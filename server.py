@@ -925,6 +925,10 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             # page loads without a token; it just can't open the WS without one
             return self._serve_file(HERE / "index.html", "text/html; charset=utf-8")
+        if path in ("/favicon.png", "/favicon.ico"):
+            return self._serve_file(HERE / "favicon.png", "image/png")
+        if path == "/logo.png":
+            return self._serve_file(HERE / "logo.png", "image/png")
         if path == "/config":
             # no token here, and no token returned — the page builds the phone
             # URL from the token already in its own address bar

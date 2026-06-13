@@ -1,5 +1,7 @@
 # clawd-harness
 
+<p align="center"><img src="logo.png" width="240" alt="clawd-harness" /></p>
+
 A web **harness** for driving real, **interactive** Claude Code sessions from a
 browser (desktop or phone) — read their output cleanly, type/dictate/paste-images
 at them, and navigate their TUI menus — without parsing the terminal's "weird
