@@ -1,0 +1,17 @@
+# runtime / local state — never commit (comments on their own lines!)
+
+# auth secret
+.clawd-harness.token
+# local session id (legacy single-session) + multi-session registry
+.clawd-harness.session
+.clawd-harness.sessions.json
+# generated; embed the token in curl URLs (one per session)
+.clawd-harness.hooks.json
+.clawd-harness.hooks.*.json
+# pasted/uploaded images (may contain anything)
+.clawd-harness-uploads/
+
+# os / editor cruft
+.DS_Store
+__pycache__/
+*.pyc
