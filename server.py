@@ -228,11 +228,11 @@ class Project:
                 "repo_url": self.repo_url, "status": self.status,
                 "created": self.created}
 
-    def meta(self, session_count=0, busy_count=0):
+    def meta(self, session_count=0, busy_count=0, waiting_count=0):
         return {"pid": self.pid, "name": self.name, "path": self.path,
                 "repoUrl": self.repo_url, "status": self.status,
                 "error": self.error, "sessionCount": session_count,
-                "busyCount": busy_count,
+                "busyCount": busy_count, "waitingCount": waiting_count,
                 "created": self.created, "pinned": self.pinned}
 
 
@@ -270,6 +270,7 @@ class ClaudeSession:
         self.transcript_path = None
         self._live_transcript = None             # live path from hooks; may rotate on compaction
         self.busy = False                        # working (turn in flight) vs idle
+        self.waiting = False                      # blocked on an interactive prompt (permission / question)
         self.last_tool = None
         self.settings_path = None
 
@@ -298,7 +299,7 @@ class ClaudeSession:
                 "title": self.title or self._fallback_title(),
                 "desc": self.desc or "",
                 "named": bool(self.title),
-                "busy": self.busy, "tool": self.last_tool,
+                "busy": self.busy, "waiting": self.waiting, "tool": self.last_tool,
                 "sessionId": self.session_id,
                 "promptCount": self.prompt_count,
                 "lastActive": self.last_active,
@@ -381,6 +382,10 @@ class ClaudeSession:
         # transcript view silently freezes. (Subagents use SubagentStop, not these.)
         if ev in ("UserPromptSubmit", "Stop", "SessionStart"):
             self._follow_session(obj)
+        # Any hook other than Notification means the turn is making progress
+        # again (the prompt, if any, got answered) → clear the blocked flag.
+        if ev != "Notification":
+            self.waiting = False
         data = {}
         if ev == "UserPromptSubmit":
             self.busy = True
@@ -390,6 +395,11 @@ class ClaudeSession:
         elif ev == "PreToolUse":
             self.busy = True
             self.last_tool = obj.get("tool_name")
+            # These two tools render a blocking interactive prompt in the TUI and
+            # don't emit a Notification — so flag waiting here (the matching
+            # PostToolUse, like any non-Notification hook above, clears it).
+            if obj.get("tool_name") in ("AskUserQuestion", "ExitPlanMode"):
+                self.waiting = True
             data = {"tool": obj.get("tool_name")}
         elif ev == "PostToolUse":
             self.busy = True
@@ -405,6 +415,12 @@ class ClaudeSession:
             if (not self.title) or name_at_prompt(self.prompt_count):
                 threading.Thread(target=self._regenerate_name, daemon=True).start()
         elif ev == "Notification":
+            # Fires both for "needs your permission / input" (mid-turn, busy) and
+            # for a 60s-idle nudge (turn already Stopped, not busy). Only the
+            # former is a real block — gate on busy so an idle session doesn't
+            # masquerade as waiting-for-you.
+            if self.busy:
+                self.waiting = True
             data = {"message": obj.get("message", "")}
         elif ev == "SessionStart":
             self.busy = False
@@ -412,8 +428,8 @@ class ClaudeSession:
         elif ev == "SessionEnd":
             data = {"reason": obj.get("reason")}
         self.manager.broadcast_all({"type": "hook", "cid": self.cid, "event": ev,
-                                    "busy": self.busy, "tool": self.last_tool,
-                                    "data": data})
+                                    "busy": self.busy, "waiting": self.waiting,
+                                    "tool": self.last_tool, "data": data})
         self.manager.broadcast_sessions()
 
     def _on_prompt(self, prompt):
@@ -652,7 +668,7 @@ class ClaudeSession:
                           "sessionId": self.session_id,
                           "title": self.title or self._fallback_title(),
                           "workdir": self.workdir(),
-                          "busy": self.busy, "tool": self.last_tool,
+                          "busy": self.busy, "waiting": self.waiting, "tool": self.last_tool,
                           "cols": COLS, "rows": ROWS})
         self._replay_history(client)
 
@@ -1041,15 +1057,18 @@ class SessionManager:
             return sum(1 for s in self.sessions.values() if s.pid == pid)
 
     def session_counts(self, pid):
-        """(total, busy) sessions for a project — busy = a turn in flight."""
+        """(total, busy, waiting) sessions for a project — busy = a turn in
+        flight; waiting = blocked on an interactive prompt (needs you)."""
         with self.lock:
-            total = busy = 0
+            total = busy = waiting = 0
             for s in self.sessions.values():
                 if s.pid == pid:
                     total += 1
-                    if s.busy:
+                    if s.waiting:
+                        waiting += 1
+                    elif s.busy:
                         busy += 1
-            return total, busy
+            return total, busy, waiting
 
     def projects_meta(self):
         return [p.meta(*self.session_counts(p.pid))

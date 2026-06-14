@@ -87,7 +87,7 @@ reconnect (i.e. the server restarted).
 // 1) a binary frame: recent PTY bytes (ring buffer snapshot)
 // 2) then:
 { "type":"hello", "cid", "pid", "sessionId", "title", "workdir",
-  "busy":bool, "tool":<string|null>, "cols":int, "rows":int }
+  "busy":bool, "waiting":bool, "tool":<string|null>, "cols":int, "rows":int }
 // 3) then recent transcript history, each:
 { "type":"transcript", "cid", "event":<event>, "history":true }
 ```
@@ -95,7 +95,7 @@ reconnect (i.e. the server restarted).
 ### Live, ongoing
 ```jsonc
 { "type":"transcript", "cid", "event":<event> }      // new transcript line (history absent/false)
-{ "type":"hook", "cid", "event":<hookName>, "busy":bool, "tool":<str|null>, "data":{...} }
+{ "type":"hook", "cid", "event":<hookName>, "busy":bool, "waiting":bool, "tool":<str|null>, "data":{...} }
 { "type":"focus", "cid" }                              // reply to a "new" you sent
 { "type":"exit", "cid" }                               // the claude process for cid exited
 { "type":"projects", "projects":[...], "boot" }        // re-broadcast on any project change
@@ -112,15 +112,22 @@ reconnect (i.e. the server restarted).
 ### projectMeta
 ```jsonc
 { "pid", "name", "path", "repoUrl", "status":"ready|cloning|error",
-  "error", "sessionCount":int, "busyCount":int, "created":float, "pinned":bool }
+  "error", "sessionCount":int, "busyCount":int, "waitingCount":int,
+  "created":float, "pinned":bool }
 ```
 
 ### sessionMeta
 ```jsonc
-{ "cid", "pid", "title", "desc", "named":bool, "busy":bool,
+{ "cid", "pid", "title", "desc", "named":bool, "busy":bool, "waiting":bool,
   "tool":<str|null>, "sessionId", "promptCount":int,
   "lastActive":float, "created":float, "alive":bool }
 ```
+- `waiting` = the session is blocked on an interactive TUI prompt (a permission
+  request, `AskUserQuestion`, or `ExitPlanMode`) and needs a human answer — it
+  looks idle from the outside but isn't. `busy` is still `true` while `waiting`
+  (the turn is in flight, just parked). In the **projectMeta** counts a waiting
+  session is tallied in `waitingCount` *instead of* `busyCount` (mutually
+  exclusive) so a blocked session reads as "needs you", not "working".
 - `cid` = stable console id (ours; survives claude's id rotation). **Address
   sessions by `cid`, never `sessionId`.**
 - `sessionId` = claude's own id; rotates on compaction/resume.
@@ -137,18 +144,23 @@ One of:
 ```
 
 ### hook `event` names + their `data`
-The turn-lifecycle signal that drives the working/idle pill. `busy` is the
-session's current state after this hook.
+The turn-lifecycle signal that drives the working/idle/blocked pill. `busy` and
+`waiting` are the session's current state after this hook.
 
-| `event` | `busy` | `data` |
-|---|---|---|
-| `UserPromptSubmit` | true | `{ "prompt" }` |
-| `PreToolUse` | true | `{ "tool" }` |
-| `PostToolUse` | true | `{ "tool", "duration_ms" }` |
-| `Stop` | **false** | `{ "last" }` ← the last assistant message (the turn's answer) |
-| `Notification` | — | `{ "message" }` |
-| `SessionStart` | false | `{ "source", "model" }` |
-| `SessionEnd` | — | `{ "reason" }` |
+| `event` | `busy` | `waiting` | `data` |
+|---|---|---|---|
+| `UserPromptSubmit` | true | false | `{ "prompt" }` |
+| `PreToolUse` | true | true *iff* tool ∈ {`AskUserQuestion`,`ExitPlanMode`}, else false | `{ "tool" }` |
+| `PostToolUse` | true | false | `{ "tool", "duration_ms" }` |
+| `Stop` | **false** | false | `{ "last" }` ← the last assistant message (the turn's answer) |
+| `Notification` | — | true *iff* `busy` (a permission/input block), else unchanged | `{ "message" }` |
+| `SessionStart` | false | false | `{ "source", "model" }` |
+| `SessionEnd` | — | false | `{ "reason" }` |
+
+➡ **To detect "the session is blocked waiting for a human": watch `waiting`.**
+Every non-`Notification` hook clears it (the prompt got answered → progress
+resumed); `Notification` (mid-turn) and `PreToolUse` of the two interactive
+tools set it.
 
 ➡ **To detect "the turn finished and here's the answer": watch for a `hook`
 frame with `event:"Stop"` — `data.last` is the assistant's final message.**
