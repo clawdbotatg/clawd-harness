@@ -461,6 +461,7 @@ function openSession(cid) {
   if (s && s.pid) currentPid = s.pid;       // keep the breadcrumb/`new` in this project
   subscribe(cid);
   setView('transcript');
+  if (!isTouch) box.focus();                // desktop: ready to type immediately (skip on touch — don't pop the keyboard)
 }
 
 function newSession() {
@@ -843,6 +844,7 @@ function playNext() {
   item.urlP.then(url => {
     if (!ttsOn || url == null) { audioPlaying = false; return playNext(); }
     const a = new Audio(url); audioEl = a;
+    a.playbackRate = 1.4;   // bump ElevenLabs read-aloud ~40% (pitch preserved by browser)
     ttsBtn.classList.add('speaking');
     a.onended = a.onerror = () => {
       URL.revokeObjectURL(url); audioPlaying = false;
