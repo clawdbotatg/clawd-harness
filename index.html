@@ -103,6 +103,16 @@
      (18*0.9≈16.2). Scoped to coarse pointers so the desktop input keeps its inherited size. */
   @media (pointer: coarse) { #box { font-size:18px; } }
   #box:focus { outline:none; border-color:var(--accent); }
+  /* voice column: speaker (TTS) over mic (STT), stacked to the left of the box */
+  #voice { display:flex; flex-direction:column; gap:6px; flex:0 0 auto; }
+  #voice button { background:#0a0a0e; border:1px solid var(--edge); color:var(--ink);
+                  border-radius:7px; padding:7px 9px; font-size:15px; line-height:1; cursor:pointer; }
+  #voice button:hover { border-color:var(--accent); }
+  #voice button:disabled { opacity:.35; cursor:default; }
+  #voice button.on { border-color:var(--accent); background:#15122a; }
+  #ttsBtn.speaking { border-color:var(--accent); animation:vpulse 1.4s infinite; }
+  #micBtn.rec { border-color:var(--err); background:#2a1212; animation:vpulse 1s infinite; }
+  @keyframes vpulse { 0%,100%{opacity:1} 50%{opacity:.45} }
   button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 16px;
            font-weight:600; cursor:pointer; }
   button:disabled { opacity:.4; cursor:default; }
@@ -212,6 +222,10 @@
       <button data-k="ctrlc">⌃C</button>
     </div>
     <div class="inputrow">
+      <div id="voice">
+        <button id="ttsBtn" title="Read replies aloud (text-to-speech)">🔊</button>
+        <button id="micBtn" title="Hold to dictate (speech-to-text)">🎤</button>
+      </div>
       <textarea id="box" placeholder="message"></textarea>
       <button id="send">Send</button>
     </div>
@@ -251,6 +265,10 @@ let currentCid = null;          // session this browser is viewing
 let currentPid = null;          // project this browser has selected
 let sessionList = [];           // latest session metadata from the server
 let projectList = [];           // latest project metadata from the server
+let gotSessions = false;        // have we received the first sessions snapshot?
+let pendingNav = null;          // nav state parsed from the URL, awaiting server data
+let pendingNewFocus = false;    // a `new` we issued — its focus should switch us in
+let lastWrittenHash = '';       // the hash we last wrote, so hashchange ignores our own writes
 
 const token = new URLSearchParams(location.search).get('t') || '';
 
@@ -272,14 +290,23 @@ function connect() {
 function handleJson(m) {
   if (m.type === 'projects') {
     renderProjects(m.projects || []);
+    resolvePendingNav();                  // a URL we restored from may name a project
   } else if (m.type === 'sessions') {
     sessionList = m.sessions || [];
+    gotSessions = true;
     renderSessions();
+    resolvePendingNav();                  // …or a session
   } else if (m.type === 'focus') {
-    // server's pick of which session to view (initial load / after /new). On a
-    // reconnect, stay on whatever we were viewing if it's still around.
-    const stay = currentCid && sessionList.some(s => s.cid === currentCid);
-    subscribe(stay ? currentCid : m.cid);
+    // server's pick of which session to view, sent only in reply to a `new` we
+    // issued. Switch into the freshly spawned session. (The defensive `stay`
+    // check guards a stray focus from clobbering a session we're already viewing.)
+    if (pendingNewFocus) {
+      pendingNewFocus = false;
+      openSession(m.cid);                 // subscribe + drop to the transcript
+    } else {
+      const stay = currentCid && sessionList.some(s => s.cid === currentCid);
+      subscribe(stay ? currentCid : m.cid);
+    }
   } else if (m.type === 'hello') {
     currentCid = m.cid;
     if (m.pid) currentPid = m.pid;
@@ -426,6 +453,7 @@ function subscribe(cid) {
   if (activeType) { activeType.finish(); activeType = null; }
   highlightCard(cid);
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'subscribe', cid }));
+  syncUrl();
 }
 
 function openSession(cid) {
@@ -437,6 +465,7 @@ function openSession(cid) {
 
 function newSession() {
   if (!currentPid) { setView('projects'); return; }   // need a project to host it
+  pendingNewFocus = true;          // the focus that comes back should switch us into it
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'new', pid: currentPid }));
   setView('transcript');           // server replies with a focus → subscribe once it's spawned
 }
@@ -663,7 +692,7 @@ function renderEvent(ev, live) {
     bubble('sys', 'system', ev.text);
   } else if (ev.role === 'assistant') {
     if (ev.text) {
-      if (live) typeBubble('assistant', 'claude', ev.text);
+      if (live) { typeBubble('assistant', 'claude', ev.text); speak(speakable(ev.text)); }
       else bubble('assistant', 'claude', ev.text, true);
     }
     (ev.tools || []).forEach(t => {
@@ -673,6 +702,7 @@ function renderEvent(ev, live) {
       body.appendChild(nm);
       body.appendChild(document.createTextNode(' ' + summarizeInput(t.input)));
     });
+    // (tool calls are shown but not spoken — only prose is read aloud)
   } else if (ev.role === 'tool_result') {
     (ev.results || []).forEach(r => resultBubble(r));
   } else if (ev.role === 'result') {
@@ -781,6 +811,150 @@ document.getElementById('keys').addEventListener('click', (e) => {
   if (k && KEY_SEQ[k] != null) { sendKeys(KEY_SEQ[k]); box.focus(); }
 });
 
+// -- voice: read replies aloud (TTS) + dictate into the box (STT) -------------
+// TTS prefers ElevenLabs (server-proxied via /tts when ELEVENLABS_API_KEY is set)
+// and falls back to the browser-native Web Speech voice. STT rides Web Speech.
+const ttsBtn = document.getElementById('ttsBtn');
+const micBtn = document.getElementById('micBtn');
+
+// --- text-to-speech: speak live assistant prose, chunk by chunk as it streams.
+const synth = window.speechSynthesis || null;
+let ttsOn = false;
+let serverTts = false;                 // true once /config reports an ElevenLabs key
+try { ttsOn = localStorage.getItem('cc_tts') === '1'; } catch {}
+// Probe the server once: with a key we route audio through /tts (better voice).
+fetch('/config').then(r => r.json()).then(c => { serverTts = !!c.tts; }).catch(() => {});
+
+// ElevenLabs playback queue. speak() fires per streamed chunk and the fetches
+// return out of order, so we play strictly in enqueue order. Each item carries
+// an AbortController so toggling TTS off cancels in-flight fetches and audio.
+let audioQueue = [], audioPlaying = false, audioEl = null;
+const audioAborts = new Set();
+function stopServerAudio() {
+  audioAborts.forEach(a => { try { a.abort(); } catch {} }); audioAborts.clear();
+  audioQueue = []; audioPlaying = false;
+  if (audioEl) { try { audioEl.pause(); } catch {} audioEl = null; }
+}
+function playNext() {
+  if (audioPlaying) return;
+  const item = audioQueue.shift();
+  if (!item) { if (!audioEl) ttsBtn.classList.remove('speaking'); return; }
+  audioPlaying = true;
+  item.urlP.then(url => {
+    if (!ttsOn || url == null) { audioPlaying = false; return playNext(); }
+    const a = new Audio(url); audioEl = a;
+    ttsBtn.classList.add('speaking');
+    a.onended = a.onerror = () => {
+      URL.revokeObjectURL(url); audioPlaying = false;
+      if (audioEl === a) audioEl = null;
+      playNext();
+    };
+    a.play().catch(() => { audioPlaying = false; playNext(); });
+  });
+}
+function speakServer(text) {
+  // Fire the fetch immediately (parallel), but keep play order = enqueue order.
+  const ac = new AbortController(); audioAborts.add(ac);
+  const urlP = fetch(`/tts?t=${encodeURIComponent(token)}`, {
+    method: 'POST', signal: ac.signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  }).then(r => r.ok ? r.blob() : null)
+    .then(b => b ? URL.createObjectURL(b) : null)
+    .catch(() => null)
+    .finally(() => audioAborts.delete(ac));
+  audioQueue.push({ urlP });
+  playNext();
+}
+
+function setTts(on) {
+  ttsOn = on;
+  ttsBtn.classList.toggle('on', on);
+  try { localStorage.setItem('cc_tts', on ? '1' : '0'); } catch {}
+  // Chrome's cancel() doesn't reliably fire onend, so drop the pulse class by
+  // hand — otherwise the button keeps animating as if it's still reading.
+  if (!on) {
+    if (synth) synth.cancel();
+    stopServerAudio();
+    ttsBtn.classList.remove('speaking');
+  }
+}
+ttsBtn.onclick = () => setTts(!ttsOn);
+setTts(ttsOn);
+
+// Strip markdown down to something worth hearing: drop fenced code (reading it
+// aloud is useless), unwrap inline code/bold/italic/links, flatten bullets.
+function speakable(md) {
+  return String(md)
+    .replace(/```[\s\S]*?```/g, ' . code block . ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1$2')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^\s*[-*]\s+/gm, ', ')
+    .replace(/\s+/g, ' ').trim();
+}
+function speak(text) {
+  if (!ttsOn || !text) return;
+  if (serverTts) { speakServer(text); return; }   // ElevenLabs path
+  if (!synth) return;
+  // Browser fallback: chunk into sentences so toggling-off stops fast.
+  for (const p of (text.match(/[^.!?]+[.!?]*/g) || [text])) {
+    const s = p.trim(); if (!s) continue;
+    const u = new SpeechSynthesisUtterance(s);
+    u.rate = 1.05;
+    u.onstart = () => ttsBtn.classList.add('speaking');
+    u.onend = () => { if (!synth.speaking && !synth.pending) ttsBtn.classList.remove('speaking'); };
+    synth.speak(u);
+  }
+}
+
+// --- speech-to-text: dictate into the box by press-and-holding the mic button.
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+let rec = null, recOn = false, recBase = '';   // recBase = box text captured when recording began
+function buildRec() {
+  const r = new SR();
+  r.continuous = true; r.interimResults = true; r.lang = 'en-US';
+  r.onresult = (e) => {
+    let finalT = '', interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const tr = e.results[i];
+      if (tr.isFinal) finalT += tr[0].transcript; else interim += tr[0].transcript;
+    }
+    if (finalT) recBase = (recBase + ' ' + finalT).replace(/\s+/g, ' ').trimStart();
+    box.value = (recBase + ' ' + interim).replace(/\s+/g, ' ').trimStart();
+  };
+  r.onend = () => { if (recOn) { try { r.start(); } catch {} } };  // Chrome auto-stops; keep alive while on
+  r.onerror = (ev) => { if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') stopRec(); };
+  return r;
+}
+function startRec() {
+  if (!SR || recOn) return;
+  if (synth) synth.cancel();                  // barge-in: don't read replies back into the mic
+  rec = rec || buildRec();
+  recBase = box.value; recOn = true;
+  micBtn.classList.add('rec'); box.focus();
+  try { rec.start(); } catch {}
+}
+function stopRec() {
+  if (!recOn) return;
+  recOn = false; micBtn.classList.remove('rec');
+  try { rec.stop(); } catch {}
+}
+if (!SR) { micBtn.disabled = true; micBtn.title = 'Speech-to-text not supported in this browser'; }
+else {
+  // Push-to-talk: press and hold the mic to dictate, release to stop. The space
+  // bar is intentionally NOT bound — it types a normal space like any textarea.
+  micBtn.title = 'Hold to dictate (speech-to-text)';
+  const hold = (e) => { e.preventDefault(); startRec(); };
+  const release = () => stopRec();
+  micBtn.addEventListener('pointerdown', hold);
+  micBtn.addEventListener('pointerup', release);
+  micBtn.addEventListener('pointerleave', release);
+  micBtn.addEventListener('pointercancel', release);
+}
+
 // -- view switcher: one of four depth levels at a time ------------------------
 // projects → sessions → transcript → tty. Mobile defaults to the transcript
 // (native scroll, markdown, no xterm pain) for a session; the app opens on the
@@ -803,6 +977,7 @@ function setView(view) {
   menuBtn.classList.toggle('on', sessions);
   projectsBtn.classList.toggle('on', projects);
   try { localStorage.setItem('cc_view', view); } catch {}
+  syncUrl();                       // keep the URL in step with the depth we're at
   if (tty) setTimeout(() => { fit.fit(); sendResize(); term.scrollToBottom(); }, 60);
   else if (view === 'transcript') feed.scrollTop = feed.scrollHeight;
 }
@@ -811,7 +986,8 @@ panelBtn.onclick = () => setView(currentView() === 'tty' ? 'transcript' : 'tty')
 menuBtn.onclick = () => { if (currentPid) setView('sessions'); else setView('projects'); };
 projectsBtn.onclick = () => setView('projects');
 document.getElementById('brand').onclick = () => setView('projects');
-setView('projects');             // always open on the top rung; pick a project to dive in
+pendingNav = parseHash();        // restore project / session / depth from the URL…
+setView(pendingNav.view);        // …optimistically; resolvePendingNav refines once data lands
 
 // Auto-surface the TUI when claude asks something interactive (AskUserQuestion,
 // plan approval, permission prompt) — those render only in the terminal, so the
@@ -824,6 +1000,68 @@ function currentView() {
   if (!leftPanel.classList.contains('hidden')) return 'tty';
   return 'transcript';
 }
+
+// -- URL routing: project / session / depth live in the hash (the `?t=` token
+// stays in the query) so a reload — or a shared link — lands back where you were.
+// Shapes: `#/` projects · `#/p/<pid>` sessions · `#/p/<pid>/s/<cid>` transcript
+// · `#/p/<pid>/s/<cid>/tty` terminal.
+function parseHash() {
+  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+  const nav = { view: 'projects', pid: null, cid: null };
+  if (parts[0] === 'p' && parts[1]) {
+    nav.pid = decodeURIComponent(parts[1]);
+    nav.view = 'sessions';
+    if (parts[2] === 's' && parts[3]) {
+      nav.cid = decodeURIComponent(parts[3]);
+      nav.view = parts[4] === 'tty' ? 'tty' : 'transcript';
+    }
+  }
+  return nav;
+}
+function syncUrl() {
+  if (pendingNav) return;          // mid-restore: don't write until the URL's state is applied
+  const v = currentView();
+  let h = '#/';
+  if (v !== 'projects' && currentPid) {
+    h = '#/p/' + encodeURIComponent(currentPid);
+    if ((v === 'transcript' || v === 'tty') && currentCid) {
+      h += '/s/' + encodeURIComponent(currentCid);
+      if (v === 'tty') h += '/tty';
+    }
+  }
+  if (h !== location.hash) { lastWrittenHash = h; location.hash = h; }
+}
+// Re-apply pendingNav as server data arrives (project list, then session list).
+// Returns early — leaving pendingNav set — until the data it names shows up.
+function resolvePendingNav() {
+  const nav = pendingNav;
+  if (!nav) return;
+  if (nav.pid) {
+    if (!projectList.length) return;                         // projects not in yet
+    if (!projectList.some(p => p.pid === nav.pid)) {         // project is gone
+      pendingNav = null; currentPid = null; setView('projects'); return;
+    }
+    currentPid = nav.pid;
+    renderSessions();
+  }
+  if (nav.cid) {
+    if (!gotSessions) return;                                // sessions not in yet
+    const s = sessionList.find(x => x.cid === nav.cid);
+    if (!s) {                                                // session is gone
+      pendingNav = null; setView(currentPid ? 'sessions' : 'projects'); return;
+    }
+    currentPid = s.pid;
+    subscribe(nav.cid);
+  }
+  pendingNav = null;
+  setView(nav.view);
+}
+// Back/forward (or a hand-edited hash) — but ignore the writes syncUrl makes.
+window.addEventListener('hashchange', () => {
+  if (location.hash === lastWrittenHash) return;
+  pendingNav = parseHash();
+  resolvePendingNav();
+});
 function openTtyForQuestion() {
   if (currentView() === 'tty') return;
   if (viewBeforeQuestion === null) viewBeforeQuestion = currentView();

@@ -88,6 +88,16 @@ user-facing overview; this file orients an agent working **on** the code.
   defaults to transcript for a session (native scroll, markdown), desktop to
   terminal. Terminal is **read-only on touch** (mobile dictation streams
   self-revising text that xterm forwards as garbled keystrokes).
+- **URL routing** — nav state lives in the **hash** (the `?t=` token stays in the
+  query): `#/` projects · `#/p/<pid>` sessions · `#/p/<pid>/s/<cid>` transcript ·
+  `…/tty` terminal. So a reload (or a shared link) lands back on the same
+  project/session/depth, and back/forward work. `setView`/`subscribe` write it via
+  `syncUrl()`; on boot `parseHash()` seeds `pendingNav`, which `resolvePendingNav()`
+  applies once the server's project then session snapshots arrive (gracefully
+  falling back if the named project/session is gone). `syncUrl()` no-ops while a
+  restore is pending; a `lastWrittenHash` guard keeps our own writes from
+  re-triggering the `hashchange` handler. Creating a session switches you into it
+  (`pendingNewFocus` → the server's `focus` reply opens the new `cid`).
 
 ## Two non-obvious gotchas (baked into server.py — don't regress)
 1. **`SCRUB_ENV`** — scrub `CLAUDECODE` / `CLAUDE_CODE_*` / `ANTHROPIC_API_KEY`

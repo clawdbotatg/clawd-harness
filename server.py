@@ -45,6 +45,7 @@ import subprocess
 import termios
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler
@@ -100,6 +101,13 @@ BANKR_MODEL    = os.environ.get("BANKR_MODEL", "claude-haiku-4-5-20251001")
 BANKR_API      = os.environ.get("BANKR_API", "openai").lower()   # openai | anthropic | bankr
 # (bankr = OpenAI-compatible body at /v1/chat/completions but authed with an
 #  X-API-Key header instead of Authorization: Bearer — see llm.bankr.bot)
+# ElevenLabs text-to-speech. Optional — without a key the browser falls back to
+# the native Web Speech voice. The key MUST stay server-side, so the browser
+# POSTs prose to /tts and we proxy to ElevenLabs (Flash v2.5, ~200ms TTFB),
+# piping the MP3 straight back. Voice ID defaults to "Brian" if unset.
+ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "") or "nPczCjzI2devNBz1zQrb"
+
 NAME_AT_PROMPTS = {1, 3, 10}      # regenerate title/desc after these prompt counts
 # The naming instruction — a module constant so bench_naming.py tests the exact
 # same prompt the app uses (single source of truth; no drift).
@@ -322,6 +330,11 @@ class ClaudeSession:
 
         threading.Thread(target=self._pump_pty, daemon=True).start()
         threading.Thread(target=self._tail_transcript, daemon=True).start()
+        # Backfill: a resumed session that has a transcript but no title (e.g. it
+        # only ever reached prompt 1, so the old start-of-turn naming missed it)
+        # gets named now from its existing content.
+        if self.resuming and not self.title:
+            threading.Thread(target=self._regenerate_name, daemon=True).start()
 
     def _write_hook_settings(self):
         """Generate a settings file that POSTs every hook event's stdin JSON to
@@ -374,6 +387,11 @@ class ClaudeSession:
             self.busy = False
             self.last_tool = None
             data = {"last": obj.get("last_assistant_message", "")}
+            # Turn complete → the transcript now has a real exchange. Name it if
+            # it's still unnamed (so even a 1-prompt session gets a title), and
+            # re-name at the {1,3,10} milestones to sharpen as it grows.
+            if (not self.title) or (self.prompt_count in NAME_AT_PROMPTS):
+                threading.Thread(target=self._regenerate_name, daemon=True).start()
         elif ev == "Notification":
             data = {"message": obj.get("message", "")}
         elif ev == "SessionStart":
@@ -387,14 +405,14 @@ class ClaudeSession:
         self.manager.broadcast_sessions()
 
     def _on_prompt(self, prompt):
-        """First/Nth user prompt: keep a fallback title and (re)generate the AI
-        name at the chosen milestones."""
+        """Count the prompt + remember a fallback first prompt. Naming itself is
+        triggered on Stop (turn complete) — not here — because UserPromptSubmit
+        fires at the *start* of a turn, before claude has written the transcript,
+        so a name generated now would read an empty/missing file and no-op."""
         self.prompt_count += 1
         if not self.first_prompt and prompt:
             self.first_prompt = prompt.strip().splitlines()[0][:200]
         self.manager.save_registry()
-        if self.prompt_count in NAME_AT_PROMPTS:
-            threading.Thread(target=self._regenerate_name, daemon=True).start()
 
     def _regenerate_name(self):
         text = self._transcript_text_for_naming()
@@ -1173,6 +1191,7 @@ class Handler(BaseHTTPRequestHandler):
                 "sessions": len(MGR.sessions),
                 "lanIp": lan_ip(),
                 "port": PORT,
+                "tts": bool(ELEVENLABS_API_KEY),   # browser uses ElevenLabs when true
             })
         self.send_error(404, "not found")
 
@@ -1182,7 +1201,61 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_hook()
         if path == "/upload":
             return self._handle_upload()
+        if path == "/tts":
+            return self._handle_tts()
         self.send_error(404, "not found")
+
+    def _handle_tts(self):
+        """Proxy a chunk of prose to ElevenLabs and stream the MP3 back. Keeps the
+        API key server-side; the browser plays the audio it gets in return."""
+        if not self._token_ok():
+            return self.send_error(403, "bad token")
+        if not ELEVENLABS_API_KEY:
+            return self.send_error(503, "tts not configured")
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(n)) if n else {}
+            text = (body.get("text") or "").strip()[:4000]
+        except Exception:
+            text = ""
+        if not text:
+            return self.send_error(400, "empty text")
+        url = (f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream"
+               "?optimize_streaming_latency=3&output_format=mp3_44100_64")
+        req_body = json.dumps({
+            "text": text,
+            "model_id": "eleven_flash_v2_5",
+            "voice_settings": {"stability": 0.65, "similarity_boost": 0.5,
+                               "use_speaker_boost": True, "speed": 1.2},
+        }).encode()
+        req = urllib.request.Request(url, data=req_body, method="POST", headers={
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+        })
+        # Stream upstream chunks straight through (read-until-EOF: no Content-Length,
+        # Connection: close) so first audio bytes reach the client ASAP.
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                while True:
+                    chunk = resp.read(2048)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:200]
+            self.send_error(502, f"elevenlabs {e.code}: {detail}")
+        except Exception as e:
+            try:
+                self.send_error(502, f"tts upstream error: {e}")
+            except Exception:
+                pass
 
     def _handle_hook(self):
         if not self._token_ok():
