@@ -108,7 +108,17 @@ BANKR_API      = os.environ.get("BANKR_API", "openai").lower()   # openai | anth
 ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "") or "nPczCjzI2devNBz1zQrb"
 
-NAME_AT_PROMPTS = {1, 3, 10}      # regenerate title/desc after these prompt counts
+# A fresh id per server process. Sent to every client on connect; when a client
+# reconnects (e.g. after a daemon restart) and sees a *different* boot id, it
+# hard-reloads — fresh state clears any stale "thinking" spinner left mid-turn.
+BOOT_ID = uuid.uuid4().hex
+
+# Re-name the session at prompt 1, then every 5 prompts (5, 10, 15, 20, …) so a
+# long-running session's title/desc keep sharpening. Naming is cheap + async, so
+# the steady cadence is worth it. The instant first-prompt naming lives in
+# _on_prompt; this gate fires on Stop once the turn's transcript exists.
+def name_at_prompt(count):
+    return count == 1 or (count >= 5 and count % 5 == 0)
 # The naming instruction — a module constant so bench_naming.py tests the exact
 # same prompt the app uses (single source of truth; no drift).
 NAME_SYS_PROMPT = ("You name software-engineering sessions. Given a transcript, "
@@ -302,6 +312,7 @@ class ClaudeSession:
 
         env = dict(os.environ)
         env["TERM"] = "xterm-256color"
+        env["COLORTERM"] = "truecolor"          # xterm.js renders 24-bit; let claude emit it
         env["COLUMNS"] = str(COLS)
         env["LINES"] = str(ROWS)
         for k in SCRUB_ENV:                      # pristine top-level + subscription auth
@@ -390,8 +401,8 @@ class ClaudeSession:
             data = {"last": obj.get("last_assistant_message", "")}
             # Turn complete → the transcript now has a real exchange. Name it if
             # it's still unnamed (so even a 1-prompt session gets a title), and
-            # re-name at the {1,3,10} milestones to sharpen as it grows.
-            if (not self.title) or (self.prompt_count in NAME_AT_PROMPTS):
+            # re-name at the 1/5/10/15/… milestones to sharpen as it grows.
+            if (not self.title) or name_at_prompt(self.prompt_count):
                 threading.Thread(target=self._regenerate_name, daemon=True).start()
         elif ev == "Notification":
             data = {"message": obj.get("message", "")}
@@ -406,17 +417,23 @@ class ClaudeSession:
         self.manager.broadcast_sessions()
 
     def _on_prompt(self, prompt):
-        """Count the prompt + remember a fallback first prompt. Naming itself is
-        triggered on Stop (turn complete) — not here — because UserPromptSubmit
-        fires at the *start* of a turn, before claude has written the transcript,
-        so a name generated now would read an empty/missing file and no-op."""
+        """Count the prompt + remember a fallback first prompt. On the *first*
+        prompt we name immediately from the prompt text itself (don't wait for
+        the turn to finish): UserPromptSubmit fires before claude has written
+        the transcript, so we can't read it yet — but the prompt is right here,
+        and it's enough to label the session the instant it's created. The Stop
+        milestones (1, then every 5) re-name from the full transcript to sharpen."""
         self.prompt_count += 1
         if not self.first_prompt and prompt:
             self.first_prompt = prompt.strip().splitlines()[0][:200]
         self.manager.save_registry()
+        if self.prompt_count == 1 and prompt.strip():
+            seed = ("User: " + prompt.strip())[:3500]
+            threading.Thread(target=self._regenerate_name,
+                             kwargs={"seed_text": seed}, daemon=True).start()
 
-    def _regenerate_name(self):
-        text = self._transcript_text_for_naming()
+    def _regenerate_name(self, seed_text=""):
+        text = seed_text or self._transcript_text_for_naming()
         if not text:
             return
         title, desc = generate_name(text)
@@ -696,6 +713,66 @@ class SessionManager:
         self.lock = threading.RLock()
         self.all_clients = set()                 # every connected browser
         self.clients_lock = threading.Lock()
+        # Graceful self-restart: when a boot-time file (server.py / .env) changes,
+        # we flag a pending restart, surface it in every browser, and wait until
+        # *all* sessions are idle before tearing down — so no in-flight turn dies.
+        self.restart_pending = False
+        self.restart_reason = ""
+        self._restarting = False
+        self._restart_lock = threading.Lock()
+
+    # -- graceful self-restart -------------------------------------------------
+    def busy_count(self):
+        with self.lock:
+            return sum(1 for s in self.sessions.values() if s.busy and s.alive)
+
+    def request_restart(self, reason):
+        """Flag that a restart is needed; it fires once all sessions are idle.
+        Idempotent — repeated calls just keep the pending state."""
+        with self._restart_lock:
+            if self._restarting:
+                return
+            first = not self.restart_pending
+            self.restart_pending = True
+            self.restart_reason = reason
+        if first:
+            print(f"[restart] pending — {reason} (waiting for all sessions idle)",
+                  flush=True)
+        self.broadcast_restart()
+        self._maybe_restart()
+
+    def cancel_restart(self):
+        with self._restart_lock:
+            if self._restarting or not self.restart_pending:
+                return
+            self.restart_pending = False
+            self.restart_reason = ""
+        print("[restart] cancelled by user", flush=True)
+        self.broadcast_restart()
+
+    def _maybe_restart(self):
+        """Fire the restart iff one is pending and nothing is mid-turn."""
+        with self._restart_lock:
+            if self._restarting or not self.restart_pending or self.busy_count():
+                return
+            self._restarting = True
+        threading.Thread(target=self._execute_restart, daemon=True).start()
+
+    def _execute_restart(self):
+        print("[restart] all idle → tearing down + exiting (launchd relaunches)",
+              flush=True)
+        self.broadcast_all({"type": "restart", "state": "go"})
+        time.sleep(0.5)                          # let the 'go' frame flush to clients
+        self.shutdown()                          # SIGTERM the claude children cleanly
+        time.sleep(0.5)
+        os._exit(0)                              # KeepAlive=true → launchd respawns us
+
+    def restart_state(self):
+        return {"type": "restart", "pending": self.restart_pending,
+                "reason": self.restart_reason, "busy": self.busy_count()}
+
+    def broadcast_restart(self):
+        self.broadcast_all(self.restart_state())
 
     # -- startup / persistence -------------------------------------------------
     def load(self):
@@ -738,20 +815,60 @@ class SessionManager:
         self.save_registry()
 
     def _discover_projects(self):
-        """Adopt any git repo under PROJECTS_DIR not already registered, so you
-        can populate projects/ by hand (or a prior clone) and have it show up."""
-        known_paths = {p.path for p in self.projects.values()}
+        """Adopt any git repo under PROJECTS_DIR not already registered, so the
+        project list mirrors what's on disk — a clone/create, or a repo dropped
+        into projects/ by hand. Returns the number of newly adopted projects."""
+        with self.lock:
+            known_paths = {p.path for p in self.projects.values()}
         try:
             entries = sorted(os.listdir(PROJECTS_DIR))
         except OSError:
-            return
+            return 0
+        added = 0
         for name in entries:
             path = str(PROJECTS_DIR / name)
             if path in known_paths or not os.path.isdir(os.path.join(path, ".git")):
                 continue
             p = Project(pid=str(uuid.uuid4()), name=name, path=path,
                         repo_url=_git_remote_url(path), status="ready")
-            self.projects[p.pid] = p
+            with self.lock:
+                self.projects[p.pid] = p
+            added += 1
+        return added
+
+    def reconcile_projects(self):
+        """Disk is the source of truth for the project list (there is no
+        in-app "remove" — you delete a repo's folder yourself). Drop any ready
+        project under PROJECTS_DIR whose folder has vanished (killing its now
+        cwd-less sessions), then adopt any new repo dir. The pinned self-project
+        and in-flight clones/errors (transient, in-memory only) are left alone.
+        Returns True if the set of projects changed. Cheap; runs on the watch
+        loop so the list follows disk within ~1s for every open browser."""
+        base = str(PROJECTS_DIR) + os.sep
+        try:
+            on_disk = {str(PROJECTS_DIR / n) for n in os.listdir(PROJECTS_DIR)}
+        except OSError:
+            on_disk = set()
+        with self.lock:
+            gone = [pid for pid, p in self.projects.items()
+                    if not p.pinned and p.status == "ready"
+                    and p.path.startswith(base) and p.path not in on_disk]
+        changed = False
+        for pid in gone:
+            with self.lock:
+                p = self.projects.pop(pid, None)
+                cids = [c for c, s in self.sessions.items() if s.pid == pid]
+            if not p:
+                continue
+            print(f"[project {p.name}] folder gone from disk → dropped", flush=True)
+            for cid in cids:
+                self.close(cid, _broadcast=False)
+            changed = True
+        if self._discover_projects():
+            changed = True
+        if changed:
+            self.save_registry()
+        return changed
 
     def _ensure_self_project(self):
         """Always present the harness's own repo as a pinned project so you can
@@ -782,9 +899,60 @@ class SessionManager:
             pass
 
     # -- project crud ----------------------------------------------------------
+    def _readopt(self, base):
+        """If `base` names a dir already on disk in projects/ (left behind by a
+        non-destructive remove, or a partial clone), re-register it in place and
+        SKIP cloning — the files are already there, so a clone would only fail
+        (e.g. the remote was renamed/deleted). Returns the (re)adopted Project, or
+        None when there's nothing on disk to adopt (→ clone fresh)."""
+        path = str(PROJECTS_DIR / base)
+        with self.lock:
+            for p in self.projects.values():
+                if p.path == path:               # already registered → reuse it
+                    return p
+        try:
+            present = os.path.isdir(path) and bool(os.listdir(path))
+        except OSError:
+            present = False
+        if not present:
+            return None                          # nothing on disk → clone fresh
+        is_git = os.path.isdir(os.path.join(path, ".git"))
+        p = Project(pid=str(uuid.uuid4()), name=base, path=path,
+                    repo_url=_git_remote_url(path) if is_git else "",
+                    status="ready", created=time.time())
+        with self.lock:
+            self.projects[p.pid] = p
+        self.save_registry()
+        self.broadcast_projects()
+        if is_git:                               # best-effort refresh; never blocks adoption
+            threading.Thread(target=self._refresh_repo, args=(path, base),
+                             daemon=True).start()
+        print(f"[project {base}] re-adopted existing dir (skipped clone)", flush=True)
+        return p
+
+    def _refresh_repo(self, path, base):
+        """Best-effort `git pull --ff-only` on an adopted repo. Non-fatal: a repo
+        with local changes, no upstream, or a gone remote just stays as-is."""
+        try:
+            r = subprocess.run(["git", "pull", "--ff-only"], cwd=path,
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                print(f"[project {base}] pulled", flush=True)
+            else:
+                print(f"[project {base}] pull skipped: "
+                      f"{(r.stderr or r.stdout or '').strip()[-120:]}", flush=True)
+        except Exception as e:
+            print(f"[project {base}] pull error: {e}", flush=True)
+
     def create_project(self, name):
-        """Create a new public repo under GH_OWNER and clone it into projects/."""
-        safe = self._unique_project_name(_safe_name(name))
+        """Create a new public repo under GH_OWNER and clone it into projects/.
+        If a dir of the same name already exists on disk (e.g. removed earlier),
+        re-adopt it in place rather than spinning up a `name-2`."""
+        base = _safe_name(name)
+        existing = self._readopt(base)
+        if existing:
+            return existing
+        safe = self._unique_project_name(base)
         path = str(PROJECTS_DIR / safe)
         url = f"https://github.com/{GH_OWNER}/{safe}"
         p = Project(pid=str(uuid.uuid4()), name=safe, path=path,
@@ -807,8 +975,11 @@ class SessionManager:
         if not re.match(r"^(https?://|git@|ssh://|file://|/|~)", repo_url):
             repo_url = (f"https://github.com/{repo_url}" if "/" in repo_url
                         else f"https://github.com/{GH_OWNER}/{repo_url}")
-        base = re.sub(r"\.git$", "", repo_url.rstrip("/").split("/")[-1])
-        safe = self._unique_project_name(_safe_name(base))
+        base = _safe_name(re.sub(r"\.git$", "", repo_url.rstrip("/").split("/")[-1]))
+        existing = self._readopt(base)
+        if existing:
+            return existing
+        safe = self._unique_project_name(base)
         path = str(PROJECTS_DIR / safe)
         p = Project(pid=str(uuid.uuid4()), name=safe, path=path,
                     repo_url=repo_url, status="cloning", created=time.time())
@@ -856,22 +1027,6 @@ class SessionManager:
         while f"{base}-{i}" in existing or os.path.exists(PROJECTS_DIR / f"{base}-{i}"):
             i += 1
         return f"{base}-{i}"
-
-    def remove_project(self, pid):
-        """Forget a project and kill its sessions. Files on disk are left intact
-        (non-destructive, mirroring session close)."""
-        with self.lock:
-            existing = self.projects.get(pid)
-            if not existing or existing.pinned:
-                return                           # the harness-itself project can't be removed
-            p = self.projects.pop(pid, None)
-            cids = [c for c, s in self.sessions.items() if s.pid == pid]
-        if not p:
-            return
-        for cid in cids:
-            self.close(cid, _broadcast=False)
-        self.save_registry()
-        self.broadcast_sessions()                # also re-broadcasts projects
 
     def get_project(self, pid):
         with self.lock:
@@ -952,10 +1107,13 @@ class SessionManager:
             self.all_clients.add(client)
         # Send projects then sessions; the client decides the initial view (no
         # forced focus — there may be zero sessions).
-        client.send_json({"type": "projects", "projects": self.projects_meta()})
+        client.send_json({"type": "projects", "projects": self.projects_meta(),
+                          "boot": BOOT_ID})
         client.send_json({"type": "sessions",
                           "sessions": self.sessions_meta(),
                           "current": self.default_cid()})
+        if self.restart_pending:                 # a late joiner still sees the banner
+            client.send_json(self.restart_state())
 
     def remove_client(self, client):
         with self.clients_lock:
@@ -990,6 +1148,9 @@ class SessionManager:
                             "sessions": self.sessions_meta(),
                             "current": self.default_cid()})
         self.broadcast_projects()                # session counts changed
+        if self.restart_pending:                 # refresh the pending banner's busy count…
+            self.broadcast_restart()
+            self._maybe_restart()                # …and fire if the last turn just ended
 
     def shutdown(self):
         with self.lock:
@@ -1396,8 +1557,10 @@ class Handler(BaseHTTPRequestHandler):
             MGR.create_project(frame.get("name", ""))
         elif t == "addProject":
             MGR.add_project(frame.get("repoUrl", ""))
-        elif t == "removeProject":
-            MGR.remove_project(frame.get("pid"))
+        elif t == "restart":
+            MGR.request_restart(frame.get("reason") or "manual")
+        elif t == "restartCancel":
+            MGR.cancel_restart()
         elif t in ("input", "send", "resize"):
             s = MGR.get(frame.get("cid") or client.cid)
             if not s:
@@ -1417,8 +1580,43 @@ class ThreadingHTTPServer(ThreadingMixIn, TCPServer):
     allow_reuse_address = True
 
 
+# --- live-reload: watch the UI file and tell open browsers to refresh ---------
+# The harness's whole point is live-editing itself, but an open page has no way
+# to know index.html changed on disk (it's served fresh, yet nothing pings the
+# tab). Poll its mtime and broadcast a `reload` so self-edits show up instantly.
+WATCH_FILES = [HERE / "index.html"]               # served fresh → just reload browsers
+# Boot-time files: their changes only take effect on a fresh process, so a disk
+# change flags a *graceful restart* (waits for all sessions idle) rather than a
+# browser reload. This is what makes "live-edit the harness" safe.
+RESTART_FILES = [Path(__file__).resolve(), HERE / ".clawd-harness.env"]
+
+def watch_ui():
+    last = {}
+    for f in WATCH_FILES + RESTART_FILES:
+        try: last[f] = f.stat().st_mtime
+        except OSError: last[f] = 0
+    while True:
+        time.sleep(1.0)
+        if MGR.reconcile_projects():             # project list follows disk
+            MGR.broadcast_projects()
+        for f in WATCH_FILES:
+            try: m = f.stat().st_mtime
+            except OSError: continue
+            if m != last[f]:
+                last[f] = m
+                print(f"[watch] {f.name} changed → reloading browsers", flush=True)
+                MGR.broadcast_all({"type": "reload"})
+        for f in RESTART_FILES:
+            try: m = f.stat().st_mtime
+            except OSError: continue
+            if m != last[f]:
+                last[f] = m
+                MGR.request_restart(f"{f.name} changed")
+
+
 def main():
     MGR.load()
+    threading.Thread(target=watch_ui, daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     ip = lan_ip()
     print(f"[http] clawd-harness (token required)", flush=True)

@@ -4,6 +4,13 @@ A web **harness** for driving interactive (subscription-billed) Claude Code
 sessions from a browser. Forked from `clawd-console`. `README.md` is the
 user-facing overview; this file orients an agent working **on** the code.
 
+> **Multi-machine?** See the sibling repo **`clawd-fleet`** (`../clawd-fleet`,
+> `github.com/clawdbotatg/clawd-fleet`). It's an abstraction layer that drives N
+> harnesses (one per machine) from one phone via a public relay. It treats this
+> harness as a black box reached over the WebSocket — **don't add fleet code
+> here.** The wire contract it depends on is **[`docs/WS-PROTOCOL.md`](docs/WS-PROTOCOL.md)**;
+> keep that doc in sync if you change the WS protocol in `server.py`.
+
 ## Run / test
 - `python3 server.py` → prints a tokenized URL `http://127.0.0.1:8787/?t=<token>`
   (token persisted in `.clawd-harness.token`; or set `CONSOLE_TOKEN`).
@@ -12,6 +19,11 @@ user-facing overview; this file orients an agent working **on** the code.
 - Smoke test: `python3 smoke_test.py` (reads the token file; asserts both channels).
 - **Port 8787**, launchd label **com.clawd.harness**. (clawd-console uses 7878 /
   com.clawd.console — they coexist on purpose.)
+- **Is it running?** It usually already is (launchd `KeepAlive`). Don't check
+  with `pgrep -f server.py` — launchd's invocation doesn't arg-match, so that
+  returns nothing even while it's up. Use `launchctl list | grep clawd.harness`
+  (shows the PID) or `lsof -nP -iTCP:8787 -sTCP:LISTEN`. So: edit `index.html` →
+  it live-reloads (see below); no need to start a server first.
 - Needs the `claude` CLI on a Claude **subscription** (OAuth, not an API key).
   Pure Python stdlib; xterm.js + a QR lib load from a CDN.
 - Verify JS edits: extract the `<script>` from index.html and `node --check` it.
@@ -25,8 +37,12 @@ user-facing overview; this file orients an agent working **on** the code.
   its own transcript tail + ring buffer. `cid` = stable console id (ours;
   survives claude's id rotation); `session_id` = claude's id (rotates on
   compaction/resume). Registry persisted to `.clawd-harness.sessions.json` as
-  `{"projects":[…],"sessions":[…]}` and `--resume`d on restart. On boot,
-  `projects/` is also scanned and any unregistered git repo is adopted.
+  `{"projects":[…],"sessions":[…]}` and `--resume`d on restart. **Disk is the
+  source of truth for the project list:** `reconcile_projects()` runs on the
+  ~1s `watch_ui` loop (and on boot) — it adopts any new git repo under
+  `projects/` and drops any whose folder has vanished (killing its now
+  cwd-less sessions), broadcasting the change. The registry persists projects
+  only as a pid↔path memo so ids stay stable across reboots.
 - **Projects layer:** create a new **public** repo under `GH_OWNER`
   (`clawdbotatg`) via `gh repo create … --clone`, or clone a repo — both run
   async in a thread with a `cloning → ready|error` status broadcast. Clone input
@@ -34,12 +50,30 @@ user-facing overview; this file orients an agent working **on** the code.
   `repo` name are resolved against `github.com` (bare → `GH_OWNER`), so typing
   `slop-computer-live` clones `github.com/clawdbotatg/slop-computer-live`.
   **Creation needs `gh` authenticated in the server's environment** (cloning a
-  public URL does not). Removing a project forgets it + kills its sessions but
-  leaves files on disk (non-destructive, like session close).
+  public URL does not). **There is no in-app "remove":** to drop a project you
+  delete its repo folder under `projects/` yourself and the reconcile loop
+  follows within ~1s (the pinned self-project lives outside `projects/`, so it's
+  never touched).
 - **Self-project:** the harness always injects *itself* as a **pinned** project
-  (`SELF_PID="self"`, `path=HERE`, top of the list, no ✕, never persisted —
+  (`SELF_PID="self"`, `path=HERE`, top of the list, never persisted —
   re-injected each boot) so you can open a session and **live-edit the running
   app**. It's the one project whose path is outside `PROJECTS_DIR`.
+- **Graceful self-restart** (companion to live-editing): `watch_ui` polls
+  `RESTART_FILES` (`server.py`, `.clawd-harness.env` — both read only at boot);
+  a change calls `MGR.request_restart(reason)`, which flags `restart_pending`,
+  surfaces a banner in every browser, and **waits until no session is `busy`**
+  before `_execute_restart` SIGTERMs the claude children and `os._exit(0)`s —
+  launchd (`KeepAlive=true`) respawns us and sessions `--resume`. So an edit to
+  the harness never kills an in-flight turn. The browser auto-reloads on the
+  `BOOT_ID` change after reconnect. Manual: WS `{type:"restart"}` /
+  `{type:"restartCancel"}`.
+- **Live-reload of the UI (no manual reload needed):** `watch_ui` *also* polls
+  `WATCH_FILES` (`index.html`) and, on an mtime change, broadcasts WS
+  `{type:"reload"}` → every open browser calls `location.reload()`
+  (`index.html` ~L495). So **saving `index.html` is enough — all open tabs
+  hard-reload themselves within ~1s**; never tell the user to reload manually,
+  and don't restart the server for a UI-only edit (that's only for
+  `RESTART_FILES`). Caveat: this needs `server.py` to be running.
 - **One WebSocket per browser, multiplexed** — a client subscribes to one session
   (its PTY bytes + transcript); session metadata (titles, busy badges) fans out to
   all clients.
@@ -55,7 +89,9 @@ user-facing overview; this file orients an agent working **on** the code.
 - **AI session naming:** optional. Set `BANKR_API_KEY` + `BANKR_BASE_URL` +
   `BANKR_API` (`openai` | `anthropic` | `bankr`). `bankr` = OpenAI-compatible body
   at `https://llm.bankr.bot/v1/chat/completions` authed with an `X-API-Key` header.
-  Off → first-prompt titles. Regenerates at prompt counts `{1, 3, 10}`. Secrets
+  Off → first-prompt titles. Regenerates at prompt 1, then every 5 (5, 10, 15,
+  …) via `name_at_prompt()` — naming is cheap + async, so a steady cadence keeps
+  a long session's title sharp. Secrets
   load from a gitignored **`.clawd-harness.env`** (`_load_env_file` at boot — the
   launchd daemon doesn't inherit your shell env, so this is the way).
 - **Right model for the right job:** naming is a cheap, frequent, fire-and-forget

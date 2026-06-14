@@ -53,7 +53,6 @@ viewer** (each with its own `client.cid`).
 | `close` | `cid` | Kill that session (SIGTERM) and detach viewers. Files on disk untouched. |
 | `createProject` | `name` | Create a new public GitHub repo under `GH_OWNER` and adopt it (async; status broadcasts via `projects`). |
 | `addProject` | `repoUrl` | Clone a repo and adopt it (async). Input normalized: full URL as-is; `owner/repo` and bare `repo` resolved against github.com. |
-| `removeProject` | `pid` | Forget a project + kill its sessions (non-destructive on disk). The pinned self-project can't be removed. |
 | `input` | `data`, `cid?` | Raw keystrokes → PTY. `data` is a UTF-8 string (incl. escape seqs for TUI menus). Falls back to `client.cid` if `cid` omitted. |
 | `send` | `text`, `cid?` | High-level: type `text`, wait for the paste to settle, then submit `\r`. Use this to "send a message/prompt". |
 | `resize` | `cols`, `rows`, `cid?` | Resize the PTY window. |
@@ -63,6 +62,12 @@ viewer** (each with its own `client.cid`).
 `input` vs `send`: `send` is what you want for prompts — it handles the
 TUI's paste-vs-submit timing (`SEND_SETTLE`). `input` is for raw control
 (arrow keys, escape sequences to drive `claude`'s menus).
+
+**No `removeProject`:** disk is the source of truth for the project list. The
+server reconciles the in-memory set against the repos in `projects/` every ~1s
+(and on boot) — a new repo dir is adopted, a vanished one is dropped (its now
+cwd-less sessions killed), and the change is broadcast via `projects`. To remove
+a project, delete its folder on disk; there is no wire message for it.
 
 ---
 

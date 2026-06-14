@@ -2,41 +2,66 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=0.9" />
+<meta name="viewport" content="width=device-width, initial-scale=0.9, minimum-scale=0.9, maximum-scale=0.9, user-scalable=no" />
 <title>clawd-harness</title>
 <link rel="icon" type="image/png" href="favicon.png" />
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 <style>
-  :root { --bg:#0c0c10; --panel:#14141b; --edge:#262633; --ink:#e6e6ee; --dim:#8a8aa0;
-          --accent:#7c5cff; --user:#1f6feb; --tool:#7a5; --err:#e5534b; }
+  /* ── terminal brutalist · amber phosphor ───────────────────────────────
+     thesis: this is a terminal harness, so it should look like one. one
+     monospace voice, true-black ground, hairline boxes, square corners,
+     a single amber accent. no gradients, no soft shadows, no pills, no
+     rounded "cards". structure is drawn with rules, not decoration. */
+  :root { --bg:#000000; --panel:#0a0a0a; --raised:#101010; --edge:#262626; --edge-hi:#3b3b3b;
+          --ink:#d9d7cf; --dim:#79726a; --accent:#e8a13a; --accent-dim:#6d5220; --accent-bg:#171002;
+          --ok:#5fa563; --err:#d6564b; --tool:#9c8f54; --mono:ui-monospace,"SF Mono",Menlo,Monaco,"Courier New",monospace; }
   * { box-sizing:border-box; }
+  ::selection { background:var(--accent); color:#000; }
   html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
               overscroll-behavior:none;   /* kill the browser's back/forward swipe overscroll */
-              font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+              font:13px/1.55 var(--mono); -webkit-font-smoothing:antialiased; }
   #app { display:flex; flex-direction:column; height:100%; }
-  header { display:flex; align-items:center; gap:12px; padding:8px 14px;
+  header { display:flex; align-items:center; gap:11px; padding:7px 12px;
            border-bottom:1px solid var(--edge); background:var(--panel); }
-  #logo { width:24px; height:24px; border-radius:6px; flex:0 0 auto; display:block; }
-  header h1 { font-size:14px; margin:0; font-weight:600; letter-spacing:.3px; cursor:pointer; }
+  #logo { width:22px; height:22px; flex:0 0 auto; display:block; border:1px solid var(--edge); }
+  header h1 { font-size:13px; margin:0; font-weight:600; letter-spacing:.5px; text-transform:lowercase; cursor:pointer; }
   header h1:hover { color:var(--accent); }
-  header .meta { color:var(--dim); font-size:12px; font-family:ui-monospace,Menlo,monospace;
+  header .meta { color:var(--dim); font-size:12px; font-family:var(--mono);
                  flex:0 1 auto; min-width:0; max-width:32vw;
                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   @media (pointer: coarse) { header .meta { max-width:42vw; } }
   header .spacer { flex:1; }
-  #dot { width:9px; height:9px; border-radius:50%; background:var(--err); flex:0 0 auto; }
-  #dot.up { background:#3fb950; }
-  #status { font-size:12px; padding:3px 10px; border-radius:999px; border:1px solid var(--edge);
-            color:var(--dim); white-space:nowrap; }
-  #status.working { color:#f5d061; border-color:#5a4d1f; background:#1c180a; }
-  #status.idle    { color:#3fb950; border-color:#1f5a2f; background:#0c1a10; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+  #dot { width:8px; height:8px; background:var(--err); flex:0 0 auto; }   /* square status LED */
+  #dot.up { background:var(--ok); }
+  /* second header row: session tabs for the current project, busy→idle→dead, left to right */
+  #sessionbar { display:flex; align-items:center; gap:6px; padding:5px 12px;
+                border-bottom:1px solid var(--edge); background:var(--panel);
+                overflow-x:auto; white-space:nowrap; scrollbar-width:none; }
+  #sessionbar::-webkit-scrollbar { display:none; }
+  #sessionbar[hidden] { display:none; }
+  #sessionbar .stab { display:inline-flex; align-items:center; gap:6px; flex:0 0 auto;
+                      padding:4px 9px; border:1px solid var(--edge); background:transparent;
+                      color:var(--dim); font-size:12px; font-family:var(--mono); cursor:pointer;
+                      max-width:170px; }
+  #sessionbar .stab:hover { border-color:var(--edge-hi); color:var(--ink); }
+  #sessionbar .stab.active { border-color:var(--accent); color:var(--accent); background:var(--accent-bg); }
+  #sessionbar .stab .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }   /* square LED, matches sessions page */
+  #sessionbar .stab .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
+  #sessionbar .stab .sdot.dead { background:var(--err); }
+  #sessionbar .stab .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #status { font-size:11px; padding:3px 9px; border:1px solid var(--edge); text-transform:uppercase;
+            letter-spacing:.1em; color:var(--dim); white-space:nowrap; }
+  #status::before { content:"["; margin-right:5px; color:var(--dim); }
+  #status::after  { content:"]"; margin-left:5px;  color:var(--dim); }
+  #status.working { color:var(--accent); border-color:var(--accent-dim); background:var(--accent-bg); }
+  #status.idle    { color:var(--ok); border-color:#22401f; background:#07120a; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   #status.working { animation:pulse 1.1s ease-in-out infinite; }
   /* live "claude is thinking" row, pinned to the bottom of the transcript while a turn is in flight */
   .thinking { display:flex; align-items:center; gap:9px; padding:2px 4px;
-              color:var(--dim); font-size:12px; font-family:ui-monospace,Menlo,monospace; }
-  .thinking .spin { width:13px; height:13px; flex:none; border-radius:50%;
-                    border:2px solid var(--edge); border-top-color:#f5d061;
+              color:var(--dim); font-size:12px; font-family:var(--mono); }
+  .thinking .spin { width:12px; height:12px; flex:none;
+                    border:2px solid var(--edge); border-top-color:var(--accent);
                     animation:spin .8s linear infinite; }
   .thinking .lbl { animation:pulse 1.1s ease-in-out infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
@@ -44,156 +69,224 @@
          touch-action:pan-y; }   /* we own horizontal swipes (page nav); leave vertical scroll to the browser */
   .col { display:flex; flex-direction:column; min-width:0; min-height:0; }
   #left  { flex:1; }
-  #right { flex:1; background:#0a0a0e; }
+  #right { flex:1; background:var(--bg); }
   .col.hidden { display:none; }
-  #term { flex:1; min-height:0; padding:6px 4px 0 8px; background:#000; }
+  #term { flex:1; min-height:0; padding:6px 4px 0 8px; background:#000; touch-action:pan-y;
+          overflow:hidden; }
+  /* bottom-justify the TTY: the xterm grid fills #term (so the PTY size claude sees is the
+     real height), but claude prints its content into the TOP rows and leaves the rest of the
+     grid blank — that's the black gap. We can't reflow content that lives inside the grid, so
+     bottomJustifyTTY() translates the rendered .xterm-screen down by the unused height; the
+     now-empty bottom rows slide past #term's edge and are clipped (overflow:hidden). Content
+     anchors to the bottom, TUI-style, matching #feed. Self-disabling once content fills/scrolls. */
+  /* xterm's viewport is its own overflow:scroll box and defaults to touch-action:auto,
+     which re-grabs horizontal gestures the browser would otherwise leave to our swipe
+     handler — that's the "swipe-back is janky on the TUI" bug. Pin it to pan-y like main. */
+  .xterm-viewport, .xterm-screen, .xterm-scroll-area { touch-action:pan-y !important; }
+  .xterm-viewport { -webkit-overflow-scrolling:touch; }   /* momentum scroll on iOS instead of frame-by-frame drag */
   #feed { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
-          padding:12px; display:flex; flex-direction:column; gap:10px;
-          width:100%; max-width:860px; align-self:center; }
+          padding:12px; display:flex; flex-direction:column; gap:9px;
+          width:100%; max-width:880px; align-self:center; }
   /* anchor content to the bottom (TUI-style): short transcripts sit at the bottom and
      grow upward; once content overflows, the auto-margin collapses and scrolling is normal. */
   #feed > :first-child { margin-top:auto; }
-  .msg { border:1px solid var(--edge); border-radius:10px; padding:8px 11px; max-width:100%;
-         white-space:pre-wrap; word-break:break-word; }
-  .msg .who { font-size:10px; text-transform:uppercase; letter-spacing:.1em; color:var(--dim); margin-bottom:3px; }
-  .msg.user      { border-color:#23406e; background:#0e1830; }
-  .msg.assistant { border-color:#3a2f6b; background:#15122a; }
-  .msg.tool      { border-color:#3a4a2a; background:#141a10; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
-  .msg.tool_result { border-color:#333; background:#0f0f14; color:var(--dim);
-                     font-family:ui-monospace,Menlo,monospace; font-size:12px; padding:0; }
+  /* messages read like a terminal log: flat ground, hairline box, a 2px left rule
+     no colored rules — every turn is the same neutral box; you read the
+     speaker from its uppercase tag, like log lines, not chat bubbles. */
+  .msg { border:1px solid var(--edge); padding:6px 11px 8px; max-width:100%;
+         white-space:pre-wrap; word-break:break-word; background:var(--panel); }
+  .msg .who { font-size:10px; text-transform:uppercase; letter-spacing:.16em; color:var(--dim);
+              margin:0 -11px 6px; padding:0 11px 5px; border-bottom:1px solid var(--edge); }
+  .msg .who:empty { display:none; }
+  /* user turns get a faint amber wash + amber edge so you can scan the
+     transcript and spot at a glance where *you* spoke amid claude's output */
+  .msg.user      { background:rgba(232,161,58,.07); border-color:var(--accent-dim); }
+  .msg.user .who      { color:var(--accent); }
+  .msg.assistant { background:var(--panel); }
+  .msg.assistant .who { color:var(--ink); }
+  .msg.tool      { background:#0a0a08; font-family:var(--mono); font-size:12px; }
+  .msg.tool .who { color:var(--tool); }
+  .msg.tool_result { background:#070707; color:var(--dim);
+                     font-family:var(--mono); font-size:12px; padding:0; }
   .msg.tool_result details { padding:0; }
   .msg.tool_result summary { cursor:pointer; padding:7px 11px; list-style:none;
                              color:var(--dim); user-select:none; }
   .msg.tool_result summary::-webkit-details-marker { display:none; }
-  .msg.tool_result summary::before { content:"▸ "; color:#555; }
-  .msg.tool_result details[open] summary::before { content:"▾ "; }
+  .msg.tool_result summary::before { content:"+ "; color:var(--accent); }
+  .msg.tool_result details[open] summary::before { content:"- "; }
   .msg.tool_result summary:hover { color:var(--ink); }
   .msg.tool_result .result-body { padding:0 11px 9px; white-space:pre-wrap; word-break:break-word;
-                                  max-height:280px; overflow:auto; border-top:1px solid #222; margin-top:2px; }
-  .msg.result    { border-color:#444; background:#101016; color:var(--dim); font-size:12px; }
-  .msg.cmd  { border-color:#3a3a52; background:#13131f; color:#b9b3e6;
-              font-family:ui-monospace,Menlo,monospace; font-size:12px; }
-  .msg.sys  { border-color:#333; background:#0f0f14; color:var(--dim); font-size:12px; font-style:italic; }
+                                  max-height:280px; overflow:auto; border-top:1px solid var(--edge); margin-top:2px; }
+  .msg.result    { background:#070707; color:var(--dim); font-size:12px; }
+  .msg.cmd  { background:#0c0a05; color:var(--accent);
+              font-family:var(--mono); font-size:12px; }
+  .msg.sys  { background:#070707; color:var(--dim); font-size:12px; font-style:italic; }
   /* rendered markdown inside bubbles */
   .md { white-space:normal; }
   .md p { margin:0 0 6px; }
   .md strong { color:#fff; font-weight:650; }
   .md em { font-style:italic; }
-  .md a { color:#8aa9ff; }
-  .md code { background:#000; border:1px solid var(--edge); border-radius:4px;
-             padding:1px 4px; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
-  .md pre { background:#000; border:1px solid var(--edge); border-radius:8px; padding:9px 11px;
+  .md a { color:var(--accent); text-underline-offset:2px; }
+  .md code { background:#000; border:1px solid var(--edge); padding:1px 4px;
+             font-family:var(--mono); font-size:12px; color:var(--accent); }
+  .md pre { background:#000; border:1px solid var(--edge); padding:9px 11px;
             overflow:auto; max-height:300px; margin:6px 0; }
-  .md pre code { background:none; border:0; padding:0; white-space:pre; }
+  .md pre code { background:none; border:0; padding:0; white-space:pre; color:inherit; }
   .msg .toolname { color:var(--tool); font-weight:600; }
   footer { border-top:1px solid var(--edge); background:var(--panel); padding:10px 12px;
            display:flex; flex-direction:column; gap:8px; }
+  /* AI session name shown just above the message box so you know what this
+     long-running session is when you return to it. Hidden when there's no title. */
+  #sessiondesc { font-size:13px; line-height:1.3;
+                 white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #sessiondesc:empty { display:none; }
+  #sessiondesc .sd-project { color:#fff; font-weight:600; }
+  #sessiondesc .sd-title { color:var(--accent); font-weight:600; }
+  #sessiondesc .sd-desc { color:var(--dim); font-weight:400; }
+  @media (pointer: coarse) { #sessiondesc { font-size:5px; } }
   .inputrow { display:flex; gap:8px; align-items:flex-end; }
   #keys { display:flex; flex-wrap:wrap; gap:6px; }
-  #keys button { background:#0a0a0e; border:1px solid var(--edge); color:var(--ink);
-                 border-radius:7px; padding:7px 11px; font-size:13px; min-width:40px;
-                 font-family:ui-monospace,Menlo,monospace; cursor:pointer; }
-  #keys button:hover { border-color:var(--accent); }
-  #keys button:active { background:var(--accent); }
+  #keys button { background:var(--raised); border:1px solid var(--edge); color:var(--ink);
+                 padding:7px 11px; font-size:13px; min-width:40px;
+                 font-family:var(--mono); cursor:pointer; }
+  #keys button:hover { border-color:var(--accent); color:var(--accent); }
+  #keys button:active { background:var(--accent); color:#000; }
   #attachments { display:flex; flex-wrap:wrap; gap:6px; }
   #attachments:empty { display:none; }
-  /* queued messages: acked locally (yellow), removed once they land in the transcript */
+  /* queued messages: acked locally (amber), removed once they land in the transcript */
   #pending { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
   #pending:empty { display:none; }
-  .pending-msg { display:flex; gap:8px; align-items:flex-start; background:#33300f;
-                 border:1px solid #6b5e1a; color:#f3e6a0; border-radius:8px;
+  .pending-msg { display:flex; gap:8px; align-items:flex-start; background:var(--accent-bg);
+                 border:1px solid var(--accent-dim); color:#e9d4a4;
                  padding:7px 10px; font-size:13px; white-space:pre-wrap; word-break:break-word; }
-  .pending-msg .tag { flex:0 0 auto; font-size:10px; text-transform:uppercase; letter-spacing:.08em;
-                      color:#c9b85a; padding-top:2px; }
-  .chip { display:flex; align-items:center; gap:6px; background:#0a0a0e; border:1px solid var(--edge);
-          border-radius:8px; padding:4px 8px; font-size:12px; color:var(--ink); }
-  .chip img { width:30px; height:30px; object-fit:cover; border-radius:4px; }
+  .pending-msg .tag { flex:0 0 auto; font-size:10px; text-transform:uppercase; letter-spacing:.1em;
+                      color:var(--accent); padding-top:2px; }
+  .chip { display:flex; align-items:center; gap:6px; background:var(--raised); border:1px solid var(--edge);
+          padding:4px 8px; font-size:12px; color:var(--ink); }
+  .chip img { width:30px; height:30px; object-fit:cover; border:1px solid var(--edge); }
   .chip.up { color:var(--dim); font-style:italic; }
   .chip button { background:transparent; border:0; color:var(--dim); cursor:pointer; padding:0 2px;
                  font-weight:700; font-size:14px; }
   .chip button:hover { color:var(--err); }
-  #box { flex:1; resize:none; min-height:38px; max-height:160px; background:#0a0a0e; color:var(--ink);
-         border:1px solid var(--edge); border-radius:8px; padding:9px 11px; font:inherit; }
-  /* iOS Safari auto-zooms on focus when the field's *visual* size is <16px. The page renders at
-     initial-scale=0.9, so a 16px font is only ~14.4 visual px — still under the bar. 18px clears it
-     (18*0.9≈16.2). Scoped to coarse pointers so the desktop input keeps its inherited size. */
-  @media (pointer: coarse) { #box { font-size:18px; } }
+  #box { flex:1; resize:none; min-height:38px; max-height:160px; background:var(--raised); color:var(--ink);
+         border:1px solid var(--edge); padding:9px 11px; font:inherit; }
+  /* 13px on mobile (small, per request). iOS Safari would normally auto-zoom on focus for a field
+     under ~16 visual px, but the viewport is locked (user-scalable=no, min=max=scale) so it can't —
+     so small type here no longer triggers the zoom. Scoped to coarse pointers so the desktop input
+     keeps its inherited size. */
+  @media (pointer: coarse) { #box { font-size:13px; } }
+  @media (pointer: fine) { #box { min-height:58px; } }   /* desktop: a little taller resting height */
   #box:focus { outline:none; border-color:var(--accent); }
+  #box::placeholder { color:var(--dim); }
   /* voice column: speaker (TTS) over mic (STT), stacked to the left of the box */
   #voice { display:flex; flex-direction:column; gap:6px; flex:0 0 auto; }
-  #voice button { background:#0a0a0e; border:1px solid var(--edge); color:var(--ink);
-                  border-radius:7px; padding:7px 9px; font-size:15px; line-height:1; cursor:pointer; }
+  #voice button { background:var(--raised); border:1px solid var(--edge); color:var(--ink);
+                  padding:7px 9px; font-size:15px; line-height:1; cursor:pointer; }
   #voice button:hover { border-color:var(--accent); }
   #voice button:disabled { opacity:.35; cursor:default; }
-  #voice button.on { border-color:var(--accent); background:#15122a; }
+  #voice button.on { border-color:var(--accent); background:var(--accent-bg); }
   #ttsBtn.speaking { border-color:var(--accent); animation:vpulse 1.4s infinite; }
-  #micBtn.rec { border-color:var(--err); background:#2a1212; animation:vpulse 1s infinite; }
+  #micBtn.rec { border-color:var(--err); background:#1c0c0a; animation:vpulse 1s infinite; }
   @keyframes vpulse { 0%,100%{opacity:1} 50%{opacity:.45} }
-  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 16px;
-           font-weight:600; cursor:pointer; }
-  /* image picker: neutral icon button sitting between the box and Send */
-  #imgBtn { background:#0a0a0e; border:1px solid var(--edge); color:var(--ink); flex:0 0 auto;
-            border-radius:7px; padding:7px 9px; font-size:15px; line-height:1; font-weight:400; }
+  button { background:var(--accent); color:#000; border:0; padding:10px 16px;
+           font-family:var(--mono); font-weight:600; cursor:pointer; }
+  /* right-side action column: attach-image over send, mirroring the voice column on the left */
+  #actions { display:flex; flex-direction:column; gap:6px; flex:0 0 auto; }
+  #actions button { padding:7px 9px; font-size:15px; line-height:1; font-weight:400; }
+  #imgBtn { background:var(--raised); border:1px solid var(--edge); color:var(--ink); }
   #imgBtn:hover { border-color:var(--accent); }
+  #send { background:var(--raised); border:1px solid var(--edge); color:var(--ink); }
+  #send:hover { border-color:var(--accent); }
   button:disabled { opacity:.4; cursor:default; }
   .hint { color:var(--dim); font-size:11px; padding:0 12px 8px; }
   #phoneBtn, #panelBtn, #menuBtn, #projectsBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
-              padding:5px 10px; font-size:12px; }
-  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover { color:var(--ink); border-color:var(--accent); }
+              padding:5px 10px; font-size:12px; font-family:var(--mono); text-transform:lowercase; letter-spacing:.04em;
+              white-space:nowrap; }
+  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover { color:var(--ink); border-color:var(--edge-hi); }
   #panelBtn.on, #menuBtn.on, #projectsBtn.on { color:var(--accent); border-color:var(--accent); }
+  .bico { font-size:14px; line-height:1; }
+  /* mobile: collapse header to icon-only buttons so the bar fits + stops over-scrolling */
+  @media (pointer: coarse) {
+    header { gap:8px; padding:8px 10px; }
+    header .blbl { display:none; }
+    #phoneBtn, #panelBtn, #menuBtn, #projectsBtn { padding:6px 9px; }
+    #status { font-size:11px; padding:3px 8px; }
+    #brand { display:none; }
+  }
   /* projects (top rung) + sessions (next rung): both are scrollable card lists */
-  #menu, #projects { flex:1; background:#0a0a0e; }
+  #menu, #projects { flex:1; background:var(--bg); }
   #sessions, #projectlist { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
-              padding:14px; display:flex; flex-direction:column; gap:10px;
-              width:100%; max-width:760px; align-self:center; }
+              padding:14px; display:flex; flex-direction:column; gap:9px;
+              width:100%; max-width:780px; align-self:center; }
   /* project cards reuse .scard; status colors + an add-project row */
   .scard.cloning, .scard.error { cursor:default; }
   .scard.cloning { opacity:.75; }
-  .sdot.cloning { background:#f5d061; animation:pulse 1.1s ease-in-out infinite; }
+  .sdot.cloning { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
   .sdot.err { background:var(--err); }
-  .scard .scount { color:var(--dim); font-size:11px; font-family:ui-monospace,Menlo,monospace;
-                   border:1px solid var(--edge); border-radius:999px; padding:1px 8px; flex:0 0 auto; }
-  .scard .swork { color:#f5d061; border-color:#5a4d1f; background:#1c180a;
+  .scard .scount { color:var(--dim); font-size:11px; font-family:var(--mono);
+                   border:1px solid var(--edge); padding:1px 8px; flex:0 0 auto; }
+  .scard .swork { color:var(--accent); border-color:var(--accent-dim); background:var(--accent-bg);
                   animation:pulse 1.1s ease-in-out infinite; }
   .scard .serror { color:var(--err); font-size:12px; word-break:break-word; }
   #addProject { display:flex; flex-direction:column; gap:8px; border:1px dashed var(--edge);
-                border-radius:11px; padding:12px 14px; }
-  #addProject input { background:#0a0a0e; color:var(--ink); border:1px solid var(--edge);
-                      border-radius:8px; padding:9px 11px; font:inherit; }
+                padding:12px 14px; }
+  #addProject input { background:var(--raised); color:var(--ink); border:1px solid var(--edge);
+                      padding:9px 11px; font:inherit; }
   @media (pointer: coarse) { #addProject input { font-size:18px; } }
   #addProject input:focus { outline:none; border-color:var(--accent); }
   #addProject .arow { display:flex; gap:8px; }
   #addProject .arow button { flex:1; font-size:13px; padding:8px 10px; }
   #addProject .ahint { color:var(--dim); font-size:11px; }
-  .scard { border:1px solid var(--edge); border-radius:11px; padding:12px 14px; background:var(--panel);
+  /* the card: a plain hairline box; the whole border lights amber when active/hovered */
+  .scard { border:1px solid var(--edge); padding:11px 14px; background:var(--panel);
            cursor:pointer; display:flex; flex-direction:column; gap:4px; position:relative; }
-  .scard:hover { border-color:var(--accent); }
-  .scard.active { border-color:var(--accent); background:#16132a; }
+  .scard:hover { border-color:var(--edge-hi); }
+  .scard.active { border-color:var(--accent); background:#0e0e0e; }
   .scard .row { display:flex; align-items:center; gap:9px; }
-  .scard .sdot { width:8px; height:8px; border-radius:50%; background:#3fb950; flex:0 0 auto; }
-  .scard .sdot.busy { background:#f5d061; animation:pulse 1.1s ease-in-out infinite; }
+  .scard .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }   /* square LED */
+  .scard .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
   .scard .sdot.dead { background:var(--err); }
-  .scard .stitle { font-weight:600; font-size:14px; flex:1; min-width:0;
+  .scard .stitle { font-weight:600; font-size:13px; flex:1; min-width:0;
                    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .scard .sdesc { color:var(--dim); font-size:12px; line-height:1.4; }
-  .scard .smeta { color:var(--dim); font-size:11px; font-family:ui-monospace,Menlo,monospace; }
+  .scard .smeta { color:var(--dim); font-size:11px; font-family:var(--mono); }
   .scard .sclose { position:absolute; top:8px; right:9px; background:transparent; border:0; color:var(--dim);
-                   font-size:15px; cursor:pointer; padding:2px 5px; line-height:1; border-radius:6px; }
-  .scard .sclose:hover { color:var(--err); background:#0a0a0e; }
-  #newSession { border:1px dashed var(--edge); border-radius:11px; padding:12px 14px; background:transparent;
-                color:var(--dim); cursor:pointer; font-size:13px; text-align:left; font-weight:500; }
-  #newSession:hover { color:var(--ink); border-color:var(--accent); }
-  .menutitle { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.12em;
+                   font-size:15px; cursor:pointer; padding:2px 5px; line-height:1; }
+  .scard .sclose:hover { color:var(--err); background:var(--raised); }
+  #newSession { border:1px dashed var(--edge); padding:11px 14px; background:transparent;
+                color:var(--dim); cursor:pointer; font-family:var(--mono); font-size:13px; text-align:left; font-weight:500; }
+  #newSession:hover { color:var(--accent); border-color:var(--accent-dim); }
+  .menutitle { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.16em;
                padding:0 2px 2px; }
-  #qrmodal { position:fixed; inset:0; background:rgba(0,0,0,.7); display:flex;
+  #qrmodal { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex;
              align-items:center; justify-content:center; z-index:50; }
   #qrmodal[hidden] { display:none; }
-  .qrcard { background:var(--panel); border:1px solid var(--edge); border-radius:14px;
+  .qrcard { background:var(--panel); border:1px solid var(--edge); border-top:2px solid var(--accent);
             padding:22px; text-align:center; max-width:340px; }
-  #qrcode { background:#fff; padding:12px; border-radius:10px; display:inline-block; }
+  #qrcode { background:#fff; padding:12px; display:inline-block; }
   #qrcode img, #qrcode canvas { display:block; }
-  .qrurl { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--dim);
+  .qrurl { font-family:var(--mono); font-size:11px; color:var(--dim);
            margin:12px 0; word-break:break-all; }
+  /* graceful-restart UI: a pending banner under the header + a go overlay */
+  #rebootbar { display:flex; align-items:center; gap:10px; padding:7px 14px;
+               background:var(--accent-bg); border-bottom:1px solid var(--accent-dim);
+               color:var(--accent); font-size:12px; }
+  #rebootbar[hidden] { display:none; }
+  #rebootbar #rebootmsg { flex:1; }
+  #rebootbar #rebootCancel { background:transparent; border:1px solid var(--accent-dim);
+               color:var(--accent); border-radius:6px; padding:3px 10px; font-size:11px; cursor:pointer; }
+  #rebootbar #rebootCancel:hover { border-color:var(--accent); }
+  .rb-spin { width:12px; height:12px; flex:none; border-radius:50%;
+             border:2px solid var(--accent-dim); border-top-color:var(--accent);
+             animation:spin .8s linear infinite; }
+  .rb-spin.big { width:22px; height:22px; border-width:3px; }
+  #rebootovl { position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.82);
+               display:flex; align-items:center; justify-content:center; }
+  #rebootovl[hidden] { display:none; }
+  #rebootovl .rb-card { display:flex; align-items:center; gap:14px; background:var(--panel);
+               border:1px solid var(--edge); border-top:2px solid var(--accent);
+               padding:22px 26px; color:var(--ink); font-size:14px; }
+  #rebootovl .rb-sub { color:var(--dim); font-size:12px; margin-top:3px; }
 </style>
 </head>
 <body>
@@ -204,12 +297,20 @@
     <h1 id="brand" title="All sessions">clawd-harness</h1>
     <span class="meta" id="meta">connecting…</span>
     <span class="spacer"></span>
-    <button id="projectsBtn" title="All projects">▦ projects</button>
-    <button id="menuBtn" title="Sessions in this project">≡ sessions</button>
-    <button id="panelBtn" title="Show/hide the structured transcript">▤ transcript</button>
-    <button id="phoneBtn" title="Open on your phone">📱 Phone</button>
-    <span id="status">—</span>
+    <button id="projectsBtn" title="All projects"><span class="bico">▦</span><span class="blbl"> projects</span></button>
+    <button id="menuBtn" title="Sessions in this project"><span class="bico">≡</span><span class="blbl"> sessions</span></button>
+    <button id="panelBtn" title="Show/hide the structured transcript"><span class="bico">▤</span><span class="blbl"> transcript</span></button>
+    <button id="phoneBtn" title="Open on your phone"><span class="bico">▢</span><span class="blbl"> qr</span></button>
+    <span id="status"><span class="bico">⚪</span><span class="blbl"> —</span></span>
   </header>
+  <div id="sessionbar" hidden></div>
+  <div id="rebootbar" hidden>
+    <span class="rb-spin"></span>
+    <span id="rebootmsg"></span>
+    <button id="rebootCancel" title="Cancel the pending restart">cancel</button>
+  </div>
+  <div id="rebootovl" hidden><div class="rb-card"><span class="rb-spin big"></span>
+    <div>restarting harness…<div class="rb-sub">reconnecting automatically</div></div></div></div>
   <div id="qrmodal" hidden>
     <div class="qrcard">
       <div id="qrcode"></div>
@@ -232,6 +333,7 @@
     </section>
   </main>
   <footer>
+    <div id="sessiondesc" title="AI-generated name for this session"></div>
     <div id="attachments"></div>
     <div id="keys" title="Send keys to the session (works even when the terminal is read-only) — for navigating TUI menus like /model">
       <button data-k="esc">esc</button>
@@ -250,9 +352,11 @@
         <button id="micBtn" title="Hold to dictate (speech-to-text)">🎤</button>
       </div>
       <textarea id="box" placeholder="message"></textarea>
-      <button id="imgBtn" title="Attach an image">🖼</button>
       <input id="imgInput" type="file" accept="image/*" multiple hidden />
-      <button id="send">Send</button>
+      <div id="actions">
+        <button id="imgBtn" title="Attach an image">🖼</button>
+        <button id="send" title="Send message">📤</button>
+      </div>
     </div>
   </footer>
 </div>
@@ -261,14 +365,36 @@
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
 <script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@master/qrcode.min.js"></script>
 <script>
+// Kill all zoom on mobile. The viewport meta (user-scalable=no, min=max=scale)
+// handles Android/Chrome, but iOS Safari deliberately *ignores* user-scalable=no
+// for accessibility — so we also defeat its two zoom gestures in JS:
+//   1. pinch  → Safari fires non-standard `gesture*` events; preventDefault them.
+//   2. double-tap → suppress the second tap when it lands <300ms after the first.
+// Scoped so it never eats real interactions: gesture* are zoom-only, and the
+// double-tap guard only cancels the *zoom*, not the taps themselves.
+['gesturestart','gesturechange','gestureend'].forEach(t =>
+  document.addEventListener(t, (e) => e.preventDefault(), { passive:false }));
+let _lastTouchEnd = 0;
+document.addEventListener('touchend', (e) => {
+  const now = e.timeStamp;
+  if (now - _lastTouchEnd <= 300) e.preventDefault();   // collapse double-tap zoom
+  _lastTouchEnd = now;
+}, { passive:false });
 // Touch devices (phones/tablets): make the terminal a read-only mirror. Mobile
 // dictation/IME streams partial, self-revising text that xterm forwards as
 // overlapping keystrokes ("thithis issthis is a…"), so all input goes through
 // the message box (which gets native dictation/paste/image handling for free).
 const isTouch = window.matchMedia('(pointer: coarse)').matches;
+// Preferred deep view when you dive into a session: desktop drives the live
+// terminal (full keyboard, drives the TUI directly); touch reads the transcript
+// (native scroll/markdown, no xterm input pain). You can still toggle to the
+// other with the panel button — this is just the default landing.
+const DEEP_VIEW = isTouch ? 'transcript' : 'tty';
 const term = new Terminal({
   fontFamily: 'ui-monospace, Menlo, Monaco, "Courier New", monospace',
-  fontSize: 13, theme: { background: '#000000' }, cursorBlink: !isTouch,
+  fontSize: 13, cursorBlink: !isTouch,
+  theme: { background: '#000000', foreground: '#d9d7cf', cursor: '#e8a13a',
+           cursorAccent: '#000000', selectionBackground: '#e8a13a55' },
   scrollback: 5000, disableStdin: isTouch,
 });
 const fit = new FitAddon.FitAddon();
@@ -276,27 +402,79 @@ term.loadAddon(fit);
 term.open(document.getElementById('term'));
 fit.fit();
 
+// Bottom-justify the TTY: claude prints into the top rows of a full-height grid and leaves
+// the rest blank. Translate the rendered screen down by the unused height so content anchors
+// to the bottom (the empty rows clip past #term's edge). Self-disables once content fills the
+// viewport or the user scrolls history — then the last visible row is non-empty and off→0.
+function bottomJustifyTTY() {
+  const screen = term.element && term.element.querySelector('.xterm-screen');
+  const rowsEl = term.element && term.element.querySelector('.xterm-rows');
+  if (!screen || !rowsEl || !rowsEl.children.length) return;
+  let last = -1;
+  for (let i = 0; i < rowsEl.children.length; i++)
+    if (rowsEl.children[i].textContent.trim()) last = i;
+  // Blank/transient frame (nothing painted yet): never translate. off would be
+  // the full grid height, sliding the whole screen below #term's clipped edge —
+  // and an idle session emits no further render to recover, so the terminal
+  // vanishes entirely. This is the "I can't see the tty at all" bug.
+  if (last < 0) { screen.style.transform = ''; return; }
+  const cell = rowsEl.children[0].offsetHeight || 0;
+  const off = Math.max(0, screen.clientHeight - (last + 1) * cell);
+  screen.style.transform = off ? 'translateY(' + off + 'px)' : '';
+}
+term.onRender(bottomJustifyTTY);
+
+// Inserting/removing a header row (the session-tabs bar, the restart banner)
+// shrinks or grows <main> without firing a window resize, so xterm keeps its
+// stale row count and the TTY sits mis-positioned until you manually resize the
+// window. Refit on any such layout change (only meaningful while viewing the
+// terminal). rAF so we measure after the browser has reflowed the new bar.
+function refitTTY() {
+  if (currentView() !== 'tty') return;
+  requestAnimationFrame(() => { fit.fit(); sendResize(); term.scrollToBottom(); bottomJustifyTTY(); });
+}
+
+// The composer (footer) grows whenever an image chip is attached, a pending
+// message is queued, the key bar appears, or the textarea wraps — each shrinks
+// <main> without a window resize, so xterm keeps its stale (taller) row count
+// and its bottom rows end up clipped behind the footer (the "tty hidden under
+// the textarea" bug). Watch the footer's box and refit the TTY on any size
+// change so the grid always matches the space actually left for it.
+new ResizeObserver(() => refitTTY()).observe(document.querySelector('footer'));
+
 const dot = document.getElementById('dot');
 const meta = document.getElementById('meta');
 const statusEl = document.getElementById('status');
+// Status pill: emoji always shows; the word label is hidden on mobile (.blbl).
+// Set text via textContent (not innerHTML) so tool labels can't inject markup.
+function setStatus(emoji, text, cls) {
+  statusEl.className = cls || '';
+  statusEl.innerHTML = '<span class="bico"></span><span class="blbl"></span>';
+  statusEl.firstChild.textContent = emoji;
+  statusEl.lastChild.textContent = ' ' + text;
+}
 const feed = document.getElementById('feed');
 const box = document.getElementById('box');
 const sendBtn = document.getElementById('send');
 const sessionsEl = document.getElementById('sessions');
 const projectsEl = document.getElementById('projectlist');
 const pendingEl = document.getElementById('pending');
+const composer = document.querySelector('footer');
 
 let ws = null, decoder = new TextDecoder();
 let currentCid = null;          // session this browser is viewing
+let currentTitle = '';          // title of the viewed session (for the breadcrumb)
 let currentPid = null;          // project this browser has selected
 let sessionList = [];           // latest session metadata from the server
 let projectList = [];           // latest project metadata from the server
 let gotSessions = false;        // have we received the first sessions snapshot?
 let pendingNav = null;          // nav state parsed from the URL, awaiting server data
 let pendingNewFocus = false;    // a `new` we issued — its focus should switch us in
+let pendingSendText = null;     // text typed on the sessions list — delivered once the new session boots
 let lastWrittenHash = '';       // the hash we last wrote, so hashchange ignores our own writes
 
 const token = new URLSearchParams(location.search).get('t') || '';
+let serverBoot = null;   // server process id; a change across reconnect = daemon restart → reload
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -313,14 +491,59 @@ function connect() {
   };
 }
 
+// -- graceful restart: pending banner (waits for all-idle) + go overlay -------
+const rebootbar = document.getElementById('rebootbar');
+const rebootmsg = document.getElementById('rebootmsg');
+const rebootovl = document.getElementById('rebootovl');
+function renderReboot(m) {
+  const wasHidden = rebootbar.hidden;
+  if (!m.pending) { rebootbar.hidden = true; if (!wasHidden) refitTTY(); return; }
+  const n = m.busy || 0;
+  const wait = n ? `waiting for ${n} session${n > 1 ? 's' : ''} to finish…`
+                 : 'all idle — restarting now…';
+  rebootmsg.textContent = `restart pending${m.reason ? ' (' + m.reason + ')' : ''} — ${wait}`;
+  rebootbar.hidden = false;
+  if (wasHidden) refitTTY();
+}
+function showRebootOverlay() { rebootbar.hidden = true; rebootovl.hidden = false; }
+document.getElementById('rebootCancel').onclick = () => {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'restartCancel' }));
+};
+
 function handleJson(m) {
+  if (m.type === 'reload') {        // server saw index.html change on disk → live-reload
+    meta.textContent = 'updated — reloading…';
+    snapshotBoxFocus();             // remember the caret so the reload doesn't steal your spot
+    setTimeout(() => location.reload(), 150);
+    return;
+  }
+  if (m.type === 'restart') {       // graceful self-restart: pending banner / go overlay
+    if (m.state === 'go') { showRebootOverlay(); return; }  // boot-id change then reloads us
+    renderReboot(m);
+    return;
+  }
   if (m.type === 'projects') {
+    // Server boot id: if it changed since we last connected, the daemon
+    // restarted — reconnecting the socket alone leaves a stale "thinking"
+    // spinner (the in-flight turn's Stop never arrived), so hard-reload for
+    // fresh state. Brief delay lets resumed sessions settle first.
+    if (m.boot) {
+      if (serverBoot && serverBoot !== m.boot) {
+        meta.textContent = 'server restarted — reloading…';
+        snapshotBoxFocus();         // preserve the caret across the daemon-restart reload too
+        setTimeout(() => location.reload(), 2000);
+        return;
+      }
+      serverBoot = m.boot;
+    }
     renderProjects(m.projects || []);
+    refreshBreadcrumb();                  // project name resolves once the list lands
     resolvePendingNav();                  // a URL we restored from may name a project
   } else if (m.type === 'sessions') {
     sessionList = m.sessions || [];
     gotSessions = true;
     renderSessions();
+    refreshBreadcrumb();                  // a renamed session updates the crumb live
     resolvePendingNav();                  // …or a session
   } else if (m.type === 'focus') {
     // server's pick of which session to view, sent only in reply to a `new` we
@@ -329,6 +552,8 @@ function handleJson(m) {
     if (pendingNewFocus) {
       pendingNewFocus = false;
       openSession(m.cid);                 // subscribe + drop to the transcript
+      // openSession→subscribe clears the feed, so show the queued box now (after).
+      if (pendingSendText) addPending(pendingSendText, pendingSendText);
     } else {
       const stay = currentCid && sessionList.some(s => s.cid === currentCid);
       subscribe(stay ? currentCid : m.cid);
@@ -343,13 +568,16 @@ function handleJson(m) {
     if (m.cid && m.cid !== currentCid) return;        // belongs to a backgrounded session
     renderEvent(m.event, !m.history);   // live events type out; history replay renders instantly
   } else if (m.type === 'hook') {
+    // claude received the prompt → the outbox copy did its job; drop it (any session,
+    // even one you've navigated away from, so it can't resurface as stale text later).
+    if (m.event === 'UserPromptSubmit') clearOutbox(m.cid);
     if (m.cid === currentCid) handleHook(m);          // drive the pill only for the viewed session
     // (menu badges update via the sessions broadcast that follows each hook)
   } else if (m.type === 'exit') {
     if (m.cid !== currentCid) return;
     hideThinking();
     meta.textContent = 'session ended';
-    statusEl.className = ''; statusEl.textContent = 'ended';
+    setStatus('🔴', 'ended', '');
   }
 }
 
@@ -359,9 +587,72 @@ function projectName(pid) {
   return p ? p.name : '';
 }
 
-function updateBreadcrumb(title) {
-  const pn = projectName(currentPid);
-  meta.textContent = [pn, title].filter(Boolean).join(' / ');
+function updateBreadcrumb(title) {        // called when we (re)subscribe to a session
+  if (title != null) currentTitle = title;
+  refreshBreadcrumb();
+}
+// The breadcrumb in row 1 now shows just the project name (blank on the projects
+// list); the active *session* is shown by the highlighted tab in row 2 instead.
+// Recomputed on every nav so climbing back out doesn't strand a stale crumb.
+function refreshBreadcrumb(view) {
+  view = view || currentView();
+  meta.textContent = view === 'projects' ? '' : projectName(currentPid);
+  // Show the AI session name above the message box, but only when a specific
+  // session is open (transcript/tty rungs) — not on the projects/sessions lists.
+  const descEl = document.getElementById('sessiondesc');
+  const live = sessionList.find(s => s.cid === currentCid);   // live title/desc (AI naming may have re-titled it)
+  const inSession = (view === 'tty' || view === 'transcript');
+  const title = (live && live.title) || currentTitle || '';
+  const longDesc = (live && live.desc) || '';
+  // Show "short title: long desc" when AI naming has produced a one-line summary,
+  // otherwise just the short title. The two parts are styled distinctly.
+  descEl.textContent = '';
+  if (inSession && title) {
+    const proj = projectName(currentPid);
+    if (proj) {
+      const p = document.createElement('span'); p.className = 'sd-project'; p.textContent = proj + ' ';
+      descEl.appendChild(p);
+    }
+    const t = document.createElement('span'); t.className = 'sd-title'; t.textContent = title;
+    descEl.appendChild(t);
+    if (longDesc) {
+      const d = document.createElement('span'); d.className = 'sd-desc'; d.textContent = ': ' + longDesc;
+      descEl.appendChild(d);
+    }
+  }
+  renderSessionBar(view);
+}
+
+// Row 2: a horizontal strip of session tabs for the current project, sorted
+// busy → idle → dead (most active to the left), color-coded like the sessions
+// page, with the open session highlighted. Hidden on the projects rung.
+function renderSessionBar(view) {
+  const bar = document.getElementById('sessionbar');
+  const wasHidden = bar.hidden;
+  view = view || currentView();
+  const list = sessionList.filter(s => s.pid === currentPid);
+  if (view === 'projects' || !currentPid || !list.length) {
+    bar.hidden = true; bar.innerHTML = '';
+    if (!wasHidden) refitTTY();
+    return;
+  }
+  const rank = s => !s.alive ? 2 : s.busy ? 0 : 1;   // busy first, idle next, dead last
+  const sorted = list.slice().sort((a, b) => rank(a) - rank(b));
+  bar.innerHTML = '';
+  sorted.forEach(s => {
+    const tab = document.createElement('button');
+    tab.className = 'stab' + (s.cid === currentCid ? ' active' : '');
+    tab.title = s.title || 'new session';
+    tab.onclick = () => { pendingSendText = null; openSession(s.cid); };  // manual open cancels a queued new-session send
+    const dot = document.createElement('span');
+    dot.className = 'sdot' + (!s.alive ? ' dead' : s.busy ? ' busy' : '');
+    const lbl = document.createElement('span');
+    lbl.className = 'lbl'; lbl.textContent = s.title || 'new session';
+    tab.appendChild(dot); tab.appendChild(lbl);
+    bar.appendChild(tab);
+  });
+  bar.hidden = false;
+  if (wasHidden) refitTTY();
 }
 
 function selectProject(pid) {
@@ -378,11 +669,6 @@ function addProjectFromUrl(url) {
   if (!url.trim() || !ws || ws.readyState !== 1) return;
   ws.send(JSON.stringify({ type: 'addProject', repoUrl: url.trim() }));
 }
-function removeProject(pid, ev) {
-  ev.stopPropagation();
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'removeProject', pid }));
-}
-
 function renderProjects(list) {
   projectList = list;
   // a freshly selected project that vanished (removed) → drop the selection
@@ -415,6 +701,13 @@ function renderProjects(list) {
   hint.textContent = 'create → new public repo under clawdbotatg; clone → git URL, owner/repo, or a clawdbotatg repo name';
   add.appendChild(inp); add.appendChild(arow); add.appendChild(hint);
   projectsEl.appendChild(add);
+
+  // no in-app remove: the list mirrors the repos on disk. To drop one, delete
+  // its folder under projects/ and the list follows within ~1s.
+  const note = document.createElement('div');
+  note.className = 'ahint'; note.style.opacity = '0.7';
+  note.textContent = 'this list mirrors the repos in projects/ — to remove one, delete its folder on disk and the list updates itself.';
+  projectsEl.appendChild(note);
 
   list.forEach(p => {
     const busyP = p.status === 'cloning', errP = p.status === 'error';
@@ -462,13 +755,6 @@ function renderProjects(list) {
       card.appendChild(se);
     }
 
-    if (!p.pinned) {                            // the harness-itself project isn't removable
-      const x = document.createElement('button');
-      x.className = 'sclose'; x.textContent = '✕'; x.title = 'remove from list (keeps files)';
-      x.onclick = (e) => removeProject(p.pid, e);
-      card.appendChild(x);
-    }
-
     projectsEl.appendChild(card);
   });
 }
@@ -486,6 +772,7 @@ function subscribe(cid) {
   hideThinking();
   if (activeType) { activeType.finish(); activeType = null; }
   highlightCard(cid);
+  syncComposer();              // load this session's own draft (bring back text from before a reload)
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'subscribe', cid }));
   syncUrl();
 }
@@ -494,7 +781,7 @@ function openSession(cid) {
   const s = sessionList.find(s => s.cid === cid);
   if (s && s.pid) currentPid = s.pid;       // keep the breadcrumb/`new` in this project
   subscribe(cid);
-  setView('transcript');
+  setView(DEEP_VIEW);                        // desktop → terminal, touch → transcript
   if (!isTouch) box.focus();                // desktop: ready to type immediately (skip on touch — don't pop the keyboard)
 }
 
@@ -502,12 +789,45 @@ function newSession() {
   if (!currentPid) { setView('projects'); return; }   // need a project to host it
   pendingNewFocus = true;          // the focus that comes back should switch us into it
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'new', pid: currentPid }));
-  setView('transcript');           // server replies with a focus → subscribe once it's spawned
+  setView(DEEP_VIEW);              // server replies with a focus → subscribe once it's spawned
 }
 
 function closeSession(cid, ev) {
-  ev.stopPropagation();
+  if (ev) ev.stopPropagation();
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'close', cid }));
+}
+
+// -- keyboard session-hopping (Ctrl+Shift+↑/↓ cycle, Ctrl+Shift+W close) ------
+// Up/down cycle through EVERY session across all projects (currentPid follows
+// the session into its project, so the breadcrumb switches too) — a fast "where
+// are we" sweep. We stay at the current depth: cycling inside the tty swaps the
+// terminal, inside the transcript swaps the bubbles, on a list just moves the
+// highlight. Left/right (Ctrl+Shift) drive the abstraction nav instead — see the
+// capture-phase handler below, which works even from inside the terminal.
+function cycleSession(dir) {
+  if (!sessionList.length) return;
+  const idx = sessionList.findIndex(s => s.cid === currentCid);
+  const next = idx < 0 ? (dir > 0 ? 0 : sessionList.length - 1)
+                       : (idx + dir + sessionList.length) % sessionList.length;
+  const s = sessionList[next];
+  if (s.pid) currentPid = s.pid;     // follow the session into its project
+  subscribe(s.cid);                  // swap content; subscribe() never changes depth
+  if (!isTouch) box.focus();
+}
+
+function closeCurrentSession() {
+  if (!currentCid) return;
+  // Stay inside the current project: pick a neighbour from THIS project only.
+  // If it was the project's last session, fall back to its (now empty) sessions
+  // list — never hop into a different project's session.
+  const siblings = sessionList.filter(s => s.pid === currentPid);
+  const idx = siblings.findIndex(s => s.cid === currentCid);
+  const rest = siblings.filter(s => s.cid !== currentCid);
+  closeSession(currentCid);
+  if (!rest.length) { navTo('sessions'); return; }   // closed the last one in this project — fall back to the list
+  const nb = rest[Math.min(idx, rest.length - 1)] || rest[0];
+  subscribe(nb.cid);                 // land on a neighbour in the same project, keeping the current depth
+  if (!isTouch) box.focus();
 }
 
 function highlightCard(cid) {
@@ -533,7 +853,7 @@ function renderSessions() {
     const card = document.createElement('div');
     card.className = 'scard' + (s.cid === currentCid ? ' active' : '');
     card.dataset.cid = s.cid;
-    card.onclick = () => openSession(s.cid);
+    card.onclick = () => { pendingSendText = null; openSession(s.cid); };  // manual open cancels a queued new-session send
 
     const row = document.createElement('div'); row.className = 'row';
     const sdot = document.createElement('span');
@@ -565,12 +885,10 @@ function renderSessions() {
 
 function setBusy(busy, label) {
   if (busy) {
-    statusEl.className = 'working';
-    statusEl.textContent = label ? `working · ${label}` : 'working…';
+    setStatus('🟡', label ? `working · ${label}` : 'working…', 'working');
     showThinking(label);
   } else {
-    statusEl.className = 'idle';
-    statusEl.textContent = 'idle · ready';
+    setStatus('🟢', 'idle · ready', 'idle');
     hideThinking();
   }
 }
@@ -606,7 +924,9 @@ function bumpThinking() { if (thinkEl) feed.appendChild(thinkEl); }  // re-pin b
 function handleHook(m) {
   const ev = m.event, d = m.data || {};
   const tool = d.tool || m.tool;
-  if (ev === 'UserPromptSubmit') { setBusy(true, null); restoreViewAfterQuestion(); }
+  // A fresh user prompt means you're driving the TTY yourself — cancel any pending
+  // auto-return (don't yank you back to where a question pulled you from).
+  if (ev === 'UserPromptSubmit') { setBusy(true, null); viewBeforeQuestion = null; deferredView = null; }
   else if (ev === 'PreToolUse')  {
     setBusy(true, tool);
     // these tools render an interactive prompt that only shows in the TUI
@@ -618,8 +938,8 @@ function handleHook(m) {
     if (tool === 'AskUserQuestion' || tool === 'ExitPlanMode') restoreViewAfterQuestion();
   }
   else if (ev === 'Stop')        { setBusy(false, null); restoreViewAfterQuestion(); }
-  else if (ev === 'SessionStart') setBusy(false, null);
-  else if (ev === 'SessionEnd')  { hideThinking(); statusEl.className=''; statusEl.textContent='session ended'; }
+  else if (ev === 'SessionStart') { setBusy(false, null); if (pendingSendText) setTimeout(flushPendingSend, 500); }
+  else if (ev === 'SessionEnd')  { hideThinking(); setStatus('🔴', 'session ended', ''); }
   else if (ev === 'Notification') {
     setBusy(m.busy, d.message ? d.message.slice(0,40) : null);
     openTtyForQuestion();                      // permission / "needs your input" — surface the TUI
@@ -834,19 +1154,150 @@ function landPending(landed) {
   p.el.remove();
 }
 function clearPending() { pendingMsgs = []; pendingEl.innerHTML = ''; }
+// Deliver the message typed on the sessions list, once the new session is up.
+// Fires from the SessionStart hook (preferred) with a setTimeout fallback;
+// guarded so whichever runs first wins and the other no-ops.
+function flushPendingSend() {
+  if (!pendingSendText || !ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({ type: 'send', text: pendingSendText }));
+  stashOutbox(currentCid, pendingSendText);  // now bound to a real session — hold until confirmed
+  stashPending(currentPid, null);            // it's the outbox's job to recover it now
+  pendingSendText = null;
+}
+
+// -- draft persistence: a half-typed message must survive a live-reload (we edit
+// this very app, so an index.html change reloads the page out from under you) or
+// any other reload. Each composer CONTEXT keeps its own draft — a session is keyed
+// by its cid, and the sessions-list "new session" box is keyed per project — even
+// though they share one physical <textarea>. On every context switch we save the
+// box back to the OLD context and load the NEW one, so a session draft never bleeds
+// into the new-session box (or vice-versa). Dropped once it's actually sent.
+const draftKey = (id) => 'cc_draft:' + (id || '_');
+function currentDraftId() {
+  const v = currentView();
+  if (v === 'sessions') return 'new:' + (currentPid || '_');   // the "new session" composer, per project
+  if (v === 'transcript' || v === 'tty') return currentCid;    // talking to one specific session
+  return null;                                                 // projects rung — composer is hidden
+}
+// The outbox closes the gap between "you hit Enter" and "claude actually has it".
+// On send we clear the draft but stash the text here; we only drop it once claude
+// confirms receipt (UserPromptSubmit). So if a restart/reload lands in that window,
+// the text comes back into the box instead of vanishing. (See syncComposer.)
+const outboxKey = (cid) => 'cc_outbox:' + (cid || '_');
+function stashOutbox(cid, text) { try { if (cid && text) localStorage.setItem(outboxKey(cid), text); } catch {} }
+function clearOutbox(cid) { try { localStorage.removeItem(outboxKey(cid)); } catch {} }
+// Text typed on a project's sessions list (no session yet) — survives reload
+// before the new session even exists; recovered into THAT project's new-session
+// composer. Keyed PER PROJECT: a queued send in one project must never surface in
+// another project's composer (a global key bled across every project's box).
+const pendingKey = (pid) => 'cc_pending:' + (pid || '_');
+function stashPending(pid, text) { try { text ? localStorage.setItem(pendingKey(pid), text) : localStorage.removeItem(pendingKey(pid)); } catch {} }
+function takePending(pid) { try { const k = pendingKey(pid); const t = localStorage.getItem(k) || ''; localStorage.removeItem(k); return t; } catch { return ''; } }
+
+let activeDraftId = null;   // which context's draft is currently sitting in the box
+// Persist the box into the context it belongs to (called as you type, and before any swap).
+function saveDraft() {
+  if (!activeDraftId) return;
+  try { box.value ? localStorage.setItem(draftKey(activeDraftId), box.value)
+                  : localStorage.removeItem(draftKey(activeDraftId)); } catch {}
+}
+function clearDraft() { try { if (activeDraftId) localStorage.removeItem(draftKey(activeDraftId)); } catch {} }
+// Reconcile the shared textarea to whatever context we're now in: save the outgoing
+// context, then load the incoming one (recovering unconfirmed sent text or a queued
+// sessions-list message if there's no live draft). Never loses text, never bleeds it.
+function syncComposer() {
+  const id = currentDraftId();
+  if (id === activeDraftId) return;          // same context — leave the box alone
+  saveDraft();                               // stash the outgoing context first
+  activeDraftId = id;
+  if (!id) { box.value = ''; autosizeBox(); return; }       // projects rung — nothing to compose
+  let v = '';
+  try {
+    v = localStorage.getItem(draftKey(id)) || '';
+    // The pending/outbox buffers are crash-recovery ONLY — consult them just once,
+    // while restoring from the URL at boot (pendingNav still set). On ordinary
+    // in-app navigation we must NOT refill the box from them, or a message you
+    // already sent (but claude hasn't acknowledged yet) would follow you back into
+    // its session — and worse, into other contexts. Sent = gone from the box.
+    if (!v && pendingNav) v = String(id).startsWith('new:') ? takePending(id.slice(4))                // this project's new-session composer recovers its own queued send
+                                                            : (localStorage.getItem(outboxKey(id)) || '');  // session recovers an unconfirmed send
+  } catch {}
+  box.value = v;
+  autosizeBox();                             // fit the box to the (possibly shorter) incoming draft
+  restoreBoxFocus();                         // if a reload stole focus mid-type, put it back here
+}
+// Desktop-only: grow the textarea (and thus the footer/bottom panel) as lines are
+// added, clamped by the CSS max-height. Mobile keeps its fixed scrolling box. The
+// footer's ResizeObserver (see refitTTY) pushes the terminal up as we grow.
+const finePointer = window.matchMedia('(pointer: fine)').matches;
+function autosizeBox() {
+  if (!finePointer) return;
+  box.style.height = 'auto';                       // let it shrink back when lines are removed
+  box.style.height = box.scrollHeight + 'px';      // CSS min/max-height clamp the result
+}
+box.addEventListener('input', () => { saveDraft(); autosizeBox(); });
+
+// -- keep focus through a reload. We live-edit this very app, so an index.html
+// change (or a self-restart) reloads the page out from under you — and if you
+// were mid-type in the message box, the reload steals your focus and caret. The
+// draft text already survives (saveDraft); this preserves the *cursor* too.
+// snapshotBoxFocus() is called right before any location.reload(); restoreBoxFocus()
+// runs once the matching composer is refilled at boot, refocusing + restoring the
+// caret so you can keep typing as if nothing happened.
+function snapshotBoxFocus() {
+  try {
+    if (document.activeElement !== box) return;
+    sessionStorage.setItem('cc_boxfocus', JSON.stringify({
+      id: activeDraftId, start: box.selectionStart, end: box.selectionEnd }));
+  } catch {}
+}
+function restoreBoxFocus() {
+  let s;
+  try { s = JSON.parse(sessionStorage.getItem('cc_boxfocus') || 'null'); } catch {}
+  if (!s || s.id !== activeDraftId) return;     // wait for the composer we were typing in
+  try { sessionStorage.removeItem('cc_boxfocus'); } catch {}
+  try {
+    box.focus({ preventScroll: false });
+    const n = box.value.length;
+    box.setSelectionRange(Math.min(s.start ?? n, n), Math.min(s.end ?? n, n));
+  } catch {}
+}
+
+// -- don't yank the view while you're mid-message. Hook-driven auto-switches (a
+// question surfacing the TUI, then restoring) go through autoSetView, which parks
+// the switch until you blur the box rather than jerking you off a live draft.
+let deferredView = null;
+function composing() { return document.activeElement === box && box.value.trim() !== ''; }
+function autoSetView(v) { if (composing()) { deferredView = v; return; } setView(v); }
+box.addEventListener('blur', () => {
+  if (deferredView !== null) { const v = deferredView; deferredView = null; setView(v); }
+});
 
 function sendMessage() {
   const text = box.value.trim();
   // `/new` is a console-level command — it spins up a fresh claude session
   // rather than being typed into the current one.
-  if (/^\/new(\s|$)/.test(text)) { box.value = ''; newSession(); return; }
+  if (/^\/new(\s|$)/.test(text)) { box.value = ''; autosizeBox(); clearDraft(); newSession(); return; }
   const ready = attachments.filter(a => a.path);
   if ((!text && !ready.length) || !ws || ws.readyState !== 1) return;
   // claude reads each path via its Read tool → sees the image
   const full = [text, ...ready.map(a => a.path)].filter(Boolean).join(' ');
+  // On the sessions list there's no session to talk to — spin up a fresh one in
+  // this project and deliver the text once it's booted (see flushPendingSend).
+  if (currentView() === 'sessions') {
+    if (!currentPid) return;
+    pendingSendText = full;
+    stashPending(currentPid, text || full);   // survive a reload before the session even exists (scoped to this project)
+    box.value = ''; autosizeBox(); clearDraft(); attachments = []; renderChips();
+    newSession();                     // focus reply → openSession → queued box shown
+    setTimeout(flushPendingSend, 8000);   // fallback if the SessionStart hook never lands
+    return;
+  }
   ws.send(JSON.stringify({ type: 'send', text: full }));
+  stashOutbox(currentCid, text || full);  // hold until claude confirms (UserPromptSubmit) — survives a mid-send restart
+  viewBeforeQuestion = null;          // you're acting here on purpose — don't auto-return
   addPending(full, text || ready.map(a => a.name).join(', ') || full);
-  box.value = ''; attachments = []; renderChips();
+  box.value = ''; autosizeBox(); clearDraft(); attachments = []; renderChips();
 }
 
 box.addEventListener('paste', (e) => {
@@ -871,6 +1322,21 @@ box.addEventListener('keydown', (e) => {
 // Raw passthrough when the user types directly in the terminal (desktop only;
 // the terminal is read-only on touch, so onData won't fire there).
 term.onData(d => sendKeys(d));
+// Shift+Enter should insert a newline, not submit. xterm sends a bare \r for
+// Enter regardless of modifiers, so intercept it and send \n (0x0A / Ctrl+J) —
+// the sequence claude's input box treats as "newline" in any terminal.
+// We must preventDefault() ourselves: returning false makes xterm bail without
+// preventing the browser's default Enter action, which would otherwise insert a
+// newline into xterm's helper textarea and get forwarded to the PTY as a submit.
+term.attachCustomKeyEventHandler((e) => {
+  if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    sendKeys('\n');
+    return false;  // stop xterm from also sending a plain \r (which submits)
+  }
+  return true;
+});
 
 // Control-key bar: send raw escape sequences straight to the PTY (bypasses
 // xterm, so it drives TUI menus even on touch where the terminal is read-only).
@@ -882,6 +1348,7 @@ function sendKeys(data) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'input', data }));
 }
 document.getElementById('keys').addEventListener('click', (e) => {
+  if (swipeTap) { swipeTap = false; return; }   // this "click" is the tail of a horizontal nav swipe, not a real tap
   const k = e.target.closest('button')?.dataset.k;
   if (k && KEY_SEQ[k] != null) { sendKeys(KEY_SEQ[k]); box.focus(); }
 });
@@ -1048,20 +1515,30 @@ function setView(view) {
   menuPanel.classList.toggle('hidden', !sessions);
   leftPanel.classList.toggle('hidden', !tty);
   rightPanel.classList.toggle('hidden', !(view === 'transcript'));
-  document.getElementById('keys').style.display = tty ? '' : 'none';  // keys only drive the tty
-  panelBtn.textContent = tty ? '▤ transcript' : '❯_ terminal';
+  document.getElementById('keys').style.display = (tty && isTouch) ? '' : 'none';  // key bar only for touch (the desktop terminal takes these keys natively)
+  // Composer is hidden on the projects rung (nothing to talk to). On the sessions
+  // list it stays, but a message there starts a new session rather than going to a
+  // session you're not viewing — say so in the placeholder.
+  composer.style.display = projects ? 'none' : '';
+  box.placeholder = sessions ? 'message → new session' : 'message';
+  syncComposer();              // each level has its own draft — swap the box to this one's
+  panelBtn.innerHTML = tty ? '<span class="bico">▤</span><span class="blbl"> transcript</span>'
+                           : '<span class="bico">❯</span><span class="blbl"> terminal</span>';
   menuBtn.classList.toggle('on', sessions);
   projectsBtn.classList.toggle('on', projects);
   try { localStorage.setItem('cc_view', view); } catch {}
+  refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
   syncUrl();                       // keep the URL in step with the depth we're at
-  if (tty) setTimeout(() => { fit.fit(); sendResize(); term.scrollToBottom(); }, 60);
+  if (tty) setTimeout(() => { fit.fit(); sendResize(); term.scrollToBottom(); bottomJustifyTTY(); }, 60);
   else if (view === 'transcript') feed.scrollTop = feed.scrollHeight;
 }
-// the toggle button hops between the two deep views; projects/sessions have their own entries
-panelBtn.onclick = () => setView(currentView() === 'tty' ? 'transcript' : 'tty');
-menuBtn.onclick = () => { if (currentPid) setView('sessions'); else setView('projects'); };
-projectsBtn.onclick = () => setView('projects');
-document.getElementById('brand').onclick = () => setView('projects');
+// the toggle button hops between the two deep views; projects/sessions have their own entries.
+// Each is a manual nav, so it cancels any pending question auto-return (navTo wraps that).
+const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; setView(v); };
+panelBtn.onclick = () => navTo(currentView() === 'tty' ? 'transcript' : 'tty');
+menuBtn.onclick = () => { if (currentPid) navTo('sessions'); else navTo('projects'); };
+projectsBtn.onclick = () => navTo('projects');
+document.getElementById('brand').onclick = () => navTo('projects');
 pendingNav = parseHash();        // restore project / session / depth from the URL…
 setView(pendingNav.view);        // …optimistically; resolvePendingNav refines once data lands
 
@@ -1141,18 +1618,21 @@ window.addEventListener('hashchange', () => {
 function openTtyForQuestion() {
   if (currentView() === 'tty') return;
   if (viewBeforeQuestion === null) viewBeforeQuestion = currentView();
-  setView('tty');
+  autoSetView('tty');          // parks until you blur if you're mid-message
 }
 function restoreViewAfterQuestion() {
   if (viewBeforeQuestion === null) return;
   const v = viewBeforeQuestion; viewBeforeQuestion = null;
-  setView(v);
+  autoSetView(v);
 }
 
 // -- depth navigation: views are an ordered stack, shallow → deep. Swipe right
 // climbs out (toward projects); swipe left dives in (toward the tty), matching
 // the iOS back-gesture feel. projects → sessions → transcript → tty.
-const LEVELS = ['projects', 'sessions', 'transcript', 'tty'];
+// The two deep rungs are ordered by device preference: desktop dives into the
+// terminal first (transcript one rung deeper), touch into the transcript first.
+const LEVELS = isTouch ? ['projects', 'sessions', 'transcript', 'tty']
+                       : ['projects', 'sessions', 'tty', 'transcript'];
 function stepLevel(dir) {
   const i = LEVELS.indexOf(currentView());
   if (i === -1) return;
@@ -1167,14 +1647,14 @@ function stepLevel(dir) {
   // diving from the sessions list into a session returns to the last session we
   // viewed (currentCid persists). If that's gone/foreign to this project, pick
   // the first session in the project; if it has none, stay on the list.
-  if (next === 'transcript' && currentView() === 'sessions') {
+  if ((next === 'transcript' || next === 'tty') && currentView() === 'sessions') {
     const here = sessionList.filter(s => s.pid === currentPid);
     if (!here.some(s => s.cid === currentCid)) {
       if (!here.length) return;            // nothing to dive into — stay on the list
       subscribe(here[0].cid);              // re-point at a real session for this project
     }
   }
-  if (next !== currentView()) setView(next);
+  if (next !== currentView()) { viewBeforeQuestion = null; setView(next); }  // manual nav cancels auto-return
 }
 const goDeeper    = () => stepLevel(+1);   // swipe left / arrow right — dive in
 const goShallower = () => stepLevel(-1);   // swipe right / arrow left — climb out
@@ -1194,18 +1674,56 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowRight') goDeeper(); else goShallower();
 });
 
-// Horizontal swipe on the stage switches depth. Listen in the capture phase so
-// xterm (which handles its own touches on the tty view) can't swallow it.
-// Vertical motion is left untouched so the transcript scrolls natively.
+// Ctrl+Shift navigation, mirroring the swipe/plain-arrow model but usable from
+// inside the live terminal too: ←/→ move through the abstraction levels
+// (projects ↔ sessions ↔ tty ↔ transcript), ↑/↓ cycle sessions at the current
+// depth, W closes the current session, N spawns a new one (focusing the box on
+// desktop, via openSession). Capture phase + stopPropagation so the
+// keys never reach xterm's textarea (it would otherwise send them to the PTY).
+// On macOS Ctrl+Shift+W is free (the browser's close-window shortcut is
+// Cmd+Shift+W), so we don't fight it.
+window.addEventListener('keydown', (e) => {
+  if (!e.ctrlKey || !e.shiftKey || e.metaKey || e.altKey) return;
+  let handled = true;
+  if (e.key === 'ArrowRight') goDeeper();
+  else if (e.key === 'ArrowLeft') goShallower();
+  else if (e.key === 'ArrowDown') cycleSession(+1);
+  else if (e.key === 'ArrowUp') cycleSession(-1);
+  else if (e.code === 'KeyW') closeCurrentSession();
+  else if (e.code === 'KeyN') newSession();   // spawn a session + focus the box to start typing
+  else handled = false;
+  if (handled) { e.preventDefault(); e.stopPropagation(); }
+}, true);
+
+// Horizontal swipe switches depth. Listen in the capture phase so xterm (which
+// handles its own touches on the tty view) can't swallow it. Vertical motion is
+// left untouched so the transcript scrolls natively.
 //
-// The touchmove listener is deliberately NON-passive: once we've decided a
-// gesture is horizontal we preventDefault() it, which is the only thing that
-// stops iOS Safari from hijacking a rightward swipe as its interactive
-// back-navigation (the "half the screen slides off and snaps back" bug).
-const stage = document.querySelector('main');
+// Bound to #app (header + main + FOOTER), not just <main>: on a phone the mobile
+// key bar lives in the footer right below a short terminal, so a back-swipe near
+// the bottom of the tty actually lands over the key bar. If we only listened on
+// <main> that gesture was invisible to nav AND registered as a tap on the ↑
+// button — the exact "swipe back triggers the up arrow" bug. Covering the footer
+// makes the swipe win there too; swipeTap suppresses the stray key tap.
+//
+// ALL THREE listeners are PASSIVE — they never preventDefault(). An earlier
+// version made touchmove non-passive to cancel horizontal native gestures, but a
+// non-passive touchmove on an ancestor of a scroll container forces the browser
+// to run this JS on every move *before* it may scroll, which made vertical
+// scrolling in the terminal crawl and starved the swipe of frames ("works after
+// a while"). We no longer need preventDefault: `touch-action: pan-y` on <main>
+// and the xterm subtree already tells the browser "vertical scroll only, leave
+// horizontal to JS", so it won't native-scroll horizontally or fire iOS's
+// edge-swipe-back. We just observe the gesture and act on it at touchend, and the
+// compositor scrolls vertically on its own thread → smooth.
+const stage = document.getElementById('app');
 let swX = 0, swY = 0, swT = 0, swOn = false, swAxis = null;   // swAxis: 'h' | 'v' once the gesture commits
+let swipeTap = false;   // set when a gesture commits to horizontal → suppress the trailing click (e.g. on a key-bar button)
 stage.addEventListener('touchstart', (e) => {
   swOn = e.touches.length === 1;
+  swipeTap = false;
+  // Don't hijack drags inside the message box (text selection / caret placement).
+  if (e.target.closest('#box')) { swOn = false; return; }
   if (!swOn) return;
   const t = e.touches[0]; swX = t.clientX; swY = t.clientY; swT = Date.now(); swAxis = null;
 }, { capture: true, passive: true });
@@ -1216,8 +1734,8 @@ stage.addEventListener('touchmove', (e) => {
   if (swAxis === null && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
     swAxis = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v';        // lock the axis on first real movement
   }
-  if (swAxis === 'h') e.preventDefault();                    // claim the gesture; block native swipe-back/scroll
-}, { capture: true, passive: false });
+  if (swAxis === 'h') swipeTap = true;                        // a horizontal gesture → suppress the trailing key-bar tap
+}, { capture: true, passive: true });
 stage.addEventListener('touchend', (e) => {
   if (!swOn) return; swOn = false;
   const t = e.changedTouches[0];
@@ -1227,7 +1745,7 @@ stage.addEventListener('touchend', (e) => {
   if (dx < 0) goDeeper(); else goShallower();
 }, { capture: true, passive: true });
 
-window.addEventListener('resize', () => { fit.fit(); sendResize(); term.scrollToBottom(); });
+window.addEventListener('resize', () => { fit.fit(); sendResize(); term.scrollToBottom(); bottomJustifyTTY(); });
 
 // -- phone / QR --------------------------------------------------------------
 const qrmodal = document.getElementById('qrmodal');
