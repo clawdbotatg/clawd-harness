@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Smoke test: connect to clawd-harness /ws, send a message, observe both channels.
+"""Smoke test: connect to clawd-harness /ws, ensure a project + session, send a
+message, observe both channels (PTY visual + structured transcript).
+
+Project-aware: with the projects layer there are no sessions until a project
+exists, so this clones the harness repo itself into a throwaway project (offline,
+fast), spawns a session in it, runs the assertions, then removes the project.
 Robust frame reader: select+recv into a buffer, parse frames out of it."""
 import socket, base64, os, struct, json, time, re, glob, pathlib
 
-HOST, PORT = "127.0.0.1", 8787
+HOST = "127.0.0.1"; PORT = int(os.environ.get("PORT", "8787"))
+HERE = pathlib.Path(__file__).resolve().parent
 TOKEN = (os.environ.get("CONSOLE_TOKEN")
-         or (pathlib.Path(__file__).resolve().parent / ".clawd-harness.token").read_text().strip())
+         or (HERE / ".clawd-harness.token").read_text().strip())
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|[\x00-\x08\x0b-\x1f\x7f]")
 
 def mask_frame(payload, opcode=0x1):
@@ -47,14 +53,15 @@ s = socket.create_connection((HOST, PORT))
 key = base64.b64encode(os.urandom(16)).decode()
 s.sendall((f"GET /ws?t={TOKEN} HTTP/1.1\r\nHost: {HOST}:{PORT}\r\nUpgrade: websocket\r\n"
            f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
-# consume handshake headers from the same byte stream
 hs = b""
 while b"\r\n\r\n" not in hs: hs += s.recv(1)
 c = Conn(s)
 
-pty_bytes = bytearray(); events = []; sid = None
+def send(obj): s.sendall(mask_frame(json.dumps(obj).encode()))
+
+pty_bytes = bytearray(); events = []; sid = None; projects = []
 def collect(frames):
-    global sid
+    global sid, projects
     for op, data in frames:
         if op == 0x2: pty_bytes.extend(data)
         elif op == 0x1:
@@ -62,15 +69,45 @@ def collect(frames):
             except Exception: continue
             events.append(m)
             if m.get("type") == "hello": sid = m.get("sessionId")
+            if m.get("type") == "projects": projects = m.get("projects", [])
 
-print("[smoke] reading splash 4s…")
+# 1) connect → read the projects/sessions snapshot
+collect(c.frames_until(time.time() + 2))
+print(f"[smoke] projects on connect: {[(p['name'],p['status']) for p in projects]}")
+
+# 2) ensure a ready project — clone the harness repo itself (offline) if none
+created_pid = None
+ready = next((p for p in projects if p["status"] == "ready"), None)
+if not ready:
+    print(f"[smoke] no project — cloning {HERE} as a throwaway project…")
+    send({"type": "addProject", "repoUrl": str(HERE)})
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        collect(c.frames_until(time.time() + 2))
+        ready = next((p for p in projects if p["status"] == "ready"), None)
+        err = next((p for p in projects if p["status"] == "error"), None)
+        if ready or err: break
+    assert ready, f"clone never reached ready ({err and err.get('error')})"
+    created_pid = ready["pid"]
+pid = ready["pid"]
+print(f"[smoke] using project {ready['name']!r} pid={pid[:8]}")
+
+# 3) spawn a session in that project and subscribe
+send({"type": "new", "pid": pid})
+cid = None
+deadline = time.time() + 15
+while time.time() < deadline and not cid:
+    collect(c.frames_until(time.time() + 2))
+    foc = next((e for e in events if e.get("type") == "focus"), None)
+    if foc: cid = foc["cid"]; send({"type": "subscribe", "cid": cid})
+assert cid, "no session was focused after /new"
 collect(c.frames_until(time.time() + 4))
-print(f"[smoke] sessionId={sid}  events={[e.get('type') for e in events]}  pty={len(pty_bytes)}B")
+print(f"[smoke] sessionId={sid}  cid={cid[:8]}  pty={len(pty_bytes)}B")
 
+# 4) send a message; observe both channels
 msg = "Reply with exactly one word: pong"
 print(f"[smoke] sending: {msg!r}")
-s.sendall(mask_frame(json.dumps({"type": "send", "text": msg}).encode()))
-
+send({"type": "send", "cid": cid, "text": msg})
 print("[smoke] reading reply 30s…")
 collect(c.frames_until(time.time() + 30))
 
@@ -91,4 +128,10 @@ print(f"\n[smoke] RESULT: pty_grew={len(pty_bytes)>5000}  user_event={got_user} 
 if sid:
     tf = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sid}.jsonl"))
     print(f"[smoke] transcript file on disk: {'YES' if tf else 'NO'}")
+
+# 5) clean up the throwaway project we created (kills its session; files stay on disk)
+if created_pid:
+    send({"type": "removeProject", "pid": created_pid})
+    c.frames_until(time.time() + 1)
+    print(f"[smoke] removed throwaway project (rm projects/{ready['name']} to delete files)")
 s.close()

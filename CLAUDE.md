@@ -17,12 +17,29 @@ user-facing overview; this file orients an agent working **on** the code.
 - Verify JS edits: extract the `<script>` from index.html and `node --check` it.
   The app has been verified live in Chrome via the **LAN URL** (see stale-cache note).
 
-## Architecture (one server, multi-session)
-- **server.py** — a `SessionManager` owns N `ClaudeSession`s. Each session is one
-  interactive `claude` in a PTY (no `-p`), with its own transcript tail + ring
-  buffer. `cid` = stable console id (ours; survives claude's id rotation);
-  `session_id` = claude's id (rotates on compaction/resume). Registry persisted to
-  `.clawd-harness.sessions.json` and `--resume`d on restart.
+## Architecture (one server, multi-project, multi-session)
+- **server.py** — a `SessionManager` owns N `Project`s and N `ClaudeSession`s.
+  A **project** is a git repo under `projects/` (`PROJECTS_DIR`, gitignored); a
+  session's `claude` runs with `cwd` = its project's path (`ClaudeSession.pid` →
+  `Project`). Each session is one interactive `claude` in a PTY (no `-p`), with
+  its own transcript tail + ring buffer. `cid` = stable console id (ours;
+  survives claude's id rotation); `session_id` = claude's id (rotates on
+  compaction/resume). Registry persisted to `.clawd-harness.sessions.json` as
+  `{"projects":[…],"sessions":[…]}` and `--resume`d on restart. On boot,
+  `projects/` is also scanned and any unregistered git repo is adopted.
+- **Projects layer:** create a new **public** repo under `GH_OWNER`
+  (`clawdbotatg`) via `gh repo create … --clone`, or clone a repo — both run
+  async in a thread with a `cloning → ready|error` status broadcast. Clone input
+  is normalized: a full git URL/path is used as-is, while `owner/repo` and a bare
+  `repo` name are resolved against `github.com` (bare → `GH_OWNER`), so typing
+  `slop-computer-live` clones `github.com/clawdbotatg/slop-computer-live`.
+  **Creation needs `gh` authenticated in the server's environment** (cloning a
+  public URL does not). Removing a project forgets it + kills its sessions but
+  leaves files on disk (non-destructive, like session close).
+- **Self-project:** the harness always injects *itself* as a **pinned** project
+  (`SELF_PID="self"`, `path=HERE`, top of the list, no ✕, never persisted —
+  re-injected each boot) so you can open a session and **live-edit the running
+  app**. It's the one project whose path is outside `PROJECTS_DIR`.
 - **One WebSocket per browser, multiplexed** — a client subscribes to one session
   (its PTY bytes + transcript); session metadata (titles, busy badges) fans out to
   all clients.
@@ -35,14 +52,41 @@ user-facing overview; this file orients an agent working **on** the code.
   working/idle pill. **Stop** carries `last_assistant_message`.
 - **Images:** `POST /upload` saves to `.clawd-harness-uploads/`; the path is folded
   into the message and claude `Read`s it (vision works by file path).
-- **AI session naming:** optional. Set `BANKR_API_KEY` + `BANKR_BASE_URL`
-  (OpenAI-compatible; or `BANKR_API=anthropic`). Off → first-prompt titles.
-  Regenerates at prompt counts `{1, 3, 10}`.
-- **index.html** — single page. View switcher (terminal xterm ↔ transcript
-  bubbles), **key bar** (sends raw escape seqs to drive TUI menus — works even on
-  touch where the terminal is read-only), message box (type/dictate/paste images),
-  sessions menu, QR. Mobile defaults to transcript (native scroll, markdown);
-  desktop to terminal. Terminal is **read-only on touch** (mobile dictation streams
+- **AI session naming:** optional. Set `BANKR_API_KEY` + `BANKR_BASE_URL` +
+  `BANKR_API` (`openai` | `anthropic` | `bankr`). `bankr` = OpenAI-compatible body
+  at `https://llm.bankr.bot/v1/chat/completions` authed with an `X-API-Key` header.
+  Off → first-prompt titles. Regenerates at prompt counts `{1, 3, 10}`. Secrets
+  load from a gitignored **`.clawd-harness.env`** (`_load_env_file` at boot — the
+  launchd daemon doesn't inherit your shell env, so this is the way).
+- **Right model for the right job:** naming is a cheap, frequent, fire-and-forget
+  labeler (~900 input tokens, 3×/session, async) — so `BANKR_MODEL` = **`qwen3-coder`**,
+  the winner of a full 41-model cost+speed+reliability survey: ~$0.032 per 1,000
+  calls (½ the cost of `gemini-3.1-flash-lite`), ~510ms (fastest reliable), 5/5
+  clean JSON, and on-domain (a code model naming code sessions). `deepseek-v3.2`
+  is an equal runner-up. Three traps the survey exposed: **reasoning models**
+  (`gemini-3-flash`, the `-pro`/`gpt-5.4`/`glm`/`kimi` tiers) blow the 120-token
+  budget *thinking* and return `null` content; **fast ≠ cheap** (`grok-4.20` was
+  quickest but 18× the price); **cheapest ≠ usable** (`gemma-4-*` only emit clean
+  JSON 1/5, wrapping it in prose). The future **AI controller** layer is a
+  *different* job (reasoning, tool decisions) and should pick its own stronger
+  model — likely one of the very reasoning models that are wrong for naming.
+- **Re-benchmark the naming model regularly** — new models ship constantly. Run
+  **`python3 bench_naming.py`** (no args → pulls the full live model list and
+  tests every model on the real naming prompt for JSON-reliability + median
+  latency, ranks them, recommends one). If a model clearly beats the incumbent,
+  update `BANKR_MODEL` in `.clawd-harness.env`. **Cadence: roughly quarterly —
+  last run 2026-06, next ≈2026-09.** The script reuses `server.NAME_SYS_PROMPT`
+  and the `.clawd-harness.env` creds, so it never drifts from the app or hardcodes
+  a key.
+- **index.html** — single page. A 4-level swipe stack — **projects → sessions →
+  transcript → tty** (`LEVELS`); swipe right climbs out, left dives in. Projects
+  page = card list + an add row (name → create repo, git URL → clone). Sessions
+  page is scoped to the selected `currentPid`. View switcher (terminal xterm ↔
+  transcript bubbles), **key bar** (sends raw escape seqs to drive TUI menus —
+  works even on touch where the terminal is read-only), message box
+  (type/dictate/paste images), QR. The app opens on the projects rung; mobile
+  defaults to transcript for a session (native scroll, markdown), desktop to
+  terminal. Terminal is **read-only on touch** (mobile dictation streams
   self-revising text that xterm forwards as garbled keystrokes).
 
 ## Two non-obvious gotchas (baked into server.py — don't regress)
@@ -56,15 +100,16 @@ user-facing overview; this file orients an agent working **on** the code.
 ## Known issues / next
 - **Transcript tailer logs `tailing …` repeatedly** (busy-reattach loop, inherited
   from console) — worth fixing.
-- Roadmap (the reason for the fork): multiple **projects** (workdir groups), the
-  **AI controller** layer, Telegram front-end, per-client terminal sizing.
-  Multi-session, view switcher, and AI naming already exist.
+- Roadmap (the reason for the fork): the **AI controller** layer, Telegram
+  front-end, per-client terminal sizing. Multi-session, multi-project (the
+  projects layer), view switcher, and AI naming already exist.
 
 ## Conventions
 - **Never commit** runtime/secret files (gitignored): `.clawd-harness.token`,
   `.clawd-harness.session`, `.clawd-harness.sessions.json`,
-  `.clawd-harness.hooks*.json`, `.clawd-harness-uploads/`. Scan diffs for leaked
-  secrets before committing (a gitleaks pre-commit hook also runs).
+  `.clawd-harness.hooks*.json`, `.clawd-harness-uploads/`, `projects/` (the
+  cloned repos). Scan diffs for leaked secrets before committing (a gitleaks
+  pre-commit hook also runs).
 - Git identity here (under `~/clawd/`): **clawdbotatg** /
   `clawd@buidlguidl.com`, over **HTTPS**. Remote: `clawdbotatg/clawd-harness`.
 - **Browser stale-cache:** a prior app on a port leaves a cached page on

@@ -2,6 +2,8 @@
 
 # auth secret
 .clawd-harness.token
+# local secrets / config (BANKR_API_KEY etc.) — loaded by server.py at boot
+.clawd-harness.env
 # local session id (legacy single-session) + multi-session registry
 .clawd-harness.session
 .clawd-harness.sessions.json
@@ -10,6 +12,8 @@
 .clawd-harness.hooks.*.json
 # pasted/uploaded images (may contain anything)
 .clawd-harness-uploads/
+# projects = cloned/created git repos we drive — never enter the harness repo
+projects/
 
 # os / editor cruft
 .DS_Store

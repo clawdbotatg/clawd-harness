@@ -51,6 +51,29 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn, TCPServer
 
+
+def _load_env_file():
+    """Load KEY=VALUE lines from .clawd-harness.env (gitignored) into the env
+    *before* the config block reads it. The launchd daemon doesn't inherit your
+    shell env, so this is how secrets like BANKR_API_KEY reach both a manual run
+    and the daemon. Real environment vars always win."""
+    path = Path(__file__).resolve().parent / ".clawd-harness.env"
+    try:
+        text = path.read_text()
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, val)
+
+_load_env_file()
+
 # ── config ──────────────────────────────────────────────────────────────────
 PORT       = int(os.environ.get("PORT", "8787"))
 BIND       = os.environ.get("BIND", "0.0.0.0")   # 0.0.0.0 = reachable on the LAN
@@ -74,8 +97,16 @@ SEND_SETTLE_MIN = float(os.environ.get("SEND_SETTLE_MIN", "0.7"))
 BANKR_API_KEY  = os.environ.get("BANKR_API_KEY", "")
 BANKR_BASE_URL = os.environ.get("BANKR_BASE_URL", "").rstrip("/")
 BANKR_MODEL    = os.environ.get("BANKR_MODEL", "claude-haiku-4-5-20251001")
-BANKR_API      = os.environ.get("BANKR_API", "openai").lower()   # openai | anthropic
+BANKR_API      = os.environ.get("BANKR_API", "openai").lower()   # openai | anthropic | bankr
+# (bankr = OpenAI-compatible body at /v1/chat/completions but authed with an
+#  X-API-Key header instead of Authorization: Bearer — see llm.bankr.bot)
 NAME_AT_PROMPTS = {1, 3, 10}      # regenerate title/desc after these prompt counts
+# The naming instruction — a module constant so bench_naming.py tests the exact
+# same prompt the app uses (single source of truth; no drift).
+NAME_SYS_PROMPT = ("You name software-engineering sessions. Given a transcript, "
+                   "reply with ONLY compact JSON and nothing else: "
+                   '{"title": "<max 5 words>", "desc": "<max 12 words>"}. '
+                   "The title is a terse label; the desc is a one-line summary.")
 
 # Env vars that, when inherited, put a spawned `claude` into a nested/embedded
 # mode (e.g. it stops writing a normal session transcript). We scrub them so the
@@ -90,12 +121,21 @@ SCRUB_ENV = [
 
 WS_GUID    = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC 6455 magic
 HERE       = Path(__file__).resolve().parent
-UPLOAD_DIR = Path(WORKDIR) / ".clawd-harness-uploads"   # pasted images land here
+UPLOAD_DIR = HERE / ".clawd-harness-uploads"            # pasted images land here (absolute paths → cwd-agnostic)
 MAX_UPLOAD = 25 * 1024 * 1024
 EXT_BY_CTYPE = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
                 "image/webp": ".webp"}
-REGISTRY_FILE = HERE / ".clawd-harness.sessions.json"   # persists all sessions across restarts
-LEGACY_SESSION_FILE = HERE / ".clawd-harness.session"   # pre-multi-session single id (migrated)
+REGISTRY_FILE = HERE / ".clawd-harness.sessions.json"   # persists projects+sessions across restarts
+# Projects = git repos we drive. Each is a subdir here; a session's `claude`
+# runs with cwd = its project's path. Gitignored, so the cloned repos never
+# enter the harness repo. The GitHub owner new repos are created under.
+PROJECTS_DIR = Path(os.environ.get("PROJECTS_DIR", str(HERE / "projects"))).resolve()
+GH_OWNER     = os.environ.get("GH_OWNER", "clawdbotatg")
+# The harness always offers *itself* as a pinned project (path = HERE, outside
+# PROJECTS_DIR) so you can open a session and live-edit the app you're running.
+# Stable sentinel pid so its sessions resume across restarts; never persisted to
+# the registry (always re-injected) and never removable.
+SELF_PID = "self"
 
 # Shared secret. Required on /ws and /hook because we bind to the LAN and the
 # session runs with bypass-permissions — without it anyone on the wifi could run
@@ -133,14 +173,59 @@ def _transcript_exists(session_id):
         f"~/.claude/projects/*/{session_id}.jsonl")))
 
 
+def _safe_name(name):
+    """A filesystem/repo-safe slug from a free-text project name."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "").strip()).strip("-._")
+    return slug or "project"
+
+
+def _git_remote_url(path):
+    """Best-effort origin URL for a repo (empty string if none)."""
+    try:
+        r = subprocess.run(["git", "remote", "get-url", "origin"],
+                           cwd=path, capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+# ── project: a git repo under PROJECTS_DIR that sessions run inside ───────────
+class Project:
+    """One git repo we drive. Owns no processes itself — it's the workdir N
+    ClaudeSessions launch in. `status` tracks an async clone/create."""
+
+    def __init__(self, pid, name, path, repo_url="", status="ready",
+                 error="", created=0.0, pinned=False):
+        self.pid = pid
+        self.name = name
+        self.path = path                         # abs path to the repo
+        self.repo_url = repo_url
+        self.status = status                     # ready | cloning | error
+        self.error = error
+        self.created = created or time.time()
+        self.pinned = pinned                     # the harness-itself project: top of list, not removable
+
+    def to_registry(self):
+        return {"pid": self.pid, "name": self.name, "path": self.path,
+                "repo_url": self.repo_url, "status": self.status,
+                "created": self.created}
+
+    def meta(self, session_count=0):
+        return {"pid": self.pid, "name": self.name, "path": self.path,
+                "repoUrl": self.repo_url, "status": self.status,
+                "error": self.error, "sessionCount": session_count,
+                "created": self.created, "pinned": self.pinned}
+
+
 # ── PTY-backed Claude session ─────────────────────────────────────────────────
 class ClaudeSession:
     """One interactive `claude` process in a PTY, streamed to the websocket
     clients currently *subscribed* to it. Owned by a SessionManager."""
 
-    def __init__(self, manager, cid, session_id, resuming,
+    def __init__(self, manager, cid, session_id, resuming, pid="",
                  title="", desc="", prompt_count=0, first_prompt="", created=0.0):
         self.manager = manager
+        self.pid = pid                           # owning project id
         self.cid = cid                           # stable console id (ours; survives claude rotation)
         self.session_id = session_id             # claude's id (rotates on compaction/resume)
         self.resuming = resuming
@@ -153,7 +238,7 @@ class ClaudeSession:
         self.last_active = self.created
 
         self.master_fd = None
-        self.pid = None
+        self.os_pid = None                       # claude's process pid (not the project pid)
         self.proc = None
         self.alive = False
 
@@ -171,10 +256,15 @@ class ClaudeSession:
 
     # -- registry shape --------------------------------------------------------
     def to_registry(self):
-        return {"cid": self.cid, "session_id": self.session_id,
+        return {"cid": self.cid, "pid": self.pid, "session_id": self.session_id,
                 "title": self.title, "desc": self.desc,
                 "prompt_count": self.prompt_count, "first_prompt": self.first_prompt,
                 "created": self.created}
+
+    def workdir(self):
+        """Where this session's claude runs — its project's repo path."""
+        proj = self.manager.projects.get(self.pid)
+        return proj.path if proj else WORKDIR
 
     def _fallback_title(self):
         if self.first_prompt:
@@ -185,7 +275,7 @@ class ClaudeSession:
 
     def meta(self):
         """Menu-level snapshot broadcast to every client."""
-        return {"cid": self.cid,
+        return {"cid": self.cid, "pid": self.pid,
                 "title": self.title or self._fallback_title(),
                 "desc": self.desc or "",
                 "named": bool(self.title),
@@ -218,15 +308,15 @@ class ClaudeSession:
             fcntl.ioctl(slave, termios.TIOCSCTTY, 0)  # slave becomes controlling tty
 
         self.proc = subprocess.Popen(
-            cmd, cwd=WORKDIR, env=env,
+            cmd, cwd=self.workdir(), env=env,
             stdin=slave, stdout=slave, stderr=slave,
             preexec_fn=_preexec, close_fds=True,
         )
         os.close(slave)                          # parent only needs the master
         self.master_fd = master
-        self.pid = self.proc.pid
+        self.os_pid = self.proc.pid
         self.alive = True
-        print(f"[session {self.cid[:8]}] claude pid={self.pid} "
+        print(f"[session {self.cid[:8]}] claude pid={self.os_pid} "
               f"session_id={self.session_id} "
               f"({'resumed' if self.resuming else 'new'})", flush=True)
 
@@ -515,10 +605,10 @@ class ClaudeSession:
         if snapshot:
             client.send_bytes(snapshot)
         client.send_json({"type": "hello",
-                          "cid": self.cid,
+                          "cid": self.cid, "pid": self.pid,
                           "sessionId": self.session_id,
                           "title": self.title or self._fallback_title(),
-                          "workdir": WORKDIR,
+                          "workdir": self.workdir(),
                           "busy": self.busy, "tool": self.last_tool,
                           "cols": COLS, "rows": ROWS})
         self._replay_history(client)
@@ -572,9 +662,10 @@ class ClaudeSession:
                 pass
 
 
-# ── session manager: registry of ClaudeSessions ───────────────────────────────
+# ── session manager: registry of Projects + ClaudeSessions ────────────────────
 class SessionManager:
     def __init__(self):
+        self.projects = {}                       # pid -> Project
         self.sessions = {}                       # cid -> ClaudeSession
         self.lock = threading.RLock()
         self.all_clients = set()                 # every connected browser
@@ -582,11 +673,25 @@ class SessionManager:
 
     # -- startup / persistence -------------------------------------------------
     def load(self):
-        entries = self._read_registry()
-        if not entries:
-            legacy = self._migrate_legacy()
-            entries = [legacy] if legacy else []
-        for e in entries:
+        PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+        reg = self._read_registry()
+        for e in reg.get("projects", []):
+            if not e.get("path") or not os.path.isdir(e["path"]):
+                continue                         # repo dir gone — drop the entry
+            p = Project(pid=e.get("pid") or str(uuid.uuid4()),
+                        name=e.get("name") or os.path.basename(e["path"]),
+                        path=e["path"], repo_url=e.get("repo_url", ""),
+                        status=e.get("status", "ready") if e.get("status") != "cloning" else "ready",
+                        created=e.get("created", 0.0))
+            self.projects[p.pid] = p
+        self._discover_projects()                # adopt repos dropped into projects/ by hand
+        self._ensure_self_project()              # always offer the harness itself, pinned
+
+        known = set(self.projects)
+        for e in reg.get("sessions", []):
+            pid = e.get("pid")
+            if pid not in known:
+                continue                         # orphaned session — its project is gone
             sid = e.get("session_id")
             resuming = bool(sid and _transcript_exists(sid))
             if sid and not resuming:
@@ -594,7 +699,7 @@ class SessionManager:
                 # of resuming into nothing.
                 sid = str(uuid.uuid4())
             s = ClaudeSession(
-                self, cid=e.get("cid") or str(uuid.uuid4()),
+                self, cid=e.get("cid") or str(uuid.uuid4()), pid=pid,
                 session_id=sid or str(uuid.uuid4()), resuming=resuming,
                 title=e.get("title", ""), desc=e.get("desc", ""),
                 prompt_count=e.get("prompt_count", 0),
@@ -602,40 +707,167 @@ class SessionManager:
                 created=e.get("created", 0.0))
             self.sessions[s.cid] = s
             s.start()
-        if not self.sessions:
-            self.create()                        # always have at least one
+        # No auto-created session: with zero projects there are legitimately zero
+        # sessions, and the client lands on the projects page.
         self.save_registry()
+
+    def _discover_projects(self):
+        """Adopt any git repo under PROJECTS_DIR not already registered, so you
+        can populate projects/ by hand (or a prior clone) and have it show up."""
+        known_paths = {p.path for p in self.projects.values()}
+        try:
+            entries = sorted(os.listdir(PROJECTS_DIR))
+        except OSError:
+            return
+        for name in entries:
+            path = str(PROJECTS_DIR / name)
+            if path in known_paths or not os.path.isdir(os.path.join(path, ".git")):
+                continue
+            p = Project(pid=str(uuid.uuid4()), name=name, path=path,
+                        repo_url=_git_remote_url(path), status="ready")
+            self.projects[p.pid] = p
+
+    def _ensure_self_project(self):
+        """Always present the harness's own repo as a pinned project so you can
+        open a session and live-edit the running app. Path = HERE (outside
+        PROJECTS_DIR); re-injected every boot rather than persisted."""
+        name = os.path.basename(str(HERE)) or "clawd-harness"
+        self.projects[SELF_PID] = Project(
+            pid=SELF_PID, name=name, path=str(HERE),
+            repo_url=_git_remote_url(str(HERE)), status="ready", pinned=True)
 
     def _read_registry(self):
         try:
             data = json.loads(REGISTRY_FILE.read_text())
-            return data if isinstance(data, list) else []
         except (OSError, ValueError):
-            return []
-
-    def _migrate_legacy(self):
-        """One-time: lift the pre-multi-session single saved id into the registry
-        so an upgrade keeps the existing conversation."""
-        try:
-            saved = LEGACY_SESSION_FILE.read_text().strip()
-        except OSError:
-            return None
-        if saved and _transcript_exists(saved):
-            return {"cid": str(uuid.uuid4()), "session_id": saved}
-        return None
+            return {}
+        if isinstance(data, dict):
+            return data
+        return {}                                # legacy flat-list → ignored (fresh start)
 
     def save_registry(self):
         with self.lock:
-            data = [s.to_registry() for s in self._ordered()]
+            data = {"projects": [p.to_registry() for p in self._ordered_projects()
+                                 if not p.pinned],   # self project is re-injected, not stored
+                    "sessions": [s.to_registry() for s in self._ordered()]}
         try:
             REGISTRY_FILE.write_text(json.dumps(data, indent=2))
         except OSError:
             pass
 
+    # -- project crud ----------------------------------------------------------
+    def create_project(self, name):
+        """Create a new public repo under GH_OWNER and clone it into projects/."""
+        safe = self._unique_project_name(_safe_name(name))
+        path = str(PROJECTS_DIR / safe)
+        url = f"https://github.com/{GH_OWNER}/{safe}"
+        p = Project(pid=str(uuid.uuid4()), name=safe, path=path,
+                    repo_url=url, status="cloning", created=time.time())
+        with self.lock:
+            self.projects[p.pid] = p
+        self.broadcast_projects()
+        cmd = ["gh", "repo", "create", f"{GH_OWNER}/{safe}",
+               "--public", "--add-readme", "--clone"]
+        threading.Thread(target=self._provision, args=(p, cmd, "create"),
+                         daemon=True).start()
+        return p
+
+    def add_project(self, repo_url):
+        """Clone an existing repo into projects/. Accepts a full git URL/path, an
+        `owner/repo` shorthand, or a bare `repo` name — the latter two are
+        resolved against github.com (bare names assume GH_OWNER), so typing
+        `slop-computer-live` clones github.com/clawdbotatg/slop-computer-live."""
+        repo_url = (repo_url or "").strip()
+        if not re.match(r"^(https?://|git@|ssh://|file://|/|~)", repo_url):
+            repo_url = (f"https://github.com/{repo_url}" if "/" in repo_url
+                        else f"https://github.com/{GH_OWNER}/{repo_url}")
+        base = re.sub(r"\.git$", "", repo_url.rstrip("/").split("/")[-1])
+        safe = self._unique_project_name(_safe_name(base))
+        path = str(PROJECTS_DIR / safe)
+        p = Project(pid=str(uuid.uuid4()), name=safe, path=path,
+                    repo_url=repo_url, status="cloning", created=time.time())
+        with self.lock:
+            self.projects[p.pid] = p
+        self.broadcast_projects()
+        cmd = ["git", "clone", repo_url, safe]
+        threading.Thread(target=self._provision, args=(p, cmd, "clone"),
+                         daemon=True).start()
+        return p
+
+    def _provision(self, project, cmd, kind):
+        """Run a clone/create in PROJECTS_DIR, then flip the project's status."""
+        try:
+            r = subprocess.run(cmd, cwd=str(PROJECTS_DIR),
+                               capture_output=True, text=True, timeout=180)
+            ok = r.returncode == 0 and os.path.isdir(
+                os.path.join(project.path, ".git"))
+            if ok:
+                project.status = "ready"
+                project.error = ""
+                if not project.repo_url:
+                    project.repo_url = _git_remote_url(project.path)
+                print(f"[project {project.name}] {kind} ok", flush=True)
+            else:
+                project.status = "error"
+                err = (r.stderr or r.stdout or "failed").strip()
+                if kind == "create" and ("auth" in err.lower() or "gh auth" in err.lower()):
+                    err += " (is `gh` authenticated in the server's environment?)"
+                project.error = err[-300:]
+                print(f"[project {project.name}] {kind} FAILED: {project.error}",
+                      flush=True)
+        except Exception as e:
+            project.status = "error"
+            project.error = str(e)[-300:]
+            print(f"[project {project.name}] {kind} error: {e}", flush=True)
+        self.save_registry()
+        self.broadcast_projects()
+
+    def _unique_project_name(self, base):
+        existing = {p.name for p in self.projects.values()}
+        if base not in existing and not os.path.exists(PROJECTS_DIR / base):
+            return base
+        i = 2
+        while f"{base}-{i}" in existing or os.path.exists(PROJECTS_DIR / f"{base}-{i}"):
+            i += 1
+        return f"{base}-{i}"
+
+    def remove_project(self, pid):
+        """Forget a project and kill its sessions. Files on disk are left intact
+        (non-destructive, mirroring session close)."""
+        with self.lock:
+            existing = self.projects.get(pid)
+            if not existing or existing.pinned:
+                return                           # the harness-itself project can't be removed
+            p = self.projects.pop(pid, None)
+            cids = [c for c, s in self.sessions.items() if s.pid == pid]
+        if not p:
+            return
+        for cid in cids:
+            self.close(cid, _broadcast=False)
+        self.save_registry()
+        self.broadcast_sessions()                # also re-broadcasts projects
+
+    def get_project(self, pid):
+        with self.lock:
+            return self.projects.get(pid)
+
+    def _ordered_projects(self):
+        # pinned (the harness itself) first, then by creation time
+        return sorted(self.projects.values(), key=lambda p: (not p.pinned, p.created))
+
+    def session_count(self, pid):
+        with self.lock:
+            return sum(1 for s in self.sessions.values() if s.pid == pid)
+
+    def projects_meta(self):
+        return [p.meta(self.session_count(p.pid)) for p in self._ordered_projects()]
+
     # -- session crud ----------------------------------------------------------
-    def create(self):
+    def create_session(self, pid):
+        if pid not in self.projects:
+            return None
         cid = str(uuid.uuid4())
-        s = ClaudeSession(self, cid=cid, session_id=str(uuid.uuid4()),
+        s = ClaudeSession(self, cid=cid, pid=pid, session_id=str(uuid.uuid4()),
                           resuming=False, created=time.time())
         with self.lock:
             self.sessions[cid] = s
@@ -648,7 +880,7 @@ class SessionManager:
         with self.lock:
             return self.sessions.get(cid)
 
-    def close(self, cid):
+    def close(self, cid, _broadcast=True):
         with self.lock:
             s = self.sessions.pop(cid, None)
         if not s:
@@ -660,11 +892,9 @@ class SessionManager:
             s.clients.clear()
         for c in viewers:
             c.cid = None
-        with self.lock:
-            if not self.sessions:                # never leave the app empty
-                self.create()
         self.save_registry()
-        self.broadcast_sessions()
+        if _broadcast:
+            self.broadcast_sessions()
 
     def _ordered(self):
         """Most-recently-active first — the menu order."""
@@ -682,12 +912,12 @@ class SessionManager:
     def add_client(self, client):
         with self.clients_lock:
             self.all_clients.add(client)
+        # Send projects then sessions; the client decides the initial view (no
+        # forced focus — there may be zero sessions).
+        client.send_json({"type": "projects", "projects": self.projects_meta()})
         client.send_json({"type": "sessions",
                           "sessions": self.sessions_meta(),
                           "current": self.default_cid()})
-        cur = self.default_cid()
-        if cur:
-            client.send_json({"type": "focus", "cid": cur})
 
     def remove_client(self, client):
         with self.clients_lock:
@@ -714,10 +944,14 @@ class SessionManager:
         for c in targets:
             c.send_json(obj)
 
+    def broadcast_projects(self):
+        self.broadcast_all({"type": "projects", "projects": self.projects_meta()})
+
     def broadcast_sessions(self):
         self.broadcast_all({"type": "sessions",
                             "sessions": self.sessions_meta(),
                             "current": self.default_cid()})
+        self.broadcast_projects()                # session counts changed
 
     def shutdown(self):
         with self.lock:
@@ -731,10 +965,7 @@ def generate_name(transcript_text):
     unconfigured or the call fails. Stdlib-only HTTP."""
     if not (BANKR_API_KEY and BANKR_BASE_URL):
         return (None, None)
-    sys_prompt = ("You name software-engineering sessions. Given a transcript, "
-                  "reply with ONLY compact JSON and nothing else: "
-                  '{"title": "<max 5 words>", "desc": "<max 12 words>"}. '
-                  "The title is a terse label; the desc is a one-line summary.")
+    sys_prompt = NAME_SYS_PROMPT
     try:
         if BANKR_API == "anthropic":
             url = f"{BANKR_BASE_URL}/v1/messages"
@@ -744,13 +975,16 @@ def generate_name(transcript_text):
             headers = {"x-api-key": BANKR_API_KEY,
                        "anthropic-version": "2023-06-01",
                        "content-type": "application/json"}
-        else:  # openai-compatible
+        else:  # openai-compatible (incl. bankr — same body, different auth header)
             url = f"{BANKR_BASE_URL}/chat/completions"
             body = {"model": BANKR_MODEL, "max_tokens": 120, "temperature": 0.3,
                     "messages": [{"role": "system", "content": sys_prompt},
                                  {"role": "user", "content": transcript_text}]}
-            headers = {"Authorization": f"Bearer {BANKR_API_KEY}",
-                       "content-type": "application/json"}
+            if BANKR_API == "bankr":
+                headers = {"X-API-Key": BANKR_API_KEY, "content-type": "application/json"}
+            else:
+                headers = {"Authorization": f"Bearer {BANKR_API_KEY}",
+                           "content-type": "application/json"}
         req = urllib.request.Request(
             url, data=json.dumps(body).encode("utf-8"),
             headers=headers, method="POST")
@@ -1055,14 +1289,22 @@ class Handler(BaseHTTPRequestHandler):
         if t == "subscribe":
             MGR.subscribe_client(client, frame.get("cid"))
         elif t == "list":
+            client.send_json({"type": "projects", "projects": MGR.projects_meta()})
             client.send_json({"type": "sessions",
                               "sessions": MGR.sessions_meta(),
                               "current": MGR.default_cid()})
         elif t == "new":
-            s = MGR.create()
-            client.send_json({"type": "focus", "cid": s.cid})
+            s = MGR.create_session(frame.get("pid"))
+            if s:
+                client.send_json({"type": "focus", "cid": s.cid})
         elif t == "close":
             MGR.close(frame.get("cid"))
+        elif t == "createProject":
+            MGR.create_project(frame.get("name", ""))
+        elif t == "addProject":
+            MGR.add_project(frame.get("repoUrl", ""))
+        elif t == "removeProject":
+            MGR.remove_project(frame.get("pid"))
         elif t in ("input", "send", "resize"):
             s = MGR.get(frame.get("cid") or client.cid)
             if not s:
