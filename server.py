@@ -218,10 +218,11 @@ class Project:
                 "repo_url": self.repo_url, "status": self.status,
                 "created": self.created}
 
-    def meta(self, session_count=0):
+    def meta(self, session_count=0, busy_count=0):
         return {"pid": self.pid, "name": self.name, "path": self.path,
                 "repoUrl": self.repo_url, "status": self.status,
                 "error": self.error, "sessionCount": session_count,
+                "busyCount": busy_count,
                 "created": self.created, "pinned": self.pinned}
 
 
@@ -531,15 +532,22 @@ class ClaudeSession:
         # rotates the session, _follow_session repoints _live_transcript and we
         # switch, streaming the new file from the top so the client catches up
         # across the rotation boundary.
+        announced = None
         while self.alive and target:
             self.transcript_path = target
-            print(f"[transcript {self.cid[:8]}] tailing {target}", flush=True)
             try:
                 f = open(target, "r")
             except OSError:
+                # claude reports transcript_path on SessionStart *before* it
+                # creates the file (it's written lazily on the first turn), so
+                # retry quietly — printing here busy-loops the log until the
+                # file appears. Only announce a successful attach (below).
                 time.sleep(0.25)
                 target = self._live_transcript or target
                 continue
+            if target != announced:                   # one line per real (re)attach
+                print(f"[transcript {self.cid[:8]}] tailing {target}", flush=True)
+                announced = target
             with f:
                 buf = ""
                 while self.alive:
@@ -877,8 +885,20 @@ class SessionManager:
         with self.lock:
             return sum(1 for s in self.sessions.values() if s.pid == pid)
 
+    def session_counts(self, pid):
+        """(total, busy) sessions for a project — busy = a turn in flight."""
+        with self.lock:
+            total = busy = 0
+            for s in self.sessions.values():
+                if s.pid == pid:
+                    total += 1
+                    if s.busy:
+                        busy += 1
+            return total, busy
+
     def projects_meta(self):
-        return [p.meta(self.session_count(p.pid)) for p in self._ordered_projects()]
+        return [p.meta(*self.session_counts(p.pid))
+                for p in self._ordered_projects()]
 
     # -- session crud ----------------------------------------------------------
     def create_session(self, pid):
