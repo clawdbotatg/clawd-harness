@@ -345,9 +345,9 @@
   <div id="passkey" hidden>
     <div class="qrcard">
       <img src="logo-ui.png" class="brandlogo" alt="clawd-harness" />
-      <div class="lh">clawd-harness</div>
-      <div class="ls" id="passkeysub">unlock with your passkey</div>
-      <button id="passkeybtn">unlock with passkey</button>
+      <div class="lh">what's the safe word?</div>
+      <div class="ls" id="passkeysub">prove it's you — unlock with your passkey</div>
+      <button id="passkeybtn">whisper the safe word 🔒</button>
     </div>
   </div>
   <main>
@@ -530,11 +530,13 @@ function loadToken() {
   } catch {}
   return t;
 }
-const token = loadToken();
 // Mode: the relay injects window.__FLEET__ when it serves this page (fleet mode —
 // machines rung, passkey, toMachine wrapping). The harness serves it untouched →
 // FLEET is false → direct mode: talk to the local harness exactly as its own UI does.
 const FLEET = !!window.__FLEET__;
+// Fleet mode is passkey-only — NO token (the passkey is the sole credential).
+// Direct (harness) mode still uses the harness token from the URL.
+const token = FLEET ? '' : loadToken();
 let serverBoot = null;   // server process id; a change across reconnect = daemon restart → reload
 let authFails = 0;       // consecutive socket closes that never opened → likely a bad/expired token
 
@@ -543,7 +545,7 @@ function clearToken() { try { localStorage.removeItem(TOKEN_KEY); } catch {} }
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   // Fleet mode dials the RELAY as a mobile client; direct mode dials the harness.
-  ws = new WebSocket(`${proto}://${location.host}/ws?${FLEET ? 'role=mobile&' : ''}t=${encodeURIComponent(token)}`);
+  ws = new WebSocket(`${proto}://${location.host}/ws?${FLEET ? 'role=mobile' : 't=' + encodeURIComponent(token)}`);
   ws.binaryType = 'arraybuffer';
   let opened = false;
 
@@ -566,7 +568,7 @@ function connect() {
     // the 403 behind code 1006, so we infer it: after a couple of pre-open closes,
     // stop hammering a dead token and surface the paste-a-new-token screen. This is
     // also how an expired token (weekly rotation) lands the user back at login.
-    if (!opened && ++authFails >= 2) {
+    if (!FLEET && !opened && ++authFails >= 2) {   // direct mode only: bad/expired harness token
       clearToken();
       return showLogin('Token expired or invalid — paste a current one.');
     }
@@ -853,12 +855,12 @@ function saveSession(tok, expMs) { try { localStorage.setItem(SESSION_KEY, JSON.
 function clearSession() { try { localStorage.removeItem(SESSION_KEY); } catch {} }
 
 let lastAuthReq = null;
-function showPasskey(msg, mode) {
+function showPasskey(msg) {
   const el = document.getElementById('passkey');
   document.getElementById('passkeysub').textContent = msg;
   const btn = document.getElementById('passkeybtn');
-  btn.textContent = mode === 'enroll' ? 'set up passkey' : 'unlock with passkey';
-  btn.onclick = () => { el.hidden = true; mode === 'enroll' ? doEnroll() : doAssertion(lastAuthReq); };
+  btn.textContent = 'whisper the safe word 🔒';
+  btn.onclick = () => { el.hidden = true; doAssertion(lastAuthReq); };
   el.hidden = false;
 }
 function hidePasskey() { const el = document.getElementById('passkey'); if (el) el.hidden = true; }
@@ -868,7 +870,11 @@ function onAuthRequired(m) {
   if (m.reason === 'expired') clearSession();
   const sess = loadSession();
   if (sess) { ws.send(JSON.stringify({ type: 'auth', session: sess })); return; }
-  if (!m.enrolled || !(m.credentialIds || []).length) { showPasskey('set up a passkey to unlock the fleet', 'enroll'); return; }
+  // No web enrollment: if no passkey is provisioned, an admin must add one.
+  if (!m.enrolled || !(m.credentialIds || []).length) {
+    showPasskey('no passkey set up for this relay — an admin must provision one (see DEPLOY.md)');
+    return;
+  }
   doAssertion(m);   // try right away; falls back to a tap if the browser needs a gesture
 }
 
@@ -886,31 +892,7 @@ async function doAssertion(m) {
       clientDataJSON: b64uEnc(r.clientDataJSON), authenticatorData: b64uEnc(r.authenticatorData), signature: b64uEnc(r.signature) }));
   } catch (e) {
     meta.textContent = '';
-    showPasskey('passkey needed to unlock', 'auth');
-  }
-}
-
-async function doEnroll() {
-  meta.textContent = 'enrolling…';
-  try {
-    const cr = await fetch('/webauthn/register-challenge?t=' + encodeURIComponent(token));
-    if (!cr.ok) { showPasskey('enrollment is disabled on the relay', 'enroll'); return; }
-    const { challenge, rpId } = await cr.json();
-    const cred = await navigator.credentials.create({ publicKey: {
-      challenge: b64uDec(challenge), rp: { id: rpId, name: 'clawd-harness' },
-      user: { id: new TextEncoder().encode('atg'), name: 'atg', displayName: 'atg' },
-      pubKeyCredParams: [{ alg: -7, type: 'public-key' }],
-      authenticatorSelection: { userVerification: 'preferred', residentKey: 'preferred' }, timeout: 60000,
-    } });
-    const r = cred.response;
-    const res = await fetch('/webauthn/register?t=' + encodeURIComponent(token), {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ attestationObject: b64uEnc(r.attestationObject), clientDataJSON: b64uEnc(r.clientDataJSON) }),
-    }).then(x => x.json());
-    if (res.ok) { meta.textContent = 'passkey enrolled'; location.reload(); }
-    else showPasskey('enroll failed: ' + (res.error || '?'), 'enroll');
-  } catch (e) {
-    showPasskey('enroll cancelled — tap to retry', 'enroll');
+    showPasskey('the gnome awaits — whisper the safe word to enter');
   }
 }
 
@@ -2260,9 +2242,10 @@ window.addEventListener('resize', () => { fit.fit(); sendResize(); term.scrollTo
 // -- phone / QR --------------------------------------------------------------
 const qrmodal = document.getElementById('qrmodal');
 document.getElementById('phoneBtn').onclick = () => {
-  // Re-attach the token so scanning pairs a new device (the bar no longer has it).
+  // Fleet is passkey-only → the QR is just the URL (the passkey gate does the rest).
+  // Direct mode re-attaches the harness token so scanning pairs a new device.
   const url = location.origin + location.pathname +
-              '?t=' + encodeURIComponent(token) + location.hash;
+              (FLEET || !token ? '' : '?t=' + encodeURIComponent(token)) + location.hash;
   const holder = document.getElementById('qrcode');
   holder.innerHTML = '';
   new QRCode(holder, { text: url, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.M });
@@ -2289,7 +2272,7 @@ function showLogin(msg) {
   inp.focus();
 }
 
-if (token) connect(); else showLogin();
+if (FLEET || token) connect(); else showLogin();   // fleet: no token, the passkey gate is the door
 </script>
 </body>
 </html>

@@ -49,39 +49,42 @@ The laptop runs `worker.py` as a launchd agent `com.clawd.fleet-worker`
 `--harness ws://127.0.0.1:8787`. To add a machine: run `worker.py` there with the
 worker token, and add its `--machine` id to `FLEET_WORKER_ALLOW` on the box.
 
-## Auth — defense in depth
-1. **Relay edge gate (token + passkey).** The mobile token (`?t=`, localStorage,
-   stripped from the URL) gates the relay handshake; the relay then requires a
-   passkey assertion before it reveals the roster. Anti-abuse; **not** the
-   security boundary. Token: `ssh zkllmapi 'grep ^FLEET_MOBILE_TOKEN= ~/clawd-fleet/fleet.env | cut -d= -f2'`.
+## Auth — passkey-only, one trust story
+**There is no user token.** Your passkey is the sole user credential
+(`FLEET_PASSKEY_ONLY=1`). The worker token still gates *machine registration*
+(`FLEET_WORKER_TOKEN`) — that's a machine-fleet secret, not your login.
+
+1. **Relay edge gate (passkey doorman).** A mobile connects with no token; the
+   relay requires a passkey assertion before it reveals the roster. Anti-abuse +
+   keeps the roster non-public; **not** the security boundary.
 2. **End-to-end channel (the real boundary).** When you open a machine, the
    mobile and that machine's **worker** run a passkey-bound authenticated key
    exchange (`fleet-e2e/1`, see **E2E-PROTOCOL.md**): the worker independently
-   verifies a channel-bound passkey (require-UV) and all traffic is AES-GCM
-   end-to-end. The relay only routes ciphertext, so a compromised relay is
-   reduced to denial-of-service. The worker session slides on activity
-   (`FLEET_E2E_IDLE_TTL`, 10 min) with a hard ceiling (`FLEET_E2E_MAX_TTL`, 1 h).
+   verifies a channel-bound passkey (require-UV) against its **laptop-local**
+   passkeys file, and all traffic is AES-GCM end-to-end. The relay only routes
+   ciphertext, so a compromised relay is reduced to denial-of-service. The worker
+   session slides on activity (`FLEET_E2E_IDLE_TTL`, 10 min) with a hard ceiling
+   (`FLEET_E2E_MAX_TTL`, 1 h).
 
-So the passkey is checked **at the relay AND again at the laptop** — and the
-laptop never acts without a fresh, channel-bound passkey signature.
+One trust story: **the laptop is the authority.** It accepts only the passkey in
+its own local file (it never trusts the relay for the pubkey). Box access alone
+can't add a credential the worker will accept — you also need laptop file access.
 
-### Enrollment (closed by default)
-A passkey is rpId-bound to `h.atg.link`, so it must be **created at the
-h.atg.link origin** — there is no standing network-reachable enroll. To add a
-credential:
-1. `ssh zkllmapi`, set `FLEET_ALLOW_ENROLL=1` in `~/clawd-fleet/fleet.env`,
-   `sudo systemctl restart clawd-fleet-relay` (opens a deliberate window).
-2. On the device, open `https://h.atg.link/?t=<TOKEN>` and enroll (Face ID).
-3. Set `FLEET_ALLOW_ENROLL=0`, restart the relay (close the window).
-4. **Propagate the public credential to each worker** (the worker verifies the
-   passkey itself, over a trusted path — never trust the relay for the pubkey):
-   ```bash
-   # box (relay) → laptop (worker). The file holds only public keys.
-   scp zkllmapi:~/clawd-fleet/.clawd-fleet.passkeys.json ~/clawd/clawd-harness/fleet/
-   launchctl kickstart -k gui/$(id -u)/com.clawd.fleet-worker   # reload to pick it up
-   ```
-The worker prints its identity fingerprint + enrolled-passkey count at startup;
-the browser shows the worker fingerprint on first pin (verify it once).
+### Provisioning the passkey (no web enrollment)
+There is **no enrollment endpoint** — nothing network-reachable can add a
+credential. The passkey public key is provisioned by an admin. A passkey is
+rpId-bound to `h.atg.link`, so a brand-new credential must be **created at the
+h.atg.link origin** (a deliberate act): temporarily restore a register endpoint
+(it lives in git history), create via Face ID, then remove it again. In practice
+you rarely need this — **iCloud Keychain syncs your existing passkey** to new
+Apple devices automatically. After (re)provisioning, copy the *public* credential
+to each worker (the file holds only public keys):
+```bash
+scp zkllmapi:~/clawd-fleet/.clawd-fleet.passkeys.json ~/clawd/clawd-harness/fleet/
+launchctl kickstart -k gui/$(id -u)/com.clawd.fleet-worker   # reload to pick it up
+```
+The worker prints its identity fingerprint + passkey count at startup; the
+browser shows the worker fingerprint on first pin (verify it once).
 
 ## Tests (from `fleet/`, no browser)
 `cd fleet && python3 test_webauthn.py` · `test_relay_passkey.py` · `fleet_smoke.py`

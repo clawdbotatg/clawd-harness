@@ -59,6 +59,12 @@ BIND = os.environ.get("FLEET_BIND", "0.0.0.0")
 PORT = int(os.environ.get("FLEET_PORT", "8788"))
 PING_EVERY = 20.0  # keep NAT mappings warm
 
+# Passkey-only mode: there is NO mobile URL token — the passkey is the sole user
+# credential (verified at the relay edge as a doorman, and AUTHORITATIVELY by the
+# machine's worker over the E2E channel). The worker token still gates machine
+# registration. Implies REQUIRE_PASSKEY (otherwise mobiles would be unauthed).
+PASSKEY_ONLY = os.environ.get("FLEET_PASSKEY_ONLY", "").lower() in ("1", "true", "yes")
+
 
 def _base_token():
     env = os.environ.get("FLEET_TOKEN")
@@ -71,18 +77,17 @@ def _base_token():
 
 
 def _load_tokens():
-    """Two secrets for two roles. The **mobile** token is the user's access
-    credential (it rides in the page URL). The **worker** token authorizes a
-    machine to register — kept separate so a leaked mobile URL can't impersonate a
-    worker. Both fall back to FLEET_TOKEN / .clawd-fleet.token for single-token
-    setups; absent everything, a loud dev default."""
+    """The **worker** token authorizes a machine to register. The **mobile** token
+    is unused in PASSKEY_ONLY mode (the passkey is the sole user credential);
+    otherwise it gates the mobile URL. Both fall back to FLEET_TOKEN /
+    .clawd-fleet.token; absent a needed one, a loud dev default."""
     base = _base_token()
     mobile = os.environ.get("FLEET_MOBILE_TOKEN") or base
     worker = os.environ.get("FLEET_WORKER_TOKEN") or base
-    if not mobile or not worker:
+    if (not mobile and not PASSKEY_ONLY) or not worker:
         print("[relay] ⚠ no token configured — using dev default. Set "
-              "FLEET_MOBILE_TOKEN + FLEET_WORKER_TOKEN before exposing publicly.",
-              flush=True)
+              "FLEET_WORKER_TOKEN (and FLEET_MOBILE_TOKEN unless FLEET_PASSKEY_ONLY) "
+              "before exposing publicly.", flush=True)
         mobile = mobile or "dev"
         worker = worker or "dev"
     return mobile, worker
@@ -106,21 +111,18 @@ def _token_ok(provided, expected):
 # FLEET_WORKER_ALLOW). Empty = allow any machine that has the worker token.
 WORKER_ALLOW = {m.strip() for m in os.environ.get("FLEET_WORKER_ALLOW", "").split(",") if m.strip()}
 
-# Passkey second factor: a mobile must prove a hardware-backed WebAuthn assertion
-# (Touch ID / Face ID / a security key) — verified server-side via webauthn.py, so
-# a leaked mobile token alone can't drive a session. Set FLEET_REQUIRE_PASSKEY=0 to
-# disable (dev / the routing smokes).
+# Passkey: a mobile must prove a hardware-backed WebAuthn assertion (Touch ID /
+# Face ID) — verified here via webauthn.py as the relay-edge doorman. The
+# AUTHORITATIVE check is the per-machine E2E handshake on the worker; this gate is
+# anti-abuse + keeps the roster non-public. Set FLEET_REQUIRE_PASSKEY=0 only for
+# the routing smokes. (There is no web enrollment — the passkey public key is
+# provisioned by an admin into .clawd-fleet.passkeys.json; see docs/fleet/DEPLOY.md.)
 RP_ID = os.environ.get("FLEET_RP_ID", "h.atg.link")
 ORIGIN = os.environ.get("FLEET_ORIGIN", "https://" + RP_ID)
-REQUIRE_PASSKEY = os.environ.get("FLEET_REQUIRE_PASSKEY", "1").lower() not in ("0", "false", "no")
+REQUIRE_PASSKEY = (os.environ.get("FLEET_REQUIRE_PASSKEY", "1").lower() not in ("0", "false", "no")) or PASSKEY_ONLY
 SESSION_TTL = int(os.environ.get("FLEET_SESSION_TTL", "86400"))  # passkey session validity (24h)
-# Enrolling a new passkey is gated behind BOTH the mobile token AND this flag (off
-# by default), so a leaked token alone can't register an attacker's own credential.
-# To add a device: set FLEET_ALLOW_ENROLL=1, enroll, set it back to 0.
-ALLOW_ENROLL = os.environ.get("FLEET_ALLOW_ENROLL", "").lower() in ("1", "true", "yes")
 PASSKEY_FILE = HERE / ".clawd-fleet.passkeys.json"
 _passkey_lock = threading.Lock()
-_reg_challenges = {}  # token -> (challenge, expiry) for the enroll round-trip
 
 
 def load_passkeys():
@@ -483,45 +485,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    # ── passkey enrollment (token + FLEET_ALLOW_ENROLL gated) ────────────────
-    def _webauthn_register_challenge(self, q):
-        token = q.get("t", [""])[0]
-        if not (ALLOW_ENROLL and _token_ok(token, MOBILE_TOKEN)):
-            return self.send_error(403, "enrollment disabled")
-        ch = new_challenge()
-        _reg_challenges[token] = (ch, time.time() + 300)
-        return self._send_json({"challenge": ch, "rpId": RP_ID})
-
-    def _webauthn_register(self, q):
-        token = q.get("t", [""])[0]
-        if not (ALLOW_ENROLL and _token_ok(token, MOBILE_TOKEN)):
-            self.close_connection = True
-            return self.send_error(403, "enrollment disabled")
-        try:
-            n = int(self.headers.get("Content-Length", "0") or 0)
-        except ValueError:
-            n = 0
-        if n > MAX_UPLOAD:
-            self.close_connection = True
-            return self.send_error(413, "too large")
-        body = self.rfile.read(n) if n > 0 else b""
-        pending = _reg_challenges.pop(token, None)
-        if not pending or pending[1] < time.time():
-            return self._send_json({"error": "no/expired challenge"}, 400)
-        try:
-            data = json.loads(body.decode())
-            reg = webauthn.parse_registration(
-                data.get("attestationObject", ""), data.get("clientDataJSON", ""),
-                pending[0], RP_ID, ORIGIN)
-        except Exception as e:
-            return self._send_json({"error": f"invalid: {e}"}, 400)
-        x, y = reg["pubkey"]
-        creds = [c for c in load_passkeys() if c.get("id") != reg["credential_id"]]
-        creds.append({"id": reg["credential_id"], "x": format(x, "064x"),
-                      "y": format(y, "064x"), "sign_count": reg["sign_count"]})
-        save_passkeys(creds)
-        print(f"[relay] passkey enrolled: {reg['credential_id'][:12]}…", flush=True)
-        return self._send_json({"ok": True, "id": reg["credential_id"]})
+    # (No web enrollment: the passkey public key is provisioned by an admin into
+    # .clawd-fleet.passkeys.json — see docs/fleet/DEPLOY.md. Verification only.)
 
     def do_GET(self):
         q = self._q()
@@ -534,17 +499,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_file("favicon.png", "image/png")
         if path == "/logo-ui.png":
             return self._serve_file("logo-ui.png", "image/png")
-        if path == "/webauthn/register-challenge":
-            return self._webauthn_register_challenge(q)
         if path != "/ws":
             return self.send_error(404, "not found")
         up = (self.headers.get("Upgrade", "").lower() == "websocket")
         if not up:
             return self.send_error(400, "expected websocket")
         role = q.get("role", ["mobile"])[0]
-        # Role-specific auth: workers and mobiles present different secrets.
+        # The worker token gates machine registration. The mobile's sole credential
+        # is the passkey (PASSKEY_ONLY → no mobile token; the passkey gate runs after
+        # connect, and the worker re-verifies authoritatively over the E2E channel).
         expected = WORKER_TOKEN if role == "worker" else MOBILE_TOKEN
-        if not _token_ok(q.get("t", [""])[0], expected):
+        if (role == "worker" or not PASSKEY_ONLY) and not _token_ok(q.get("t", [""])[0], expected):
             return self.send_error(403, "bad token")
         if role == "worker":
             ident = q.get("machine", [""])[0]
@@ -566,9 +531,7 @@ class Handler(BaseHTTPRequestHandler):
         # machine — exactly where that session's claude will Read it.
         q = self._q()
         path = self.path.split("?")[0]
-        if path == "/webauthn/register":
-            return self._webauthn_register(q)
-        if path != "/upload" or not _token_ok(q.get("t", [""])[0], MOBILE_TOKEN):
+        if path != "/upload" or (not PASSKEY_ONLY and not _token_ok(q.get("t", [""])[0], MOBILE_TOKEN)):
             self.close_connection = True
             return self.send_error(403 if path == "/upload" else 404, "denied")
         try:
@@ -673,16 +636,15 @@ def main():
     # Never print the token: the relay runs on a shared box and its stdout lands
     # in the systemd journal, which is a leak. Show only that auth is configured.
     print(f"[relay]   worker url: ws://<host>:{PORT}/ws?role=worker&machine=<id>&t=<WORKER_TOKEN>", flush=True)
-    print(f"[relay]   mobile url: ws://<host>:{PORT}/ws?role=mobile&t=<MOBILE_TOKEN>", flush=True)
-    split = "split" if MOBILE_TOKEN != WORKER_TOKEN else "SHARED (set FLEET_WORKER_TOKEN to split)"
-    allow = ",".join(sorted(WORKER_ALLOW)) if WORKER_ALLOW else "any (set FLEET_WORKER_ALLOW to restrict)"
-    print(f"[relay]   auth: mobile/worker tokens {split}; worker allowlist: {allow}", flush=True)
-    nkeys = len(load_passkeys())
-    if REQUIRE_PASSKEY:
-        pk = f"required (rpId={RP_ID}, {nkeys} enrolled" + (", ENROLL OPEN" if ALLOW_ENROLL else "") + ")"
+    if PASSKEY_ONLY:
+        print(f"[relay]   mobile url: ws://<host>:{PORT}/ws?role=mobile   (PASSKEY-ONLY — no token)", flush=True)
     else:
-        pk = "DISABLED (set FLEET_REQUIRE_PASSKEY=1 to require)"
-    print(f"[relay]   passkey second factor: {pk}", flush=True)
+        print(f"[relay]   mobile url: ws://<host>:{PORT}/ws?role=mobile&t=<MOBILE_TOKEN>", flush=True)
+    allow = ",".join(sorted(WORKER_ALLOW)) if WORKER_ALLOW else "any (set FLEET_WORKER_ALLOW to restrict)"
+    print(f"[relay]   auth: {'passkey-only (no mobile token)' if PASSKEY_ONLY else 'mobile+worker tokens'}; worker allowlist: {allow}", flush=True)
+    nkeys = len(load_passkeys())
+    pk = f"required (rpId={RP_ID}, {nkeys} provisioned)" if REQUIRE_PASSKEY else "DISABLED (set FLEET_REQUIRE_PASSKEY=1 to require)"
+    print(f"[relay]   passkey: {pk}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

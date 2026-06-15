@@ -13,9 +13,11 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >   layout) then `HERE.parent/<name>` (monorepo). All paths below are relative to
 >   `fleet/` unless noted.
 > - **Auth is defense-in-depth:**
->   - *Relay edge gate* — mobile token (factor 1) + a passkey (WebAuthn) verified
->     in stdlib (`webauthn.py`); the relay withholds the roster until `{type:auth}`.
->     Anti-abuse, **not** the security boundary. `FLEET_REQUIRE_PASSKEY`.
+>   - *Relay edge gate* — **passkey-only** (`FLEET_PASSKEY_ONLY=1`, no mobile
+>     token); a passkey (WebAuthn) verified in stdlib (`webauthn.py`); the relay
+>     withholds the roster until `{type:auth}`. Anti-abuse, **not** the security
+>     boundary. The worker token still gates machine registration. There is **no
+>     web enrollment** — the passkey pubkey is admin-provisioned into the file.
 >   - *End-to-end channel (`fleet-e2e/1`)* — THE boundary. When a mobile opens a
 >     machine it runs a passkey-bound authenticated key exchange directly with that
 >     machine's **worker** (`e2e.py` + the `[e2e-core]` block in `index.html`): the

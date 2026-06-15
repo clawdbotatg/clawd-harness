@@ -80,11 +80,12 @@ fields (nonces, hashes) are still wrapped for uniformity.
   run, persisted at `fleet/.fleet.worker_id.json` (private key PKCS#8,
   `chmod 600`, gitignored). Its public key `IK_w.pub` is the worker's identity.
   Fingerprint = `base32(SHA-256(IK_w.pub))[:20]` shown as 4×5 groups.
-- **Passkey credentials:** WebAuthn public keys enrolled out-of-band by a
-  **local, physical-access** flow on the laptop (see DEPLOY). Stored at
-  `fleet/.clawd-fleet.passkeys.json` on the worker (authoritative) and copied to
-  the relay (edge gate). Enrollment is **closed by default** — there is no
-  standing "enroll" capability reachable from the network.
+- **Passkey credentials:** WebAuthn public keys provisioned **out-of-band by an
+  admin** (see DEPLOY) — there is **no web enrollment endpoint**, nothing
+  network-reachable can add a credential. Stored at
+  `fleet/.clawd-fleet.passkeys.json` on the worker (**authoritative** — the worker
+  trusts only this local file, never the relay) and copied to the relay (edge
+  doorman). The user credential is the passkey alone (no mobile token).
 - **Pinning:** the mobile stores `IK_w.pub` per machine id in localStorage on
   first contact; mismatch on a later connect is a hard, loud failure.
 
