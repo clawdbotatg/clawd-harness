@@ -168,7 +168,13 @@
   .chip button { background:transparent; border:0; color:var(--dim); cursor:pointer; padding:0 2px;
                  font-weight:700; font-size:14px; }
   .chip button:hover { color:var(--err); }
-  #box { flex:1; resize:none; min-height:38px; max-height:160px; background:var(--raised); color:var(--ink);
+  /* field-sizing:content lets the browser grow AND shrink the textarea to fit its
+     content in its own layout engine — so clearing box.value on send snaps it back
+     to min-height instantly, with no JS call to forget (the old autosizeBox() patch
+     had to be re-run after every programmatic value change and kept regressing).
+     Browsers without it fall back to the JS autosize below. */
+  #box { flex:1; resize:none; field-sizing:content; min-height:38px; max-height:160px;
+         background:var(--raised); color:var(--ink);
          border:1px solid var(--edge); padding:9px 11px; font:inherit; }
   /* 13px on mobile (small, per request). iOS Safari would normally auto-zoom on focus for a field
      under ~16 visual px, but the viewport's maximum-scale=1 caps zoom so it can't — so small type
@@ -1817,12 +1823,16 @@ function syncComposer() {
   autosizeBox();                             // size to the restored draft (or shrink back if empty)
   restoreBoxFocus();                         // if a reload stole focus mid-type, put it back here
 }
-// Desktop-only: grow the textarea (and thus the footer/bottom panel) as lines are
-// added, clamped by the CSS max-height. Mobile keeps its fixed scrolling box. The
-// footer's ResizeObserver (see refitTTY) pushes the terminal up as we grow.
+// Grow the textarea (and thus the footer/bottom panel) as lines are added, clamped
+// by the CSS max-height; the footer's ResizeObserver (see refitTTY) pushes the
+// terminal up as we grow. Modern browsers do this natively via `field-sizing:content`
+// (see #box CSS) — there we MUST NOT set an explicit height or it would pin the box
+// and defeat the native shrink-on-clear. So autosizeBox is a no-op when supported and
+// only the JS fallback below runs on older engines. Fallback stays desktop-only.
 const finePointer = window.matchMedia('(pointer: fine)').matches;
+const nativeFieldSizing = window.CSS && CSS.supports && CSS.supports('field-sizing', 'content');
 function autosizeBox() {
-  if (!finePointer) return;
+  if (nativeFieldSizing || !finePointer) return;   // CSS owns sizing when field-sizing is supported
   box.style.height = 'auto';                       // let it shrink back when lines are removed
   box.style.height = box.scrollHeight + 'px';      // CSS min/max-height clamp the result
 }
