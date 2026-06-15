@@ -1011,6 +1011,11 @@ document.getElementById('rebootCancel').onclick = () => {
 
 function handleJson(m) {
   if (m.type === 'reload') {        // server saw index.html change on disk → live-reload
+    // Direct mode only: this page IS the harness's served HTML, so a disk edit
+    // means reload. In fleet mode the page comes from the RELAY (its own copy) —
+    // a remote machine's harness reloading is irrelevant to us, and acting on it
+    // just flashes the phone every time someone edits a laptop's index.html.
+    if (FLEET) return;
     beginUpdate('Updating…', 900);  // server stays up; brief beat to show the modal, then reload
     return;
   }
@@ -1386,13 +1391,16 @@ function cycleSession(dir) {
 
 function closeCurrentSession() {
   if (!currentCid) return;
-  const idx = sessionList.findIndex(s => s.cid === currentCid);
-  const rest = sessionList.filter(s => s.cid !== currentCid);
+  // Stay within the current project: pick a neighbour from THIS project only,
+  // and if there are none left, fall back to its session list — never hop to a
+  // session in another project.
+  const mine = sessionList.filter(s => s.pid === currentPid);
+  const idx = mine.findIndex(s => s.cid === currentCid);
+  const rest = mine.filter(s => s.cid !== currentCid);
   closeSession(currentCid);
-  if (!rest.length) { navTo('sessions'); return; }   // closed the last one — fall back to the list
+  if (!rest.length) { navTo('sessions'); return; }   // closed the last one in this project — fall back to the list
   const nb = rest[Math.min(idx, rest.length - 1)] || rest[0];
-  if (nb.pid) currentPid = nb.pid;
-  subscribe(nb.cid);                 // land on a neighbour, keeping the current depth
+  subscribe(nb.cid);                 // land on a neighbour in the same project, keeping the current depth
   if (!isTouch) box.focus();
 }
 
