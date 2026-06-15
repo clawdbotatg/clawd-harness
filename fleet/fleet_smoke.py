@@ -26,6 +26,7 @@ ENV = {**os.environ, "FLEET_PORT": PORT,
        "FLEET_WORKER_ALLOW": "alpha,beta",   # gamma below is intentionally not listed
        "FLEET_REQUIRE_PASSKEY": "0",  # routing smokes: 2nd factor off
        "FLEET_RELAY": RELAY, "FLEET_BIND": "127.0.0.1",
+       "FLEET_E2E_REQUIRE": "0",  # diagnostic suite: exec only exists on non-E2E workers
        "FLEET_ALLOW_EXEC": "1"}   # this suite exercises the exec diagnostic
 
 procs = []

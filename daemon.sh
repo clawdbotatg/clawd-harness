@@ -17,7 +17,7 @@ LOG="$HOME/Library/Logs/clawd-harness.log"
 PY="$(command -v python3)"
 CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude)}"   # absolute path — launchd has a bare PATH
 PORT="${PORT:-8787}"
-BIND="${BIND:-0.0.0.0}"
+BIND="${BIND:-127.0.0.1}"   # localhost-only; remote access is the fleet's job. BIND=0.0.0.0 to expose on the LAN.
 DOMAIN="gui/$(id -u)"
 
 cmd="${1:-}"

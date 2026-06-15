@@ -37,7 +37,9 @@ import hashlib
 import json
 import os
 import pty
+import hmac
 import re
+import secrets
 import select
 import signal
 import struct
@@ -77,7 +79,11 @@ _load_env_file()
 
 # ── config ──────────────────────────────────────────────────────────────────
 PORT       = int(os.environ.get("PORT", "8787"))
-BIND       = os.environ.get("BIND", "0.0.0.0")   # 0.0.0.0 = reachable on the LAN
+BIND       = os.environ.get("BIND", "127.0.0.1")  # localhost-only by default.
+# Remote access is the fleet's job (worker dials the harness over localhost, then
+# the relay/passkey/E2E stack gates it). Binding 0.0.0.0 exposes :PORT to anyone
+# on the LAN, *below* that whole stack — only the token guards it. Opt in with
+# BIND=0.0.0.0 (and accept that the token alone gates bypass-permissions claude).
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 WORKDIR    = os.path.abspath(os.environ.get("WORKDIR", os.getcwd()))
 COLS       = int(os.environ.get("COLS", "120"))
@@ -166,11 +172,21 @@ def _load_or_make_token():
     try:
         return tok_file.read_text().strip()
     except OSError:
-        tok = uuid.uuid4().hex[:16]
+        tok = secrets.token_urlsafe(32)  # 256-bit, URL-safe (was uuid4 hex[:16] = 64-bit)
         tok_file.write_text(tok)
         return tok
 
 TOKEN = _load_or_make_token()
+
+# Auth posture. The token only ever existed to gate *non-loopback* (LAN) access,
+# because the session runs bypass-permissions. On the default loopback bind the
+# harness is reachable solely by local processes — you in a browser on this box
+# and the fleet worker — so we skip the token entirely: 127.0.0.1 just works, no
+# token anywhere. Remote access goes exclusively through the fleet relay, which
+# enforces a passkey + end-to-end encryption that the *worker verifies locally*
+# (so a pwned relay can neither drive this box nor read its sessions). Opt into a
+# non-loopback bind (BIND=0.0.0.0) and the token is enforced again as the LAN guard.
+AUTH_REQUIRED = BIND not in ("127.0.0.1", "localhost", "::1")
 
 
 def lan_ip():
@@ -1366,7 +1382,17 @@ class Handler(BaseHTTPRequestHandler):
         return parse_qs(urlparse(self.path).query)
 
     def _token_ok(self):
-        return self._query().get("t", [""])[0] == TOKEN
+        # Loopback bind ⇒ no auth (see AUTH_REQUIRED): only local processes can
+        # reach us, so the token is moot — every request passes.
+        if not AUTH_REQUIRED:
+            return True
+        # Constant-time: avoid a byte-by-byte timing oracle on the token. (== on
+        # str short-circuits at the first mismatch.) compare_digest raises on
+        # non-ASCII, so guard the types.
+        try:
+            return hmac.compare_digest(self._query().get("t", [""])[0], TOKEN)
+        except (TypeError, ValueError):
+            return False
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -1384,8 +1410,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/logo-ui.png":
             return self._serve_file(HERE / "logo-ui.png", "image/png")
         if path == "/config":
-            # no token here, and no token returned — the page builds the phone
-            # URL from the token already in its own address bar
+            # Token-gated: it leaks workdir / lanIp / sessionId, which a malicious
+            # site could grab via DNS-rebinding if this were open. The page sends
+            # the token it already holds (?t=). No token is returned in the body.
+            if not self._token_ok():
+                return self.send_error(403, "bad token")
             cur = MGR.get(MGR.default_cid())
             return self._serve_json({
                 "sessionId": cur.session_id if cur else None,
@@ -1640,17 +1669,24 @@ def main():
     threading.Thread(target=watch_ui, daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     ip = lan_ip()
-    print(f"[http] clawd-harness (token required)", flush=True)
+    print(f"[http] clawd-harness ({'token required' if AUTH_REQUIRED else 'no auth — loopback only'})", flush=True)
     print(f"[http]   workdir : {WORKDIR}", flush=True)
     print(f"[http]   sessions: {len(MGR.sessions)}", flush=True)
-    print(f"[http]   local : http://127.0.0.1:{PORT}/?t={TOKEN}", flush=True)
-    print(f"[http]   phone : http://{ip}:{PORT}/?t={TOKEN}", flush=True)
+    if AUTH_REQUIRED:
+        print(f"[http]   local : http://127.0.0.1:{PORT}/?t={TOKEN}", flush=True)
+        print(f"[http]   phone : http://{ip}:{PORT}/?t={TOKEN}", flush=True)
+    else:
+        print(f"[http]   local : http://127.0.0.1:{PORT}/   (no token)", flush=True)
     if not (BANKR_API_KEY and BANKR_BASE_URL):
         print("[http]   note  : AI naming off (set BANKR_API_KEY + BANKR_BASE_URL "
               "to enable); using first-prompt titles.", flush=True)
-    if BIND == "0.0.0.0":
-        print("[http]   ⚠ reachable on your LAN with bypass-permissions — "
-              "the token is the only thing gating command execution.", flush=True)
+    if BIND == "127.0.0.1":
+        print("[http]   bind  : 127.0.0.1 (localhost only) — remote access via the "
+              "fleet (relay + passkey + E2E). Set BIND=0.0.0.0 for direct LAN access.", flush=True)
+    else:
+        print(f"[http]   ⚠ bind {BIND}: reachable beyond localhost with "
+              "bypass-permissions — the token is the only thing gating command "
+              "execution. Prefer BIND=127.0.0.1 + the fleet for remote access.", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

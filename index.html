@@ -551,7 +551,9 @@ function loadToken() {
 // FLEET is false → direct mode: talk to the local harness exactly as its own UI does.
 const FLEET = !!window.__FLEET__;
 // Fleet mode is passkey-only — NO token (the passkey is the sole credential).
-// Direct (harness) mode still uses the harness token from the URL.
+// Direct (harness) mode no longer requires a token either: the harness skips auth
+// on its loopback bind (only local processes reach it). We still pick up a token if
+// one is in the URL/storage — harmless, and it's what a LAN bind (BIND=0.0.0.0) needs.
 const token = FLEET ? '' : loadToken();
 let serverBoot = null;   // server process id; a change across reconnect = daemon restart → reload
 let authFails = 0;       // consecutive socket closes that never opened → likely a bad/expired token
@@ -1070,9 +1072,11 @@ function handleJson(m) {
       if (pendingSendText) addPending(pendingSendText, pendingSendText);
     } else {
       const stay = currentCid && sessionList.some(s => s.cid === currentCid);
+      console.log('[TRACE focus-else] m.cid=', m.cid, 'currentCid=', currentCid, 'stay=', stay);
       subscribe(stay ? currentCid : m.cid);
     }
   } else if (m.type === 'hello') {
+    console.log('[TRACE hello] m.cid=', m.cid, 'm.pid=', m.pid, 'was currentPid=', currentPid);
     currentCid = m.cid;
     if (m.pid) currentPid = m.pid;
     updateBreadcrumb(m.title || '');
@@ -1403,9 +1407,13 @@ function closeCurrentSession() {
   const mine = sessionList.filter(s => s.pid === currentPid);
   const idx = mine.findIndex(s => s.cid === currentCid);
   const rest = mine.filter(s => s.cid !== currentCid);
+  console.log('[TRACE close] currentPid=', currentPid, 'currentCid=', currentCid,
+    'mine=', mine.map(s=>s.cid.slice(0,6)+'@'+String(s.pid).slice(0,6)),
+    'rest=', rest.length);
   closeSession(currentCid);
-  if (!rest.length) { navTo('sessions'); return; }   // closed the last one in this project — fall back to the list
+  if (!rest.length) { console.log('[TRACE close] -> navTo sessions'); navTo('sessions'); return; }   // closed the last one in this project — fall back to the list
   const nb = rest[Math.min(idx, rest.length - 1)] || rest[0];
+  console.log('[TRACE close] -> subscribe sibling', nb.cid.slice(0,6), 'pid=', String(nb.pid).slice(0,6));
   subscribe(nb.cid);                 // land on a neighbour in the same project, keeping the current depth
   if (!isTouch) box.focus();
 }
@@ -2391,7 +2399,9 @@ function showLogin(msg) {
   inp.focus();
 }
 
-if (FLEET || token) connect(); else showLogin();   // fleet: no token, the passkey gate is the door
+connect();   // fleet: the passkey gate is the door. direct: the loopback harness needs no token, so always
+             // connect; only a non-loopback (BIND=0.0.0.0) server that actually rejects surfaces a login
+             // lazily via the authFails path in ws.onclose.
 </script>
 </body>
 </html>

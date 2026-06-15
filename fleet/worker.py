@@ -297,6 +297,20 @@ class Worker:
         # POST it to the LOCAL harness /upload (same as a browser would) and send
         # the resulting {path,name} back; the path is local to this machine, which
         # is exactly where this session's claude will Read it.
+        #
+        # Gate: the upload bridge rides plaintext through the relay (it's an HTTP
+        # POST, not an E2E record), so a malicious relay could otherwise write
+        # arbitrary bytes to this machine's uploads dir at will (disk-fill DoS).
+        # On an E2E-required worker, only honor it while at least one viewer holds
+        # a live E2E session — i.e. a real, passkey-authenticated human is present.
+        # (Residual: the bytes themselves still transit the relay un-E2E'd; routing
+        # uploads through the channel is the proper fix — see E2E-PROTOCOL §6.)
+        if E2E_REQUIRE:
+            with self.e2e_lock:
+                live = any(not s.expired() for s in self.e2e_sessions.values())
+            if not live:
+                return self.send_relay({"type": "uploadResult", "id": frame.get("id"),
+                                        "ok": False, "error": "no authenticated session"})
         threading.Thread(target=self._do_upload, args=(frame,), daemon=True).start()
 
     def _do_upload(self, frame):
@@ -462,6 +476,15 @@ class Worker:
                              "machine": self.machine, "ts": int(time.time())})
             return
         if kind == "exec":
+            # exec is a raw, non-E2E RCE primitive reachable from any frame the
+            # relay can forge — so it must NOT exist on a production (E2E-required)
+            # worker, regardless of ALLOW_EXEC. Otherwise a compromised relay would
+            # be one env-flag from a remote shell, breaking "relay compromise = DoS
+            # only". It survives only for the local non-E2E diagnostic smokes.
+            if E2E_REQUIRE:
+                self.reply(frm, {"kind": "exit", "code": -1,
+                                 "error": "exec refused (E2E-required worker)"})
+                return
             if not ALLOW_EXEC:
                 self.reply(frm, {"kind": "exit", "code": -1,
                                  "error": "exec disabled (set FLEET_ALLOW_EXEC=1)"})
