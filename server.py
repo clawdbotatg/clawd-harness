@@ -1381,6 +1381,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_file(HERE / "favicon.png", "image/png")
         if path == "/logo.png":
             return self._serve_file(HERE / "logo.png", "image/png")
+        if path == "/logo-ui.png":
+            return self._serve_file(HERE / "logo-ui.png", "image/png")
         if path == "/config":
             # no token here, and no token returned — the page builds the phone
             # URL from the token already in its own address bar

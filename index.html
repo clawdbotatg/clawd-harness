@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=0.9, minimum-scale=0.9, maximum-scale=0.9, user-scalable=no" />
-<title>clawd-fleet</title>
+<title>clawd-harness</title>
 <link rel="icon" type="image/png" href="favicon.png" />
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 <style>
@@ -278,6 +278,9 @@
                  border:1px solid var(--edge); padding:11px 12px; font:inherit; margin-bottom:10px; }
   #login input:focus { outline:none; border-color:var(--accent); }
   #login button, #passkey button { width:100%; }
+  .brandlogo { width:120px; height:120px; border-radius:16px; object-fit:cover;
+               border:2px solid var(--accent); margin:0 auto 14px; display:block;
+               box-shadow:0 6px 20px rgba(0,0,0,.5); }
   /* graceful-restart UI: a pending banner under the header + a go overlay */
   #rebootbar { display:flex; align-items:center; gap:10px; padding:7px 14px;
                background:var(--accent-bg); border-bottom:1px solid var(--accent-dim);
@@ -303,9 +306,9 @@
 <body>
 <div id="app">
   <header>
-    <img id="logo" src="favicon.png" alt="clawd-fleet" />
+    <img id="logo" src="favicon.png" alt="clawd-harness" />
     <div id="dot"></div>
-    <h1 id="brand" title="All machines">clawd-fleet</h1>
+    <h1 id="brand" title="All machines">clawd-harness</h1>
     <span class="meta" id="meta">connecting…</span>
     <span class="spacer"></span>
     <button id="machinesBtn" title="All machines"><span class="bico">⊞</span><span class="blbl"> machines</span></button>
@@ -332,7 +335,8 @@
   </div>
   <div id="login" hidden>
     <div class="qrcard">
-      <div class="lh">clawd-fleet</div>
+      <img src="logo-ui.png" class="brandlogo" alt="clawd-harness" />
+      <div class="lh">clawd-harness</div>
       <div class="ls" id="loginsub">paste your fleet token to connect</div>
       <input id="logintoken" type="password" placeholder="fleet token" autocomplete="off" />
       <button id="loginbtn">connect</button>
@@ -340,7 +344,8 @@
   </div>
   <div id="passkey" hidden>
     <div class="qrcard">
-      <div class="lh">clawd-fleet</div>
+      <img src="logo-ui.png" class="brandlogo" alt="clawd-harness" />
+      <div class="lh">clawd-harness</div>
       <div class="ls" id="passkeysub">unlock with your passkey</div>
       <button id="passkeybtn">unlock with passkey</button>
     </div>
@@ -666,7 +671,7 @@ async function doEnroll() {
     if (!cr.ok) { showPasskey('enrollment is disabled on the relay', 'enroll'); return; }
     const { challenge, rpId } = await cr.json();
     const cred = await navigator.credentials.create({ publicKey: {
-      challenge: b64uDec(challenge), rp: { id: rpId, name: 'clawd-fleet' },
+      challenge: b64uDec(challenge), rp: { id: rpId, name: 'clawd-harness' },
       user: { id: new TextEncoder().encode('atg'), name: 'atg', displayName: 'atg' },
       pubKeyCredParams: [{ alg: -7, type: 'public-key' }],
       authenticatorSelection: { userVerification: 'preferred', residentKey: 'preferred' }, timeout: 60000,

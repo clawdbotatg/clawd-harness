@@ -4,7 +4,7 @@ No Vercel, no build step. The whole system is pure-Python stdlib + one static
 `index.html`. Three moving parts:
 
 ```
- phone/browser ──wss──▶  relay.atg.link  (AWS box: relay.py)  ◀──wss──  laptop: worker.py → harness :8787
+ phone/browser ──wss──▶  h.atg.link  (AWS box: relay.py)  ◀──wss──  laptop: worker.py → harness :8787
  (fleet UI)              token + passkey gate, routes              (the real Claude sessions)
 ```
 
@@ -31,7 +31,7 @@ Verify the JS first: extract the `<script>` and `node --check` it.
 ## The box (relay backend)
 - Host: `ssh zkllmapi` (Ubuntu, `174.129.67.164`). **Shared/production** — also runs
   conclave, mediamtx, etc. Touch nginx carefully; `nginx -t` before any reload.
-- Relay: `wss://relay.atg.link` → nginx → `127.0.0.1:8788`. Cert via certbot (auto-renew).
+- Relay: `wss://h.atg.link` → nginx → `127.0.0.1:8788`. Cert via certbot (auto-renew).
   Code at `~/clawd-fleet`. Service: `clawd-fleet-relay` (systemd). Logs:
   `journalctl -u clawd-fleet-relay -f`.
 - **Ship relay/worker changes** (run from the harness root; fleet code is in `fleet/`,
@@ -40,12 +40,12 @@ Verify the JS first: extract the `<script>` and `node --check` it.
   then `ssh zkllmapi 'sudo systemctl restart clawd-fleet-relay'`. The box stays **flat**,
   so `index.html` sits next to `relay.py` there (`_serve_file` checks `HERE/` first).
 - `fleet.env` on the box (gitignored) holds: `FLEET_MOBILE_TOKEN`, `FLEET_WORKER_TOKEN`,
-  `FLEET_WORKER_ALLOW`, `FLEET_RP_ID=relay.atg.link`, `FLEET_ORIGIN=https://relay.atg.link`,
+  `FLEET_WORKER_ALLOW`, `FLEET_RP_ID=h.atg.link`, `FLEET_ORIGIN=https://h.atg.link`,
   `FLEET_REQUIRE_PASSKEY=1`, `FLEET_ALLOW_ENROLL=0`.
 
 ## The worker (each machine)
 The laptop runs `worker.py` as a launchd agent `com.clawd.fleet-worker`
-(`~/Library/LaunchAgents/`), pointing `FLEET_RELAY=wss://relay.atg.link` and
+(`~/Library/LaunchAgents/`), pointing `FLEET_RELAY=wss://h.atg.link` and
 `--harness ws://127.0.0.1:8787`. To add a machine: run `worker.py` there with the
 worker token, and add its `--machine` id to `FLEET_WORKER_ALLOW` on the box.
 
@@ -53,7 +53,7 @@ worker token, and add its `--machine` id to `FLEET_WORKER_ALLOW` on the box.
 1. **Mobile token** (`?t=`) — gates the relay handshake; stored in localStorage, stripped
    from the URL on load. Get it: `ssh zkllmapi 'grep ^FLEET_MOBILE_TOKEN= ~/clawd-fleet/fleet.env | cut -d= -f2'`.
 2. **Passkey** (WebAuthn) — `webauthn.py` verifies the assertion against the enrolled
-   credential (`.clawd-fleet.passkeys.json` on the box) and pins `rpId=relay.atg.link`.
+   credential (`.clawd-fleet.passkeys.json` on the box) and pins `rpId=h.atg.link`.
    A success mints a 24h session.
 
 **Enroll a new device** (passkeys sync via iCloud Keychain, so usually unnecessary):

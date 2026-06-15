@@ -532,6 +532,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_file("index.html", "text/html; charset=utf-8")
         if path == "/favicon.png":
             return self._serve_file("favicon.png", "image/png")
+        if path == "/logo-ui.png":
+            return self._serve_file("logo-ui.png", "image/png")
         if path == "/webauthn/register-challenge":
             return self._webauthn_register_challenge(q)
         if path != "/ws":

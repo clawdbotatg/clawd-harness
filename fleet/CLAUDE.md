@@ -17,8 +17,10 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >   The relay withholds the roster until `{type:auth}` proves a passkey assertion;
 >   a success mints a 24h session. Enroll is gated by token + `FLEET_ALLOW_ENROLL`.
 >   Config: `FLEET_RP_ID`, `FLEET_ORIGIN`, `FLEET_REQUIRE_PASSKEY`.
-> - **Live at `wss://relay.atg.link`** (its own subdomain → the box), not
->   `h.atg.link`. The relay serves the thin `index.html` there.
+> - **Live at `wss://h.atg.link`** (its own subdomain → the box). The relay serves
+>   the unified `index.html` there. (The earlier `relay.atg.link` subdomain was
+>   retired 2026-06 — DNS + cert still exist on the box but its nginx vhost is
+>   disabled; `h.atg.link` is the one production endpoint.)
 > - **One UI, two modes.** `index.html` (at the harness root) is **unified and
 >   mode-aware** via `window.__FLEET__`: the harness serves it untouched → direct
 >   mode; the relay injects the flag (`relay.py` `_serve_file`) → fleet mode

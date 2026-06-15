@@ -9,7 +9,7 @@ one public **relay**, and a mobile client reaches any machine — or all at
 once — through it.
 
 ```
- 📱 mobile ──wss──▶  relay  (public box, e.g. wss://relay.atg.link)
+ 📱 mobile ──wss──▶  relay  (public box, e.g. wss://h.atg.link)
                        │   token + passkey gate, then routes frames per machine
         ┌──────────────┼───────────────┐
         ▼              ▼                ▼
