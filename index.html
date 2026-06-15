@@ -798,7 +798,9 @@ function e2eSetPin(m, b) { try { localStorage.setItem('cc_e2e_pin_' + m, b); } c
 // Resumption material (per machine): lets a reload re-attach with NO passkey,
 // within the worker's hard TTL. The master is key material on disk for ≤ this
 // window — the convenience/secrecy trade (a malicious relay still can't read it).
-const RESUME_TTL_MS = 60 * 60 * 1000;
+// Keep in sync with FLEET_E2E_MAX_TTL on the worker (fleet/fleet.env): the
+// shorter of the two wins, so a mismatch silently forces an early re-passkey.
+const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
 function e2eLoadResume(m) { try { const s = JSON.parse(localStorage.getItem('cc_e2e_rs_' + m) || 'null'); return (s && s.exp > Date.now()) ? s : null; } catch { return null; } }
 function e2eSaveResume(m, id, master) { try { localStorage.setItem('cc_e2e_rs_' + m, JSON.stringify({ id, master, exp: Date.now() + RESUME_TTL_MS })); } catch {} }
 function e2eClearResume(m) { try { localStorage.removeItem('cc_e2e_rs_' + m); } catch {} }
