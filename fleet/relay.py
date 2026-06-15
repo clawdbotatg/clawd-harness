@@ -16,12 +16,14 @@ Protocol (all JSON text frames):
     (handshake via query: ?role=worker&machine=<id>&host=<name>&t=<token>)
     {type:"reply",  to:<mobileId>, msg:{...}}   # route a result to one mobile
     {type:"status", msg:{...}}                  # broadcast (e.g. busy/idle)
+    {type:"stats", projects:N, sessions:N, active:N}  # plaintext aggregate
+        counts only (no titles/content) — for the at-a-glance roster load
   mobile→relay:
     (handshake via query: ?role=mobile&t=<token>)
     {type:"list"}                               # ask for the machine roster
     {type:"toMachine", machine:<id|"*">, msg:{...}}
   relay→mobile:
-    {type:"machines", machines:[{id,host,online,lastSeen}]}
+    {type:"machines", machines:[{id,host,online,lastSeen,stats:{projects,sessions,active}|null}]}
     {type:"machineMsg", machine:<id>, msg:{...}}
     {type:"error", error:"..."}
   relay→worker:
@@ -193,6 +195,10 @@ class Conn:
         self.mfa_ok = not REQUIRE_PASSKEY if role == "mobile" else True
         self.auth_until = float("inf")
         self.challenge = ""
+        # Plaintext aggregate counts a proxy worker reports for its harness
+        # ({projects,sessions,active}) — three integers, no titles/content; shown
+        # on the roster for an at-a-glance per-machine load. None until reported.
+        self.stats = None
 
     @classmethod
     def next_mobile_id(cls):
@@ -258,7 +264,7 @@ class Relay:
     def roster(self):
         with self.lock:
             return [{"id": w.ident, "host": w.host, "online": not w.dead,
-                     "lastSeen": int(w.last_seen)}
+                     "lastSeen": int(w.last_seen), "stats": w.stats}
                     for w in self.workers.values()]
 
     def broadcast_roster(self):
@@ -429,6 +435,12 @@ class Relay:
                 mobiles = list(self.mobiles.values())
             for m in mobiles:
                 m.send_json(out)
+            return
+        if t == "stats":             # plaintext aggregate counts for the roster
+            worker.stats = {"projects": int(frame.get("projects") or 0),
+                            "sessions": int(frame.get("sessions") or 0),
+                            "active": int(frame.get("active") or 0)}
+            self.broadcast_roster()
             return
         if t == "uploadResult":      # answer to a pending HTTP /upload
             self.finish_upload(frame.get("id"), frame)

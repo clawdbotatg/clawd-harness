@@ -247,6 +247,20 @@ def main():
                  what="roster with mockbox")
     check("roster discovery (mock machine online)", t_roster)
 
+    # 1b. the worker reports plaintext aggregate counts → roster carries stats
+    #     (mock harness = 1 project, 1 idle session). Wait for the roster the
+    #     relay re-broadcasts once the worker's stats frame lands.
+    def t_stats():
+        def has_stats(f):
+            if f.get("type") != "machines":
+                return False
+            m = next((x for x in f["machines"] if x["id"] == MACHINE), None)
+            return bool(m and m.get("stats"))
+        f = wait_for(has_stats, what="roster entry with stats")
+        st = next(x for x in f["machines"] if x["id"] == MACHINE)["stats"]
+        assert st == {"projects": 1, "sessions": 1, "active": 0}, st
+    check("worker reports aggregate counts → roster stats", t_stats)
+
     # 2. harness `list` → projects + sessions tunnel back as machineMsgs
     def t_list():
         inbox.clear()

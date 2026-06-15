@@ -231,6 +231,10 @@ class Worker:
         self.wlock = threading.Lock()
         self.links = {}            # mobile_id -> HarnessLink
         self.links_lock = threading.Lock()
+        # Latest plaintext aggregate counts {projects,sessions,active} read from
+        # the local harness and reported to the relay for the roster. None until
+        # the first poll succeeds. Just three integers — never titles or content.
+        self.stats = None
         # E2E state (per remote viewer)
         self.e2e_sessions = {}     # mobile_id -> e2e.Session (open channel)
         self.e2e_hs = {}           # mobile_id -> e2e.WorkerHandshake (in progress)
@@ -283,6 +287,13 @@ class Worker:
                              opcode=0x1, mask=True)
         except Exception:
             pass
+
+    def report_stats(self):
+        """Push the latest aggregate counts to the relay (no-op until polled, or
+        if the relay link is down — the next poll change, or the reconnect
+        re-send in serve_once, will catch it up)."""
+        if self.stats is not None:
+            self.send_relay(dict(self.stats, type="stats"))
 
     def harness_http(self):
         base = self.harness_ws
@@ -544,6 +555,69 @@ class Worker:
         proc.wait()
         self.reply(frm, {"kind": "exit", "code": proc.returncode})
 
+    # ── roster stats (plaintext aggregate counts) ────────────────────────────
+    def stats_loop(self):
+        """Keep one standing harness connection open purely to count projects /
+        sessions / active sessions, and report the three integers to the relay
+        whenever they change. This is the ONLY harness path that isn't E2E — by
+        design, because the relay folds these counts into the public roster. It
+        carries no titles, prompts, or PTY bytes; just the load numbers so the
+        machine list can show 'N projects · N sessions · N active' at a glance.
+        Auto-reconnects with backoff if the harness is down or drops."""
+        backoff = 1.0
+        while True:
+            try:
+                self._poll_stats_once()
+                backoff = 1.0
+            except Exception as e:
+                print(f"[worker {self.machine}] stats link error: {e}", flush=True)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+
+    def _poll_stats_once(self):
+        url = f"{self.harness_ws}/ws?t={quote(self.harness_token)}"
+        sock, rfile, wfile = fleet_ws.client_connect(url)
+        lock = threading.Lock()
+        nproj = nsess = None
+        nactive = 0
+        try:
+            while True:
+                msg = fleet_ws.ws_read_message(rfile)
+                if msg is None:
+                    break
+                kind, data = msg
+                if kind == "close":
+                    break
+                if kind == "ping":
+                    fleet_ws.ws_send(wfile, lock, data, opcode=0xA, mask=True)
+                    continue
+                if kind == "pong" or kind == 0x2:    # ignore keepalives + PTY bytes
+                    continue
+                try:
+                    frame = json.loads(data.decode("utf-8"))
+                except Exception:
+                    continue
+                t = frame.get("type")
+                if t == "projects":
+                    nproj = len(frame.get("projects") or [])
+                elif t == "sessions":
+                    sess = frame.get("sessions") or []
+                    nsess = len(sess)
+                    nactive = sum(1 for s in sess if s.get("busy"))
+                else:
+                    continue
+                if nproj is None or nsess is None:
+                    continue
+                new = {"projects": nproj, "sessions": nsess, "active": nactive}
+                if new != self.stats:
+                    self.stats = new
+                    self.report_stats()
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
     # ── connection loop ──────────────────────────────────────────────────────
     def url(self):
         return (f"{self.relay}/ws?role=worker&machine={quote(self.machine)}"
@@ -553,6 +627,7 @@ class Worker:
         sock, rfile, wfile = fleet_ws.client_connect(self.url())
         self.wfile = wfile
         print(f"[worker {self.machine}] connected to {self.relay}", flush=True)
+        self.report_stats()   # seed the fresh roster entry with our last counts
         try:
             while True:
                 msg = fleet_ws.ws_read_message(rfile)
@@ -586,6 +661,7 @@ class Worker:
                 pass
 
     def run(self):
+        threading.Thread(target=self.stats_loop, daemon=True).start()
         backoff = 1.0
         while True:
             try:

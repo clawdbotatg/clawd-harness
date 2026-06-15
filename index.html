@@ -1135,6 +1135,21 @@ function renderMachines(list) {
       const d = document.createElement('div'); d.className = 'sdesc'; d.textContent = m.host;
       card.appendChild(d);
     }
+    // Aggregate counts the worker reported in plaintext (no titles/content):
+    // N projects · N sessions · N active — an at-a-glance per-machine load.
+    if (m.stats) {
+      const s = m.stats;
+      const cl = document.createElement('div'); cl.className = 'sdesc';
+      cl.append(`${s.projects} project${s.projects === 1 ? '' : 's'} · `
+              + `${s.sessions} session${s.sessions === 1 ? '' : 's'}`);
+      if (s.active > 0) {
+        const a = document.createElement('span');
+        a.textContent = ` · ${s.active} active`;
+        a.style.color = 'var(--ok)';
+        cl.append(a);
+      }
+      card.appendChild(cl);
+    }
     machinesEl.appendChild(card);
   });
   refreshBreadcrumb();
