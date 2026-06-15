@@ -1798,7 +1798,7 @@ function syncComposer() {
   if (id === activeDraftId) return;          // same context — leave the box alone
   saveDraft();                               // stash the outgoing context first
   activeDraftId = id;
-  if (!id) { box.value = ''; return; }       // projects rung — nothing to compose
+  if (!id) { box.value = ''; autosizeBox(); return; }   // projects rung — nothing to compose
   let v = '';
   try {
     v = localStorage.getItem(draftKey(id)) || '';
@@ -1806,6 +1806,7 @@ function syncComposer() {
                                               : (localStorage.getItem(outboxKey(id)) || '');  // session recovers an unconfirmed send
   } catch {}
   box.value = v;
+  autosizeBox();                             // size to the restored draft (or shrink back if empty)
   restoreBoxFocus();                         // if a reload stole focus mid-type, put it back here
 }
 // Desktop-only: grow the textarea (and thus the footer/bottom panel) as lines are
@@ -1833,7 +1834,7 @@ function sendMessage() {
   const text = box.value.trim();
   // `/new` is a console-level command — it spins up a fresh claude session
   // rather than being typed into the current one.
-  if (/^\/new(\s|$)/.test(text)) { box.value = ''; clearDraft(); newSession(); return; }
+  if (/^\/new(\s|$)/.test(text)) { box.value = ''; autosizeBox(); clearDraft(); newSession(); return; }
   const ready = attachments.filter(a => a.path);
   if ((!text && !ready.length) || !ws || ws.readyState !== 1) return;
   // claude reads each path via its Read tool → sees the image
@@ -1844,7 +1845,7 @@ function sendMessage() {
     if (!currentPid) return;
     pendingSendText = full;
     stashPending(text || full);       // survive a reload before the session even exists
-    box.value = ''; clearDraft(); attachments = []; renderChips();
+    box.value = ''; autosizeBox(); clearDraft(); attachments = []; renderChips();
     newSession();                     // focus reply → openSession → queued box shown
     setTimeout(flushPendingSend, 8000);   // fallback if the SessionStart hook never lands
     return;
@@ -1853,7 +1854,7 @@ function sendMessage() {
   stashOutbox(currentCid, text || full);  // hold until claude confirms (UserPromptSubmit) — survives a mid-send restart
   viewBeforeQuestion = null;          // you're acting here on purpose — don't auto-return
   addPending(full, text || ready.map(a => a.name).join(', ') || full);
-  box.value = ''; clearDraft(); attachments = []; renderChips();
+  box.value = ''; autosizeBox(); clearDraft(); attachments = []; renderChips();
 }
 
 box.addEventListener('paste', (e) => {
