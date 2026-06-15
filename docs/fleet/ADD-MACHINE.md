@@ -77,6 +77,46 @@ lsof -nP -iTCP:8787 -sTCP:LISTEN     # should show python on :8787
 The harness writes a token to `.clawd-harness.token`; the worker auto-discovers
 it, so you don't pass it by hand.
 
+### Step 1b — create `.clawd-harness.env` (AI naming + TTS keys)
+
+**Easy to miss, and the usual cause of "session auto-naming / summaries stopped
+working."** The harness reads per-deployment secrets from a **gitignored**
+`.clawd-harness.env` at the repo root. It does **not** come across in the clone
+(by design — it holds keys), so a fresh machine has none and the harness silently
+falls back to dumb first-prompt titles. The boot log says so:
+`note: AI naming off (set BANKR_API_KEY + BANKR_BASE_URL …)`.
+
+Copy it from an existing machine (it's the same secrets everywhere):
+
+```bash
+scp zkllmapi:~/clawd/clawd-harness/.clawd-harness.env ~/clawd/clawd-harness/
+# (or from the laptop / any working harness)
+chmod 600 ~/clawd/clawd-harness/.clawd-harness.env
+```
+
+Or create it by hand — minimum for AI session naming, plus optional ElevenLabs TTS:
+
+```bash
+# AI session naming via the Bankr OpenAI-compatible gateway.
+# BANKR_API=bankr → auth via the X-API-Key header.
+BANKR_API=bankr
+BANKR_BASE_URL=https://llm.bankr.bot/v1
+BANKR_MODEL=qwen3-coder
+BANKR_API_KEY=<bankr-key>
+
+# Optional: ElevenLabs TTS (Flash v2.5). Without it the browser uses the native voice.
+ELEVENLABS_API_KEY=<elevenlabs-key>
+ELEVENLABS_VOICE_ID=<voice-id>
+```
+
+`.clawd-harness.env` is in the harness's `RESTART_FILES`, so **saving it triggers
+a graceful self-restart** (after in-flight turns finish) and the daemon loads the
+keys — no manual restart needed. Verify naming is live:
+
+```bash
+cd ~/clawd/clawd-harness && python3 -c "import server; print('naming on:', bool(server.BANKR_API_KEY and server.BANKR_BASE_URL))"
+```
+
 ## Step 2 — install the worker's one dependency: `cryptography`
 
 The harness and relay are pure stdlib, but the **worker needs
@@ -273,6 +313,11 @@ come up. In order of likelihood:
 That's a harness problem, not fleet. Make sure step 1 worked (`lsof` shows
 `:8787`) and `claude` is logged into a subscription. See the root
 [`CLAUDE.md`](../../CLAUDE.md).
+
+**Session titles are dumb first-prompt strings / auto-naming stopped.**
+The harness is missing `.clawd-harness.env` (or its `BANKR_*` keys) — see
+**step 1b**. Confirm with the boot log (`AI naming off …`) or the one-liner in
+that step. Same file holds the ElevenLabs key, so missing TTS has the same fix.
 
 **`pkill -f worker.py` over SSH kills your shell** (the pattern matches its own
 command line). Use the bracket trick `pkill -f "[w]orker.py"`, or just
