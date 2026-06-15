@@ -46,6 +46,31 @@ import fleet_ws
 
 HERE = Path(__file__).resolve().parent
 
+
+def _load_env_file():
+    """Load KEY=VALUE lines from fleet.env (gitignored) into the env *before* the
+    config below reads it — the same pattern as the harness's .clawd-harness.env.
+    A launchd/systemd daemon doesn't inherit your shell env, so this is how the
+    secret (FLEET_WORKER_TOKEN) plus FLEET_RELAY / HARNESS_WS / FLEET_MACHINE
+    reach both a manual run and the daemon, keeping the token out of the plist.
+    Real environment vars always win (setdefault)."""
+    try:
+        text = (HERE / "fleet.env").read_text()
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, val)
+
+
+_load_env_file()
+
 # The `exec` shell handler is a diagnostic, not part of the product (the harness
 # proxy is). It's the most direct RCE primitive, so it's OFF unless explicitly
 # enabled — even a leaked mobile token then can't get a raw remote shell.

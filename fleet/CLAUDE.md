@@ -136,8 +136,13 @@ Corollary directions baked into the design:
   `exec` only if `FLEET_ALLOW_EXEC=1`, which it isn't in prod).
   The real **harness-proxy worker** runs on a machine that has a harness (e.g.
   the laptop: `FLEET_RELAY=wss://h.atg.link FLEET_TOKEN=… python3 worker.py
-  --machine <id> --harness ws://127.0.0.1:8787`). Not yet daemonized on the
-  laptop — that's the remaining deploy step for always-on phone access.
+  --machine <id> --harness ws://127.0.0.1:8787`). On the laptop it's now
+  **daemonized via launchd** (`./daemon-worker.sh install --host atg`, label
+  `com.clawd.fleet-worker`, RunAtLoad + KeepAlive — the worker companion to the
+  harness's `daemon.sh`) so phone access is always-on across reboots/crashes.
+  Config + the worker token come from a gitignored **`fleet.env`** that
+  `worker.py` self-loads (`_load_env_file`), so the secret stays out of the plist
+  — same pattern as the harness's `.clawd-harness.env`.
 - **Updating prod:** the box keeps a **flat** `~/clawd-fleet/` (scp copy, not a git
   checkout). The box layout is flat, so `index.html`/`favicon.png` sit **next to**
   `relay.py` there (the relay's `_serve_file` checks `HERE/<name>` first, which
