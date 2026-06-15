@@ -121,7 +121,8 @@ RP_ID = os.environ.get("FLEET_RP_ID", "h.atg.link")
 ORIGIN = os.environ.get("FLEET_ORIGIN", "https://" + RP_ID)
 REQUIRE_PASSKEY = (os.environ.get("FLEET_REQUIRE_PASSKEY", "1").lower() not in ("0", "false", "no")) or PASSKEY_ONLY
 SESSION_TTL = int(os.environ.get("FLEET_SESSION_TTL", "86400"))  # passkey session validity (24h)
-PASSKEY_FILE = HERE / ".clawd-fleet.passkeys.json"
+# Configurable so tests/dev never clobber a real worker's provisioned file.
+PASSKEY_FILE = Path(os.environ.get("FLEET_PASSKEY_FILE") or (HERE / ".clawd-fleet.passkeys.json"))
 _passkey_lock = threading.Lock()
 
 

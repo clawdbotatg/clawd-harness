@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -26,7 +27,9 @@ HERE = Path(__file__).resolve().parent
 PORT = "8801"
 RELAY = f"ws://127.0.0.1:{PORT}"
 TOKEN = "smoke-mobile-token"
-STORE = HERE / ".clawd-fleet.passkeys.json"
+# Isolated temp store — NEVER the real fleet/.clawd-fleet.passkeys.json (a live
+# worker uses that path; clobbering it would wipe a provisioned passkey).
+STORE = Path(tempfile.gettempdir()) / "clawd-fleet-test.passkeys.json"
 
 ENV = {
     **os.environ,
@@ -37,6 +40,7 @@ ENV = {
     "FLEET_REQUIRE_PASSKEY": "1",
     "FLEET_RP_ID": "h.atg.link",
     "FLEET_ORIGIN": "https://h.atg.link",
+    "FLEET_PASSKEY_FILE": str(STORE),
 }
 
 

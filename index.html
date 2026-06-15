@@ -810,7 +810,7 @@ async function e2eEnsure(machine) {
   })().catch((e) => {
     ch.status = 'failed';
     if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
-    else meta.textContent = 'secure channel failed';
+    else { meta.textContent = 'secure channel failed: ' + ((e && e.message) || e); console.error('[e2e] handshake failed for', machine, e); }
     throw e;
   });
   return ch.ready;
@@ -875,7 +875,9 @@ function onAuthRequired(m) {
     showPasskey('no passkey set up for this relay — an admin must provision one (see DEPLOY.md)');
     return;
   }
-  doAssertion(m);   // try right away; falls back to a tap if the browser needs a gesture
+  // Show the gnome and let the user tap to scan — a real user gesture, and the
+  // experience they asked for ("what's the safe word?").
+  showPasskey("prove it's you — unlock with your passkey");
 }
 
 async function doAssertion(m) {

@@ -60,7 +60,7 @@ ALLOW_EXEC = os.environ.get("FLEET_ALLOW_EXEC", "").lower() in ("1", "true", "ye
 E2E_REQUIRE = os.environ.get("FLEET_E2E_REQUIRE", "1").lower() not in ("0", "false", "no")
 RP_ID = os.environ.get("FLEET_RP_ID", "h.atg.link")
 ORIGIN = os.environ.get("FLEET_ORIGIN", "https://" + RP_ID)
-PASSKEYS_FILE = HERE / ".clawd-fleet.passkeys.json"
+PASSKEYS_FILE = Path(os.environ.get("FLEET_PASSKEY_FILE") or (HERE / ".clawd-fleet.passkeys.json"))
 WORKER_ID_FILE = HERE / ".fleet.worker_id.json"
 try:
     import e2e as e2emod
@@ -334,7 +334,8 @@ class Worker:
             hs = e2emod.WorkerHandshake(self.identity, self.machine,
                                         self.passkey_verify, self.e2e_seen)
             sh = hs.server_hello(msg)
-        except Exception:
+        except Exception as e:
+            print(f"[worker {self.machine}] E2E hello failed for {frm}: {e}", flush=True)
             return self.reply(frm, {"t": "e2e.err", "error": "hello"})
         with self.e2e_lock:
             self.e2e_hs[frm] = hs
@@ -347,7 +348,8 @@ class Worker:
             return self.reply(frm, {"t": "e2e.err", "error": "no handshake"})
         try:
             done, sess = hs.finish(msg)
-        except Exception:
+        except Exception as e:
+            print(f"[worker {self.machine}] E2E auth failed for {frm}: {e}", flush=True)
             return self.reply(frm, {"t": "e2e.err", "error": "auth"})
         with self.e2e_lock:
             self.e2e_sessions[frm] = sess
