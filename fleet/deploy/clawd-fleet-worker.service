@@ -1,0 +1,15 @@
+[Unit]
+Description=clawd fleet worker (a machine in the fleet)
+After=network.target clawd-fleet-relay.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/clawd-fleet
+EnvironmentFile=/home/ubuntu/clawd-fleet/fleet.env
+ExecStart=/usr/bin/python3 /home/ubuntu/clawd-fleet/worker.py --machine zkllmapi-box --host zkllmapi
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

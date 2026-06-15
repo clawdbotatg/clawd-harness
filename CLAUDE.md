@@ -4,20 +4,23 @@ A web **harness** for driving interactive (subscription-billed) Claude Code
 sessions from a browser. Forked from `clawd-console`. `README.md` is the
 user-facing overview; this file orients an agent working **on** the code.
 
-> **Multi-machine?** See the sibling repo **`clawd-fleet`** (`../clawd-fleet`,
-> `github.com/clawdbotatg/clawd-fleet`). It's an abstraction layer that drives N
-> harnesses (one per machine) from one phone via a public relay. It treats this
-> harness as a black box reached over the WebSocket — **don't add fleet code
-> here** (the one exception: `index.html`, below). The wire contract it depends on
-> is **[`docs/WS-PROTOCOL.md`](docs/WS-PROTOCOL.md)**; keep that doc in sync if you
-> change the WS protocol in `server.py`.
+> **Multi-machine?** The fleet (relay/worker layer that drives N harnesses from
+> one phone via a public relay) now lives **in this repo** under **[`fleet/`](fleet/)**
+> — see **[`fleet/CLAUDE.md`](fleet/CLAUDE.md)**. It was folded in from the former
+> standalone `clawd-fleet` repo (now archived). The **boundary is preserved as a
+> code-discipline rule**: `fleet/` code must never import `server.py` or reach into
+> harness internals — the worker is just another WS client. The wire contract it
+> depends on is **[`docs/WS-PROTOCOL.md`](docs/WS-PROTOCOL.md)**; keep that doc in
+> sync if you change the WS protocol in `server.py`. Fleet deep docs:
+> **[`docs/fleet/`](docs/fleet/)**.
 >
-> **`index.html` is now the *unified* UI shared with clawd-fleet** — mode-aware via
+> **`index.html` is the single, *unified* UI** shared by both modes — mode-aware via
 > `window.__FLEET__`: the harness serves it untouched (direct mode); the fleet relay
-> injects the flag for fleet mode (machines rung + passkey). The fleet keeps a
-> **byte-identical copy**, so after editing this file, sync it
-> (`cp index.html ../clawd-fleet/index.html` + scp to the box — see clawd-fleet's
-> `docs/DEPLOY.md`). The fleet/passkey code here is dormant unless `__FLEET__` is set.
+> (`fleet/relay.py` `_serve_file`) injects the flag for fleet mode (machines rung +
+> passkey). There is now **one copy** (the old cp-to-fleet sync ritual is gone). To
+> change the fleet UI: edit this `index.html`, then `scp` it to the box (see
+> `docs/fleet/DEPLOY.md`). The fleet/passkey code here is dormant unless `__FLEET__`
+> is set.
 
 ## Run / test
 - `python3 server.py` → prints a tokenized URL `http://127.0.0.1:8787/?t=<token>`

@@ -1,0 +1,176 @@
+# clawd-fleet (the `fleet/` layer) — orientation for Claude
+
+The **fleet layer of clawd-harness**: drive N machines (each running a harness)
+from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
+(folded in from the former standalone `clawd-fleet` repo, now archived).
+`README.md` is the user-facing overview; this file orients an agent working
+**on** the code.
+
+> **Current state (2026-06) — read this; some details below predate it.**
+> - **Monorepo:** this is now `clawd-harness/fleet/`, not a separate repo. The
+>   shared `index.html`/`favicon.png` live one level up at the harness root; the
+>   relay's `_serve_file` serves the **first existing** of `HERE/<name>` (flat box
+>   layout) then `HERE.parent/<name>` (monorepo). All paths below are relative to
+>   `fleet/` unless noted.
+> - **Auth is now two-factor:** the mobile token (factor 1) **+ a passkey**
+>   (WebAuthn, factor 2), verified server-side in pure stdlib (`webauthn.py`).
+>   The relay withholds the roster until `{type:auth}` proves a passkey assertion;
+>   a success mints a 24h session. Enroll is gated by token + `FLEET_ALLOW_ENROLL`.
+>   Config: `FLEET_RP_ID`, `FLEET_ORIGIN`, `FLEET_REQUIRE_PASSKEY`.
+> - **Live at `wss://relay.atg.link`** (its own subdomain → the box), not
+>   `h.atg.link`. The relay serves the thin `index.html` there.
+> - **One UI, two modes.** `index.html` (at the harness root) is **unified and
+>   mode-aware** via `window.__FLEET__`: the harness serves it untouched → direct
+>   mode; the relay injects the flag (`relay.py` `_serve_file`) → fleet mode
+>   (machines rung + passkey). There is **one copy** now (the old cp-to-fleet
+>   ritual is gone) — edit the harness root `index.html`, then `scp` it to the box.
+>   **See `../docs/fleet/DEPLOY.md`.** No build, no React (that rebuild was
+>   reverted — archived on `archive/react-scaffold-eth`).
+> - New files: `webauthn.py`, `test_webauthn.py`, `test_relay_passkey.py`.
+
+## The one principle that must not regress
+**The `fleet/` layer never modifies or imports the harness.** The harness
+(`../server.py`) is a black box reached over its own localhost WebSocket. If you
+find yourself wanting to edit `server.py` to make the fleet work, stop — the
+right fix almost always lives in the worker (a *client* of the harness) or the
+relay. Even though they now share a repo, that boundary is the whole point: keep
+`fleet/` import-free of harness internals.
+
+Corollary directions baked into the design:
+- **Everyone dials out to the relay.** Workers and mobiles never accept inbound
+  connections (machines sit behind NAT). The relay is the only public box.
+- **The worker is just another harness client.** It speaks the harness's
+  protocol like a browser does, but forwards frames to the relay. This is now
+  live: `worker.py` opens one harness connection per remote viewer and pumps
+  frames both ways (the prototype `ping`/`exec` handlers remain as diagnostics).
+- **The mobile reuses the harness protocol verbatim** below a new top rung.
+  Harness stack: `projects → sessions → transcript → tty`. Fleet adds
+  `machines` on top; everything below is unchanged. This is now live —
+  `index.html` is a fork of the harness's page (see Architecture).
+
+## Architecture
+- **relay.py** — public hub. Holds an outbound WS from each worker
+  (`machine_id → Conn`) and each mobile (`mobile_id → Conn`); routes by id,
+  broadcasts the roster on join/leave, pings to keep NAT mappings warm. Routes
+  both JSON control frames **and binary PTY frames** (opcode `0x2`): a worker's
+  binary frame is `[1-byte len][mobileId][PTY bytes]` → re-tagged to the mobile
+  as `[1-byte len][machineId][PTY bytes]`. On a mobile disconnect it sends every
+  worker `{type:"mobileGone", mobile}` so they can drop that viewer's harness
+  link. Also **serves the mobile UI**: `GET /` → `index.html`, `GET /favicon.png`
+  (so the page and its WS share one origin — `https://h.atg.link/?t=<TOKEN>`).
+  Pure stdlib `BaseHTTPRequestHandler` + the framing in `fleet_ws.py`. Runs on
+  AWS, bound to `127.0.0.1`, TLS terminated by nginx in front.
+- **worker.py** — per-machine agent. Dials the relay, registers a stable
+  `machine` id, auto-reconnects with backoff. Two task families share the link,
+  disambiguated by field: **`msg.type`** = a harness control frame → proxied
+  into a per-viewer **`HarnessLink`** (a client WS to `ws://127.0.0.1:8787`,
+  opened lazily on first frame, torn down on `mobileGone`); **`msg.kind`** =
+  the prototype `ping`/`exec` diagnostics. Harness→relay: JSON frames wrapped as
+  `{type:"reply",to,msg}`, binary PTY as a length-prefixed `0x2` frame. Config:
+  `--harness` / `HARNESS_WS` (default `ws://127.0.0.1:8787`) and `--harness-token`
+  / `HARNESS_TOKEN` (auto-discovered from `.clawd-harness.token`).
+- **fleet_ws.py** — RFC 6455 helpers. `ws_send`/`ws_read_message` (shared, both
+  handle text `0x1` + binary `0x2`) and `client_connect` (dials `ws://`/`wss://`
+  — clients MUST mask their frames; the relay/server MUST NOT). TLS is
+  client-side only; the relay speaks plain ws.
+- **../index.html** (the harness root) — the **one** mode-aware UI. In fleet mode
+  (`window.__FLEET__`, injected by the relay) the same page runs the relay adapter:
+  it dials the relay as a mobile (`?role=mobile`), wraps every outgoing harness
+  control frame as `{type:"toMachine",machine,msg}` via `hsend()`, unwraps
+  incoming `machineMsg`/binary by machine (`handleRelay`/`handleBinary`), and adds
+  a **`machines`** rung above `projects → sessions → transcript → tty` (roster
+  cards, `selectMachine`, machine-prefixed hash `#/m/<id>/p/<pid>/s/<cid>`).
+  Everything below the rung is the harness UI unchanged. **The relay serves it**
+  at `GET /` (so the page + WS share one origin). It's the same file the harness
+  serves directly — no fork, no copy; the adapter is gated on `FLEET` and
+  localized (search `hsend`, `currentMachine`, `renderMachines`). Known gaps vs.
+  direct mode: image upload + server-side TTS hit harness-only endpoints
+  (`/upload`, `/tts`, `/config`) that the relay doesn't proxy — they degrade
+  gracefully (browser TTS still works).
+- **fleet_cli.py** — terminal mobile stand-in (prototype `ping`/`exec`); the
+  real UI is now `index.html`.
+- **fleet_smoke.py** — relay + 2 workers + scripted mobile; asserts the
+  prototype `ping`/`exec`/fan-out loop. Run after touching routing.
+- **fleet_proxy_smoke.py** — the harness-proxy loop: relay + worker + an embedded
+  **mock harness** (speaks WS-PROTOCOL.md, no real `claude` needed). Asserts
+  `list`/`subscribe`/`send`→`Stop` and a **binary PTY frame tunneled back**. Run
+  after touching the worker proxy or relay binary routing.
+
+## Run / test
+- Local loop: `python3 relay.py` + `python3 worker.py --machine X` + `python3 fleet_cli.py`.
+- `python3 fleet_smoke.py` — prototype loop assertion (exits non-zero on failure).
+- `python3 fleet_proxy_smoke.py` — harness-proxy loop assertion (mock harness).
+- Env: `FLEET_MOBILE_TOKEN` + `FLEET_WORKER_TOKEN` (auth; both fall back to
+  `FLEET_TOKEN`, then `.clawd-fleet.token`), `FLEET_WORKER_ALLOW` (csv machine
+  allowlist), `FLEET_ALLOW_EXEC=1` (enable the `exec` diagnostic, off by default),
+  `FLEET_RELAY` (worker→relay url), `FLEET_PORT`, `FLEET_BIND`, `FLEET_MACHINE`,
+  plus `HARNESS_WS` / `HARNESS_TOKEN` (worker → local harness).
+
+## Live deployment (the AWS box)
+- Host: `ssh zkllmapi` (Ubuntu, public IP 174.129.67.164). **Shared, in
+  production** — also runs conclave.larv.ai, media streaming (mediamtx),
+  backend.zkllmapi.com. Touch nginx carefully; only add vhosts, never edit
+  others'. Always `nginx -t` before reload.
+- Relay: `wss://h.atg.link` → nginx → `127.0.0.1:8788`. Cert via certbot
+  (auto-renew). Code at `~/clawd-fleet` on the box.
+- Services: `clawd-fleet-relay` and `clawd-fleet-worker` (systemd, enabled,
+  auto-restart). `journalctl -u clawd-fleet-relay -f` to watch. Units +
+  `setup_tls.sh` are versioned in `deploy/`.
+- The box's `clawd-fleet-worker` is a **prototype/diagnostic** worker
+  (`--machine zkllmapi-box`, no harness on the box) — it answers `ping` (and
+  `exec` only if `FLEET_ALLOW_EXEC=1`, which it isn't in prod).
+  The real **harness-proxy worker** runs on a machine that has a harness (e.g.
+  the laptop: `FLEET_RELAY=wss://h.atg.link FLEET_TOKEN=… python3 worker.py
+  --machine <id> --harness ws://127.0.0.1:8787`). Not yet daemonized on the
+  laptop — that's the remaining deploy step for always-on phone access.
+- **Updating prod:** the box keeps a **flat** `~/clawd-fleet/` (scp copy, not a git
+  checkout). The box layout is flat, so `index.html`/`favicon.png` sit **next to**
+  `relay.py` there (the relay's `_serve_file` checks `HERE/<name>` first, which
+  covers this). To ship a change, scp the fleet files from `fleet/` plus the shared
+  UI from the harness root:
+  `scp fleet/relay.py fleet/worker.py fleet/fleet_ws.py fleet/webauthn.py index.html favicon.png zkllmapi:~/clawd-fleet/`
+  then `ssh zkllmapi 'sudo systemctl restart clawd-fleet-relay clawd-fleet-worker'`.
+  Don't `mv` the live dir for a clone unless the clone is ready — services hold the
+  old inode but a later restart needs the path. See `../docs/fleet/RUNBOOK.md`.
+- **gotcha:** `pkill -f "worker.py"` over SSH matches its own command line and
+  kills the shell (exit 255). Use the bracket trick: `pkill -f "[w]orker.py"`.
+
+## Deep docs
+- **`../docs/fleet/ARCHITECTURE.md`** — design, rationale, decision log, traps.
+- **`../docs/fleet/HARNESS-PROXY.md`** — the proxy-worker design (✅ shipped).
+- **`../docs/fleet/RUNBOOK.md`** — operating the live box.
+- **`../docs/WS-PROTOCOL.md`** — the harness contract to bridge.
+
+## Roadmap (the reason this layer exists)
+1. ~~**Harness-proxy worker**~~ — ✅ done. Worker connects to the local harness as
+   a client, one connection per remote viewer, pumps JSON metadata + binary PTY
+   to/from the relay. Verified live through `wss://h.atg.link` against a real
+   laptop harness (roster, `list`, `new`, `subscribe`, 256KB PTY snapshot, live
+   hooks all tunneled).
+2. ~~**Relay tunnels binary frames**~~ — ✅ done. Length-prefixed opcode `0x2`
+   routing, per machine + per client (see relay.py).
+3. ~~**Mobile UI**~~ — ✅ done. `index.html` (a fork of the harness page + a relay
+   adapter) adds a `machines` rung above the unchanged harness stack; the relay
+   serves it. Verified live on `https://h.atg.link`: roster, drilling into a real
+   machine's projects/sessions, live terminal (binary PTY) + transcript + hooks,
+   machine-prefixed hash routing — all over TLS. Image upload / server TTS are the
+   known gaps (harness-only endpoints, not proxied).
+4. ~~**Auth hardening**~~ — ✅ done. Split secrets: `FLEET_MOBILE_TOKEN` (the
+   user's URL credential) vs `FLEET_WORKER_TOKEN` (authorizes a machine to
+   register) — both fall back to `FLEET_TOKEN` for single-token setups. Worker
+   **allowlist** (`FLEET_WORKER_ALLOW`, csv of machine ids). The `exec` shell
+   handler is **off by default** (gated behind `FLEET_ALLOW_EXEC=1` on the
+   worker) — the product path is the harness proxy. Relay never logs tokens.
+   Verified live: old token 403'd, mobile token can't register a worker,
+   non-allowlisted worker rejected, `exec` disabled. The mobile token no longer
+   lingers in the URL — `index.html` migrates `?t=` into localStorage on load and
+   strips it (replaceState); no-token shows a paste-the-token screen; the QR
+   re-appends it for pairing. **Remaining debt:** the box is still scp-deployed
+   (private repo → no anon clone; a deploy key is the fix).
+
+## Conventions
+- Git identity here (under `~/clawd/`): **clawdbotatg** /
+  `clawd@buidlguidl.com`, over **HTTPS**. Remote: `clawdbotatg/clawd-fleet`.
+- **Never commit** `.clawd-fleet.token`, `fleet.env`, `.clawd-fleet.machine`,
+  `*.log` (gitignored). Scan diffs for secrets before committing.
+- Pure Python stdlib, no deps — keep it that way (matches clawd-harness).

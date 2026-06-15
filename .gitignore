@@ -15,6 +15,13 @@
 # projects = cloned/created git repos we drive — never enter the harness repo
 projects/
 
+# fleet/ runtime state (relay/worker layer — see fleet/CLAUDE.md)
+fleet/.clawd-fleet.token
+fleet/.clawd-fleet.machine
+fleet/.clawd-fleet.passkeys.json
+fleet/fleet.env
+fleet/*.log
+
 # os / editor cruft
 .DS_Store
 __pycache__/
