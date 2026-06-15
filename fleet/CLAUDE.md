@@ -128,12 +128,14 @@ Corollary directions baked into the design:
   others'. Always `nginx -t` before reload.
 - Relay: `wss://h.atg.link` → nginx → `127.0.0.1:8788`. Cert via certbot
   (auto-renew). Code at `~/clawd-fleet` on the box.
-- Services: `clawd-fleet-relay` and `clawd-fleet-worker` (systemd, enabled,
-  auto-restart). `journalctl -u clawd-fleet-relay -f` to watch. Units +
+- Services: `clawd-fleet-relay` (systemd, enabled, auto-restart).
+  `journalctl -u clawd-fleet-relay -f` to watch. The unit +
   `setup_tls.sh` are versioned in `deploy/`.
-- The box's `clawd-fleet-worker` is a **prototype/diagnostic** worker
-  (`--machine zkllmapi-box`, no harness on the box) — it answers `ping` (and
-  `exec` only if `FLEET_ALLOW_EXEC=1`, which it isn't in prod).
+- **No worker runs on the box.** It used to host a diagnostic-only
+  `clawd-fleet-worker` (`--machine zkllmapi-box`, no harness behind it) that
+  answered `ping`/`exec` but showed up on the roster as a dead entry with no
+  projects — **removed 2026-06** (service disabled + unit deleted; its deploy
+  unit dropped from `deploy/`). The box is **relay-only**.
   The real **harness-proxy worker** runs on a machine that has a harness (e.g.
   the laptop: `FLEET_RELAY=wss://h.atg.link FLEET_TOKEN=… python3 worker.py
   --machine <id> --harness ws://127.0.0.1:8787`). On the laptop it's now
@@ -149,7 +151,7 @@ Corollary directions baked into the design:
   covers this). To ship a change, scp the fleet files from `fleet/` plus the shared
   UI from the harness root:
   `scp fleet/relay.py fleet/worker.py fleet/fleet_ws.py fleet/webauthn.py index.html favicon.png zkllmapi:~/clawd-fleet/`
-  then `ssh zkllmapi 'sudo systemctl restart clawd-fleet-relay clawd-fleet-worker'`.
+  then `ssh zkllmapi 'sudo systemctl restart clawd-fleet-relay'`.
   Don't `mv` the live dir for a clone unless the clone is ready — services hold the
   old inode but a later restart needs the path. See `../docs/fleet/RUNBOOK.md`.
 - **gotcha:** `pkill -f "worker.py"` over SSH matches its own command line and
