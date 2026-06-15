@@ -33,6 +33,11 @@ def main():
     wsess = e2e.Session(ks, "worker")
     py_w2m_record = wsess.seal(e2e.KIND_JSON, b"hello from the worker")
 
+    # Resume keys from a fixed master+rn — guards the rkey/riv label strings.
+    resume_master = bytes((i * 17) & 0xFF for i in range(32))
+    resume_rn = bytes((i * 19) & 0xFF for i in range(32))
+    rk_py = e2e.resume_keys(resume_master, resume_rn)
+
     # ECDSA: Python signs, Node (WebCrypto) verifies.
     idp = e2e.gen_ec()
     ik_w_sig = e2e.pub_raw(idp.public_key())
@@ -46,6 +51,7 @@ def main():
         "py_w2m_record": py_w2m_record.hex(),
         "js_seal_plain": "hello from the mobile",
         "ik_w_sig": ik_w_sig.hex(), "sig": sig.hex(), "sig_msg": sig_msg.hex(),
+        "resume_master": resume_master.hex(), "resume_rn": resume_rn.hex(),
     }
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
@@ -64,12 +70,19 @@ def main():
     fails = []
 
     # 1) key schedule must match exactly
-    for k in ("Th", "k_m2w", "k_w2m", "iv_m2w", "iv_w2m", "kc_m", "kc_w", "webauthn_challenge"):
+    for k in ("Th", "k_m2w", "k_w2m", "iv_m2w", "iv_w2m", "kc_m", "kc_w",
+              "webauthn_challenge", "resume_master", "resume_id"):
         jk = "challenge" if k == "webauthn_challenge" else k
         if js["ks"][jk] != ks[k].hex():
             fails.append(f"key schedule {k}: py={ks[k].hex()} js={js['ks'][jk]}")
     if not fails:
-        print("  ✓ key schedule identical (Th, keys, ivs, confirm keys, challenge)")
+        print("  ✓ key schedule identical (Th, keys, ivs, confirm, challenge, resume)")
+
+    # 1b) resume keys must match exactly (rkey/riv labels)
+    if all(js["rk"][k] == rk_py[k].hex() for k in ("k_m2w", "k_w2m", "iv_m2w", "iv_w2m")):
+        print("  ✓ resume keys identical (rkey/riv labels match)")
+    else:
+        fails.append(f"resume keys mismatch: py={ {k: rk_py[k].hex() for k in rk_py} } js={js['rk']}")
 
     # 2) JS opened the Python worker->mobile record
     if js["opened"]["kind"] != e2e.KIND_JSON or js["opened"]["payload"] != "hello from the worker":

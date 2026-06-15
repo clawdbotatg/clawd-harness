@@ -22,7 +22,11 @@ const xh = (u) => Buffer.from(u).toString('hex');
 
   const ks = await T.keySchedule(hx(v.Z), hx(v.mid), hx(v.epk_m), hx(v.n_m), hx(v.epk_w), hx(v.n_w), hx(v.ik_w));
   const ksOut = {};
-  for (const k of ['Th', 'k_m2w', 'k_w2m', 'iv_m2w', 'iv_w2m', 'kc_m', 'kc_w', 'challenge']) ksOut[k] = xh(ks[k]);
+  for (const k of ['Th', 'k_m2w', 'k_w2m', 'iv_m2w', 'iv_w2m', 'kc_m', 'kc_w', 'challenge', 'resume_master', 'resume_id']) ksOut[k] = xh(ks[k]);
+
+  // resume keys from a fixed master+rn (label-mismatch guard)
+  const rk = await T.resumeKeyset(hx(v.resume_master), hx(v.resume_rn));
+  const rkOut = {}; for (const k of ['k_m2w', 'k_w2m', 'iv_m2w', 'iv_w2m']) rkOut[k] = xh(rk[k]);
 
   const keys = { k_m2w: hx(v.keys.k_m2w), k_w2m: hx(v.keys.k_w2m), iv_m2w: hx(v.keys.iv_m2w), iv_w2m: hx(v.keys.iv_w2m) };
   const sess = await new T.Session(keys).init();
@@ -33,6 +37,7 @@ const xh = (u) => Buffer.from(u).toString('hex');
 
   process.stdout.write(JSON.stringify({
     ks: ksOut,
+    rk: rkOut,
     opened: { kind: opened.kind, payload: Buffer.from(opened.payload).toString('utf8') },
     sealed: xh(sealed),
     sigOk,

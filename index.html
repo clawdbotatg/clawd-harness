@@ -609,7 +609,7 @@ function handleRelay(m) {
   if (m.type === 'machines') { hidePasskey(); renderMachines(m.machines || []); return; }
   if (m.type === 'machineMsg') {
     const msg = m.msg || {};
-    if (msg.t === 'e2e.shello' || msg.t === 'e2e.done' || msg.t === 'e2e.err') { e2eOnCtl(m.machine, msg); return; }
+    if (msg.t === 'e2e.shello' || msg.t === 'e2e.resumed' || msg.t === 'e2e.done' || msg.t === 'e2e.err') { e2eOnCtl(m.machine, msg); return; }
     if (msg.t === 'e2e.rec') { e2eOnRecord(m.machine, b64uDec(msg.r)); return; }
     return;   // fail-closed: never act on a plaintext harness frame from a machine
   }
@@ -668,8 +668,21 @@ const E2E = (() => {
       kc_m: await exp('fleet-e2e/1 confirm-m'),
       kc_w: await exp('fleet-e2e/1 confirm-w'),
       challenge: await sha256(concat(te.encode('fleet-e2e/1 webauthn-challenge'), Th)),
+      resume_master: await exp('fleet-e2e/1 resume-master'),
+      resume_id: (await exp('fleet-e2e/1 resume-id')).slice(0, 16),
     };
   }
+
+  // Resumption (§7): derive fresh keys from the stored master + the worker's rn.
+  async function resumeKeyset(master, rn) {
+    const k = async (label, len = 32) => (await hkdf(rn, master, te.encode(label), 32)).slice(0, len);
+    return {
+      k_m2w: await k('fleet-e2e/1 rkey m2w'), k_w2m: await k('fleet-e2e/1 rkey w2m'),
+      iv_m2w: await k('fleet-e2e/1 riv m2w', 4), iv_w2m: await k('fleet-e2e/1 riv w2m', 4),
+    };
+  }
+  async function resumeSession(master, rn) { return new Session(await resumeKeyset(master, rn)).init(); }
+  const resumeConfirm = (master, rn) => hmac(master, concat(te.encode('fleet-e2e/1 resume-confirm'), rn));
 
   // An open channel: directional AES-GCM keys + monotonic sequence. seal/open are
   // serialized by the caller (sendChain/recvChain) so sequence order is preserved.
@@ -740,6 +753,7 @@ const E2E = (() => {
         return new Session(keys).init();
       },
       fingerprint() { return E2E._fp(ikW); },
+      resumeMaterial() { return { id: b64uEnc(keys.resume_id), master: b64uEnc(keys.resume_master) }; },
     };
   }
 
@@ -749,8 +763,8 @@ const E2E = (() => {
     return b32.match(/.{1,5}/g).join(' ');
   }
 
-  return { client, KIND_JSON, KIND_BIN, _fp, _eq: eq,
-    _test: { keySchedule, Session, lp, sha256, hmac, hkdf, concat, u64, rd64, verifySig } };
+  return { client, resumeSession, resumeConfirm, KIND_JSON, KIND_BIN, _fp, _eq: eq,
+    _test: { keySchedule, Session, lp, sha256, hmac, hkdf, concat, u64, rd64, verifySig, resumeKeyset } };
 })();
 // [e2e-core-end]
 
@@ -763,9 +777,19 @@ const e2eChans = {};   // machine -> { status, session, queue, sendChain, recvCh
 function e2eDeferred() { let r, j; const p = new Promise((res, rej) => { r = res; j = rej; }); p.resolve = r; p.reject = j; return p; }
 function e2ePin(m) { try { return localStorage.getItem('cc_e2e_pin_' + m); } catch { return null; } }
 function e2eSetPin(m, b) { try { localStorage.setItem('cc_e2e_pin_' + m, b); } catch {} }
+// Resumption material (per machine): lets a reload re-attach with NO passkey,
+// within the worker's hard TTL. The master is key material on disk for ≤ this
+// window — the convenience/secrecy trade (a malicious relay still can't read it).
+const RESUME_TTL_MS = 60 * 60 * 1000;
+function e2eLoadResume(m) { try { const s = JSON.parse(localStorage.getItem('cc_e2e_rs_' + m) || 'null'); return (s && s.exp > Date.now()) ? s : null; } catch { return null; } }
+function e2eSaveResume(m, id, master) { try { localStorage.setItem('cc_e2e_rs_' + m, JSON.stringify({ id, master, exp: Date.now() + RESUME_TTL_MS })); } catch {} }
+function e2eClearResume(m) { try { localStorage.removeItem('cc_e2e_rs_' + m); } catch {} }
 
-// Acquire a channel-bound passkey assertion. Tries immediately (often still inside
-// the machine-tap gesture); on a gesture/cancel error, surfaces a tap-to-unlock.
+// Reveal the gnome first, then prompt for the passkey. We let the modal paint for
+// REVEAL_MS so you actually SEE "what's the safe word?" before the OS sheet, then
+// auto-fire (works on desktop / while the tap activation is fresh). If the browser
+// needs an explicit gesture (iOS), the modal stays and the tap fires it.
+const REVEAL_MS = 350;
 function e2eGetAssertion(machine, challengeBytes) {
   const req = lastAuthReq || {};
   const get = () => navigator.credentials.get({ publicKey: {
@@ -774,11 +798,20 @@ function e2eGetAssertion(machine, challengeBytes) {
     userVerification: 'required', timeout: 60000,
   } }).then(a => ({ credentialId: b64uEnc(a.rawId), clientDataJSON: b64uEnc(a.response.clientDataJSON),
     authenticatorData: b64uEnc(a.response.authenticatorData), signature: b64uEnc(a.response.signature) }));
-  return get().catch(() => new Promise((resolve, reject) => {
-    showPasskey('unlock ' + machine + ' with your passkey', 'auth');
+  return new Promise((resolve) => {
+    const el = document.getElementById('passkey');
+    document.getElementById('passkeysub').textContent = 'unlock ' + machine + ' — whisper the safe word';
     const btn = document.getElementById('passkeybtn');
-    btn.onclick = () => { document.getElementById('passkey').hidden = true; get().then(resolve, reject); };
-  }));
+    btn.textContent = 'whisper the safe word 🔒';
+    let firing = false;
+    const fire = () => { if (firing) return; firing = true; meta.textContent = 'passkey…';
+      get().then(a => { el.hidden = true; resolve(a); })
+           .catch(() => { firing = false; meta.textContent = ''; });   // gesture needed → tap fires it
+    };
+    btn.onclick = fire;
+    el.hidden = false;
+    setTimeout(fire, REVEAL_MS);
+  });
 }
 
 async function e2eEnsure(machine) {
@@ -786,22 +819,42 @@ async function e2eEnsure(machine) {
   if (cur && cur.status === 'open') return cur;
   if (cur && cur.status === 'handshaking') return cur.ready;
   const ch = e2eChans[machine] = { status: 'handshaking', session: null, queue: [],
-    sendChain: Promise.resolve(), recvChain: Promise.resolve(), dSH: e2eDeferred(), dSD: e2eDeferred() };
+    sendChain: Promise.resolve(), recvChain: Promise.resolve(),
+    dSH: e2eDeferred(), dSD: e2eDeferred(), dRes: e2eDeferred() };
   ch.ready = (async () => {
+    // 1) Silent resume (no passkey) if we have unexpired material.
+    const rs = e2eLoadResume(machine);
+    if (rs) {
+      try {
+        meta.textContent = 'resuming ' + machine + '…';
+        e2eSendCtl(machine, { t: 'e2e.resume', id: rs.id });
+        const r = await ch.dRes;                                  // {rn, cf}
+        const master = b64uDec(rs.master), rn = b64uDec(r.rn);
+        if (!E2E._eq(await E2E.resumeConfirm(master, rn), b64uDec(r.cf))) throw new Error('resume-cf');
+        ch.session = await E2E.resumeSession(master, rn);
+        ch.status = 'open'; meta.textContent = '';
+        const q = ch.queue; ch.queue = [];
+        for (const fr of q) e2eSendFrame(machine, fr);
+        return ch;
+      } catch (e) {                                               // expired/dropped → re-handshake
+        e2eClearResume(machine); ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred();
+      }
+    }
+    // 2) Full handshake (passkey via the gnome modal).
     const pinB64 = e2ePin(machine);
     const cli = E2E.client(machine, pinB64 ? b64uDec(pinB64) : null);
     meta.textContent = 'securing ' + machine + '…';
     e2eSendCtl(machine, await cli.hello());
     const sh = await ch.dSH;                              // ServerHello (worker-signed)
     const { challenge, ikW, build } = await cli.auth(sh); // verify sig + pin, derive keys
-    const ikB64 = b64uEnc(ikW);
-    if (!pinB64) { e2eSetPin(machine, ikB64); ch.firstPin = true; }   // TOFU
+    if (!pinB64) { e2eSetPin(machine, b64uEnc(ikW)); ch.firstPin = true; }   // TOFU
     const assertion = await e2eGetAssertion(machine, challenge);      // Face ID, channel-bound
     hidePasskey();
     e2eSendCtl(machine, await build(assertion));          // ClientAuth
     const sd = await ch.dSD;                              // ServerDone (key confirmation)
     ch.session = await cli.done(sd);
     ch.fp = await cli.fingerprint();
+    e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);  // no-passkey reloads
     ch.status = 'open';
     meta.textContent = ch.firstPin ? ('🔒 pinned · ' + ch.fp) : '';
     const q = ch.queue; ch.queue = [];
@@ -832,8 +885,9 @@ function e2eOnCtl(machine, msg) {
   const ch = e2eChans[machine];
   if (!ch) return;
   if (msg.t === 'e2e.shello') ch.dSH.resolve(msg);
+  else if (msg.t === 'e2e.resumed') ch.dRes.resolve(msg);
   else if (msg.t === 'e2e.done') ch.dSD.resolve(msg);
-  else if (msg.t === 'e2e.err') { const e = new Error(msg.error || 'worker error'); ch.dSH.reject(e); ch.dSD.reject(e); if (ch.status !== 'open') ch.status = 'failed'; }
+  else if (msg.t === 'e2e.err') { const e = new Error(msg.error || 'worker error'); ch.dRes.reject(e); ch.dSH.reject(e); ch.dSD.reject(e); if (ch.status !== 'open') ch.status = 'failed'; }
 }
 
 // Decrypt a record (from the JSON path or the binary PTY path) in seq order.
@@ -878,10 +932,12 @@ function onAuthRequired(m) {
   // Show the gnome and let the user tap to scan — a real user gesture, and the
   // experience they asked for ("what's the safe word?").
   showPasskey("prove it's you — unlock with your passkey");
+  setTimeout(() => doAssertion(m), REVEAL_MS);   // reveal the gnome, then auto-try (tap is the fallback)
 }
 
 async function doAssertion(m) {
-  if (!m) return;
+  if (!m || doAssertion._busy) return;
+  doAssertion._busy = true;
   meta.textContent = 'passkey…';
   try {
     const a = await navigator.credentials.get({ publicKey: {
@@ -895,6 +951,8 @@ async function doAssertion(m) {
   } catch (e) {
     meta.textContent = '';
     showPasskey('the gnome awaits — whisper the safe word to enter');
+  } finally {
+    doAssertion._busy = false;
   }
 }
 

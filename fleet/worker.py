@@ -235,6 +235,7 @@ class Worker:
         self.e2e_sessions = {}     # mobile_id -> e2e.Session (open channel)
         self.e2e_hs = {}           # mobile_id -> e2e.WorkerHandshake (in progress)
         self.e2e_seen = set()      # used challenges — cross-handshake replay defense
+        self.e2e_resume = {}       # resume_id -> {master, hard} (no-passkey re-attach within TTL)
         self.e2e_lock = threading.Lock()
         self.identity = None
         self.passkey_verify = None
@@ -353,8 +354,29 @@ class Worker:
             return self.reply(frm, {"t": "e2e.err", "error": "auth"})
         with self.e2e_lock:
             self.e2e_sessions[frm] = sess
+            self.e2e_resume[e2emod.b64u(hs.keys["resume_id"])] = {
+                "master": hs.keys["resume_master"], "hard": sess.hard_deadline}
         print(f"[worker {self.machine}] E2E channel open for {frm}", flush=True)
         self.reply(frm, dict(done, t="e2e.done"))
+
+    def _e2e_resume(self, frm, msg):
+        if not (HAVE_E2E and self.identity):
+            return self.reply(frm, {"t": "e2e.err", "error": "e2e unavailable"})
+        with self.e2e_lock:
+            ent = self.e2e_resume.get(msg.get("id", ""))
+            if ent and time.time() > ent["hard"]:
+                self.e2e_resume.pop(msg.get("id", ""), None)
+                ent = None
+        if not ent:
+            return self.reply(frm, {"t": "e2e.err", "error": "resume"})
+        rn = os.urandom(32)
+        sess = e2emod.Session(e2emod.resume_keys(ent["master"], rn), "worker")
+        sess.hard_deadline = ent["hard"]   # resume never extends the hard ceiling
+        with self.e2e_lock:
+            self.e2e_sessions[frm] = sess
+        print(f"[worker {self.machine}] E2E channel resumed for {frm}", flush=True)
+        self.reply(frm, {"t": "e2e.resumed", "rn": e2emod.b64u(rn),
+                         "cf": e2emod.b64u(e2emod.resume_confirm(ent["master"], rn))})
 
     def _e2e_rec(self, frm, msg):
         sess = self.e2e_sessions.get(frm)
@@ -418,6 +440,8 @@ class Worker:
             return self._e2e_hello(frm, msg)
         if t == "e2e.auth":
             return self._e2e_auth(frm, msg)
+        if t == "e2e.resume":
+            return self._e2e_resume(frm, msg)
         if t == "e2e.rec":
             return self._e2e_rec(frm, msg)
         # Harness-proxy path: a harness control frame (has a `type`). When E2E is

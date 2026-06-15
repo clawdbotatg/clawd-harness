@@ -153,11 +153,34 @@ def key_schedule(Z, mid, epk_m, n_m, epk_w, n_w, ik_w):
         "kc_m": exp(b"fleet-e2e/1 confirm-m"),
         "kc_w": exp(b"fleet-e2e/1 confirm-w"),
         "webauthn_challenge": sha256(b"fleet-e2e/1 webauthn-challenge" + Th),
+        # Resumption: a master secret + opaque id both sides derive. Lets a
+        # reconnecting mobile re-attach within the TTL without a fresh passkey
+        # (§7). The master never crosses the wire; the relay can't derive keys.
+        "resume_master": exp(b"fleet-e2e/1 resume-master"),
+        "resume_id": exp(b"fleet-e2e/1 resume-id")[:16],
     }
 
 
 def _confirm(kc, tag):
     return hmac.new(kc, tag, hashlib.sha256).digest()
+
+
+# ── resumption (§7): fresh per-resume keys from the master + a worker nonce ───
+def resume_keys(resume_master, rn):
+    """Derive a fresh directional key set for a resumed session. A new `rn` each
+    resume → fresh keys → seq restarts at 0 safely (no nonce reuse)."""
+    prk = hkdf_extract(rn, resume_master)
+    return {
+        "k_m2w": hkdf_expand(prk, b"fleet-e2e/1 rkey m2w"),
+        "k_w2m": hkdf_expand(prk, b"fleet-e2e/1 rkey w2m"),
+        "iv_m2w": hkdf_expand(prk, b"fleet-e2e/1 riv m2w")[:4],
+        "iv_w2m": hkdf_expand(prk, b"fleet-e2e/1 riv w2m")[:4],
+    }
+
+
+def resume_confirm(resume_master, rn):
+    """Worker→mobile proof it holds the same master (so the mobile trusts the rn)."""
+    return hmac.new(resume_master, b"fleet-e2e/1 resume-confirm" + rn, hashlib.sha256).digest()
 
 
 # ── record layer (§6) ────────────────────────────────────────────────────────

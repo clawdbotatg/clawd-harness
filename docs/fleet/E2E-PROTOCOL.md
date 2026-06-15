@@ -249,6 +249,32 @@ The relay logic is unchanged except for routing the new control types — see
 - The worker opens / forwards to its local harness **only** for a viewer with a
   live session. No session ⇒ the worker does nothing (the core requirement).
 
+### 7.1 Resumption (reconnect without a fresh passkey)
+A page reload is a new WebSocket → new relay mobile id → no worker session, which
+would force a passkey on every load. Resumption avoids that **within the existing
+TTL**:
+- The key schedule (§5) also derives `resume_master = Expand("…resume-master" ‖ Th)`
+  and `resume_id = Expand("…resume-id" ‖ Th)[:16]`. Both sides hold them; **neither
+  crosses the wire**, so the relay can't derive resume keys.
+- On a completed handshake the worker stores `resume_id → {resume_master,
+  hard_deadline}`; the mobile stores `{resume_id, resume_master}` in localStorage
+  with an expiry ≤ `MAX_TTL`.
+- **Resume:** mobile → `{t:"e2e.resume", id}`. If the worker has a live, unexpired
+  entry it picks a fresh nonce `rn`, derives **new** session keys
+  `resume_keys(resume_master, rn)` (fresh keys ⇒ seq restarts at 0, no nonce
+  reuse), re-attaches the session to the new mobile id, and replies
+  `{t:"e2e.resumed", rn, cf}` where `cf = HMAC(resume_master, "…resume-confirm" ‖ rn)`.
+  The mobile verifies `cf` (proving the worker holds the same master), derives the
+  same keys, and the channel is live — **no passkey**.
+- The resumed session inherits the **original `hard_deadline`** (resume never
+  extends the 1 h ceiling); idle still slides. After the hard deadline the resume
+  entry is dropped → next connect falls back to a full handshake (passkey).
+- **Tradeoff:** `resume_master` is key material at rest (browser localStorage,
+  worker memory) for ≤ `MAX_TTL` — the convenience/secrecy trade a TLS session
+  ticket makes. A malicious relay still can't read it or derive keys (it only sees
+  `resume_id`/`rn`); replaying a captured `resume_id` yields a session it has no
+  keys for → DoS only, and forces the real mobile to re-auth.
+
 ## 8. Parameters
 
 | Name | Default | Meaning |
