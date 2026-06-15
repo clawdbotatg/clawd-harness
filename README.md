@@ -1,6 +1,6 @@
 # clawd-harness
 
-<p align="center"><img src="logo.png" width="240" alt="clawd-harness" /></p>
+<p align="center"><img src="logo.png" width="240" alt="clawd-harness" /><BR><I>whisper the safe word</I></p>
 
 A web **harness** for driving real, **interactive** Claude Code sessions from a
 browser (desktop or phone) — read their output cleanly, type/dictate/paste-images
