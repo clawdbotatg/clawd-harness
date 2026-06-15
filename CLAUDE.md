@@ -39,6 +39,21 @@ user-facing overview; this file orients an agent working **on** the code.
   Pure Python stdlib; xterm.js + a QR lib load from a CDN.
 - Verify JS edits: extract the `<script>` from index.html and `node --check` it.
   The app has been verified live in Chrome via the **LAN URL** (see stale-cache note).
+- **Watch the UI run yourself — `tools/uiprobe.mjs`.** For any *visual/DOM* bug
+  (textarea sizing, layout, a button that won't repaint) don't reason blind: drive
+  the running app from a **local headless Chromium** and read the real DOM.
+  `cd tools && npm i` once (playwright browsers are already cached on this machine,
+  so it's just `playwright-core`), then
+  `node uiprobe.mjs` (snapshot + screenshot the projects rung) or
+  `node uiprobe.mjs --hash '#/p/self/s/<cid>/tty' --box` (deep-link a session and
+  assert the composer grows on fill + shrinks on clear — prints `{resting,tall,cleared}`,
+  exit-codes for a verify flow; it clears the box rather than sending, so no real
+  message hits a live session). **Why this and not the `claude-in-chrome` MCP
+  browser:** that browser is *remote* (a cloud Chrome on another network) and
+  **cannot reach `127.0.0.1:8787`** — every navigate fails `ERR_CONNECTION_REFUSED`.
+  A process launched from the Bash tool is on *this* machine (same as `server.py`),
+  so it can. This is the loop that turns "guess a fix, commit, ask the human to
+  eyeball it" into "run it, read the number."
 
 ## Architecture (one server, multi-project, multi-session)
 - **server.py** — a `SessionManager` owns N `Project`s and N `ClaudeSession`s.

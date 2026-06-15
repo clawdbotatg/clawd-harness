@@ -168,6 +168,24 @@ python3 smoke_test.py     # sends a message; asserts user+assistant events + tra
 Or open the page, send a message, and watch it in both views. Run `/status` in the
 terminal to confirm it's on the subscription.
 
+### Watch the UI run headlessly — `tools/uiprobe.mjs`
+
+For **visual / DOM** changes (textarea sizing, layout, repaint bugs) you want to see
+the running app, not reason about it. `tools/uiprobe.mjs` drives a **local headless
+Chromium** against the live server and reports the real DOM + a screenshot:
+
+```bash
+cd tools && npm i                 # one-time (playwright browsers are already cached)
+node uiprobe.mjs                  # snapshot + screenshot the projects rung
+node uiprobe.mjs --hash '#/p/self/s/<cid>/tty' --box   # deep-link a session; assert the
+                                  # composer grows on fill and shrinks back on clear
+```
+
+`--box` prints `{resting, tall, cleared}` and exit-codes pass/fail (clears the box
+rather than sending, so no real message reaches a live session). Note: this is a
+**local** browser on purpose — the editor's remote automation browser can't reach
+`127.0.0.1`, but a process launched on this machine can.
+
 ## Notes / gotchas
 
 - **Stale-cache on `127.0.0.1`** — if a different app previously ran on this port,

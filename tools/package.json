@@ -1,0 +1,12 @@
+{
+  "name": "clawd-harness-tools",
+  "private": true,
+  "type": "module",
+  "description": "Dev tooling for clawd-harness. uiprobe.mjs drives the running UI from a local headless Chromium (the MCP browser is remote and can't reach localhost).",
+  "scripts": {
+    "probe": "node uiprobe.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.49.0"
+  }
+}
