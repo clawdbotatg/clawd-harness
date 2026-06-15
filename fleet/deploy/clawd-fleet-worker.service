@@ -1,0 +1,20 @@
+[Unit]
+# The worker that runs ON the relay box itself. It has NO harness behind it, so
+# it can't hold projects/sessions — it registers with `--kind relay` purely so
+# the hub shows up on the roster as infrastructure (a muted, non-drivable card).
+# Real drivable machines run a worker with `--kind machine` (the default) pointed
+# at their local harness — see docs/fleet/ADD-MACHINE.md.
+Description=clawd fleet worker (relay-node marker for the hub box)
+After=network.target clawd-fleet-relay.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/clawd-fleet
+EnvironmentFile=/home/ubuntu/clawd-fleet/fleet.env
+ExecStart=/usr/bin/python3 /home/ubuntu/clawd-fleet/worker.py --machine zkllmapi-box --host zkllmapi --kind relay
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

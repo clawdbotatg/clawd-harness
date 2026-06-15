@@ -1118,9 +1118,14 @@ function renderMachines(list) {
     machinesEl.appendChild(note);
   }
   list.forEach(m => {
+    // The relay node is the hub box itself — it has no harness, so there are no
+    // projects/sessions to drive. Show it for topology awareness, but as a muted,
+    // non-clickable infra card (opening it would only hang on an empty list).
+    const isRelay = m.kind === 'relay';
     const card = document.createElement('div');
-    card.className = 'scard' + (m.id === currentMachine ? ' active' : '');
-    card.onclick = () => selectMachine(m.id);
+    card.className = 'scard' + (m.id === currentMachine ? ' active' : '') + (isRelay ? ' relay' : '');
+    if (isRelay) { card.style.opacity = '0.7'; card.style.cursor = 'default'; }
+    else card.onclick = () => selectMachine(m.id);
     const row = document.createElement('div'); row.className = 'row';
     const sdot = document.createElement('span');
     sdot.className = 'sdot' + (m.online ? '' : ' dead');
@@ -1128,14 +1133,23 @@ function renderMachines(list) {
     title.className = 'stitle'; title.textContent = m.id;
     row.appendChild(sdot); row.appendChild(title);
     const tag = document.createElement('span');
-    tag.className = 'scount'; tag.textContent = m.online ? 'online' : 'offline';
-    if (m.online) { tag.style.color = 'var(--ok)'; tag.style.borderColor = '#22401f'; }
+    tag.className = 'scount';
+    tag.textContent = isRelay ? 'relay' : (m.online ? 'online' : 'offline');
+    if (isRelay) { tag.style.color = 'var(--dim)'; tag.style.borderColor = 'var(--edge)'; }
+    else if (m.online) { tag.style.color = 'var(--ok)'; tag.style.borderColor = '#22401f'; }
     else tag.style.color = 'var(--err)';
     row.appendChild(tag);
     card.appendChild(row);
     if (m.host && m.host !== m.id) {
       const d = document.createElement('div'); d.className = 'sdesc'; d.textContent = m.host;
       card.appendChild(d);
+    }
+    if (isRelay) {
+      const d = document.createElement('div'); d.className = 'sdesc';
+      d.textContent = 'the hub — routes every machine (no sessions of its own)';
+      card.appendChild(d);
+      machinesEl.appendChild(card);
+      return;   // no stats line for the relay
     }
     // Aggregate counts the worker reported in plaintext (no titles/content):
     // N projects · N sessions · N active — an at-a-glance per-machine load.
@@ -2268,7 +2282,7 @@ function stepLevel(dir) {
   // diving past the machines rung needs a chosen machine; pick the first online
   // one (selectMachine fetches its projects + drops us on the projects rung).
   if (FLEET && next === 'projects' && !currentMachine) {
-    const on = machineList.find(m => m.online);
+    const on = machineList.find(m => m.online && m.kind !== 'relay');
     if (!on) return;
     selectMachine(on.id);
     return;

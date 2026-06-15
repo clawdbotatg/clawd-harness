@@ -245,11 +245,16 @@ class HarnessLink:
 
 
 class Worker:
-    def __init__(self, relay, token, machine, host, harness_ws, harness_token):
+    def __init__(self, relay, token, machine, host, harness_ws, harness_token,
+                 kind="machine"):
         self.relay = relay.rstrip("/")
         self.token = token
         self.machine = machine
         self.host = host
+        # Node type advertised to the relay for the roster. "machine" = a normal
+        # drivable harness host; "relay" = the hub box itself (shown as infra, not
+        # opened). Purely a display hint — it doesn't change wire behavior.
+        self.kind = kind
         self.harness_ws = harness_ws.rstrip("/")
         self.harness_token = harness_token
         self.wfile = None
@@ -646,7 +651,7 @@ class Worker:
     # ── connection loop ──────────────────────────────────────────────────────
     def url(self):
         return (f"{self.relay}/ws?role=worker&machine={quote(self.machine)}"
-                f"&host={quote(self.host)}&t={quote(self.token)}")
+                f"&host={quote(self.host)}&kind={quote(self.kind)}&t={quote(self.token)}")
 
     def serve_once(self):
         sock, rfile, wfile = fleet_ws.client_connect(self.url())
@@ -686,7 +691,10 @@ class Worker:
                 pass
 
     def run(self):
-        threading.Thread(target=self.stats_loop, daemon=True).start()
+        # A relay node has no harness behind it, so there are no stats to poll —
+        # skip the loop (it would just spam "Connection refused" forever).
+        if self.kind != "relay":
+            threading.Thread(target=self.stats_loop, daemon=True).start()
         backoff = 1.0
         while True:
             try:
@@ -710,9 +718,12 @@ def main():
                     help="local harness WebSocket base URL")
     ap.add_argument("--harness-token", default=default_harness_token(),
                     help="harness token (default: auto-discovered or $HARNESS_TOKEN)")
+    ap.add_argument("--kind", default=os.environ.get("FLEET_KIND", "machine"),
+                    help="node type for the roster: 'machine' (drivable harness host) "
+                         "or 'relay' (the hub box itself, shown as infra)")
     args = ap.parse_args()
     Worker(args.relay, args.token, args.machine, args.host,
-           args.harness, args.harness_token).run()
+           args.harness, args.harness_token, args.kind).run()
 
 
 if __name__ == "__main__":

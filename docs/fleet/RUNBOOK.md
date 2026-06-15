@@ -11,18 +11,20 @@ way, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | Mobile UI | **`https://h.atg.link/?t=<TOKEN>`** — relay serves `index.html` at `/` |
 | AWS box | `ssh zkllmapi` — Ubuntu 24.04, user `ubuntu`, public IP `174.129.67.164` |
 | Relay process | systemd `clawd-fleet-relay` → `python3 relay.py`, bound `127.0.0.1:8788` |
+| Relay-node worker | systemd `clawd-fleet-worker` → machine id `zkllmapi-box`, started `--kind relay`. No harness behind it — it registers purely so the **hub shows on the roster** as a muted, non-drivable infra card. Don't expect projects/sessions from it. |
 | Laptop proxy worker | launchd `com.clawd.fleet-worker` → machine id `austin-laptop`, bridges to the laptop's harness (`ws://127.0.0.1:8787`) |
 | nginx vhost | `/etc/nginx/sites-available/h.atg.link` → proxies `:443` to `127.0.0.1:8788` |
 | Code on box | `~/clawd-fleet/` (currently an **scp copy**, not a git clone — see "Drift") |
 | Auth | `~/clawd-fleet/fleet.env` (chmod 600): `FLEET_MOBILE_TOKEN` (URL credential) + `FLEET_WORKER_TOKEN` (machine registration) + `FLEET_WORKER_ALLOW=austin-laptop`. `exec` off (no `FLEET_ALLOW_EXEC`). |
 
-> 🗑️ **No worker runs on the box.** The old `clawd-fleet-worker` systemd unit
-> (machine id `zkllmapi-box`) was a diagnostic-only worker with **no harness
-> behind it** — it showed up on the roster but could never hold projects or
-> sessions, so it was **removed 2026-06** (`disable --now` + unit file deleted).
-> The box runs the **relay only**; real machines (e.g. the laptop) run the proxy
-> worker pointed at their local harness. Don't re-add a worker on the box unless
-> you also stand up a harness there.
+> ℹ️ **The box runs a `--kind relay` worker** (`clawd-fleet-worker`, machine id
+> `zkllmapi-box`). It has **no harness behind it**, so it holds no projects or
+> sessions — it exists only to put the **hub itself** on the roster as a muted,
+> non-drivable "relay" card (topology awareness). The UI keys off `kind:"relay"`
+> in the roster: it skips it in auto-select and renders it as infra, not a machine
+> you open. Real drivable machines (e.g. the laptop) run `--kind machine` (the
+> default) pointed at their local harness. *(History: this worker was briefly
+> removed 2026-06 as a confusing dead card, then brought back **labeled** instead.)*
 
 > ⚠️ **The box is shared and in production.** It also runs conclave.larv.ai,
 > media streaming (mediamtx), and backend.zkllmapi.com. When touching nginx:
@@ -37,10 +39,11 @@ way, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 ssh zkllmapi 'systemctl status clawd-fleet-relay --no-pager'
 ssh zkllmapi 'journalctl -u clawd-fleet-relay -n 50 --no-pager'
 ssh zkllmapi 'journalctl -u clawd-fleet-relay -f'          # live tail
+ssh zkllmapi 'journalctl -u clawd-fleet-worker -f'         # the relay-node worker
 
-# restart / stop / start (relay only — no worker runs on the box)
-ssh zkllmapi 'sudo systemctl restart clawd-fleet-relay'
-ssh zkllmapi 'sudo systemctl stop clawd-fleet-relay'
+# restart / stop / start
+ssh zkllmapi 'sudo systemctl restart clawd-fleet-relay clawd-fleet-worker'
+ssh zkllmapi 'sudo systemctl stop clawd-fleet-worker'
 
 # is the relay listening + who's connected?
 ssh zkllmapi 'ss -tlnp | grep 8788'
@@ -51,7 +54,7 @@ ssh zkllmapi 'grep -E "MOBILE_TOKEN|WORKER_TOKEN" ~/clawd-fleet/fleet.env'
 ```
 The **mobile token** is what goes in the phone URL: `https://h.atg.link/?t=<MOBILE_TOKEN>`.
 To rotate, edit `fleet.env`, `sudo systemctl restart clawd-fleet-relay`, then update
-every worker's token (e.g. the laptop launchd plist).
+every worker's token (the laptop launchd plist; the box worker reads `fleet.env`).
 
 ## Verify the loop
 
@@ -117,10 +120,10 @@ FLEET_RELAY=wss://h.atg.link FLEET_WORKER_TOKEN=<worker-token> \
 - **To drive real Claude sessions**, the machine must run a clawd-harness; point
   `--harness` at it (`HARNESS_TOKEN` auto-discovers from `.clawd-harness.token`).
   Without a harness the worker only answers `ping` (`exec` needs `FLEET_ALLOW_EXEC=1`).
-- Linux/systemd: write a unit modeled on `deploy/clawd-fleet-relay.service`
-  (`ExecStart` runs `worker.py --machine <id> --harness ws://127.0.0.1:8787`),
-  set `EnvironmentFile`/`--machine`, `daemon-reload`, `enable --now`. (There's no
-  shipped worker unit — the box no longer runs one.)
+- Linux/systemd: copy `deploy/clawd-fleet-worker.service` (it's the box's
+  relay-node unit — change `ExecStart` to `worker.py --machine <id> --harness
+  ws://127.0.0.1:8787`, dropping `--kind relay`, which is only for the hub),
+  set `EnvironmentFile`/`--machine`, `daemon-reload`, `enable --now`.
 - macOS: a launchd agent (see the `com.clawd.fleet-worker.plist` example above).
 - It dials out — **no inbound ports / firewall changes needed** on the machine.
 
@@ -148,7 +151,7 @@ changes by copying the files that changed and restarting:
 # from the harness root (fleet code lives in fleet/, the shared UI at the root):
 scp fleet/relay.py fleet/worker.py fleet/fleet_ws.py fleet/webauthn.py index.html favicon.png \
     zkllmapi:~/clawd-fleet/
-ssh zkllmapi 'sudo systemctl restart clawd-fleet-relay'
+ssh zkllmapi 'sudo systemctl restart clawd-fleet-relay clawd-fleet-worker'
 ```
 The box stays **flat** — `index.html` lands next to `relay.py`, which `_serve_file`
 serves via its `HERE/<name>` check.

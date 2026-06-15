@@ -99,7 +99,9 @@ inner `msg` as opaque. **Binary frames (opcode `0x2`) carry raw PTY bytes**,
 length-prefixed with a routing id (shipped in the proxy step).
 
 - mobile→relay: `{type:"list"}` · `{type:"toMachine", machine:<id|"*">, msg:{…}}`
-- relay→mobile: `{type:"machines", machines:[{id,host,online,lastSeen}]}` ·
+- relay→mobile: `{type:"machines", machines:[{id,host,kind,online,lastSeen,stats}]}`
+  (`kind`: `"machine"` = drivable harness host · `"relay"` = the hub box itself,
+  shown as a muted, non-drivable infra card) ·
   `{type:"machineMsg", machine:<id>, msg:{…}}` · `{type:"error", error}` ·
   binary `[len][machineId][PTY…]`
 - relay→worker: `{type:"task", from:<mobileId>, msg:{…}}` ·

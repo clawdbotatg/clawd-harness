@@ -23,7 +23,7 @@ Protocol (all JSON text frames):
     {type:"list"}                               # ask for the machine roster
     {type:"toMachine", machine:<id|"*">, msg:{...}}
   relay→mobile:
-    {type:"machines", machines:[{id,host,online,lastSeen,stats:{projects,sessions,active}|null}]}
+    {type:"machines", machines:[{id,host,kind,online,lastSeen,stats:{projects,sessions,active}|null}]}
     {type:"machineMsg", machine:<id>, msg:{...}}
     {type:"error", error:"..."}
   relay→worker:
@@ -179,12 +179,15 @@ class Conn:
     _seq = 0
     _seq_lock = threading.Lock()
 
-    def __init__(self, wfile, role, ident, host=""):
+    def __init__(self, wfile, role, ident, host="", kind="machine"):
         self.wfile = wfile
         self.lock = threading.Lock()
         self.role = role
         self.ident = ident
         self.host = host
+        # Node type advertised by a worker at handshake ("machine" | "relay"),
+        # folded into the roster as a display hint (relay = the hub box itself).
+        self.kind = kind
         self.dead = False
         self.last_seen = time.time()
         # Passkey second factor (mobiles). Workers are gated by their token at the
@@ -263,7 +266,8 @@ class Relay:
     # ── roster ──────────────────────────────────────────────────────────────
     def roster(self):
         with self.lock:
-            return [{"id": w.ident, "host": w.host, "online": not w.dead,
+            return [{"id": w.ident, "host": w.host, "kind": w.kind,
+                     "online": not w.dead,
                      "lastSeen": int(w.last_seen), "stats": w.stats}
                     for w in self.workers.values()]
 
@@ -532,10 +536,12 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"[relay] rejected worker not in allowlist: {ident}", flush=True)
                 return self.send_error(403, "machine not allowed")
             host = q.get("host", [""])[0]
+            kind = q.get("kind", ["machine"])[0] or "machine"
         else:
             ident = Conn.next_mobile_id()
             host = ""
-        self._serve_ws(role, ident, host)
+            kind = "machine"
+        self._serve_ws(role, ident, host, kind)
 
     def do_POST(self):
         # Image-upload bridge: the mobile POSTs image bytes here for a given
@@ -582,7 +588,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _serve_ws(self, role, ident, host):
+    def _serve_ws(self, role, ident, host, kind="machine"):
         key = self.headers.get("Sec-WebSocket-Key", "")
         self.send_response(101)
         self.send_header("Upgrade", "websocket")
@@ -591,7 +597,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
-        conn = Conn(self.wfile, role, ident, host)
+        conn = Conn(self.wfile, role, ident, host, kind)
         if role == "worker":
             RELAY.add_worker(conn)
         else:
