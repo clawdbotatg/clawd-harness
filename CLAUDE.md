@@ -12,7 +12,9 @@ user-facing overview; this file orients an agent working **on** the code.
 > harness internals — the worker is just another WS client. The wire contract it
 > depends on is **[`docs/WS-PROTOCOL.md`](docs/WS-PROTOCOL.md)**; keep that doc in
 > sync if you change the WS protocol in `server.py`. Fleet deep docs:
-> **[`docs/fleet/`](docs/fleet/)**.
+> **[`docs/fleet/`](docs/fleet/)**. **Adding a machine to the fleet?** Hand the new
+> box **[`docs/fleet/ADD-MACHINE.md`](docs/fleet/ADD-MACHINE.md)** — a self-contained
+> checklist (harness + worker + the E2E `cryptography` dep and shared passkey file).
 >
 > **`index.html` is the single, *unified* UI** shared by both modes — mode-aware via
 > `window.__FLEET__`: the harness serves it untouched (direct mode); the fleet relay

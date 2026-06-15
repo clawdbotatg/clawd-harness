@@ -151,6 +151,10 @@ Corollary directions baked into the design:
   kills the shell (exit 255). Use the bracket trick: `pkill -f "[w]orker.py"`.
 
 ## Deep docs
+- **`../docs/fleet/ADD-MACHINE.md`** — self-contained checklist to add a new
+  machine to the fleet (the doc to hand a fresh Claude on the new box). Covers the
+  E2E prerequisites — the `cryptography` worker dep + the shared passkey file —
+  that the older RUNBOOK snippet omitted.
 - **`../docs/fleet/ARCHITECTURE.md`** — design, rationale, decision log, traps.
 - **`../docs/fleet/HARNESS-PROXY.md`** — the proxy-worker design (✅ shipped).
 - **`../docs/fleet/RUNBOOK.md`** — operating the live box.
@@ -181,7 +185,8 @@ Corollary directions baked into the design:
    lingers in the URL — `index.html` migrates `?t=` into localStorage on load and
    strips it (replaceState); no-token shows a paste-the-token screen; the QR
    re-appends it for pairing. **Remaining debt:** the box is still scp-deployed
-   (private repo → no anon clone; a deploy key is the fix).
+   (a leftover — the repo is now **public**, so a `git clone` on the box is
+   unblocked).
 
 ## Conventions
 - Git identity here (under `~/clawd/`): **clawdbotatg** /

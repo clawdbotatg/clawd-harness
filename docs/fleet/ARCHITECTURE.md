@@ -133,8 +133,8 @@ and strips it from the bar (replaceState); tokenless → a paste-the-token scree
 the QR re-appends it for pairing.
 
 🚧 **Remaining:** server-side TTS isn't proxied (`/tts`/`/config` are
-harness-only); the box is scp-deployed (private repo → no anonymous clone; a
-deploy key is the fix).
+harness-only); the box is still scp-deployed (a leftover — the repo is now
+**public**, so converting the box to a `git clone` is unblocked).
 
 ## Decision log (and the traps we hit)
 

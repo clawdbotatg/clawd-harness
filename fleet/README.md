@@ -96,9 +96,10 @@ only verify. (This replaced a short-lived wallet-signature experiment + a
 scaffold-eth/Vercel rebuild — both archived on `archive/react-scaffold-eth`; the
 thin, build-free, relay-served single-file UI is back.)
 
-🚧 **Remaining:** server-side TTS isn't proxied; the box is scp-deployed (private
-repo → no anonymous clone); the mobile UI is still a hand-synced fork of the
-harness `index.html` (unifying the two is the next step).
+🚧 **Remaining:** server-side TTS isn't proxied; the box is scp-deployed (a
+leftover — the repo is now **public**, so a `git clone` on the box is unblocked);
+the mobile UI is still a hand-synced fork of the harness `index.html` (unifying
+the two is the next step).
 
 ## Files
 

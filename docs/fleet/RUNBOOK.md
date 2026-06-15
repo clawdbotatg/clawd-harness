@@ -86,16 +86,28 @@ python3 fleet_cli.py --relay wss://h.atg.link --token "$TOKEN"
 
 ## Add a new machine to the fleet
 
+➡️ **Full, self-contained checklist: [`ADD-MACHINE.md`](ADD-MACHINE.md).** Hand
+that page to a fresh Claude on the new box — it covers the two pieces this quick
+recipe used to omit (the worker's `cryptography` dependency and the shared
+passkey file), which are required for the end-to-end channel and are the usual
+reason a new machine joins the roster but won't open. The quick version:
+
 First **add the machine id to the relay's allowlist**: edit `fleet.env`'s
 `FLEET_WORKER_ALLOW` on the box and `sudo systemctl restart clawd-fleet-relay`
 (skip if the allowlist is empty = allow-any). Then, on the new machine (anywhere
 with Python 3 + outbound internet):
 ```bash
+python3 -m pip install cryptography      # worker-only dep, needed for the E2E channel
+cp <from-existing-machine>/fleet/.clawd-fleet.passkeys.json fleet/    # shared passkey(s)
 FLEET_RELAY=wss://h.atg.link FLEET_WORKER_TOKEN=<worker-token> \
   python3 worker.py --machine <unique-id> --host $(hostname) \
   --harness ws://127.0.0.1:8787      # ← omit on a box with no harness (diagnostic only)
 ```
 - Use the **worker** token (not the mobile one); get it from the box's `fleet.env`.
+- **`cryptography` + the passkey file are mandatory** to drive real sessions: with
+  `FLEET_E2E_REQUIRE=1` (default) the worker refuses to proxy without them. Don't
+  copy `.fleet.worker_id.json` — it's per-machine (auto-generated). See
+  [`ADD-MACHINE.md`](ADD-MACHINE.md).
 - **To drive real Claude sessions**, the machine must run a clawd-harness; point
   `--harness` at it (`HARNESS_TOKEN` auto-discovers from `.clawd-harness.token`).
   Without a harness the worker only answers `ping` (`exec` needs `FLEET_ALLOW_EXEC=1`).
@@ -115,13 +127,15 @@ FLEET_RELAY=wss://h.atg.link FLEET_WORKER_TOKEN=<worker-token> \
    `sudo bash deploy/setup_tls.sh <domain> <email>` (adds an nginx vhost + cert).
 5. Workers connect with `FLEET_RELAY=wss://<domain>`.
 
-## Deploy updates to the box (scp, because the repo is private)
+## Deploy updates to the box (scp)
 
-The box's `~/clawd-fleet/` is an **scp copy, not a git checkout**. The repo is
-**private**, so an anonymous `git clone` on the box fails (`could not read
-Username for 'https://github.com'`) — converting to a real checkout needs a
-read-only **deploy key** on the box (not yet set up). Until then, ship changes by
-copying the files that changed and restarting:
+The box's `~/clawd-fleet/` is an **scp copy, not a git checkout** — a historical
+artifact, not a constraint. (The repo `clawdbotatg/clawd-harness` is **public**,
+so a plain `git clone https://github.com/clawdbotatg/clawd-harness.git` on the box
+now works and converting to a real checkout is a viable cleanup — note the box
+layout is **flat** vs. the repo's `fleet/` + root split, so a checkout would also
+move `_serve_file`'s lookup to the `HERE.parent/<name>` branch.) Until then, ship
+changes by copying the files that changed and restarting:
 ```bash
 # from the harness root (fleet code lives in fleet/, the shared UI at the root):
 scp fleet/relay.py fleet/worker.py fleet/fleet_ws.py fleet/webauthn.py index.html favicon.png \
@@ -131,6 +145,7 @@ ssh zkllmapi 'sudo systemctl restart clawd-fleet-relay clawd-fleet-worker'
 The box stays **flat** — `index.html` lands next to `relay.py`, which `_serve_file`
 serves via its `HERE/<name>` check.
 Then verify with `journalctl -u clawd-fleet-relay -n 20` and the browser/loop
-checks above. (Tried the git-clone conversion 2026-06; blocked on the private-repo
-auth — left as a deploy-key task. Don't `mv` the live dir without a working clone
-ready: the running services hold the old inode but a later restart needs the path.)
+checks above. (A git-clone conversion was deferred in 2026-06 — at the time the
+repo was assumed private; it's since **public**, so a clone is now unblocked,
+left as a cleanup. Don't `mv` the live dir without a working clone ready: the
+running services hold the old inode but a later restart needs the path.)
