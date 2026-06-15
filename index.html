@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=0.9, minimum-scale=0.9, maximum-scale=0.9, user-scalable=no" />
-<title>clawd-harness</title>
+<title>clawd-fleet</title>
 <link rel="icon" type="image/png" href="favicon.png" />
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 <style>
@@ -47,7 +47,6 @@
   #sessionbar .stab.active { border-color:var(--accent); color:var(--accent); background:var(--accent-bg); }
   #sessionbar .stab .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }   /* square LED, matches sessions page */
   #sessionbar .stab .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
-  #sessionbar .stab .sdot.waiting { background:var(--err); animation:pulse 0.8s ease-in-out infinite; }
   #sessionbar .stab .sdot.dead { background:var(--err); }
   #sessionbar .stab .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #status { font-size:11px; padding:3px 9px; border:1px solid var(--edge); text-transform:uppercase;
@@ -55,11 +54,9 @@
   #status::before { content:"["; margin-right:5px; color:var(--dim); }
   #status::after  { content:"]"; margin-left:5px;  color:var(--dim); }
   #status.working { color:var(--accent); border-color:var(--accent-dim); background:var(--accent-bg); }
-  #status.waiting { color:var(--err); border-color:#5c2420; background:#1a0908; }
   #status.idle    { color:var(--ok); border-color:#22401f; background:#07120a; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   #status.working { animation:pulse 1.1s ease-in-out infinite; }
-  #status.waiting { animation:pulse 0.8s ease-in-out infinite; }
   /* live "claude is thinking" row, pinned to the bottom of the transcript while a turn is in flight */
   .thinking { display:flex; align-items:center; gap:9px; padding:2px 4px;
               color:var(--dim); font-size:12px; font-family:var(--mono); }
@@ -174,9 +171,9 @@
   #box { flex:1; resize:none; min-height:38px; max-height:160px; background:var(--raised); color:var(--ink);
          border:1px solid var(--edge); padding:9px 11px; font:inherit; }
   /* 13px on mobile (small, per request). iOS Safari would normally auto-zoom on focus for a field
-     under ~16 visual px, but the viewport is locked (user-scalable=no, min=max=scale) so it can't —
-     so small type here no longer triggers the zoom. Scoped to coarse pointers so the desktop input
-     keeps its inherited size. */
+     under ~16 visual px, but the viewport's maximum-scale=1 caps zoom so it can't — so small type
+     here no longer triggers the zoom. Scoped to coarse pointers so the desktop input keeps its
+     inherited size. */
   @media (pointer: coarse) { #box { font-size:13px; } }
   @media (pointer: fine) { #box { min-height:58px; } }   /* desktop: a little taller resting height */
   #box:focus { outline:none; border-color:var(--accent); }
@@ -202,23 +199,23 @@
   #send:hover { border-color:var(--accent); }
   button:disabled { opacity:.4; cursor:default; }
   .hint { color:var(--dim); font-size:11px; padding:0 12px 8px; }
-  #phoneBtn, #panelBtn, #menuBtn, #projectsBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
+  #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
               padding:5px 10px; font-size:12px; font-family:var(--mono); text-transform:lowercase; letter-spacing:.04em;
               white-space:nowrap; }
-  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover { color:var(--ink); border-color:var(--edge-hi); }
-  #panelBtn.on, #menuBtn.on, #projectsBtn.on { color:var(--accent); border-color:var(--accent); }
+  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover, #machinesBtn:hover { color:var(--ink); border-color:var(--edge-hi); }
+  #panelBtn.on, #menuBtn.on, #projectsBtn.on, #machinesBtn.on { color:var(--accent); border-color:var(--accent); }
   .bico { font-size:14px; line-height:1; }
   /* mobile: collapse header to icon-only buttons so the bar fits + stops over-scrolling */
   @media (pointer: coarse) {
     header { gap:8px; padding:8px 10px; }
     header .blbl { display:none; }
-    #phoneBtn, #panelBtn, #menuBtn, #projectsBtn { padding:6px 9px; }
+    #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn { padding:6px 9px; }
     #status { font-size:11px; padding:3px 8px; }
     #brand { display:none; }
   }
   /* projects (top rung) + sessions (next rung): both are scrollable card lists */
-  #menu, #projects { flex:1; background:var(--bg); }
-  #sessions, #projectlist { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
+  #menu, #projects, #machines { flex:1; background:var(--bg); }
+  #sessions, #projectlist, #machinelist { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
               padding:14px; display:flex; flex-direction:column; gap:9px;
               width:100%; max-width:780px; align-self:center; }
   /* project cards reuse .scard; status colors + an add-project row */
@@ -230,8 +227,6 @@
                    border:1px solid var(--edge); padding:1px 8px; flex:0 0 auto; }
   .scard .swork { color:var(--accent); border-color:var(--accent-dim); background:var(--accent-bg);
                   animation:pulse 1.1s ease-in-out infinite; }
-  .scard .swait { color:var(--err); border-color:#5c2420; background:#1a0908;
-                  animation:pulse 0.8s ease-in-out infinite; }
   .scard .serror { color:var(--err); font-size:12px; word-break:break-word; }
   #addProject { display:flex; flex-direction:column; gap:8px; border:1px dashed var(--edge);
                 padding:12px 14px; }
@@ -250,7 +245,6 @@
   .scard .row { display:flex; align-items:center; gap:9px; }
   .scard .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }   /* square LED */
   .scard .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
-  .scard .sdot.waiting { background:var(--err); animation:pulse 0.8s ease-in-out infinite; }
   .scard .sdot.dead { background:var(--err); }
   .scard .stitle { font-weight:600; font-size:13px; flex:1; min-width:0;
                    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -273,6 +267,17 @@
   #qrcode img, #qrcode canvas { display:block; }
   .qrurl { font-family:var(--mono); font-size:11px; color:var(--dim);
            margin:12px 0; word-break:break-all; }
+  /* token entry — shown only when no token is in the URL or localStorage */
+  #login, #passkey { position:fixed; inset:0; background:var(--bg); display:flex;
+           align-items:center; justify-content:center; z-index:70; padding:20px; }
+  #login[hidden], #passkey[hidden] { display:none; }
+  #login .qrcard, #passkey .qrcard { max-width:360px; width:100%; }
+  #login .lh, #passkey .lh { color:var(--ink); font-size:14px; font-weight:600; margin-bottom:4px; }
+  #login .ls, #passkey .ls { color:var(--dim); font-size:12px; margin-bottom:14px; }
+  #login input { display:block; width:100%; background:var(--raised); color:var(--ink);
+                 border:1px solid var(--edge); padding:11px 12px; font:inherit; margin-bottom:10px; }
+  #login input:focus { outline:none; border-color:var(--accent); }
+  #login button, #passkey button { width:100%; }
   /* graceful-restart UI: a pending banner under the header + a go overlay */
   #rebootbar { display:flex; align-items:center; gap:10px; padding:7px 14px;
                background:var(--accent-bg); border-bottom:1px solid var(--accent-dim);
@@ -298,11 +303,12 @@
 <body>
 <div id="app">
   <header>
-    <img id="logo" src="favicon.png" alt="clawd-harness" />
+    <img id="logo" src="favicon.png" alt="clawd-fleet" />
     <div id="dot"></div>
-    <h1 id="brand" title="All sessions">clawd-harness</h1>
+    <h1 id="brand" title="All machines">clawd-fleet</h1>
     <span class="meta" id="meta">connecting…</span>
     <span class="spacer"></span>
+    <button id="machinesBtn" title="All machines"><span class="bico">⊞</span><span class="blbl"> machines</span></button>
     <button id="projectsBtn" title="All projects"><span class="bico">▦</span><span class="blbl"> projects</span></button>
     <button id="menuBtn" title="Sessions in this project"><span class="bico">≡</span><span class="blbl"> sessions</span></button>
     <button id="panelBtn" title="Show/hide the structured transcript"><span class="bico">▤</span><span class="blbl"> transcript</span></button>
@@ -324,7 +330,25 @@
       <button id="qrclose">close</button>
     </div>
   </div>
+  <div id="login" hidden>
+    <div class="qrcard">
+      <div class="lh">clawd-fleet</div>
+      <div class="ls" id="loginsub">paste your fleet token to connect</div>
+      <input id="logintoken" type="password" placeholder="fleet token" autocomplete="off" />
+      <button id="loginbtn">connect</button>
+    </div>
+  </div>
+  <div id="passkey" hidden>
+    <div class="qrcard">
+      <div class="lh">clawd-fleet</div>
+      <div class="ls" id="passkeysub">unlock with your passkey</div>
+      <button id="passkeybtn">unlock with passkey</button>
+    </div>
+  </div>
   <main>
+    <section class="col hidden" id="machines">
+      <div id="machinelist"></div>
+    </section>
     <section class="col hidden" id="projects">
       <div id="projectlist"></div>
     </section>
@@ -376,16 +400,14 @@
 // for accessibility — so we also defeat its two zoom gestures in JS:
 //   1. pinch  → Safari fires non-standard `gesture*` events; preventDefault them.
 //   2. double-tap → suppress the second tap when it lands <300ms after the first.
-// Scoped so it never eats real interactions: gesture* are zoom-only, and the
-// double-tap guard only cancels the *zoom*, not the taps themselves.
-['gesturestart','gesturechange','gestureend'].forEach(t =>
-  document.addEventListener(t, (e) => e.preventDefault(), { passive:false }));
+['gesturestart', 'gesturechange', 'gestureend'].forEach(t =>
+  document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
 let _lastTouchEnd = 0;
 document.addEventListener('touchend', (e) => {
   const now = e.timeStamp;
   if (now - _lastTouchEnd <= 300) e.preventDefault();   // collapse double-tap zoom
   _lastTouchEnd = now;
-}, { passive:false });
+}, { passive: false });
 // Touch devices (phones/tablets): make the terminal a read-only mirror. Mobile
 // dictation/IME streams partial, self-revising text that xterm forwards as
 // overlapping keystrokes ("thithis issthis is a…"), so all input goes through
@@ -468,6 +490,8 @@ const pendingEl = document.getElementById('pending');
 const composer = document.querySelector('footer');
 
 let ws = null, decoder = new TextDecoder();
+let currentMachine = null;      // fleet machine this browser is driving (null = machines rung)
+let machineList = [];           // latest roster from the relay
 let currentCid = null;          // session this browser is viewing
 let currentTitle = '';          // title of the viewed session (for the breadcrumb)
 let currentPid = null;          // project this browser has selected
@@ -479,22 +503,184 @@ let pendingNewFocus = false;    // a `new` we issued — its focus should switch
 let pendingSendText = null;     // text typed on the sessions list — delivered once the new session boots
 let lastWrittenHash = '';       // the hash we last wrote, so hashchange ignores our own writes
 
-const token = new URLSearchParams(location.search).get('t') || '';
+// Token handling: the relay still accepts ?t=<token> in the URL (so a shared
+// link / QR carries it), but we don't LEAVE it in the address bar — on first load
+// we stash it in localStorage and strip it from the URL (replaceState), so it
+// can't leak via history/screenshots. Later loads read it from storage; a device
+// with neither gets a paste-the-token screen.
+const TOKEN_KEY = 'cc_fleet_token';
+function loadToken() {
+  let t = '';
+  try {
+    const u = new URL(location.href);
+    const fromUrl = u.searchParams.get('t');
+    if (fromUrl) {
+      t = fromUrl;
+      try { localStorage.setItem(TOKEN_KEY, fromUrl); } catch {}
+      u.searchParams.delete('t');                       // scrub it from the bar
+      history.replaceState(null, '', u.pathname + u.search + u.hash);
+    } else {
+      t = localStorage.getItem(TOKEN_KEY) || '';
+    }
+  } catch {}
+  return t;
+}
+const token = loadToken();
+// Mode: the relay injects window.__FLEET__ when it serves this page (fleet mode —
+// machines rung, passkey, toMachine wrapping). The harness serves it untouched →
+// FLEET is false → direct mode: talk to the local harness exactly as its own UI does.
+const FLEET = !!window.__FLEET__;
 let serverBoot = null;   // server process id; a change across reconnect = daemon restart → reload
+let authFails = 0;       // consecutive socket closes that never opened → likely a bad/expired token
+
+function clearToken() { try { localStorage.removeItem(TOKEN_KEY); } catch {} }
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
+  // Fleet mode dials the RELAY as a mobile client; direct mode dials the harness.
+  ws = new WebSocket(`${proto}://${location.host}/ws?${FLEET ? 'role=mobile&' : ''}t=${encodeURIComponent(token)}`);
   ws.binaryType = 'arraybuffer';
+  let opened = false;
 
-  ws.onopen = () => { dot.classList.add('up'); sendResize();
-                      if (!currentCid) meta.textContent = ''; };  // clear "connecting…" on the projects rung
-  ws.onclose = () => { dot.classList.remove('up'); meta.textContent = 'reconnecting…';
-                       setTimeout(connect, 1200); };
-  ws.onmessage = (e) => {
-    if (typeof e.data === 'string') { handleJson(JSON.parse(e.data)); }
-    else { term.write(new Uint8Array(e.data), () => term.scrollToBottom()); }  // raw PTY bytes, pin to bottom
+  ws.onopen = () => {
+    opened = true; authFails = 0;   // a successful open proves the token is good
+    dot.classList.add('up');
+    if (!FLEET) { sendResize(); if (!currentCid) meta.textContent = ''; return; }  // direct: the harness pushes projects
+    if (!currentMachine) { meta.textContent = ''; return; }   // on the machines rung — nothing to re-sync
+    // Reconnects get a fresh relay mobile id → the worker opens a fresh harness
+    // link, so re-fetch this machine's projects/sessions and re-subscribe.
+    hsend({ type: 'list' });
+    if (currentCid) hsend({ type: 'subscribe', cid: currentCid });
+    sendResize();
   };
+  ws.onclose = () => {
+    dot.classList.remove('up');
+    // A close *before* we ever opened, when the page itself was just served by the
+    // relay, almost always means auth (the box is clearly up). The browser hides
+    // the 403 behind code 1006, so we infer it: after a couple of pre-open closes,
+    // stop hammering a dead token and surface the paste-a-new-token screen. This is
+    // also how an expired token (weekly rotation) lands the user back at login.
+    if (!opened && ++authFails >= 2) {
+      clearToken();
+      return showLogin('Token expired or invalid — paste a current one.');
+    }
+    meta.textContent = 'reconnecting…';
+    setTimeout(connect, 1200);
+  };
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') { FLEET ? handleRelay(JSON.parse(e.data)) : handleJson(JSON.parse(e.data)); }
+    else if (FLEET) { handleBinary(e.data); }
+    else { term.write(new Uint8Array(e.data), () => term.scrollToBottom()); }   // direct: raw PTY
+  };
+}
+
+// Route a harness control frame to the server. Fleet mode wraps it for the
+// current machine (toMachine); direct mode sends it straight to the harness —
+// so every call site that used to do ws.send(JSON.stringify(frame)) goes here.
+function hsend(frame) {
+  if (!ws || ws.readyState !== 1) return;
+  if (!FLEET) { ws.send(JSON.stringify(frame)); return; }
+  if (currentMachine) ws.send(JSON.stringify({ type: 'toMachine', machine: currentMachine, msg: frame }));
+}
+
+// Relay → us. `machineMsg` carries a harness frame (act on it only if it's from
+// the machine we're viewing); `machines` is the roster; `error` is a relay error.
+function handleRelay(m) {
+  if (m.type === 'authRequired') { onAuthRequired(m); return; }
+  if (m.type === 'authOk') {
+    if (m.session) saveSession(m.session, m.expires);
+    hidePasskey(); meta.textContent = '';
+    // re-sync the viewed machine after a (re)auth — onopen's sends were pre-auth
+    if (currentMachine) { hsend({ type: 'list' }); if (currentCid) hsend({ type: 'subscribe', cid: currentCid }); sendResize(); }
+    return;
+  }
+  if (m.type === 'machines') { hidePasskey(); renderMachines(m.machines || []); return; }
+  if (m.type === 'machineMsg') { if (m.machine === currentMachine) handleJson(m.msg || {}); return; }
+  if (m.type === 'error') { meta.textContent = 'relay: ' + (m.error || 'error'); return; }
+}
+
+// Relay → us, binary: [1-byte len][machineId ascii][PTY bytes]. Feed the PTY to
+// the terminal only when it's tagged with the machine we're currently viewing.
+function handleBinary(buf) {
+  const u = new Uint8Array(buf);
+  if (!u.length) return;
+  const n = u[0];
+  const machine = decoder.decode(u.subarray(1, 1 + n));
+  if (machine !== currentMachine) return;
+  term.write(u.subarray(1 + n), () => term.scrollToBottom());
+}
+
+// ---- passkey second factor (native WebAuthn — zero deps) -------------------
+const b64uDec = (s) => { s = s.replace(/-/g, '+').replace(/_/g, '/'); s += '='.repeat((4 - s.length % 4) % 4);
+  const bin = atob(s), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
+const b64uEnc = (buf) => { const u = new Uint8Array(buf); let s = ''; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
+
+const SESSION_KEY = 'cc_fleet_session';
+function loadSession() { try { const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); return (s && s.exp > Date.now()) ? s.tok : ''; } catch { return ''; } }
+function saveSession(tok, expMs) { try { localStorage.setItem(SESSION_KEY, JSON.stringify({ tok, exp: expMs || Date.now() + 86400000 })); } catch {} }
+function clearSession() { try { localStorage.removeItem(SESSION_KEY); } catch {} }
+
+let lastAuthReq = null;
+function showPasskey(msg, mode) {
+  const el = document.getElementById('passkey');
+  document.getElementById('passkeysub').textContent = msg;
+  const btn = document.getElementById('passkeybtn');
+  btn.textContent = mode === 'enroll' ? 'set up passkey' : 'unlock with passkey';
+  btn.onclick = () => { el.hidden = true; mode === 'enroll' ? doEnroll() : doAssertion(lastAuthReq); };
+  el.hidden = false;
+}
+function hidePasskey() { const el = document.getElementById('passkey'); if (el) el.hidden = true; }
+
+function onAuthRequired(m) {
+  lastAuthReq = m;
+  if (m.reason === 'expired') clearSession();
+  const sess = loadSession();
+  if (sess) { ws.send(JSON.stringify({ type: 'auth', session: sess })); return; }
+  if (!m.enrolled || !(m.credentialIds || []).length) { showPasskey('set up a passkey to unlock the fleet', 'enroll'); return; }
+  doAssertion(m);   // try right away; falls back to a tap if the browser needs a gesture
+}
+
+async function doAssertion(m) {
+  if (!m) return;
+  meta.textContent = 'passkey…';
+  try {
+    const a = await navigator.credentials.get({ publicKey: {
+      challenge: b64uDec(m.challenge), rpId: m.rpId,
+      allowCredentials: (m.credentialIds || []).map(id => ({ id: b64uDec(id), type: 'public-key' })),
+      userVerification: 'preferred', timeout: 60000,
+    } });
+    const r = a.response;
+    ws.send(JSON.stringify({ type: 'auth', id: b64uEnc(a.rawId),
+      clientDataJSON: b64uEnc(r.clientDataJSON), authenticatorData: b64uEnc(r.authenticatorData), signature: b64uEnc(r.signature) }));
+  } catch (e) {
+    meta.textContent = '';
+    showPasskey('passkey needed to unlock', 'auth');
+  }
+}
+
+async function doEnroll() {
+  meta.textContent = 'enrolling…';
+  try {
+    const cr = await fetch('/webauthn/register-challenge?t=' + encodeURIComponent(token));
+    if (!cr.ok) { showPasskey('enrollment is disabled on the relay', 'enroll'); return; }
+    const { challenge, rpId } = await cr.json();
+    const cred = await navigator.credentials.create({ publicKey: {
+      challenge: b64uDec(challenge), rp: { id: rpId, name: 'clawd-fleet' },
+      user: { id: new TextEncoder().encode('atg'), name: 'atg', displayName: 'atg' },
+      pubKeyCredParams: [{ alg: -7, type: 'public-key' }],
+      authenticatorSelection: { userVerification: 'preferred', residentKey: 'preferred' }, timeout: 60000,
+    } });
+    const r = cred.response;
+    const res = await fetch('/webauthn/register?t=' + encodeURIComponent(token), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ attestationObject: b64uEnc(r.attestationObject), clientDataJSON: b64uEnc(r.clientDataJSON) }),
+    }).then(x => x.json());
+    if (res.ok) { meta.textContent = 'passkey enrolled'; location.reload(); }
+    else showPasskey('enroll failed: ' + (res.error || '?'), 'enroll');
+  } catch (e) {
+    showPasskey('enroll cancelled — tap to retry', 'enroll');
+  }
 }
 
 // -- graceful restart: pending banner (waits for all-idle) + go overlay -------
@@ -513,7 +699,7 @@ function renderReboot(m) {
 }
 function showRebootOverlay() { rebootbar.hidden = true; rebootovl.hidden = false; }
 document.getElementById('rebootCancel').onclick = () => {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'restartCancel' }));
+  hsend({ type: 'restartCancel' });
 };
 
 function handleJson(m) {
@@ -569,8 +755,7 @@ function handleJson(m) {
     if (m.pid) currentPid = m.pid;
     updateBreadcrumb(m.title || '');
     highlightCard(m.cid);
-    if (m.waiting) setStatus('🔴', 'blocked · needs your answer', 'waiting');
-    else setBusy(m.busy, null);
+    setBusy(m.busy, null);
   } else if (m.type === 'transcript') {
     if (m.cid && m.cid !== currentCid) return;        // belongs to a backgrounded session
     renderEvent(m.event, !m.history);   // live events type out; history replay renders instantly
@@ -588,6 +773,64 @@ function handleJson(m) {
   }
 }
 
+// -- machines (the fleet's top rung) ----------------------------------------
+const machinesEl = document.getElementById('machinelist');
+const machinesBtn = document.getElementById('machinesBtn');
+function renderMachines(list) {
+  machineList = list;
+  machinesEl.innerHTML = '';
+  const online = list.filter(m => m.online).length;
+  const label = document.createElement('div');
+  label.className = 'menutitle'; label.textContent = `machines · ${online}/${list.length} online`;
+  machinesEl.appendChild(label);
+  if (!list.length) {
+    const note = document.createElement('div');
+    note.className = 'ahint';
+    note.textContent = 'no machines connected — start a worker (worker.py) on a machine running a harness.';
+    machinesEl.appendChild(note);
+  }
+  list.forEach(m => {
+    const card = document.createElement('div');
+    card.className = 'scard' + (m.id === currentMachine ? ' active' : '');
+    card.onclick = () => selectMachine(m.id);
+    const row = document.createElement('div'); row.className = 'row';
+    const sdot = document.createElement('span');
+    sdot.className = 'sdot' + (m.online ? '' : ' dead');
+    const title = document.createElement('span');
+    title.className = 'stitle'; title.textContent = m.id;
+    row.appendChild(sdot); row.appendChild(title);
+    const tag = document.createElement('span');
+    tag.className = 'scount'; tag.textContent = m.online ? 'online' : 'offline';
+    if (m.online) { tag.style.color = 'var(--ok)'; tag.style.borderColor = '#22401f'; }
+    else tag.style.color = 'var(--err)';
+    row.appendChild(tag);
+    card.appendChild(row);
+    if (m.host && m.host !== m.id) {
+      const d = document.createElement('div'); d.className = 'sdesc'; d.textContent = m.host;
+      card.appendChild(d);
+    }
+    machinesEl.appendChild(card);
+  });
+  refreshBreadcrumb();
+  resolvePendingNav();        // a URL we restored from may name a machine
+}
+
+// Switch the machine we're driving. A different machine is a different harness,
+// so everything below the rung (projects/sessions/terminal) is wiped, then we
+// ask the new machine for its projects + sessions.
+function selectMachine(id) {
+  if (id !== currentMachine) {
+    currentMachine = id;
+    currentPid = null; currentCid = null; currentTitle = '';
+    projectList = []; sessionList = []; gotSessions = false;
+    term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
+    if (activeType) { activeType.finish(); activeType = null; }
+    projectsEl.innerHTML = ''; sessionsEl.innerHTML = '';
+  }
+  hsend({ type: 'list' });    // fetch this machine's projects + sessions
+  setView('projects');
+}
+
 // -- projects (top rung) ----------------------------------------------------
 function projectName(pid) {
   const p = projectList.find(p => p.pid === pid);
@@ -603,7 +846,14 @@ function updateBreadcrumb(title) {        // called when we (re)subscribe to a s
 // Recomputed on every nav so climbing back out doesn't strand a stale crumb.
 function refreshBreadcrumb(view) {
   view = view || currentView();
-  meta.textContent = view === 'projects' ? '' : projectName(currentPid);
+  // machines rung: blank. projects rung: machine name. deeper: machine / project.
+  let crumb = '';
+  if (view !== 'machines' && currentMachine) {
+    crumb = currentMachine;
+    const pn = projectName(currentPid);
+    if (view !== 'projects' && pn) crumb += ' / ' + pn;
+  }
+  meta.textContent = crumb;
   // Show the AI session name above the message box, but only when a specific
   // session is open (transcript/tty rungs) — not on the projects/sessions lists.
   const descEl = document.getElementById('sessiondesc');
@@ -643,7 +893,7 @@ function renderSessionBar(view) {
     if (!wasHidden) refitTTY();
     return;
   }
-  const rank = s => !s.alive ? 3 : s.waiting ? 0 : s.busy ? 1 : 2;   // needs-you first, busy, idle, dead last
+  const rank = s => !s.alive ? 2 : s.busy ? 0 : 1;   // busy first, idle next, dead last
   const sorted = list.slice().sort((a, b) => rank(a) - rank(b));
   bar.innerHTML = '';
   sorted.forEach(s => {
@@ -652,7 +902,7 @@ function renderSessionBar(view) {
     tab.title = s.title || 'new session';
     tab.onclick = () => { pendingSendText = null; openSession(s.cid); };  // manual open cancels a queued new-session send
     const dot = document.createElement('span');
-    dot.className = 'sdot' + (!s.alive ? ' dead' : s.waiting ? ' waiting' : s.busy ? ' busy' : '');
+    dot.className = 'sdot' + (!s.alive ? ' dead' : s.busy ? ' busy' : '');
     const lbl = document.createElement('span');
     lbl.className = 'lbl'; lbl.textContent = s.title || 'new session';
     tab.appendChild(dot); tab.appendChild(lbl);
@@ -669,12 +919,12 @@ function selectProject(pid) {
 }
 
 function createProject(name) {
-  if (!name.trim() || !ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: 'createProject', name: name.trim() }));
+  if (!name.trim()) return;
+  hsend({ type: 'createProject', name: name.trim() });
 }
 function addProjectFromUrl(url) {
-  if (!url.trim() || !ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: 'addProject', repoUrl: url.trim() }));
+  if (!url.trim()) return;
+  hsend({ type: 'addProject', repoUrl: url.trim() });
 }
 function renderProjects(list) {
   projectList = list;
@@ -735,13 +985,6 @@ function renderProjects(list) {
       tag.className = 'scount'; tag.textContent = 'this app'; tag.title = 'the running harness — live-editable';
       row.appendChild(tag);
     }
-    if (p.waitingCount > 0) {
-      const wait = document.createElement('span');
-      wait.className = 'scount swait';
-      wait.textContent = `⏸ ${p.waitingCount} needs you`;
-      wait.title = `${p.waitingCount} session${p.waitingCount === 1 ? '' : 's'} blocked on a question — open to answer`;
-      row.appendChild(wait);
-    }
     if (p.busyCount > 0) {
       const work = document.createElement('span');
       work.className = 'scount swork';
@@ -787,7 +1030,7 @@ function subscribe(cid) {
   if (activeType) { activeType.finish(); activeType = null; }
   highlightCard(cid);
   syncComposer();              // load this session's own draft (bring back text from before a reload)
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'subscribe', cid }));
+  hsend({ type: 'subscribe', cid });
   syncUrl();
 }
 
@@ -802,13 +1045,13 @@ function openSession(cid) {
 function newSession() {
   if (!currentPid) { setView('projects'); return; }   // need a project to host it
   pendingNewFocus = true;          // the focus that comes back should switch us into it
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'new', pid: currentPid }));
+  hsend({ type: 'new', pid: currentPid });
   setView(DEEP_VIEW);              // server replies with a focus → subscribe once it's spawned
 }
 
 function closeSession(cid, ev) {
   if (ev) ev.stopPropagation();
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'close', cid }));
+  hsend({ type: 'close', cid });
 }
 
 // -- keyboard session-hopping (Ctrl+Shift+↑/↓ cycle, Ctrl+Shift+W close) ------
@@ -831,16 +1074,13 @@ function cycleSession(dir) {
 
 function closeCurrentSession() {
   if (!currentCid) return;
-  // Stay inside the current project: pick a neighbour from THIS project only.
-  // If it was the project's last session, fall back to its (now empty) sessions
-  // list — never hop into a different project's session.
-  const siblings = sessionList.filter(s => s.pid === currentPid);
-  const idx = siblings.findIndex(s => s.cid === currentCid);
-  const rest = siblings.filter(s => s.cid !== currentCid);
+  const idx = sessionList.findIndex(s => s.cid === currentCid);
+  const rest = sessionList.filter(s => s.cid !== currentCid);
   closeSession(currentCid);
-  if (!rest.length) { navTo('sessions'); return; }   // closed the last one in this project — fall back to the list
+  if (!rest.length) { navTo('sessions'); return; }   // closed the last one — fall back to the list
   const nb = rest[Math.min(idx, rest.length - 1)] || rest[0];
-  subscribe(nb.cid);                 // land on a neighbour in the same project, keeping the current depth
+  if (nb.pid) currentPid = nb.pid;
+  subscribe(nb.cid);                 // land on a neighbour, keeping the current depth
   if (!isTouch) box.focus();
 }
 
@@ -871,16 +1111,10 @@ function renderSessions() {
 
     const row = document.createElement('div'); row.className = 'row';
     const sdot = document.createElement('span');
-    sdot.className = 'sdot' + (!s.alive ? ' dead' : s.waiting ? ' waiting' : s.busy ? ' busy' : '');
+    sdot.className = 'sdot' + (!s.alive ? ' dead' : s.busy ? ' busy' : '');
     const title = document.createElement('span');
     title.className = 'stitle'; title.textContent = s.title || 'new session';
     row.appendChild(sdot); row.appendChild(title);
-    if (s.alive && s.waiting) {
-      const wait = document.createElement('span');
-      wait.className = 'scount swait'; wait.textContent = '⏸ needs you';
-      wait.title = 'blocked on a question — open to answer';
-      row.appendChild(wait);
-    }
     card.appendChild(row);
 
     if (s.desc) {
@@ -890,7 +1124,7 @@ function renderSessions() {
     }
     const sm = document.createElement('div');
     sm.className = 'smeta';
-    const state = !s.alive ? 'ended' : s.waiting ? 'waiting for you' : s.busy ? (s.tool ? `running ${s.tool}` : 'working…') : 'idle';
+    const state = !s.alive ? 'ended' : s.busy ? (s.tool ? `running ${s.tool}` : 'working…') : 'idle';
     sm.textContent = `${s.promptCount || 0} msg · ${state}`;
     card.appendChild(sm);
 
@@ -948,15 +1182,10 @@ function handleHook(m) {
   // auto-return (don't yank you back to where a question pulled you from).
   if (ev === 'UserPromptSubmit') { setBusy(true, null); viewBeforeQuestion = null; deferredView = null; }
   else if (ev === 'PreToolUse')  {
+    setBusy(true, tool);
     // these tools render an interactive prompt that only shows in the TUI
-    if (tool === 'AskUserQuestion' || tool === 'ExitPlanMode') {
-      setStatus('🔴', `blocked · ${tool === 'ExitPlanMode' ? 'review the plan' : 'answer the question'}`, 'waiting');
-      hideThinking();
-      openTtyForQuestion();
-    } else {
-      setBusy(true, tool);
-      restoreViewAfterQuestion();             // a normal tool starting = prior prompt was answered
-    }
+    if (tool === 'AskUserQuestion' || tool === 'ExitPlanMode') openTtyForQuestion();
+    else restoreViewAfterQuestion();          // a normal tool starting = prior prompt was answered
   }
   else if (ev === 'PostToolUse') {
     setBusy(true, tool);
@@ -966,15 +1195,8 @@ function handleHook(m) {
   else if (ev === 'SessionStart') { setBusy(false, null); if (pendingSendText) setTimeout(flushPendingSend, 500); }
   else if (ev === 'SessionEnd')  { hideThinking(); setStatus('🔴', 'session ended', ''); }
   else if (ev === 'Notification') {
-    if (m.waiting) {
-      const msg = d.message ? d.message.slice(0,40) : 'needs your answer';
-      setStatus('🔴', `blocked · ${msg}`, 'waiting');
-      hideThinking();                          // it's not working — it's stuck on you
-      openTtyForQuestion();                    // genuinely blocked — surface the TUI to answer
-    } else {
-      // a 60s-idle nudge (not a block) — update the pill but don't yank to the TTY
-      setBusy(m.busy, d.message ? d.message.slice(0,40) : null);
-    }
+    setBusy(m.busy, d.message ? d.message.slice(0,40) : null);
+    openTtyForQuestion();                      // permission / "needs your input" — surface the TUI
   }
 }
 
@@ -1114,7 +1336,7 @@ function clip(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + '…'
 
 // -- write channel ----------------------------------------------------------
 function sendResize() {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({type:'resize', cols: term.cols, rows: term.rows}));
+  hsend({ type: 'resize', cols: term.cols, rows: term.rows });
 }
 // -- image attachments (paste / drop → upload → fold path into message) ------
 let attachments = [];   // {path, name, url}
@@ -1137,11 +1359,15 @@ function renderChips() {
 }
 
 async function uploadImage(file) {
+  if (!currentMachine) return;   // no machine selected → nowhere to upload to
   const slot = { pending: true, url: URL.createObjectURL(file) };
   attachments.push(slot); renderChips();
   try {
-    const res = await fetch(`/upload?t=${encodeURIComponent(token)}`, {
+    // The relay forwards the bytes to the current machine's worker, which POSTs
+    // to that machine's local harness /upload and returns a path local to it.
+    const res = await fetch(`/upload?t=${encodeURIComponent(token)}&machine=${encodeURIComponent(currentMachine)}`, {
       method: 'POST', headers: { 'Content-Type': file.type || 'image/png' }, body: file });
+    if (!res.ok) throw new Error('upload failed');
     const j = await res.json();
     slot.pending = false; slot.path = j.path; slot.name = j.name;
   } catch (e) {
@@ -1191,9 +1417,9 @@ function clearPending() { pendingMsgs = []; pendingEl.innerHTML = ''; }
 // guarded so whichever runs first wins and the other no-ops.
 function flushPendingSend() {
   if (!pendingSendText || !ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: 'send', text: pendingSendText }));
+  hsend({ type: 'send', text: pendingSendText });
   stashOutbox(currentCid, pendingSendText);  // now bound to a real session — hold until confirmed
-  stashPending(currentPid, null);            // it's the outbox's job to recover it now
+  stashPending(null);                        // it's the outbox's job to recover it now
   pendingSendText = null;
 }
 
@@ -1218,13 +1444,11 @@ function currentDraftId() {
 const outboxKey = (cid) => 'cc_outbox:' + (cid || '_');
 function stashOutbox(cid, text) { try { if (cid && text) localStorage.setItem(outboxKey(cid), text); } catch {} }
 function clearOutbox(cid) { try { localStorage.removeItem(outboxKey(cid)); } catch {} }
-// Text typed on a project's sessions list (no session yet) — survives reload
-// before the new session even exists; recovered into THAT project's new-session
-// composer. Keyed PER PROJECT: a queued send in one project must never surface in
-// another project's composer (a global key bled across every project's box).
-const pendingKey = (pid) => 'cc_pending:' + (pid || '_');
-function stashPending(pid, text) { try { text ? localStorage.setItem(pendingKey(pid), text) : localStorage.removeItem(pendingKey(pid)); } catch {} }
-function takePending(pid) { try { const k = pendingKey(pid); const t = localStorage.getItem(k) || ''; localStorage.removeItem(k); return t; } catch { return ''; } }
+// Text typed on the sessions list (no session yet) — survives reload before the
+// new session even exists; recovered into the new-session composer.
+const PENDING_KEY = 'cc_pendingsend';
+function stashPending(text) { try { text ? localStorage.setItem(PENDING_KEY, text) : localStorage.removeItem(PENDING_KEY); } catch {} }
+function takePending() { try { const t = localStorage.getItem(PENDING_KEY) || ''; localStorage.removeItem(PENDING_KEY); return t; } catch { return ''; } }
 
 let activeDraftId = null;   // which context's draft is currently sitting in the box
 // Persist the box into the context it belongs to (called as you type, and before any swap).
@@ -1234,48 +1458,8 @@ function saveDraft() {
                   : localStorage.removeItem(draftKey(activeDraftId)); } catch {}
 }
 function clearDraft() { try { if (activeDraftId) localStorage.removeItem(draftKey(activeDraftId)); } catch {} }
-// Reconcile the shared textarea to whatever context we're now in: save the outgoing
-// context, then load the incoming one (recovering unconfirmed sent text or a queued
-// sessions-list message if there's no live draft). Never loses text, never bleeds it.
-function syncComposer() {
-  const id = currentDraftId();
-  if (id === activeDraftId) return;          // same context — leave the box alone
-  saveDraft();                               // stash the outgoing context first
-  activeDraftId = id;
-  if (!id) { box.value = ''; autosizeBox(); return; }       // projects rung — nothing to compose
-  let v = '';
-  try {
-    v = localStorage.getItem(draftKey(id)) || '';
-    // The pending/outbox buffers are crash-recovery ONLY — consult them just once,
-    // while restoring from the URL at boot (pendingNav still set). On ordinary
-    // in-app navigation we must NOT refill the box from them, or a message you
-    // already sent (but claude hasn't acknowledged yet) would follow you back into
-    // its session — and worse, into other contexts. Sent = gone from the box.
-    if (!v && pendingNav) v = String(id).startsWith('new:') ? takePending(id.slice(4))                // this project's new-session composer recovers its own queued send
-                                                            : (localStorage.getItem(outboxKey(id)) || '');  // session recovers an unconfirmed send
-  } catch {}
-  box.value = v;
-  autosizeBox();                             // fit the box to the (possibly shorter) incoming draft
-  restoreBoxFocus();                         // if a reload stole focus mid-type, put it back here
-}
-// Desktop-only: grow the textarea (and thus the footer/bottom panel) as lines are
-// added, clamped by the CSS max-height. Mobile keeps its fixed scrolling box. The
-// footer's ResizeObserver (see refitTTY) pushes the terminal up as we grow.
-const finePointer = window.matchMedia('(pointer: fine)').matches;
-function autosizeBox() {
-  if (!finePointer) return;
-  box.style.height = 'auto';                       // let it shrink back when lines are removed
-  box.style.height = box.scrollHeight + 'px';      // CSS min/max-height clamp the result
-}
-box.addEventListener('input', () => { saveDraft(); autosizeBox(); });
-
-// -- keep focus through a reload. We live-edit this very app, so an index.html
-// change (or a self-restart) reloads the page out from under you — and if you
-// were mid-type in the message box, the reload steals your focus and caret. The
-// draft text already survives (saveDraft); this preserves the *cursor* too.
-// snapshotBoxFocus() is called right before any location.reload(); restoreBoxFocus()
-// runs once the matching composer is refilled at boot, refocusing + restoring the
-// caret so you can keep typing as if nothing happened.
+// Preserve the message-box caret across a reload (live-reload / daemon restart):
+// snapshot before location.reload(), restore once the same draft is back in the box.
 function snapshotBoxFocus() {
   try {
     if (document.activeElement !== box) return;
@@ -1294,6 +1478,34 @@ function restoreBoxFocus() {
     box.setSelectionRange(Math.min(s.start ?? n, n), Math.min(s.end ?? n, n));
   } catch {}
 }
+// Reconcile the shared textarea to whatever context we're now in: save the outgoing
+// context, then load the incoming one (recovering unconfirmed sent text or a queued
+// sessions-list message if there's no live draft). Never loses text, never bleeds it.
+function syncComposer() {
+  const id = currentDraftId();
+  if (id === activeDraftId) return;          // same context — leave the box alone
+  saveDraft();                               // stash the outgoing context first
+  activeDraftId = id;
+  if (!id) { box.value = ''; return; }       // projects rung — nothing to compose
+  let v = '';
+  try {
+    v = localStorage.getItem(draftKey(id)) || '';
+    if (!v) v = String(id).startsWith('new:') ? takePending()                          // sessions composer recovers a queued send
+                                              : (localStorage.getItem(outboxKey(id)) || '');  // session recovers an unconfirmed send
+  } catch {}
+  box.value = v;
+  restoreBoxFocus();                         // if a reload stole focus mid-type, put it back here
+}
+// Desktop-only: grow the textarea (and thus the footer/bottom panel) as lines are
+// added, clamped by the CSS max-height. Mobile keeps its fixed scrolling box. The
+// footer's ResizeObserver (see refitTTY) pushes the terminal up as we grow.
+const finePointer = window.matchMedia('(pointer: fine)').matches;
+function autosizeBox() {
+  if (!finePointer) return;
+  box.style.height = 'auto';                       // let it shrink back when lines are removed
+  box.style.height = box.scrollHeight + 'px';      // CSS min/max-height clamp the result
+}
+box.addEventListener('input', () => { saveDraft(); autosizeBox(); });
 
 // -- don't yank the view while you're mid-message. Hook-driven auto-switches (a
 // question surfacing the TUI, then restoring) go through autoSetView, which parks
@@ -1309,7 +1521,7 @@ function sendMessage() {
   const text = box.value.trim();
   // `/new` is a console-level command — it spins up a fresh claude session
   // rather than being typed into the current one.
-  if (/^\/new(\s|$)/.test(text)) { box.value = ''; autosizeBox(); clearDraft(); newSession(); return; }
+  if (/^\/new(\s|$)/.test(text)) { box.value = ''; clearDraft(); newSession(); return; }
   const ready = attachments.filter(a => a.path);
   if ((!text && !ready.length) || !ws || ws.readyState !== 1) return;
   // claude reads each path via its Read tool → sees the image
@@ -1319,17 +1531,17 @@ function sendMessage() {
   if (currentView() === 'sessions') {
     if (!currentPid) return;
     pendingSendText = full;
-    stashPending(currentPid, text || full);   // survive a reload before the session even exists (scoped to this project)
-    box.value = ''; autosizeBox(); clearDraft(); attachments = []; renderChips();
+    stashPending(text || full);       // survive a reload before the session even exists
+    box.value = ''; clearDraft(); attachments = []; renderChips();
     newSession();                     // focus reply → openSession → queued box shown
     setTimeout(flushPendingSend, 8000);   // fallback if the SessionStart hook never lands
     return;
   }
-  ws.send(JSON.stringify({ type: 'send', text: full }));
+  hsend({ type: 'send', text: full });
   stashOutbox(currentCid, text || full);  // hold until claude confirms (UserPromptSubmit) — survives a mid-send restart
   viewBeforeQuestion = null;          // you're acting here on purpose — don't auto-return
   addPending(full, text || ready.map(a => a.name).join(', ') || full);
-  box.value = ''; autosizeBox(); clearDraft(); attachments = []; renderChips();
+  box.value = ''; clearDraft(); attachments = []; renderChips();
 }
 
 box.addEventListener('paste', (e) => {
@@ -1377,7 +1589,7 @@ const KEY_SEQ = {
   enter: '\r', tab: '\t', ctrlc: '\x03',
 };
 function sendKeys(data) {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'input', data }));
+  hsend({ type: 'input', data });
 }
 document.getElementById('keys').addEventListener('click', (e) => {
   if (swipeTap) { swipeTap = false; return; }   // this "click" is the tail of a horizontal nav swipe, not a real tap
@@ -1534,6 +1746,7 @@ else {
 // projects → sessions → transcript → tty. Mobile defaults to the transcript
 // (native scroll, markdown, no xterm pain) for a session; the app opens on the
 // projects rung. Drop to the tty only to get surgical.
+const machinesPanel = document.getElementById('machines');
 const projectsPanel = document.getElementById('projects');
 const menuPanel = document.getElementById('menu');
 const leftPanel = document.getElementById('left');
@@ -1542,22 +1755,25 @@ const panelBtn = document.getElementById('panelBtn');
 const menuBtn = document.getElementById('menuBtn');
 const projectsBtn = document.getElementById('projectsBtn');
 function setView(view) {
-  const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects';
+  const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects',
+        machines = view === 'machines';
+  machinesPanel.classList.toggle('hidden', !machines);
   projectsPanel.classList.toggle('hidden', !projects);
   menuPanel.classList.toggle('hidden', !sessions);
   leftPanel.classList.toggle('hidden', !tty);
   rightPanel.classList.toggle('hidden', !(view === 'transcript'));
   document.getElementById('keys').style.display = (tty && isTouch) ? '' : 'none';  // key bar only for touch (the desktop terminal takes these keys natively)
-  // Composer is hidden on the projects rung (nothing to talk to). On the sessions
-  // list it stays, but a message there starts a new session rather than going to a
-  // session you're not viewing — say so in the placeholder.
-  composer.style.display = projects ? 'none' : '';
+  // Composer is hidden on the machines + projects rungs (nothing to talk to). On
+  // the sessions list it stays, but a message there starts a new session rather
+  // than going to a session you're not viewing — say so in the placeholder.
+  composer.style.display = (projects || machines) ? 'none' : '';
   box.placeholder = sessions ? 'message → new session' : 'message';
   syncComposer();              // each level has its own draft — swap the box to this one's
   panelBtn.innerHTML = tty ? '<span class="bico">▤</span><span class="blbl"> transcript</span>'
                            : '<span class="bico">❯</span><span class="blbl"> terminal</span>';
   menuBtn.classList.toggle('on', sessions);
   projectsBtn.classList.toggle('on', projects);
+  machinesBtn.classList.toggle('on', machines);
   try { localStorage.setItem('cc_view', view); } catch {}
   refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
   syncUrl();                       // keep the URL in step with the depth we're at
@@ -1568,9 +1784,11 @@ function setView(view) {
 // Each is a manual nav, so it cancels any pending question auto-return (navTo wraps that).
 const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; setView(v); };
 panelBtn.onclick = () => navTo(currentView() === 'tty' ? 'transcript' : 'tty');
-menuBtn.onclick = () => { if (currentPid) navTo('sessions'); else navTo('projects'); };
-projectsBtn.onclick = () => navTo('projects');
-document.getElementById('brand').onclick = () => navTo('projects');
+menuBtn.onclick = () => { if (currentPid) navTo('sessions'); else navTo(FLEET && !currentMachine ? 'machines' : 'projects'); };
+projectsBtn.onclick = () => navTo(FLEET && !currentMachine ? 'machines' : 'projects');
+machinesBtn.onclick = () => navTo('machines');
+document.getElementById('brand').onclick = () => navTo(FLEET ? 'machines' : 'projects');
+if (!FLEET) machinesBtn.style.display = 'none';   // no machines rung when talking to a harness directly
 pendingNav = parseHash();        // restore project / session / depth from the URL…
 setView(pendingNav.view);        // …optimistically; resolvePendingNav refines once data lands
 
@@ -1580,25 +1798,30 @@ setView(pendingNav.view);        // …optimistically; resolvePendingNav refines
 // once the prompt is answered. Skips work if you're already on the tty.
 let viewBeforeQuestion = null;
 function currentView() {
+  if (!machinesPanel.classList.contains('hidden')) return 'machines';
   if (!projectsPanel.classList.contains('hidden')) return 'projects';
   if (!menuPanel.classList.contains('hidden')) return 'sessions';
   if (!leftPanel.classList.contains('hidden')) return 'tty';
   return 'transcript';
 }
 
-// -- URL routing: project / session / depth live in the hash (the `?t=` token
-// stays in the query) so a reload — or a shared link — lands back where you were.
-// Shapes: `#/` projects · `#/p/<pid>` sessions · `#/p/<pid>/s/<cid>` transcript
-// · `#/p/<pid>/s/<cid>/tty` terminal.
+// -- URL routing: machine / project / session / depth live in the hash (the `?t=`
+// token stays in the query) so a reload — or a shared link — lands back where you
+// were. Shapes: `#/` machines · `#/m/<machine>` projects ·
+// `#/m/<machine>/p/<pid>` sessions · `…/s/<cid>` transcript · `…/s/<cid>/tty` tty.
 function parseHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
-  const nav = { view: 'projects', pid: null, cid: null };
-  if (parts[0] === 'p' && parts[1]) {
-    nav.pid = decodeURIComponent(parts[1]);
-    nav.view = 'sessions';
-    if (parts[2] === 's' && parts[3]) {
-      nav.cid = decodeURIComponent(parts[3]);
-      nav.view = parts[4] === 'tty' ? 'tty' : 'transcript';
+  const nav = { view: FLEET ? 'machines' : 'projects', machine: null, pid: null, cid: null };
+  let i = 0;
+  if (FLEET) {                                   // fleet: a machine prefixes the path
+    if (parts[0] !== 'm' || !parts[1]) return nav;
+    nav.machine = decodeURIComponent(parts[1]); nav.view = 'projects'; i = 2;
+  }
+  if (parts[i] === 'p' && parts[i + 1]) {
+    nav.pid = decodeURIComponent(parts[i + 1]); nav.view = 'sessions';
+    if (parts[i + 2] === 's' && parts[i + 3]) {
+      nav.cid = decodeURIComponent(parts[i + 3]);
+      nav.view = parts[i + 4] === 'tty' ? 'tty' : 'transcript';
     }
   }
   return nav;
@@ -1607,8 +1830,10 @@ function syncUrl() {
   if (pendingNav) return;          // mid-restore: don't write until the URL's state is applied
   const v = currentView();
   let h = '#/';
-  if (v !== 'projects' && currentPid) {
-    h = '#/p/' + encodeURIComponent(currentPid);
+  if (FLEET && currentMachine && v !== 'machines') h += 'm/' + encodeURIComponent(currentMachine);
+  if ((!FLEET || currentMachine) && currentPid && v !== 'machines' && v !== 'projects') {
+    if (h !== '#/') h += '/';
+    h += 'p/' + encodeURIComponent(currentPid);
     if ((v === 'transcript' || v === 'tty') && currentCid) {
       h += '/s/' + encodeURIComponent(currentCid);
       if (v === 'tty') h += '/tty';
@@ -1621,6 +1846,18 @@ function syncUrl() {
 function resolvePendingNav() {
   const nav = pendingNav;
   if (!nav) return;
+  if (nav.machine) {
+    if (!machineList.length) return;                         // roster not in yet
+    if (!machineList.some(x => x.id === nav.machine)) {      // machine is gone
+      pendingNav = null; currentMachine = null; setView('machines'); return;
+    }
+    if (currentMachine !== nav.machine) {                    // attach to it + fetch its list
+      currentMachine = nav.machine;
+      currentPid = null; currentCid = null; currentTitle = '';
+      projectList = []; sessionList = []; gotSessions = false;
+      hsend({ type: 'list' });
+    }
+  }
   if (nav.pid) {
     if (!projectList.length) return;                         // projects not in yet
     if (!projectList.some(p => p.pid === nav.pid)) {         // project is gone
@@ -1663,12 +1900,21 @@ function restoreViewAfterQuestion() {
 // the iOS back-gesture feel. projects → sessions → transcript → tty.
 // The two deep rungs are ordered by device preference: desktop dives into the
 // terminal first (transcript one rung deeper), touch into the transcript first.
-const LEVELS = isTouch ? ['projects', 'sessions', 'transcript', 'tty']
-                       : ['projects', 'sessions', 'tty', 'transcript'];
+const LEVELS = (FLEET ? ['machines'] : []).concat(
+  isTouch ? ['projects', 'sessions', 'transcript', 'tty']
+          : ['projects', 'sessions', 'tty', 'transcript']);
 function stepLevel(dir) {
   const i = LEVELS.indexOf(currentView());
   if (i === -1) return;
   let next = LEVELS[Math.min(LEVELS.length - 1, Math.max(0, i + dir))];
+  // diving past the machines rung needs a chosen machine; pick the first online
+  // one (selectMachine fetches its projects + drops us on the projects rung).
+  if (FLEET && next === 'projects' && !currentMachine) {
+    const on = machineList.find(m => m.online);
+    if (!on) return;
+    selectMachine(on.id);
+    return;
+  }
   // diving past projects needs a selected project; fall back to the last one we
   // were on (currentPid persists), else the first ready project, else stay put.
   if (next === 'sessions' && !currentPid) {
@@ -1781,12 +2027,10 @@ window.addEventListener('resize', () => { fit.fit(); sendResize(); term.scrollTo
 
 // -- phone / QR --------------------------------------------------------------
 const qrmodal = document.getElementById('qrmodal');
-document.getElementById('phoneBtn').onclick = async () => {
-  let url;
-  try {
-    const cfg = await (await fetch('/config')).json();
-    url = `http://${cfg.lanIp}:${cfg.port}/?t=${encodeURIComponent(token)}`;
-  } catch { url = location.href; }
+document.getElementById('phoneBtn').onclick = () => {
+  // Re-attach the token so scanning pairs a new device (the bar no longer has it).
+  const url = location.origin + location.pathname +
+              '?t=' + encodeURIComponent(token) + location.hash;
   const holder = document.getElementById('qrcode');
   holder.innerHTML = '';
   new QRCode(holder, { text: url, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.M });
@@ -1796,7 +2040,24 @@ document.getElementById('phoneBtn').onclick = async () => {
 document.getElementById('qrclose').onclick = () => { qrmodal.hidden = true; };
 qrmodal.onclick = (e) => { if (e.target === qrmodal) qrmodal.hidden = true; };
 
-connect();
+// -- token entry (only when we have none) ------------------------------------
+function showLogin(msg) {
+  const el = document.getElementById('login');
+  const inp = document.getElementById('logintoken');
+  if (msg) { const s = document.getElementById('loginsub'); if (s) s.textContent = msg; }
+  el.hidden = false;
+  const go = () => {
+    const v = inp.value.trim();
+    if (!v) return;
+    try { localStorage.setItem(TOKEN_KEY, v); } catch {}
+    location.reload();   // reload → loadToken() picks it up from storage, then connect()
+  };
+  document.getElementById('loginbtn').onclick = go;
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+  inp.focus();
+}
+
+if (token) connect(); else showLogin();
 </script>
 </body>
 </html>
