@@ -8,8 +8,16 @@ user-facing overview; this file orients an agent working **on** the code.
 > `github.com/clawdbotatg/clawd-fleet`). It's an abstraction layer that drives N
 > harnesses (one per machine) from one phone via a public relay. It treats this
 > harness as a black box reached over the WebSocket — **don't add fleet code
-> here.** The wire contract it depends on is **[`docs/WS-PROTOCOL.md`](docs/WS-PROTOCOL.md)**;
-> keep that doc in sync if you change the WS protocol in `server.py`.
+> here** (the one exception: `index.html`, below). The wire contract it depends on
+> is **[`docs/WS-PROTOCOL.md`](docs/WS-PROTOCOL.md)**; keep that doc in sync if you
+> change the WS protocol in `server.py`.
+>
+> **`index.html` is now the *unified* UI shared with clawd-fleet** — mode-aware via
+> `window.__FLEET__`: the harness serves it untouched (direct mode); the fleet relay
+> injects the flag for fleet mode (machines rung + passkey). The fleet keeps a
+> **byte-identical copy**, so after editing this file, sync it
+> (`cp index.html ../clawd-fleet/index.html` + scp to the box — see clawd-fleet's
+> `docs/DEPLOY.md`). The fleet/passkey code here is dormant unless `__FLEET__` is set.
 
 ## Run / test
 - `python3 server.py` → prints a tokenized URL `http://127.0.0.1:8787/?t=<token>`
