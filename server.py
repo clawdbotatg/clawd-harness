@@ -223,6 +223,20 @@ def _git_remote_url(path):
         return ""
 
 
+def _remote_repo_exists(slug):
+    """True iff `owner/repo` already exists on GitHub (per `gh repo view`).
+    Used to turn a `create` of an already-existing repo into a `clone` instead
+    of letting `gh repo create` 422. Best-effort: if `gh` is missing or errors
+    for any other reason, returns False so we fall through to the normal create
+    path (which surfaces its own error)."""
+    try:
+        r = subprocess.run(["gh", "repo", "view", slug],
+                           capture_output=True, text=True, timeout=15)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 # ── project: a git repo under PROJECTS_DIR that sessions run inside ───────────
 class Project:
     """One git repo we drive. Owns no processes itself — it's the workdir N
@@ -979,11 +993,17 @@ class SessionManager:
     def create_project(self, name):
         """Create a new public repo under GH_OWNER and clone it into projects/.
         If a dir of the same name already exists on disk (e.g. removed earlier),
-        re-adopt it in place rather than spinning up a `name-2`."""
+        re-adopt it in place rather than spinning up a `name-2`. If the repo
+        already exists *remotely* on GH_OWNER (e.g. created on another machine),
+        clone it instead of trying to `gh repo create` (which would 422)."""
         base = _safe_name(name)
         existing = self._readopt(base)
         if existing:
             return existing
+        if _remote_repo_exists(f"{GH_OWNER}/{base}"):
+            print(f"[project {base}] exists on {GH_OWNER} — cloning instead of creating",
+                  flush=True)
+            return self.add_project(f"{GH_OWNER}/{base}")
         safe = self._unique_project_name(base)
         path = str(PROJECTS_DIR / safe)
         url = f"https://github.com/{GH_OWNER}/{safe}"
