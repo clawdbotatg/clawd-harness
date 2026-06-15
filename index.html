@@ -560,6 +560,7 @@ function connect() {
   };
   ws.onclose = () => {
     dot.classList.remove('up');
+    for (const k of Object.keys(e2eChans)) delete e2eChans[k];   // sessions die with the connection → re-handshake
     // A close *before* we ever opened, when the page itself was just served by the
     // relay, almost always means auth (the box is clearly up). The browser hides
     // the 403 behind code 1006, so we infer it: after a couple of pre-open closes,
@@ -585,7 +586,11 @@ function connect() {
 function hsend(frame) {
   if (!ws || ws.readyState !== 1) return;
   if (!FLEET) { ws.send(JSON.stringify(frame)); return; }
-  if (currentMachine) ws.send(JSON.stringify({ type: 'toMachine', machine: currentMachine, msg: frame }));
+  if (!currentMachine) return;
+  const ch = e2eChans[currentMachine];
+  if (ch && ch.status === 'open') { e2eSendFrame(currentMachine, frame); return; }
+  e2eEnsure(currentMachine).catch(() => {});   // start the secure handshake if needed
+  e2eChans[currentMachine].queue.push(frame);  // queued until the channel opens
 }
 
 // Relay → us. `machineMsg` carries a harness frame (act on it only if it's from
@@ -600,7 +605,12 @@ function handleRelay(m) {
     return;
   }
   if (m.type === 'machines') { hidePasskey(); renderMachines(m.machines || []); return; }
-  if (m.type === 'machineMsg') { if (m.machine === currentMachine) handleJson(m.msg || {}); return; }
+  if (m.type === 'machineMsg') {
+    const msg = m.msg || {};
+    if (msg.t === 'e2e.shello' || msg.t === 'e2e.done' || msg.t === 'e2e.err') { e2eOnCtl(m.machine, msg); return; }
+    if (msg.t === 'e2e.rec') { e2eOnRecord(m.machine, b64uDec(msg.r)); return; }
+    return;   // fail-closed: never act on a plaintext harness frame from a machine
+  }
   if (m.type === 'error') { meta.textContent = 'relay: ' + (m.error || 'error'); return; }
 }
 
@@ -611,8 +621,7 @@ function handleBinary(buf) {
   if (!u.length) return;
   const n = u[0];
   const machine = decoder.decode(u.subarray(1, 1 + n));
-  if (machine !== currentMachine) return;
-  term.write(u.subarray(1 + n), () => term.scrollToBottom());
+  e2eOnRecord(machine, u.subarray(1 + n));   // encrypted PTY record → decrypt in seq order
 }
 
 // ---- passkey second factor (native WebAuthn — zero deps) -------------------
@@ -620,6 +629,223 @@ const b64uDec = (s) => { s = s.replace(/-/g, '+').replace(/_/g, '/'); s += '='.r
   const bin = atob(s), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
 const b64uEnc = (buf) => { const u = new Uint8Array(buf); let s = ''; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
+
+// ============================================================================
+// fleet-e2e/1 — end-to-end channel between this mobile and a machine's worker.
+// See docs/fleet/E2E-PROTOCOL.md. Every byte string below MUST match fleet/e2e.py.
+// The relay only ever sees ciphertext; a malicious relay degrades to DoS.
+// fleet/test_e2e_interop.py extracts the region between the markers to cross-check.
+// [e2e-core-begin]
+const E2E = (() => {
+  const te = new TextEncoder();
+  const PROTO = te.encode('fleet-e2e/1');
+  const DIR_M2W = 0x4D, DIR_W2M = 0x57, KIND_JSON = 0x01, KIND_BIN = 0x02;
+  const C = crypto, S = crypto.subtle;
+
+  const concat = (...a) => { let n = 0; for (const x of a) n += x.length; const o = new Uint8Array(n); let i = 0; for (const x of a) { o.set(x, i); i += x.length; } return o; };
+  const u16 = (n) => new Uint8Array([(n >> 8) & 0xff, n & 0xff]);
+  const u64 = (n) => { const b = new Uint8Array(8); let x = BigInt(n); for (let i = 7; i >= 0; i--) { b[i] = Number(x & 0xffn); x >>= 8n; } return b; };
+  const rd64 = (b) => Number(new DataView(b.buffer, b.byteOffset, 8).getBigUint64(0));
+  const lp = (...parts) => { const segs = []; for (const p of parts) { segs.push(u16(p.length), p); } return concat(...segs); };
+  const eq = (a, b) => { if (a.length !== b.length) return false; let d = 0; for (let i = 0; i < a.length; i++) d |= a[i] ^ b[i]; return d === 0; };
+  const sha256 = async (b) => new Uint8Array(await S.digest('SHA-256', b));
+  const hmac = async (key, msg) => new Uint8Array(await S.sign('HMAC', await S.importKey('raw', key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']), msg));
+  const hkdf = async (salt, ikm, info, len = 32) => new Uint8Array(await S.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, await S.importKey('raw', ikm, 'HKDF', false, ['deriveBits']), len * 8));
+  const verifySig = async (ikRaw, sigRaw, data) => S.verify({ name: 'ECDSA', hash: 'SHA-256' }, await S.importKey('raw', ikRaw, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']), sigRaw, data);
+
+  async function keySchedule(Z, midB, epk_m, n_m, epk_w, n_w, ik_w) {
+    const salt = await sha256(lp(n_m, n_w));
+    const Th = await sha256(lp(PROTO, midB, epk_m, n_m, epk_w, n_w, ik_w));
+    const exp = (label) => hkdf(salt, Z, concat(te.encode(label), Th), 32);
+    return {
+      Th,
+      k_m2w: await exp('fleet-e2e/1 key m2w'),
+      k_w2m: await exp('fleet-e2e/1 key w2m'),
+      iv_m2w: (await exp('fleet-e2e/1 iv m2w')).slice(0, 4),
+      iv_w2m: (await exp('fleet-e2e/1 iv w2m')).slice(0, 4),
+      kc_m: await exp('fleet-e2e/1 confirm-m'),
+      kc_w: await exp('fleet-e2e/1 confirm-w'),
+      challenge: await sha256(concat(te.encode('fleet-e2e/1 webauthn-challenge'), Th)),
+    };
+  }
+
+  // An open channel: directional AES-GCM keys + monotonic sequence. seal/open are
+  // serialized by the caller (sendChain/recvChain) so sequence order is preserved.
+  class Session {
+    constructor(keys) {   // mobile role: send=m2w, recv=w2m
+      this.kS = keys.k_m2w; this.ivS = keys.iv_m2w; this.dS = DIR_M2W;
+      this.kR = keys.k_w2m; this.ivR = keys.iv_w2m; this.dR = DIR_W2M;
+      this.seqS = 0; this.seqRmax = -1;
+    }
+    async init() {
+      this._eS = await S.importKey('raw', this.kS, 'AES-GCM', false, ['encrypt']);
+      this._eR = await S.importKey('raw', this.kR, 'AES-GCM', false, ['decrypt']);
+      return this;
+    }
+    async seal(kind, payload) {
+      const seq = this.seqS++;
+      const nonce = concat(this.ivS, u64(seq));
+      const aad = concat(new Uint8Array([this.dS]), u64(seq));
+      const ct = new Uint8Array(await S.encrypt({ name: 'AES-GCM', iv: nonce, additionalData: aad, tagLength: 128 }, this._eS, concat(new Uint8Array([kind]), payload)));
+      return concat(u64(seq), ct);
+    }
+    async open(record) {
+      if (record.length < 8 + 16) throw new Error('short');
+      const seq = rd64(record.subarray(0, 8));
+      if (seq <= this.seqRmax) throw new Error('replay');
+      const nonce = concat(this.ivR, u64(seq));
+      const aad = concat(new Uint8Array([this.dR]), u64(seq));
+      let inner;
+      try { inner = new Uint8Array(await S.decrypt({ name: 'AES-GCM', iv: nonce, additionalData: aad, tagLength: 128 }, this._eR, record.subarray(8))); }
+      catch { throw new Error('auth'); }
+      if (seq <= this.seqRmax) throw new Error('replay');
+      this.seqRmax = seq;
+      return { kind: inner[0], payload: inner.subarray(1) };
+    }
+  }
+
+  // Drives the client half of the handshake. The assertion (Face ID) is acquired
+  // by the caller between auth() and build() so it can run inside a user gesture.
+  function client(midStr, pinnedIkW) {
+    const midB = te.encode(midStr);
+    let eph, n_m, epk_m, keys, ikW;
+    return {
+      async hello() {
+        eph = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+        epk_m = new Uint8Array(await S.exportKey('raw', eph.publicKey));
+        n_m = C.getRandomValues(new Uint8Array(32));
+        return { t: 'e2e.hello', epk_m: b64uEnc(epk_m), n_m: b64uEnc(n_m), proto: 'fleet-e2e/1' };
+      },
+      // Verify the worker's signed ephemeral + derive keys. Returns the WebAuthn
+      // challenge (caller obtains the assertion) and build() to finish.
+      async auth(sh) {
+        const epk_w = b64uDec(sh.epk_w), n_w = b64uDec(sh.n_w), ik_w = b64uDec(sh.ik_w), sig = b64uDec(sh.sig_w);
+        if (pinnedIkW && !eq(ik_w, pinnedIkW)) throw new Error('pin');
+        const T1 = await sha256(lp(PROTO, midB, epk_m, n_m, epk_w, n_w, ik_w));
+        if (!(await verifySig(ik_w, sig, T1))) throw new Error('worker-sig');
+        const peer = await S.importKey('raw', epk_w, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+        const Z = new Uint8Array(await S.deriveBits({ name: 'ECDH', public: peer }, eph.privateKey, 256));
+        keys = await keySchedule(Z, midB, epk_m, n_m, epk_w, n_w, ik_w);
+        ikW = ik_w;
+        return {
+          challenge: keys.challenge, ikW: ik_w,
+          build: async (assertion) => ({ t: 'e2e.auth', assertion, cf_m: b64uEnc(await hmac(keys.kc_m, te.encode('fleet-e2e/1 client-finished'))) }),
+        };
+      },
+      async done(sd) {
+        const expect = await hmac(keys.kc_w, te.encode('fleet-e2e/1 server-finished'));
+        if (!eq(expect, b64uDec(sd.cf_w))) throw new Error('server-confirm');
+        return new Session(keys).init();
+      },
+      fingerprint() { return E2E._fp(ikW); },
+    };
+  }
+
+  async function _fp(ikRaw) {
+    const h = await sha256(ikRaw);
+    const b32 = ((bytes) => { const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; let bits = 0, val = 0, out = ''; for (const b of bytes) { val = (val << 8) | b; bits += 8; while (bits >= 5) { out += A[(val >>> (bits - 5)) & 31]; bits -= 5; } } return out; })(h).slice(0, 20);
+    return b32.match(/.{1,5}/g).join(' ');
+  }
+
+  return { client, KIND_JSON, KIND_BIN, _fp, _eq: eq,
+    _test: { keySchedule, Session, lp, sha256, hmac, hkdf, concat, u64, rd64, verifySig } };
+})();
+// [e2e-core-end]
+
+// ---- E2E integration: per-machine secure channels over the relay -----------
+// One E2E channel per machine. All harness traffic for a machine is sealed with
+// its channel; the relay only routes ciphertext. The handshake's passkey is
+// bound to the channel keys, so the worker (and optionally the relay) verifies a
+// human authorized THIS channel — independent of the relay's edge gate.
+const e2eChans = {};   // machine -> { status, session, queue, sendChain, recvChain, dSH, dSD, ready, fp }
+function e2eDeferred() { let r, j; const p = new Promise((res, rej) => { r = res; j = rej; }); p.resolve = r; p.reject = j; return p; }
+function e2ePin(m) { try { return localStorage.getItem('cc_e2e_pin_' + m); } catch { return null; } }
+function e2eSetPin(m, b) { try { localStorage.setItem('cc_e2e_pin_' + m, b); } catch {} }
+
+// Acquire a channel-bound passkey assertion. Tries immediately (often still inside
+// the machine-tap gesture); on a gesture/cancel error, surfaces a tap-to-unlock.
+function e2eGetAssertion(machine, challengeBytes) {
+  const req = lastAuthReq || {};
+  const get = () => navigator.credentials.get({ publicKey: {
+    challenge: challengeBytes, rpId: req.rpId || location.hostname,
+    allowCredentials: (req.credentialIds || []).map(id => ({ id: b64uDec(id), type: 'public-key' })),
+    userVerification: 'required', timeout: 60000,
+  } }).then(a => ({ credentialId: b64uEnc(a.rawId), clientDataJSON: b64uEnc(a.response.clientDataJSON),
+    authenticatorData: b64uEnc(a.response.authenticatorData), signature: b64uEnc(a.response.signature) }));
+  return get().catch(() => new Promise((resolve, reject) => {
+    showPasskey('unlock ' + machine + ' with your passkey', 'auth');
+    const btn = document.getElementById('passkeybtn');
+    btn.onclick = () => { document.getElementById('passkey').hidden = true; get().then(resolve, reject); };
+  }));
+}
+
+async function e2eEnsure(machine) {
+  const cur = e2eChans[machine];
+  if (cur && cur.status === 'open') return cur;
+  if (cur && cur.status === 'handshaking') return cur.ready;
+  const ch = e2eChans[machine] = { status: 'handshaking', session: null, queue: [],
+    sendChain: Promise.resolve(), recvChain: Promise.resolve(), dSH: e2eDeferred(), dSD: e2eDeferred() };
+  ch.ready = (async () => {
+    const pinB64 = e2ePin(machine);
+    const cli = E2E.client(machine, pinB64 ? b64uDec(pinB64) : null);
+    meta.textContent = 'securing ' + machine + '…';
+    e2eSendCtl(machine, await cli.hello());
+    const sh = await ch.dSH;                              // ServerHello (worker-signed)
+    const { challenge, ikW, build } = await cli.auth(sh); // verify sig + pin, derive keys
+    const ikB64 = b64uEnc(ikW);
+    if (!pinB64) { e2eSetPin(machine, ikB64); ch.firstPin = true; }   // TOFU
+    const assertion = await e2eGetAssertion(machine, challenge);      // Face ID, channel-bound
+    hidePasskey();
+    e2eSendCtl(machine, await build(assertion));          // ClientAuth
+    const sd = await ch.dSD;                              // ServerDone (key confirmation)
+    ch.session = await cli.done(sd);
+    ch.fp = await cli.fingerprint();
+    ch.status = 'open';
+    meta.textContent = ch.firstPin ? ('🔒 pinned · ' + ch.fp) : '';
+    const q = ch.queue; ch.queue = [];
+    for (const fr of q) e2eSendFrame(machine, fr);
+    return ch;
+  })().catch((e) => {
+    ch.status = 'failed';
+    if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
+    else meta.textContent = 'secure channel failed';
+    throw e;
+  });
+  return ch.ready;
+}
+
+function e2eSendCtl(machine, msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'toMachine', machine, msg })); }
+
+function e2eSendFrame(machine, frame) {
+  const ch = e2eChans[machine];
+  if (!ch || ch.status !== 'open') { if (ch) ch.queue.push(frame); return; }
+  const bytes = new TextEncoder().encode(JSON.stringify(frame));
+  ch.sendChain = ch.sendChain.then(async () => {
+    const rec = await ch.session.seal(E2E.KIND_JSON, bytes);
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'toMachine', machine, msg: { t: 'e2e.rec', r: b64uEnc(rec) } }));
+  }).catch(() => {});
+}
+
+function e2eOnCtl(machine, msg) {
+  const ch = e2eChans[machine];
+  if (!ch) return;
+  if (msg.t === 'e2e.shello') ch.dSH.resolve(msg);
+  else if (msg.t === 'e2e.done') ch.dSD.resolve(msg);
+  else if (msg.t === 'e2e.err') { const e = new Error(msg.error || 'worker error'); ch.dSH.reject(e); ch.dSD.reject(e); if (ch.status !== 'open') ch.status = 'failed'; }
+}
+
+// Decrypt a record (from the JSON path or the binary PTY path) in seq order.
+function e2eOnRecord(machine, rec) {
+  const ch = e2eChans[machine];
+  if (!ch || !ch.session) return;
+  ch.recvChain = ch.recvChain.then(async () => {
+    let out;
+    try { out = await ch.session.open(rec); } catch { return; }   // drop bad/replayed
+    if (machine !== currentMachine) return;
+    if (out.kind === E2E.KIND_BIN) term.write(out.payload, () => term.scrollToBottom());
+    else handleJson(JSON.parse(new TextDecoder().decode(out.payload)));
+  }).catch(() => {});
+}
 
 const SESSION_KEY = 'cc_fleet_session';
 function loadSession() { try { const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); return (s && s.exp > Date.now()) ? s.tok : ''; } catch { return ''; } }
@@ -824,6 +1050,7 @@ function renderMachines(list) {
 // so everything below the rung (projects/sessions/terminal) is wiped, then we
 // ask the new machine for its projects + sessions.
 function selectMachine(id) {
+  e2eEnsure(id).catch(() => {});   // start the secure handshake inside this tap gesture
   if (id !== currentMachine) {
     currentMachine = id;
     currentPid = null; currentCid = null; currentTitle = '';

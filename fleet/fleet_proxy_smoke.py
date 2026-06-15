@@ -36,6 +36,7 @@ MACHINE = "mockbox"
 
 ENV = {**os.environ, "FLEET_PORT": RELAY_PORT, "FLEET_TOKEN": TOKEN,
        "FLEET_REQUIRE_PASSKEY": "0",  # routing smoke: 2nd factor off (covered by test_relay_passkey)
+       "FLEET_E2E_REQUIRE": "0",      # transport smoke: E2E off (covered by test_e2e* + interop)
        "FLEET_RELAY": RELAY, "FLEET_BIND": "127.0.0.1"}
 
 procs = []

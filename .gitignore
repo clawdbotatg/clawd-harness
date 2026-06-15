@@ -19,6 +19,7 @@ projects/
 fleet/.clawd-fleet.token
 fleet/.clawd-fleet.machine
 fleet/.clawd-fleet.passkeys.json
+fleet/.fleet.worker_id.json
 fleet/fleet.env
 fleet/*.log
 

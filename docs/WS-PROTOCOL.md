@@ -7,6 +7,12 @@ of rendering them. **This doc is the contract that lets the fleet drive a
 harness without modifying it.** (Source of truth: `server.py` `Handler.handle_ws`
 / `_dispatch`, `ClaudeSession`, `SessionManager`.)
 
+> **Fleet note:** between a mobile and a worker, every frame below is carried
+> inside an **end-to-end AES-GCM record** (`fleet-e2e/1`) that the relay cannot
+> read — the worker decrypts mobile→harness and encrypts harness→mobile. The
+> harness itself is unchanged; the E2E layer wraps this protocol transparently.
+> See `docs/fleet/E2E-PROTOCOL.md`.
+
 ## Connection
 
 ```

@@ -12,11 +12,20 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >   relay's `_serve_file` serves the **first existing** of `HERE/<name>` (flat box
 >   layout) then `HERE.parent/<name>` (monorepo). All paths below are relative to
 >   `fleet/` unless noted.
-> - **Auth is now two-factor:** the mobile token (factor 1) **+ a passkey**
->   (WebAuthn, factor 2), verified server-side in pure stdlib (`webauthn.py`).
->   The relay withholds the roster until `{type:auth}` proves a passkey assertion;
->   a success mints a 24h session. Enroll is gated by token + `FLEET_ALLOW_ENROLL`.
->   Config: `FLEET_RP_ID`, `FLEET_ORIGIN`, `FLEET_REQUIRE_PASSKEY`.
+> - **Auth is defense-in-depth:**
+>   - *Relay edge gate* — mobile token (factor 1) + a passkey (WebAuthn) verified
+>     in stdlib (`webauthn.py`); the relay withholds the roster until `{type:auth}`.
+>     Anti-abuse, **not** the security boundary. `FLEET_REQUIRE_PASSKEY`.
+>   - *End-to-end channel (`fleet-e2e/1`)* — THE boundary. When a mobile opens a
+>     machine it runs a passkey-bound authenticated key exchange directly with that
+>     machine's **worker** (`e2e.py` + the `[e2e-core]` block in `index.html`): the
+>     worker independently verifies a channel-bound passkey (require-UV) over its
+>     pinned long-term identity, and **all** harness traffic is AES-GCM end-to-end.
+>     The relay routes only ciphertext → a compromised relay is reduced to DoS.
+>     Worker session slides 10 min idle / 1 h hard. Spec: **`../docs/fleet/E2E-PROTOCOL.md`**.
+>     The relay needs **no** crypto for this (blind passthrough); `cryptography`
+>     is a **worker-only** dep. Tests: `test_e2e.py`, `test_e2e_mitm.py`,
+>     `test_e2e_interop.py` (Python↔browser byte-for-byte via `node`).
 > - **Live at `wss://h.atg.link`** (its own subdomain → the box). The relay serves
 >   the unified `index.html` there. (The earlier `relay.atg.link` subdomain was
 >   retired 2026-06 — DNS + cert still exist on the box but its nginx vhost is
@@ -28,7 +37,9 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >   ritual is gone) — edit the harness root `index.html`, then `scp` it to the box.
 >   **See `../docs/fleet/DEPLOY.md`.** No build, no React (that rebuild was
 >   reverted — archived on `archive/react-scaffold-eth`).
-> - New files: `webauthn.py`, `test_webauthn.py`, `test_relay_passkey.py`.
+> - New files: `webauthn.py`, `e2e.py` (E2E channel crypto), `test_webauthn.py`,
+>   `test_relay_passkey.py`, `test_e2e.py`, `test_e2e_mitm.py`, `test_e2e_interop.py`,
+>   `.fleet.worker_id.json` (worker identity key, gitignored).
 
 ## The one principle that must not regress
 **The `fleet/` layer never modifies or imports the harness.** The harness

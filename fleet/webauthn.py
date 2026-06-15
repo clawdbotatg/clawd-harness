@@ -141,19 +141,30 @@ def _on_curve(q):
 
 
 def _der_parse_sig(sig: bytes):
-    """ASN.1 DER ECDSA-Sig-Value: SEQUENCE { INTEGER r, INTEGER s }."""
+    """ASN.1 DER ECDSA-Sig-Value: SEQUENCE { INTEGER r, INTEGER s }. Strict and
+    fully-consuming — short-form lengths only (P-256 sigs are <128 bytes), exact
+    length match, no trailing bytes. Rejects non-canonical encodings rather than
+    silently ignoring them."""
     if len(sig) < 8 or sig[0] != 0x30:
         raise ValueError("der: not a sequence")
+    seqlen = sig[1]
+    if seqlen & 0x80 or seqlen != len(sig) - 2:
+        raise ValueError("der: bad sequence length")
     i = 2
-    # (length byte at sig[1] — short form is fine for P-256 sigs)
     if sig[i] != 0x02:
         raise ValueError("der: expected integer r")
-    rlen = sig[i + 1]; i += 2
+    rlen = sig[i + 1]
+    if rlen == 0 or rlen & 0x80 or i + 2 + rlen + 2 > len(sig):
+        raise ValueError("der: bad r length")
+    i += 2
     r = int.from_bytes(sig[i:i + rlen], "big"); i += rlen
     if sig[i] != 0x02:
         raise ValueError("der: expected integer s")
-    slen = sig[i + 1]; i += 2
-    s = int.from_bytes(sig[i:i + slen], "big"); i += slen
+    slen = sig[i + 1]
+    if slen == 0 or slen & 0x80 or i + 2 + slen != len(sig):
+        raise ValueError("der: bad s length / trailing bytes")
+    i += 2
+    s = int.from_bytes(sig[i:i + slen], "big")
     return r, s
 
 

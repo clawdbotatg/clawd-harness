@@ -51,6 +51,73 @@ HERE = Path(__file__).resolve().parent
 # enabled — even a leaked mobile token then can't get a raw remote shell.
 ALLOW_EXEC = os.environ.get("FLEET_ALLOW_EXEC", "").lower() in ("1", "true", "yes")
 
+# End-to-end channel (fleet-e2e/1). The worker independently verifies a
+# channel-bound passkey and encrypts ALL harness traffic, so a compromised relay
+# can neither drive this machine nor read its sessions. See docs/fleet/E2E-PROTOCOL.md.
+# Needs pyca/cryptography (worker only); the box's diagnostic worker may lack it,
+# so the import is optional — without it, E2E is unavailable (proxy refused if
+# required, but ping/diagnostics still work).
+E2E_REQUIRE = os.environ.get("FLEET_E2E_REQUIRE", "1").lower() not in ("0", "false", "no")
+RP_ID = os.environ.get("FLEET_RP_ID", "h.atg.link")
+ORIGIN = os.environ.get("FLEET_ORIGIN", "https://" + RP_ID)
+PASSKEYS_FILE = HERE / ".clawd-fleet.passkeys.json"
+WORKER_ID_FILE = HERE / ".fleet.worker_id.json"
+try:
+    import e2e as e2emod
+    import webauthn
+    HAVE_E2E = True
+except Exception as _e2e_err:        # cryptography missing → diagnostics-only worker
+    e2emod = None
+    HAVE_E2E = False
+
+
+def _load_passkeys():
+    try:
+        return json.loads(PASSKEYS_FILE.read_text())
+    except Exception:
+        return []
+
+
+def _save_passkeys(creds):
+    tmp = str(PASSKEYS_FILE) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(creds, f)
+    os.replace(tmp, PASSKEYS_FILE)
+
+
+def make_passkey_verifier():
+    """A WorkerHandshake verify callback: validates a channel-bound assertion
+    against an enrolled credential, requires user-verification (biometric), and
+    enforces sign-count monotonicity. Returns truthy on success."""
+    lock = threading.Lock()
+
+    def verify(assertion, challenge_bytes):
+        with lock:
+            creds = _load_passkeys()
+            cred = next((c for c in creds if c.get("id") == assertion.get("credentialId")), None)
+            if not cred:
+                return False
+            pubkey = (int(cred["x"], 16), int(cred["y"], 16))
+            ok, _reason = webauthn.verify_assertion(
+                pubkey, assertion.get("clientDataJSON", ""),
+                assertion.get("authenticatorData", ""), assertion.get("signature", ""),
+                e2emod.b64u(challenge_bytes), RP_ID, ORIGIN, require_uv=True)
+            if not ok:
+                return False
+            try:
+                ad = e2emod.b64u_dec(assertion["authenticatorData"])
+                new_count = int.from_bytes(ad[33:37], "big")
+            except Exception:
+                return False
+            old = int(cred.get("sign_count", 0))
+            if (new_count or old) and new_count <= old:   # 0/0 ok (Apple platform), else monotone
+                return False
+            cred["sign_count"] = new_count
+            _save_passkeys(creds)
+            return True
+
+    return verify
+
 
 def default_machine_id():
     # stable per-host id, persisted so reconnects keep the same identity
@@ -122,19 +189,19 @@ class HarnessLink:
                     continue
                 if kind == "pong":
                     continue
-                if kind == 0x2:  # binary PTY bytes → relay (tagged with this mobile)
-                    self.worker.send_pty(self.mobile_id, data)
+                if kind == 0x2:  # binary PTY bytes → relay (sealed, tagged with this mobile)
+                    self.worker.send_pty_enc(self.mobile_id, data)
                     continue
                 # text/JSON harness frame → wrap and route to the mobile verbatim
                 try:
                     frame = json.loads(data.decode("utf-8"))
                 except Exception:
                     continue
-                self.worker.reply(self.mobile_id, frame)
+                self.worker.reply_enc(self.mobile_id, frame)
         finally:
             self.dead = True
-            self.worker.reply(self.mobile_id,
-                              {"type": "error", "error": "harness link closed"})
+            self.worker.reply_enc(self.mobile_id,
+                                  {"type": "error", "error": "harness link closed"})
             self.close()
 
     def send_text(self, frame):
@@ -164,6 +231,36 @@ class Worker:
         self.wlock = threading.Lock()
         self.links = {}            # mobile_id -> HarnessLink
         self.links_lock = threading.Lock()
+        # E2E state (per remote viewer)
+        self.e2e_sessions = {}     # mobile_id -> e2e.Session (open channel)
+        self.e2e_hs = {}           # mobile_id -> e2e.WorkerHandshake (in progress)
+        self.e2e_seen = set()      # used challenges — cross-handshake replay defense
+        self.e2e_lock = threading.Lock()
+        self.identity = None
+        self.passkey_verify = None
+        if HAVE_E2E:
+            try:
+                self.identity = e2emod.load_or_create_identity(str(WORKER_ID_FILE))
+                self.passkey_verify = make_passkey_verifier()
+                fp = e2emod.fingerprint(e2emod.pub_raw(self.identity.public_key()))
+                n = len(_load_passkeys())
+                print(f"[worker {machine}] E2E identity {fp} · {n} passkey(s) enrolled", flush=True)
+                if n == 0 and E2E_REQUIRE:
+                    print(f"[worker {machine}] ⚠ no passkeys enrolled — the harness "
+                          f"proxy will refuse every viewer until one is propagated "
+                          f"(see docs/fleet/DEPLOY.md)", flush=True)
+            except Exception as e:
+                print(f"[worker {machine}] E2E init failed: {e}", flush=True)
+                self.identity = None
+        # Fail-closed startup banners: make a missing/disabled E2E impossible to miss.
+        if not E2E_REQUIRE:
+            print(f"[worker {machine}] ⚠⚠ FLEET_E2E_REQUIRE=0 — end-to-end encryption "
+                  f"is OFF; the relay can read and inject harness traffic. Use only "
+                  f"for local transport smokes, NEVER in production.", flush=True)
+        elif not (HAVE_E2E and self.identity):
+            print(f"[worker {machine}] ⚠ E2E required but unavailable "
+                  f"({'cryptography missing' if not HAVE_E2E else 'identity init failed'}) "
+                  f"— the harness proxy is disabled (diagnostics still work).", flush=True)
 
     # ── outbound frames to the relay ─────────────────────────────────────────
     def reply(self, to, msg):
@@ -229,11 +326,105 @@ class Worker:
         except Exception:
             pass
 
+    # ── E2E channel (per remote viewer) ──────────────────────────────────────
+    def _e2e_hello(self, frm, msg):
+        if not (HAVE_E2E and self.identity):
+            return self.reply(frm, {"t": "e2e.err", "error": "e2e unavailable"})
+        try:
+            hs = e2emod.WorkerHandshake(self.identity, self.machine,
+                                        self.passkey_verify, self.e2e_seen)
+            sh = hs.server_hello(msg)
+        except Exception:
+            return self.reply(frm, {"t": "e2e.err", "error": "hello"})
+        with self.e2e_lock:
+            self.e2e_hs[frm] = hs
+        self.reply(frm, dict(sh, t="e2e.shello"))
+
+    def _e2e_auth(self, frm, msg):
+        with self.e2e_lock:
+            hs = self.e2e_hs.pop(frm, None)
+        if hs is None:
+            return self.reply(frm, {"t": "e2e.err", "error": "no handshake"})
+        try:
+            done, sess = hs.finish(msg)
+        except Exception:
+            return self.reply(frm, {"t": "e2e.err", "error": "auth"})
+        with self.e2e_lock:
+            self.e2e_sessions[frm] = sess
+        print(f"[worker {self.machine}] E2E channel open for {frm}", flush=True)
+        self.reply(frm, dict(done, t="e2e.done"))
+
+    def _e2e_rec(self, frm, msg):
+        sess = self.e2e_sessions.get(frm)
+        if sess is None:
+            return self.reply(frm, {"t": "e2e.err", "error": "no session"})
+        try:
+            kind, payload = sess.open(e2emod.b64u_dec(msg.get("r", "")))
+        except e2emod.E2EError:
+            if sess.expired():
+                with self.e2e_lock:
+                    self.e2e_sessions.pop(frm, None)
+                self.drop_mobile(frm)
+                self.reply(frm, {"t": "e2e.err", "error": "expired"})
+            return                                  # drop bad/replayed frame silently
+        if kind == e2emod.KIND_JSON:
+            try:
+                frame = json.loads(payload.decode("utf-8"))
+            except Exception:
+                return
+            link = self._link_for(frm)
+            if link is not None:
+                link.send_text(frame)
+
+    def _expire(self, to):
+        with self.e2e_lock:
+            self.e2e_sessions.pop(to, None)
+        self.reply(to, {"t": "e2e.err", "error": "expired"})
+        self.drop_mobile(to)
+
+    def reply_enc(self, to, frame):
+        """A harness JSON frame back to the mobile, sealed with its channel."""
+        sess = self.e2e_sessions.get(to)
+        if sess is None:
+            return None if E2E_REQUIRE else self.reply(to, frame)
+        if sess.expired():
+            return self._expire(to)
+        try:
+            rec = sess.seal(e2emod.KIND_JSON, json.dumps(frame).encode("utf-8"))
+        except Exception:
+            return
+        self.reply(to, {"t": "e2e.rec", "r": e2emod.b64u(rec)})
+
+    def send_pty_enc(self, to, payload):
+        """Binary PTY bytes back to the mobile, sealed with its channel."""
+        sess = self.e2e_sessions.get(to)
+        if sess is None:
+            return None if E2E_REQUIRE else self.send_pty(to, payload)
+        if sess.expired():
+            return self._expire(to)
+        try:
+            rec = sess.seal(e2emod.KIND_BIN, payload)
+        except Exception:
+            return
+        self.send_pty(to, rec)
+
     # ── task handling ────────────────────────────────────────────────────────
     def handle_task(self, frm, msg):
-        # Harness-proxy path: a harness control frame (has a `type`) → forward it
-        # into this viewer's dedicated harness connection.
+        # E2E channel frames (handshake + encrypted records) come first.
+        t = msg.get("t")
+        if t == "e2e.hello":
+            return self._e2e_hello(frm, msg)
+        if t == "e2e.auth":
+            return self._e2e_auth(frm, msg)
+        if t == "e2e.rec":
+            return self._e2e_rec(frm, msg)
+        # Harness-proxy path: a harness control frame (has a `type`). When E2E is
+        # required, plaintext proxy frames are refused — everything must arrive
+        # through the secure channel (decrypted in _e2e_rec). Fail closed.
         if "type" in msg:
+            if E2E_REQUIRE:
+                self.reply(frm, {"t": "e2e.err", "error": "secure channel required"})
+                return
             link = self._link_for(frm)
             if link is not None:
                 link.send_text(msg)
@@ -278,6 +469,9 @@ class Worker:
     def drop_mobile(self, mobile_id):
         with self.links_lock:
             link = self.links.pop(mobile_id, None)
+        with self.e2e_lock:
+            self.e2e_sessions.pop(mobile_id, None)
+            self.e2e_hs.pop(mobile_id, None)
         if link:
             link.close()
 
