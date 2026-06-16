@@ -169,6 +169,7 @@ class RelayFleet:
     def _on_frame(self, f):
         t = f.get("type")
         if t == "machines":
+            prime = []
             with self._lock:
                 live = set()
                 for m in f.get("machines", []):
@@ -176,14 +177,20 @@ class RelayFleet:
                         continue
                     mid = m["id"]
                     live.add(mid)
-                    if mid not in self.machines:
+                    mm = self.machines.get(mid)
+                    if mm is None:
                         self.machines[mid] = RelayMachine(mid, self)
-                        self._to_machine(mid, {"type": "list"})   # pull projects+sessions
-                    else:
-                        self.machines[mid].connected = True
+                        prime.append(mid)               # new machine → pull state
+                    elif not mm.connected:
+                        mm.connected = True
+                        prime.append(mid)               # reconnected → re-pull state
                 for mid, mm in self.machines.items():
                     if mid not in live:
                         mm.connected = False
+            # (re)request projects+sessions outside the lock; the harness then
+            # pushes updates over the link automatically.
+            for mid in prime:
+                self._to_machine(mid, {"type": "list"})
             self.on_change("relay", "machines")
         elif t == "machineMsg":
             mid = f.get("machine")
