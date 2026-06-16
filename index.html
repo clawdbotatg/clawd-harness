@@ -53,6 +53,7 @@
             letter-spacing:.1em; color:var(--dim); white-space:nowrap; cursor:pointer; user-select:none; }
   #status:hover { border-color:var(--edge-hi); color:var(--ink); }
   #status.pmopen { border-color:var(--accent); color:var(--accent); }
+  #status.needs { border-color:var(--err); color:var(--err); }
   #status::before { content:"["; margin-right:5px; color:var(--dim); }
   #status::after  { content:"]"; margin-left:5px;  color:var(--dim); }
   #status.working { color:var(--accent); border-color:var(--accent-dim); background:var(--accent-bg); }
@@ -86,12 +87,12 @@
      handler — that's the "swipe-back is janky on the TUI" bug. Pin it to pan-y like main. */
   .xterm-viewport, .xterm-screen, .xterm-scroll-area { touch-action:pan-y !important; }
   .xterm-viewport { -webkit-overflow-scrolling:touch; }   /* momentum scroll on iOS instead of frame-by-frame drag */
-  #feed { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
+  #feed, #pmfeed { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
           padding:12px; display:flex; flex-direction:column; gap:9px;
           width:100%; max-width:880px; align-self:center; }
   /* anchor content to the bottom (TUI-style): short transcripts sit at the bottom and
      grow upward; once content overflows, the auto-margin collapses and scrolling is normal. */
-  #feed > :first-child { margin-top:auto; }
+  #feed > :first-child, #pmfeed > :first-child { margin-top:auto; }
   /* messages read like a terminal log: flat ground, hairline box, a 2px left rule
      no colored rules — every turn is the same neutral box; you read the
      speaker from its uppercase tag, like log lines, not chat bubbles. */
@@ -213,38 +214,24 @@
   #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover, #machinesBtn:hover:hover { color:var(--ink); border-color:var(--edge-hi); }
   #panelBtn.on, #menuBtn.on, #projectsBtn.on, #machinesBtn.on.on { color:var(--accent); border-color:var(--accent); }
   .bico { font-size:14px; line-height:1; }
-  /* PM page — the Fleet PM (controller) chat, folded into the harness UI as a full page */
-  #pmDrawer { position:fixed; inset:0; height:100%; width:100%; z-index:60;
-              background:var(--panel); display:flex; flex-direction:column;
-              transform:translateY(10px); opacity:0; transition:transform .18s ease, opacity .18s ease; }
-  #pmDrawer.open { transform:translateY(0); opacity:1; }
-  /* keep the conversation column readable on wide screens */
-  #pmHead, #pmTabs, #pmLog, #pmForm { width:100%; max-width:760px; margin-inline:auto; }
-  #pmHead { display:flex; align-items:center; gap:8px; padding:11px 13px; border-bottom:1px solid var(--edge); }
-  #pmHead b { font-size:14px; } #pmHead .pmsub { color:var(--dim); font-size:11px; font-family:var(--mono); flex:1; }
-  #pmHead button { background:transparent; border:1px solid var(--edge); color:var(--dim); padding:4px 9px; font-size:13px; cursor:pointer; }
-  #pmTabs { display:flex; gap:5px; padding:7px 11px; border-bottom:1px solid var(--edge); }
-  #pmTabs button { background:transparent; border:1px solid var(--edge); color:var(--dim); border-radius:6px;
-                   padding:4px 13px; font-size:12px; font-family:var(--mono); cursor:pointer; }
-  #pmTabs button.on { color:var(--accent); border-color:var(--accent); }
-  .pmpane { display:none; flex:1; min-height:0; }
-  .pmpane.on { display:flex; }
-  #pmChatPane.on { flex-direction:column; }
-  #pmDebugFrame { border:0; width:100%; background:var(--bg); }
-  #pmDebugFrame.on { display:block; }
-  #pmLog { flex:1; overflow:auto; padding:14px; display:flex; flex-direction:column; gap:9px; }
-  .pmm { max-width:92%; padding:8px 11px; border-radius:11px; white-space:pre-wrap; word-wrap:break-word; font-size:13px; line-height:1.45; }
-  .pmm.me { align-self:flex-end; background:var(--accent); color:#000; }
-  .pmm.bot { align-self:flex-start; background:var(--raised); border:1px solid var(--edge); color:var(--ink); }
-  .pmm .pmtr { margin-top:6px; padding-top:5px; border-top:1px dashed var(--edge); color:var(--dim); font-size:11px; font-family:var(--mono); }
-  .pmm.think { align-self:flex-start; color:var(--dim); font-style:italic; }
-  #pmForm { display:flex; gap:7px; padding:11px; border-top:1px solid var(--edge); }
-  #pmBox { flex:1; resize:none; background:var(--bg); color:var(--ink); border:1px solid var(--edge); border-radius:8px;
-           padding:9px; font:13px/1.4 inherit; max-height:120px; }
-  #pmBox:focus { outline:none; border-color:var(--accent); }
-  #pmSend { border-radius:8px; padding:0 15px; }
-  #pmScrim { position:fixed; inset:0; background:rgba(0,0,0,.4); z-index:59; }
-  #pmScrim[hidden], #pmDrawer[hidden] { display:none; }
+  /* Fleet PM — folded into the harness as a first-class view: PM threads ride the
+     same #sessionbar tab strip, and the chat reuses the transcript #feed look.
+     #pmfeed inherits the #feed rules (see the #feed selectors above). */
+  .pmtrace { margin-top:6px; padding-top:5px; border-top:1px dashed var(--edge);
+             color:var(--dim); font-size:11px; font-family:var(--mono); }
+  .msg.pmthink { color:var(--dim); font-style:italic; }
+  .msg .pmopen { display:inline-block; margin-top:7px; padding:4px 10px; border:1px solid var(--accent);
+                 color:var(--accent); border-radius:6px; font-size:11px; text-decoration:none; }
+  .msg .pmopen:hover { background:var(--accent-bg); }
+  /* PM thread tabs: same .stab look as session tabs, plus a subtle archive ✕ and
+     trailing management controls (new / clear / show-archived). */
+  #sessionbar .stab.pmtab .x { color:var(--dim); font-weight:700; padding:0 2px; margin-left:1px; border-radius:3px; }
+  #sessionbar .stab.pmtab .x:hover { color:var(--err); background:var(--edge); }
+  #sessionbar .stab.arch { opacity:.55; font-style:italic; }
+  #sessionbar .pmctl { display:inline-flex; align-items:center; flex:0 0 auto; gap:4px;
+        background:transparent; border:1px solid var(--edge); color:var(--dim); border-radius:6px;
+        padding:4px 9px; font-size:11px; font-family:var(--mono); cursor:pointer; }
+  #sessionbar .pmctl:hover { border-color:var(--accent); color:var(--accent); }
   /* mobile: collapse header to icon-only buttons so the bar fits + stops over-scrolling */
   @media (pointer: coarse) {
     header { gap:8px; padding:8px 10px; }
@@ -380,27 +367,6 @@
     <button id="phoneBtn" title="Open on your phone"><span class="bico">▢</span><span class="blbl"> qr</span></button>
     <span id="status" title="Fleet PM — click to open"><span class="bico">🛰️</span><span class="blbl"> pm</span></span>
   </header>
-  <div id="pmScrim" hidden></div>
-  <aside id="pmDrawer" hidden>
-    <div id="pmHead">
-      <b>🛰️ Fleet PM</b>
-      <span class="pmsub" id="pmSub">connecting…</span>
-      <button id="pmReset" title="Clear the conversation">⟲</button>
-      <button id="pmClose" title="Close">✕</button>
-    </div>
-    <div id="pmTabs">
-      <button data-pt="chat" class="on">chat</button>
-      <button data-pt="debug" title="Prompt, tools, raw data">🛠 debug</button>
-    </div>
-    <div id="pmChatPane" class="pmpane on">
-      <div id="pmLog"></div>
-      <form id="pmForm">
-        <textarea id="pmBox" rows="1" placeholder="Ask the PM… (e.g. 'anything need me?')"></textarea>
-        <button id="pmSend" type="submit">Send</button>
-      </form>
-    </div>
-    <iframe id="pmDebugFrame" class="pmpane" title="Fleet PM debug"></iframe>
-  </aside>
   <div id="sessionbar" hidden></div>
   <div id="rebootbar" hidden>
     <span class="rb-spin"></span>
@@ -451,6 +417,9 @@
     </section>
     <section class="col hidden" id="right">
       <div id="feed"></div>
+    </section>
+    <section class="col hidden" id="pm">
+      <div id="pmfeed"></div>
     </section>
   </main>
   <footer>
@@ -630,6 +599,15 @@ const FLEET = !!window.__FLEET__;
 const token = FLEET ? '' : loadToken();
 let serverBoot = null;   // server process id; a change across reconnect = daemon restart → reload
 let authFails = 0;       // consecutive socket closes that never opened → likely a bad/expired token
+// -- Fleet PM ('pm' view): its own conversation threads, the chat analog of a
+// project's sessions. State mirrors the session model so the PM rides the same
+// #sessionbar tab strip + transcript #feed look. Talks to the controller over the
+// same-origin /pm/* proxy (HTTP), independent of the harness WS.
+let pmThreads = [];      // [{id,title,archived,count,current}]
+let pmCurrent = null;    // selected thread id
+let pmMessages = [];     // current thread's transcript [{who,text,trace}]
+let pmArchOpen = false;  // whether archived threads are revealed in the bar
+let pmLoaded = false, pmBusy = false;
 
 function clearToken() { try { localStorage.removeItem(TOKEN_KEY); } catch {} }
 
@@ -1318,6 +1296,13 @@ function updateBreadcrumb(title) {        // called when we (re)subscribe to a s
 // Recomputed on every nav so climbing back out doesn't strand a stale crumb.
 function refreshBreadcrumb(view) {
   view = view || currentView();
+  // PM view: a fixed crumb; its threads ride the #sessionbar like sessions do.
+  if (view === 'pm') {
+    meta.textContent = 'fleet pm';
+    document.getElementById('sessiondesc').textContent = '';
+    renderSessionBar(view);
+    return;
+  }
   // machines rung: blank. projects rung: machine name. deeper: machine / project.
   let crumb = '';
   if (view !== 'machines' && currentMachine) {
@@ -1359,6 +1344,7 @@ function renderSessionBar(view) {
   const bar = document.getElementById('sessionbar');
   const wasHidden = bar.hidden;
   view = view || currentView();
+  if (view === 'pm') { renderPmBar(bar, wasHidden); return; }   // PM threads ride the same strip
   const list = sessionList.filter(s => s.pid === currentPid);
   if (view === 'projects' || !currentPid || !list.length) {
     bar.hidden = true; bar.innerHTML = '';
@@ -1943,6 +1929,7 @@ function flushPendingSend() {
 const draftKey = (id) => 'cc_draft:' + (id || '_');
 function currentDraftId() {
   const v = currentView();
+  if (v === 'pm') return 'pm:' + (pmCurrent || '_');           // a draft per PM thread
   if (v === 'sessions') return 'new:' + (currentPid || '_');   // the "new session" composer, per project
   if (v === 'transcript' || v === 'tty') return currentCid;    // talking to one specific session
   return null;                                                 // projects rung — composer is hidden
@@ -2034,6 +2021,8 @@ box.addEventListener('blur', () => {
 
 function sendMessage() {
   const text = box.value.trim();
+  // PM view: the composer talks to the current PM thread (HTTP), not a WS session.
+  if (currentView() === 'pm') { if (text) { box.value = ''; autosizeBox(); clearDraft(); pmSend(text); } return; }
   // `/new` is a console-level command — it spins up a fresh claude session
   // rather than being typed into the current one.
   if (/^\/new(\s|$)/.test(text)) { box.value = ''; autosizeBox(); clearDraft(); newSession(); return; }
@@ -2268,34 +2257,40 @@ const projectsPanel = document.getElementById('projects');
 const menuPanel = document.getElementById('menu');
 const leftPanel = document.getElementById('left');
 const rightPanel = document.getElementById('right');
+const pmPanel = document.getElementById('pm');
+const pmfeed = document.getElementById('pmfeed');
 const panelBtn = document.getElementById('panelBtn');
 const menuBtn = document.getElementById('menuBtn');
 const projectsBtn = document.getElementById('projectsBtn');
 function setView(view) {
   const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects',
-        machines = view === 'machines';
+        machines = view === 'machines', pm = view === 'pm';
   machinesPanel.classList.toggle('hidden', !machines);
   projectsPanel.classList.toggle('hidden', !projects);
   menuPanel.classList.toggle('hidden', !sessions);
   leftPanel.classList.toggle('hidden', !tty);
   rightPanel.classList.toggle('hidden', !(view === 'transcript'));
+  pmPanel.classList.toggle('hidden', !pm);
   document.getElementById('keys').style.display = (tty && isTouch) ? '' : 'none';  // key bar only for touch (the desktop terminal takes these keys natively)
   // Composer is hidden on the machines + projects rungs (nothing to talk to). On
   // the sessions list it stays, but a message there starts a new session rather
   // than going to a session you're not viewing — say so in the placeholder.
+  // The PM view keeps the composer (it talks to the current PM thread).
   composer.style.display = (projects || machines) ? 'none' : '';
-  box.placeholder = sessions ? 'message → new session' : 'message';
+  box.placeholder = pm ? 'message → fleet PM' : sessions ? 'message → new session' : 'message';
   syncComposer();              // each level has its own draft — swap the box to this one's
   panelBtn.innerHTML = tty ? '<span class="bico">▤</span><span class="blbl"> transcript</span>'
                            : '<span class="bico">❯</span><span class="blbl"> terminal</span>';
   menuBtn.classList.toggle('on', sessions);
   projectsBtn.classList.toggle('on', projects);
   machinesBtn.classList.toggle('on', machines);
+  statusEl.classList.toggle('pmopen', pm);
   try { localStorage.setItem('cc_view', view); } catch {}
   refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
   syncUrl();                       // keep the URL in step with the depth we're at
   if (tty) setTimeout(() => { fit.fit(); sendResize(); term.scrollToBottom(); bottomJustifyTTY(); }, 60);
   else if (view === 'transcript') feed.scrollTop = feed.scrollHeight;
+  else if (pm) { renderPmFeed(); pmfeed.scrollTop = pmfeed.scrollHeight; }
 }
 // the toggle button hops between the two deep views; projects/sessions have their own entries.
 // Each is a manual nav, so it cancels any pending question auto-return (navTo wraps that).
@@ -2315,6 +2310,7 @@ setView(pendingNav.view);        // …optimistically; resolvePendingNav refines
 // once the prompt is answered. Skips work if you're already on the tty.
 let viewBeforeQuestion = null;
 function currentView() {
+  if (!pmPanel.classList.contains('hidden')) return 'pm';
   if (!machinesPanel.classList.contains('hidden')) return 'machines';
   if (!projectsPanel.classList.contains('hidden')) return 'projects';
   if (!menuPanel.classList.contains('hidden')) return 'sessions';
@@ -2330,6 +2326,7 @@ function parseHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   const nav = { view: FLEET ? 'machines' : 'projects', machine: null, pid: null, cid: null };
   let i = 0;
+  if (parts[0] === 'pm') { nav.view = 'pm'; return nav; }   // Fleet PM (its own top-level view)
   if (FLEET) {                                   // fleet: a machine prefixes the path
     if (parts[0] !== 'm' || !parts[1]) return nav;
     nav.machine = decodeURIComponent(parts[1]); nav.view = 'projects'; i = 2;
@@ -2346,6 +2343,7 @@ function parseHash() {
 function syncUrl() {
   if (pendingNav) return;          // mid-restore: don't write until the URL's state is applied
   const v = currentView();
+  if (v === 'pm') { const h = '#/pm'; if (h !== location.hash) { lastWrittenHash = h; location.hash = h; } return; }
   let h = '#/';
   if (FLEET && currentMachine && v !== 'machines') h += 'm/' + encodeURIComponent(currentMachine);
   if ((!FLEET || currentMachine) && currentPid && v !== 'machines' && v !== 'projects') {
@@ -2363,6 +2361,7 @@ function syncUrl() {
 function resolvePendingNav() {
   const nav = pendingNav;
   if (!nav) return;
+  if (nav.view === 'pm') { pendingNav = null; openPM(); return; }   // PM is harness-data-independent
   if (nav.machine) {
     if (!machineList.length) return;                         // roster not in yet
     if (!machineList.some(x => x.id === nav.machine)) {      // machine is gone
@@ -2575,85 +2574,153 @@ function showLogin(msg) {
   inp.focus();
 }
 
-// ── Fleet PM drawer — the controller chat, folded into the harness UI. Talks to
-//    the controller (a sibling process on :8799) over its HTTP API via CORS.
-//    Direct mode only for now; in fleet mode the controller isn't reachable from
-//    a remote phone (that needs the relay to proxy it — a follow-up).
-(function pmInit() {
-  // The PM launcher is folded into the #status indicator (one combined control:
-  // emoji session-status + click-to-open-PM).
-  const btn = document.getElementById('status');
-  // Same-origin in BOTH modes: direct → the harness reverse-proxies /pm/* to the
-  // local controller; fleet → the relay proxies /pm/* to the box-resident
-  // controller (gated by your passkey session via the pmt cookie). One UI, one URL.
-  const PM_BASE = '/pm';
-  const drawer = document.getElementById('pmDrawer'), scrim = document.getElementById('pmScrim');
-  const log = document.getElementById('pmLog'), box = document.getElementById('pmBox'), sub = document.getElementById('pmSub');
-  let busy = false, greeted = false;
+// ── Fleet PM — folded into the harness as a first-class 'pm' view (not a drawer).
+//    Its conversation threads ride the same #sessionbar tab strip a project's
+//    sessions do, and the chat reuses the transcript #feed look; the footer
+//    composer talks to the current thread. Same-origin via the /pm/* proxy in
+//    BOTH modes: direct → harness reverse-proxies to the local controller; fleet
+//    → relay proxies to the box-resident controller (gated by your passkey).
+const PM_BASE = '/pm';
+const pmPost = (body) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+const pmApi = async (path, opts) => (await fetch(PM_BASE + path, opts)).json();
 
-  const api = async (path, opts) => (await fetch(PM_BASE + path, opts)).json();
-  function add(cls, text) {
-    const d = document.createElement('div'); d.className = 'pmm ' + cls; d.textContent = text;
-    log.appendChild(d); log.scrollTop = log.scrollHeight; return d;
+// Rebuild a PM-minted deep link against THIS browser's hostname (so a link made
+// on localhost still opens over the LAN), matching the controller chat's navHref.
+function pmNavHref(r) {
+  if (r.port && r.path) return location.protocol + '//' + location.hostname + ':' + r.port + r.path;
+  return r.url || null;
+}
+// One chat message → a transcript-style .msg (user=you / assistant=pm), with the
+// tool trace and any "open ↗" deep-link button the PM produced.
+function pmMsgEl(m) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + (m.who === 'me' ? 'user' : 'assistant');
+  const who = document.createElement('div'); who.className = 'who';
+  who.textContent = m.who === 'me' ? 'you' : 'pm'; d.appendChild(who);
+  d.appendChild(document.createTextNode(m.text || ''));
+  const nav = (m.trace || []).map(t => t && t.result).filter(r => r && r.nav).pop();
+  const href = nav && pmNavHref(nav);
+  if (href) {
+    const a = document.createElement('a'); a.className = 'pmopen'; a.href = href;
+    a.textContent = '↗ open ' + (nav.cid ? (nav.title || nav.cid) : (nav.name || nav.pid));
+    d.appendChild(a);
   }
-  function addBot(out) {
-    const d = add('bot', out.reply || '(no reply)');
-    if (out.trace && out.trace.length) {
-      const t = document.createElement('div'); t.className = 'pmtr';
-      t.textContent = 'did: ' + out.trace.map(x => x.tool).join(' → '); d.appendChild(t);
+  if (m.trace && m.trace.length) {
+    const t = document.createElement('div'); t.className = 'pmtrace';
+    t.textContent = 'did: ' + m.trace.map(x => x.tool).join(' → '); d.appendChild(t);
+  }
+  return d;
+}
+function renderPmFeed() {
+  pmfeed.innerHTML = '';
+  if (!pmMessages.length) {
+    pmfeed.appendChild(pmMsgEl({ who: 'bot', text: "Hi — I'm your fleet PM. Ask what needs you, or tell me to start work on a project." }));
+  } else {
+    pmMessages.forEach(m => pmfeed.appendChild(pmMsgEl(m)));
+  }
+  if (pmBusy) { const t = document.createElement('div'); t.className = 'msg assistant pmthink'; t.textContent = 'thinking…'; pmfeed.appendChild(t); }
+  pmfeed.scrollTop = pmfeed.scrollHeight;
+}
+// PM threads in the #sessionbar: same .stab look as session tabs (dot + title),
+// a subtle ✕ to archive, then trailing controls (new / clear / show-archived / debug).
+function renderPmBar(bar, wasHidden) {
+  bar.innerHTML = '';
+  pmThreads.forEach(t => {
+    if (t.archived && !pmArchOpen) return;
+    const tab = document.createElement('button');
+    tab.className = 'stab pmtab' + (t.id === pmCurrent ? ' active' : '') + (t.archived ? ' arch' : '');
+    tab.title = t.archived ? 'archived — click to restore' : (t.title || 'thread');
+    const dot = document.createElement('span'); dot.className = 'sdot'; tab.appendChild(dot);
+    const lbl = document.createElement('span'); lbl.className = 'lbl'; lbl.textContent = t.title || 'new thread'; tab.appendChild(lbl);
+    if (!t.archived) {
+      const x = document.createElement('span'); x.className = 'x'; x.textContent = '✕'; x.title = 'archive';
+      x.onclick = e => { e.stopPropagation(); pmArchive(t.id); };
+      tab.appendChild(x);
     }
-    return d;
-  }
-  async function refresh() {
-    try {
-      const st = await api('/api/state'); const n = st.attention_count;
-      sub.textContent = `${st.model} · ${n ? n + ' need you' : 'all clear'}`;
-      sub.style.color = n ? 'var(--err)' : 'var(--dim)';
-    } catch (e) { sub.textContent = 'controller offline (:8799)'; sub.style.color = 'var(--err)'; }
-  }
-  async function send(text) {
-    if (busy || !text.trim()) return; busy = true;
-    add('me', text); const think = add('think', 'thinking…');
-    try {
-      const out = await api('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }) });
-      think.remove(); addBot(out);
-    } catch (e) { think.remove(); add('bot', '⚠️ controller unreachable on :8799'); }
-    busy = false; box.focus(); refresh();
-  }
-  function open() {
-    drawer.hidden = false; scrim.hidden = false; btn.classList.add('pmopen');
-    requestAnimationFrame(() => drawer.classList.add('open'));
-    if (!greeted) { greeted = true; add('bot', "Hi — I'm your fleet PM. Ask what needs you, or tell me to start work on a project."); }
-    refresh(); setTimeout(() => box.focus(), 60);
-  }
-  function close() {
-    drawer.classList.remove('open'); scrim.hidden = true; btn.classList.remove('pmopen');
-    setTimeout(() => { drawer.hidden = true; }, 180);
-  }
-  // tabs: chat (native) | debug (the controller's /debug page, lazy-loaded in an iframe)
-  const chatPane = document.getElementById('pmChatPane'), dbgFrame = document.getElementById('pmDebugFrame');
-  let dbgLoaded = false;
-  function showTab(t) {
-    document.querySelectorAll('#pmTabs button').forEach(b => b.classList.toggle('on', b.dataset.pt === t));
-    chatPane.classList.toggle('on', t === 'chat');
-    dbgFrame.classList.toggle('on', t === 'debug');
-    if (t === 'debug' && !dbgLoaded) { dbgFrame.src = PM_BASE + '/debug'; dbgLoaded = true; }
-  }
-  document.querySelectorAll('#pmTabs button').forEach(b => b.onclick = () => showTab(b.dataset.pt));
-
-  btn.onclick = () => drawer.classList.contains('open') ? close() : open();
-  document.getElementById('pmClose').onclick = close;
-  scrim.onclick = close;
-  document.getElementById('pmReset').onclick = async () => {
-    try { await api('/api/reset', { method: 'POST' }); } catch (e) {}
-    log.innerHTML = ''; greeted = false; add('bot', 'Conversation reset.');
-  };
-  document.getElementById('pmForm').addEventListener('submit', e => {
-    e.preventDefault(); const t = box.value; box.value = ''; box.style.height = 'auto'; send(t);
+    tab.onclick = () => pmSelect(t.id);
+    bar.appendChild(tab);
   });
-  box.addEventListener('input', () => { box.style.height = 'auto'; box.style.height = Math.min(box.scrollHeight, 120) + 'px'; });
-  box.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('pmForm').requestSubmit(); } });
-})();
+  const ctl = (txt, title, fn) => { const b = document.createElement('button'); b.className = 'pmctl'; b.textContent = txt; b.title = title; b.onclick = fn; bar.appendChild(b); };
+  ctl('＋ new', 'New PM thread', pmNew);
+  ctl('🧹 clear', "Clear this thread's context (keeps the thread)", pmClear);
+  const archN = pmThreads.filter(t => t.archived).length;
+  if (archN) ctl(pmArchOpen ? 'hide archived' : '🗄 ' + archN, 'Show / hide archived threads',
+                 () => { pmArchOpen = !pmArchOpen; renderPmBar(bar, false); });
+  ctl('🛠', 'PM debug (prompt, tools, raw data)', () => window.open(PM_BASE + '/debug', '_blank'));
+  bar.hidden = false;
+  if (wasHidden) refitTTY();
+}
+function pmApplyThreads(s) {           // s = {threads, current, archived_count}
+  if (!s || !s.threads) return;
+  pmThreads = s.threads; pmCurrent = s.current; pmLoaded = true;
+  if (currentView() === 'pm') renderSessionBar('pm');
+}
+async function pmLoadMessages() {
+  try { const r = await pmApi('/api/thread/messages'); pmMessages = r.messages || []; }
+  catch (e) { pmMessages = []; }
+  if (currentView() === 'pm') renderPmFeed();
+}
+async function openPM() {
+  setView('pm');                       // show immediately (renders current state)
+  try { pmApplyThreads(await pmApi('/api/threads')); } catch (e) { /* controller offline → greeting */ }
+  await pmLoadMessages();
+  syncComposer();                      // swap the footer box to this thread's draft
+  setTimeout(() => box.focus(), 60);
+}
+async function pmSelect(tid) {
+  if (tid === pmCurrent && pmLoaded) return;
+  try { pmApplyThreads(await pmApi('/api/thread/select', pmPost({ id: tid }))); } catch (e) {}
+  await pmLoadMessages();
+  syncComposer(); syncUrl();
+}
+async function pmNew() {
+  pmArchOpen = false;
+  try { pmApplyThreads(await pmApi('/api/thread/new', pmPost({}))); } catch (e) {}
+  pmMessages = []; renderPmFeed(); syncComposer(); box.focus();
+}
+async function pmClear() {
+  try { pmApplyThreads(await pmApi('/api/thread/clear', pmPost({}))); } catch (e) {}
+  pmMessages = []; renderPmFeed();
+}
+async function pmArchive(tid) {
+  const wasCurrent = tid === pmCurrent;
+  try { pmApplyThreads(await pmApi('/api/thread/archive', pmPost({ id: tid }))); } catch (e) {}
+  if (wasCurrent) { await pmLoadMessages(); syncComposer(); }
+}
+async function pmSend(text) {
+  if (pmBusy || !text.trim()) return;
+  pmBusy = true;
+  pmMessages.push({ who: 'me', text }); renderPmFeed();   // user msg + a thinking line
+  try {
+    const out = await pmApi('/api/chat', pmPost({ message: text }));
+    pmMessages.push({ who: 'bot', text: out.reply || '(no reply)', trace: out.trace || [] });
+  } catch (e) {
+    pmMessages.push({ who: 'bot', text: '⚠️ controller unreachable (/pm)' });
+  }
+  pmBusy = false; renderPmFeed();
+  try { pmApplyThreads(await pmApi('/api/threads')); } catch (e) {}   // refresh tab titles + counts
+  if (currentView() === 'pm') box.focus();
+}
+// The #status chip is the PM launcher; keep its attention badge fresh and, while
+// the PM view is open, poll the thread list so titles/counts track live.
+async function pmRefreshBadge() {
+  try {
+    const st = await pmApi('/api/state'); const n = st.attention_count;
+    statusEl.title = 'Fleet PM — ' + (n ? n + ' need you' : 'all clear');
+    statusEl.classList.toggle('needs', !!n);
+  } catch (e) { statusEl.title = 'Fleet PM (controller offline)'; statusEl.classList.remove('needs'); }
+}
+// #status opens the PM view, or leaves it (back to projects/sessions) if already there.
+statusEl.onclick = () => {
+  if (currentView() === 'pm') navTo(FLEET && !currentMachine ? 'machines' : (currentPid ? 'sessions' : 'projects'));
+  else openPM();
+};
+pmRefreshBadge();
+setInterval(() => {
+  pmRefreshBadge();
+  if (currentView() === 'pm' && pmLoaded) pmApi('/api/threads').then(pmApplyThreads).catch(() => {});
+}, 5000);
+if (parseHash().view === 'pm') openPM();   // deep-linked straight to the PM
 
 connect();   // fleet: the passkey gate is the door. direct: the loopback harness needs no token, so always
              // connect; only a non-loopback (BIND=0.0.0.0) server that actually rejects surfaces a login
