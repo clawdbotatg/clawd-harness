@@ -2,6 +2,12 @@
 
 **Self-contained: executable without prior conversation context.** Delete this file when done.
 
+> ⚠️ **HISTORICAL — this plan is DONE.** The fleet lives in `fleet/` now, and the box
+> was since migrated **off scp to a git checkout** at `~/clawd-harness` (deploy = `git
+> pull` + restart). Anything below describing the box as a flat `~/clawd-fleet/` scp
+> copy (step 4) is the *old* state — see **`fleet/DEPLOY.md`** / **`fleet/RUNBOOK.md`**
+> for the current deploy.
+
 ## Goal
 One repo (`clawd-harness`) holds the engine **and** the fleet (relay/worker). Kill the
 only real duplication — `index.html` is currently byte-identical in both repos. The

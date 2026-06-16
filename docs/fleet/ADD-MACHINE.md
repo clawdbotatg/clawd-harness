@@ -39,8 +39,8 @@ under `fleet/`) or from the operator. You need **both**:
 
 | What | Env / file | Where to get it |
 |---|---|---|
-| **Worker token** | `FLEET_WORKER_TOKEN` | The box's `~/clawd-fleet/fleet.env` (`grep WORKER_TOKEN`), or an existing machine's worker config (e.g. the laptop's launchd plist). Use the **worker** token, *not* the mobile/URL token. |
-| **Passkey file** | `fleet/.clawd-fleet.passkeys.json` | The canonical copy lives on the box: `scp zkllmapi:~/clawd-fleet/.clawd-fleet.passkeys.json` (or copy from any existing machine's `fleet/` dir). It holds only **public** keys, is the **same on every machine**, and is what lets this worker verify *you* over the end-to-end channel. See [`DEPLOY.md`](DEPLOY.md) → "Provisioning the passkey". |
+| **Worker token** | `FLEET_WORKER_TOKEN` | The box's `~/clawd-harness/fleet/fleet.env` (`grep WORKER_TOKEN`), or an existing machine's worker config (e.g. the laptop's launchd plist). Use the **worker** token, *not* the mobile/URL token. |
+| **Passkey file** | `fleet/.clawd-fleet.passkeys.json` | The canonical copy lives on the box: `scp zkllmapi:~/clawd-harness/fleet/.clawd-fleet.passkeys.json` (or copy from any existing machine's `fleet/` dir). It holds only **public** keys, is the **same on every machine**, and is what lets this worker verify *you* over the end-to-end channel. See [`DEPLOY.md`](DEPLOY.md) → "Provisioning the passkey". |
 
 You also need, for **step 4**, the ability to edit the relay's allowlist on the
 box (`ssh zkllmapi`) — or ask whoever has it to add this machine's id.
@@ -150,7 +150,7 @@ From the values you brought in "Before you start":
 
 # passkey file: copy it into THIS repo's fleet/ dir, verbatim, then lock it down.
 # canonical source is the box (holds only public keys):
-scp zkllmapi:~/clawd-fleet/.clawd-fleet.passkeys.json ~/clawd/clawd-harness/fleet/
+scp zkllmapi:~/clawd-harness/fleet/.clawd-fleet.passkeys.json ~/clawd/clawd-harness/fleet/
 # (or from any existing machine's fleet/ dir, e.g. the laptop)
 chmod 600 ~/clawd/clawd-harness/fleet/.clawd-fleet.passkeys.json
 ```
@@ -173,7 +173,7 @@ accepts workers whose id is in `FLEET_WORKER_ALLOW`. Add it on the box:
 
 ```bash
 # from a machine that can ssh to the box (e.g. the laptop), append the new id:
-ssh zkllmapi 'grep FLEET_WORKER_ALLOW ~/clawd-fleet/fleet.env'    # see current list
+ssh zkllmapi 'grep FLEET_WORKER_ALLOW ~/clawd-harness/fleet/fleet.env'    # see current list
 # edit fleet.env to add ",austin-desktop" to the FLEET_WORKER_ALLOW line, then:
 ssh zkllmapi 'sudo systemctl restart clawd-fleet-relay'
 ```
@@ -329,10 +329,11 @@ machine's projects/sessions automatically whenever its worker (re)connects, so n
 controller restart is needed.
 
 > **Updating an existing machine's worker code** (e.g. to gain trusted-control
-> support): the worker machines are **git checkouts** that pull from `origin/main`
-> — so `git pull --ff-only` + restart the worker (NOT scp, which dirties the
-> checkout; scp is only how the box's flat `~/clawd-fleet/` copy is updated). See
-> the memory note "fleet-machine-update" for the per-machine ssh aliases/paths.
+> support): every machine — worker laptops **and the box** — is now a **git
+> checkout** that pulls from `origin/main`, so `git pull --ff-only` + restart the
+> worker (NOT scp, which dirties the checkout). The box checkout is at
+> `~/clawd-harness`. See the memory note "fleet-machine-update" for the per-machine
+> ssh aliases/paths.
 
 ---
 

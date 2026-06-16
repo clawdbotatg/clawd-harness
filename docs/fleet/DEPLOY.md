@@ -88,7 +88,7 @@ you rarely need this — **iCloud Keychain syncs your existing passkey** to new
 Apple devices automatically. After (re)provisioning, copy the *public* credential
 to each worker (the file holds only public keys):
 ```bash
-scp zkllmapi:~/clawd-fleet/.clawd-fleet.passkeys.json ~/clawd/clawd-harness/fleet/
+scp zkllmapi:~/clawd-harness/fleet/.clawd-fleet.passkeys.json ~/clawd/clawd-harness/fleet/
 launchctl kickstart -k gui/$(id -u)/com.clawd.fleet-worker   # reload to pick it up
 ```
 The worker prints its identity fingerprint + passkey count at startup; the
