@@ -2597,7 +2597,12 @@ function pmMsgEl(m) {
   d.className = 'msg ' + (m.who === 'me' ? 'user' : 'assistant');
   const who = document.createElement('div'); who.className = 'who';
   who.textContent = m.who === 'me' ? 'you' : 'pm'; d.appendChild(who);
-  d.appendChild(document.createTextNode(m.text || ''));
+  // PM replies are markdown (bold/code/lists) — render them like transcript
+  // assistant turns; your own messages stay plain text.
+  const body = document.createElement('div');
+  if (m.who === 'me') body.textContent = m.text || '';
+  else { body.className = 'md'; body.innerHTML = mdToHtml(m.text || ''); }
+  d.appendChild(body);
   const nav = (m.trace || []).map(t => t && t.result).filter(r => r && r.nav).pop();
   const href = nav && pmNavHref(nav);
   if (href) {
