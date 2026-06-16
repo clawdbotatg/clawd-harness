@@ -217,9 +217,6 @@
   /* Fleet PM — folded into the harness as a first-class view: PM threads ride the
      same #sessionbar tab strip, and the chat reuses the transcript #feed look.
      #pmfeed inherits the #feed rules (see the #feed selectors above). */
-  .pmtrace { margin-top:6px; padding-top:5px; border-top:1px dashed var(--edge);
-             color:var(--dim); font-size:11px; font-family:var(--mono); }
-  .msg.pmthink { color:var(--dim); font-style:italic; }
   .msg .pmopen { display:inline-block; margin-top:7px; padding:4px 10px; border:1px solid var(--accent);
                  color:var(--accent); border-radius:6px; font-size:11px; text-decoration:none; }
   .msg .pmopen:hover { background:var(--accent-bg); }
@@ -608,6 +605,8 @@ let pmCurrent = null;    // selected thread id
 let pmMessages = [];     // current thread's transcript [{who,text,trace}]
 let pmArchOpen = false;  // whether archived threads are revealed in the bar
 let pmLoaded = false, pmBusy = false;
+// PM thinking-spinner state (declared early — hoisted render fns touch it at boot)
+let pmThinkEl = null, pmThinkTimer = null, pmSpinTimer = null, pmThinkStart = 0, pmSpinFrame = 0;
 
 function clearToken() { try { localStorage.removeItem(TOKEN_KEY); } catch {} }
 
@@ -1696,7 +1695,11 @@ function handleHook(m) {
   }
 }
 
-function bubble(cls, who, text, asMarkdown) {
+// `feedEl` defaults to the session transcript feed; the PM view passes #pmfeed so
+// it renders with the exact same bubble vocabulary. Bump the spinner that belongs
+// to the target feed (session vs PM each own one).
+function bubble(cls, who, text, asMarkdown, feedEl) {
+  const F = feedEl || feed;
   const d = document.createElement('div');
   d.className = 'msg ' + cls;
   const w = document.createElement('div'); w.className = 'who'; w.textContent = who;
@@ -1705,9 +1708,9 @@ function bubble(cls, who, text, asMarkdown) {
   if (asMarkdown) { body.className = 'md'; body.innerHTML = mdToHtml(text); }
   else body.textContent = text;
   d.appendChild(body);
-  feed.appendChild(d);
-  bumpThinking();
-  feed.scrollTop = feed.scrollHeight;
+  F.appendChild(d);
+  (F === pmfeed ? pmBumpThinking : bumpThinking)();
+  F.scrollTop = F.scrollHeight;
   return d;
 }
 
@@ -1716,19 +1719,21 @@ function bubble(cls, who, text, asMarkdown) {
 // streams, mirroring the TUI. Step count is capped so long messages stay snappy.
 // Only one types at a time; a new one instantly finalizes the previous.
 let activeType = null;
-function typeBubble(cls, who, text) {
+function typeBubble(cls, who, text, feedEl) {
+  const F = feedEl || feed;
+  const bump = F === pmfeed ? pmBumpThinking : bumpThinking;
   if (activeType) activeType.finish();
-  const d = bubble(cls, who, '', true);
+  const d = bubble(cls, who, '', true, F);
   const body = d.lastChild;
   const n = text.length;
   const steps = Math.min(70, Math.max(8, Math.ceil(n / 8)));
   let step = 0, done = false;
-  const paint = (k) => { body.innerHTML = mdToHtml(text.slice(0, k)); bumpThinking(); feed.scrollTop = feed.scrollHeight; };
+  const paint = (k) => { body.innerHTML = mdToHtml(text.slice(0, k)); bump(); F.scrollTop = F.scrollHeight; };
   const finish = () => {
     if (done) return; done = true;
     clearInterval(timer);
     body.innerHTML = mdToHtml(text);
-    bumpThinking(); feed.scrollTop = feed.scrollHeight;
+    bump(); F.scrollTop = F.scrollHeight;
     if (activeType === handle) activeType = null;
   };
   const timer = setInterval(() => {
@@ -1738,6 +1743,7 @@ function typeBubble(cls, who, text) {
   }, 22);
   const handle = { finish };
   activeType = handle;
+  return d;
 }
 
 // Minimal, XSS-safe markdown: escape first, then format a common subset.
@@ -1763,7 +1769,8 @@ function mdToHtml(src) {
 }
 
 // Tool results can be huge — collapse them into a dropdown, opened on demand.
-function resultBubble(text) {
+function resultBubble(text, feedEl) {
+  const F = feedEl || feed;
   text = String(text);
   const d = document.createElement('div');
   d.className = 'msg tool_result';
@@ -1778,9 +1785,9 @@ function resultBubble(text) {
   body.textContent = clip(text, 8000);
   det.appendChild(body);
   d.appendChild(det);
-  feed.appendChild(d);
-  bumpThinking();
-  feed.scrollTop = feed.scrollHeight;
+  F.appendChild(d);
+  (F === pmfeed ? pmBumpThinking : bumpThinking)();
+  F.scrollTop = F.scrollHeight;
 }
 
 function renderEvent(ev, live) {
@@ -2590,19 +2597,51 @@ function pmNavHref(r) {
   if (r.port && r.path) return location.protocol + '//' + location.hostname + ':' + r.port + r.path;
   return r.url || null;
 }
-// One chat message → a transcript-style .msg (user=you / assistant=pm), with the
-// tool trace and any "open ↗" deep-link button the PM produced.
-function pmMsgEl(m) {
-  const d = document.createElement('div');
-  d.className = 'msg ' + (m.who === 'me' ? 'user' : 'assistant');
-  const who = document.createElement('div'); who.className = 'who';
-  who.textContent = m.who === 'me' ? 'you' : 'pm'; d.appendChild(who);
-  // PM replies are markdown (bold/code/lists) — render them like transcript
-  // assistant turns; your own messages stay plain text.
-  const body = document.createElement('div');
-  if (m.who === 'me') body.textContent = m.text || '';
-  else { body.className = 'md'; body.innerHTML = mdToHtml(m.text || ''); }
-  d.appendChild(body);
+// PM's own thinking spinner — independent of the session's singleton (a background
+// session may be mid-turn while you're in the PM view), but reusing the same
+// braille frames + .thinking markup so it reads identically to the transcript.
+// (State declared up top so the hoisted render fns can touch it at boot.)
+function pmShowThinking() {
+  if (!pmThinkEl) {
+    pmThinkEl = document.createElement('div');
+    pmThinkEl.className = 'thinking';
+    pmThinkEl.innerHTML = '<span class="spin"></span><span class="lbl"></span>';
+    pmThinkStart = Date.now();
+    pmThinkTimer = setInterval(pmPaintThinking, 1000);
+    pmSpinTimer = setInterval(() => { if (pmThinkEl) { pmSpinFrame = (pmSpinFrame + 1) % SPIN_FRAMES.length; pmThinkEl.querySelector('.spin').textContent = SPIN_FRAMES[pmSpinFrame]; } }, 80);
+  }
+  pmfeed.appendChild(pmThinkEl); pmPaintThinking(); pmfeed.scrollTop = pmfeed.scrollHeight;
+}
+function pmPaintThinking() {
+  if (!pmThinkEl) return;
+  const secs = Math.round((Date.now() - pmThinkStart) / 1000);
+  pmThinkEl.querySelector('.lbl').textContent = `pm is thinking… ${secs}s`;
+}
+function pmHideThinking() {
+  if (pmThinkTimer) { clearInterval(pmThinkTimer); pmThinkTimer = null; }
+  if (pmSpinTimer) { clearInterval(pmSpinTimer); pmSpinTimer = null; }
+  if (pmThinkEl) { pmThinkEl.remove(); pmThinkEl = null; }
+}
+function pmBumpThinking() { if (pmThinkEl) pmfeed.appendChild(pmThinkEl); }   // re-pin below newest content
+
+// A turn's tool trace → the same .msg.tool + collapsible .msg.tool_result bubbles
+// a session shows for tool_use/tool_result events.
+function pmRenderTrace(trace) {
+  (trace || []).forEach(t => {
+    if (!t || !t.tool) return;
+    const d = bubble('tool', 'tool', '', false, pmfeed);
+    const body = d.lastChild;
+    const nm = document.createElement('span'); nm.className = 'toolname'; nm.textContent = t.tool;
+    body.appendChild(nm); body.appendChild(document.createTextNode(' ' + summarizeInput(t.args || {})));
+    if (t.result !== undefined)
+      resultBubble(typeof t.result === 'string' ? t.result : JSON.stringify(t.result, null, 2), pmfeed);
+  });
+}
+// The PM's prose reply → an assistant bubble (typewriter when live), with any
+// "open ↗" deep-link button the PM produced appended to it.
+function pmReplyBubble(m, typing) {
+  const d = typing ? typeBubble('assistant', 'pm', m.text || '', pmfeed)
+                   : bubble('assistant', 'pm', m.text || '', true, pmfeed);
   const nav = (m.trace || []).map(t => t && t.result).filter(r => r && r.nav).pop();
   const href = nav && pmNavHref(nav);
   if (href) {
@@ -2610,20 +2649,23 @@ function pmMsgEl(m) {
     a.textContent = '↗ open ' + (nav.cid ? (nav.title || nav.cid) : (nav.name || nav.pid));
     d.appendChild(a);
   }
-  if (m.trace && m.trace.length) {
-    const t = document.createElement('div'); t.className = 'pmtrace';
-    t.textContent = 'did: ' + m.trace.map(x => x.tool).join(' → '); d.appendChild(t);
-  }
   return d;
 }
+// Rebuild the whole feed from the stored transcript (on thread switch / load),
+// using the exact session vocabulary: user turn, then each bot turn's tools +
+// reply. Live sends append incrementally (see pmSend) for the spinner/typewriter.
 function renderPmFeed() {
+  pmHideThinking();
   pmfeed.innerHTML = '';
   if (!pmMessages.length) {
-    pmfeed.appendChild(pmMsgEl({ who: 'bot', text: "Hi — I'm your fleet PM. Ask what needs you, or tell me to start work on a project." }));
+    bubble('assistant', 'pm', "Hi — I'm your fleet PM. Ask what needs you, or tell me to start work on a project.", true, pmfeed);
   } else {
-    pmMessages.forEach(m => pmfeed.appendChild(pmMsgEl(m)));
+    pmMessages.forEach(m => {
+      if (m.who === 'me') bubble('user', 'you', m.text || '', true, pmfeed);
+      else { pmRenderTrace(m.trace); pmReplyBubble(m, false); }
+    });
   }
-  if (pmBusy) { const t = document.createElement('div'); t.className = 'msg assistant pmthink'; t.textContent = 'thinking…'; pmfeed.appendChild(t); }
+  if (pmBusy) pmShowThinking();
   pmfeed.scrollTop = pmfeed.scrollHeight;
 }
 // PM threads in the #sessionbar: same .stab look as session tabs (dot + title),
@@ -2695,15 +2737,19 @@ async function pmArchive(tid) {
 async function pmSend(text) {
   if (pmBusy || !text.trim()) return;
   pmBusy = true;
-  pmMessages.push({ who: 'me', text }); renderPmFeed();   // user msg + a thinking line
-  try {
-    const out = await pmApi('/api/chat', pmPost({ message: text }));
-    pmMessages.push({ who: 'bot', text: out.reply || '(no reply)', trace: out.trace || [] });
-  } catch (e) {
-    pmMessages.push({ who: 'bot', text: '⚠️ controller unreachable (/pm)' });
-  }
-  pmBusy = false; renderPmFeed();
-  try { pmApplyThreads(await pmApi('/api/threads')); } catch (e) {}   // refresh tab titles + counts
+  pmMessages.push({ who: 'me', text });
+  bubble('user', 'you', text, true, pmfeed);   // append the user turn (no full rebuild)
+  pmShowThinking();                             // braille spinner + elapsed time, like a session
+  let out;
+  try { out = await pmApi('/api/chat', pmPost({ message: text })); }
+  catch (e) { out = { reply: '⚠️ controller unreachable (/pm)', trace: [] }; }
+  pmHideThinking();
+  const msg = { who: 'bot', text: out.reply || '(no reply)', trace: out.trace || [] };
+  pmMessages.push(msg);
+  pmRenderTrace(msg.trace);     // tool + collapsible result bubbles
+  pmReplyBubble(msg, true);     // typewriter reveal of the reply
+  pmBusy = false;
+  try { pmApplyThreads(await pmApi('/api/threads')); } catch (e) {}   // refresh tab titles + counts (bar only)
   if (currentView() === 'pm') box.focus();
 }
 // The #status chip is the PM launcher; keep its attention badge fresh and, while
