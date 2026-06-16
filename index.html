@@ -519,22 +519,56 @@ function refitTTY() {
   requestAnimationFrame(() => { fit.fit(); sendResize(); term.refresh(0, term.rows - 1); term.scrollToBottom(); bottomJustifyTTY(); });
 }
 
+// A HARD repaint — exactly what dragging the window border does: re-fit, then
+// force xterm to CLEAR and RE-RENDER ITS ENTIRE BUFFER. We need the full
+// re-render, not term.refresh() (which only repaints rows xterm thinks changed),
+// because the server streams a session's replayed screen into the buffer while
+// #term is still display:none / mid-layout — those rows get a buffer entry but
+// never a paint, so they stay black ("only the characters that keep updating are
+// visible") until something forces a full redraw. Toggling the row count by one
+// and back drives xterm's resize path, which does that full clear+repaint — the
+// same code a window resize runs. That's the behaviour you get when you nudge
+// the window, done deliberately on landing.
+function hardRepaint() {
+  if (currentView() !== 'tty') return;
+  fit.fit();
+  const c = term.cols, r = term.rows;
+  if (r > 1) { term.resize(c, r - 1); term.resize(c, r); }   // round-trip → full re-render of the whole buffer
+  else term.refresh(0, term.rows - 1);
+  sendResize();
+  term.scrollToBottom();
+  bottomJustifyTTY();
+}
+
 // Showing the terminal un-hides #term from display:none. While hidden xterm
 // can't measure its container, so the grid keeps whatever size it last fit to
-// (often stale/tiny) and the first visible frame looks janky — you had to
-// resize the window to force a refit. One fit on a fixed 60ms timer was too
-// fragile: layout + web-font metrics settle at different moments across
-// devices, and if the single shot fired early the wrong size stuck. Instead
-// refit + force a *full* repaint at several settle points. fit() no-ops when
-// the dimensions are unchanged and refresh() is cheap, so the extra passes
-// cost nothing once the size has converged.
+// (often stale/tiny). Hard-repaint at several settle points because layout +
+// web-font metrics land at different moments across devices; the resize
+// round-trip is cheap once the size has converged.
 function showTTY() {
   if (currentView() !== 'tty') return;
   // double rAF → measure only after the browser has laid out the now-visible panel
-  requestAnimationFrame(() => requestAnimationFrame(refitTTY));
-  setTimeout(refitTTY, 120);   // fallback for layout that settles a frame late
-  // glyph metrics can change when the monospace web-font finishes loading — refit once it's ready
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(refitTTY);
+  requestAnimationFrame(() => requestAnimationFrame(hardRepaint));
+  setTimeout(hardRepaint, 120);   // fallback for layout that settles a frame late
+  // glyph metrics can change when the monospace web-font finishes loading — repaint once it's ready
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(hardRepaint);
+}
+
+// After subscribing we set this flag; the replayed screen arrives as one or more
+// async PTY bursts (see ws.onmessage). We can't repaint until that content is in
+// the buffer, so we debounce: each PTY write reschedules, and ~80ms after the
+// burst goes quiet we hard-repaint ONCE. Cleared after firing so live streaming
+// during an active turn never triggers it (that content paints normally).
+let hardRepaintTimer = null, pendingHardRepaint = false;
+function armHardRepaint() {
+  pendingHardRepaint = true;
+  scheduleHardRepaint();
+  setTimeout(() => { if (pendingHardRepaint) { pendingHardRepaint = false; hardRepaint(); } }, 600);  // backstop if a burst never goes quiet
+}
+function scheduleHardRepaint() {
+  if (!pendingHardRepaint || currentView() !== 'tty') return;
+  clearTimeout(hardRepaintTimer);
+  hardRepaintTimer = setTimeout(() => { pendingHardRepaint = false; hardRepaint(); }, 80);
 }
 
 // The composer (footer) grows whenever an image chip is attached, a pending
@@ -665,7 +699,7 @@ function connect() {
   ws.onmessage = (e) => {
     if (typeof e.data === 'string') { FLEET ? handleRelay(JSON.parse(e.data)) : handleJson(JSON.parse(e.data)); }
     else if (FLEET) { handleBinary(e.data); }
-    else { term.write(new Uint8Array(e.data), () => term.scrollToBottom()); }   // direct: raw PTY
+    else { term.write(new Uint8Array(e.data), () => term.scrollToBottom()); scheduleHardRepaint(); }   // direct: raw PTY — debounce a hard repaint of the replayed screen
   };
 }
 
@@ -987,7 +1021,7 @@ function e2eOnRecord(machine, rec) {
     let out;
     try { out = await ch.session.open(rec); } catch { return; }   // drop bad/replayed
     if (machine !== currentMachine) return;
-    if (out.kind === E2E.KIND_BIN) term.write(out.payload, () => term.scrollToBottom());
+    if (out.kind === E2E.KIND_BIN) { term.write(out.payload, () => term.scrollToBottom()); scheduleHardRepaint(); }
     else handleJson(JSON.parse(new TextDecoder().decode(out.payload)));
   }).catch(() => {});
 }
@@ -1536,6 +1570,7 @@ function subscribe(cid) {
   highlightCard(cid);
   syncComposer();              // load this session's own draft (bring back text from before a reload)
   hsend({ type: 'subscribe', cid });
+  armHardRepaint();            // the replayed screen lands as async PTY bursts — force one full repaint once it settles
   syncUrl();
 }
 
