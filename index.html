@@ -557,6 +557,7 @@ let currentTitle = '';          // title of the viewed session (for the breadcru
 let currentPid = null;          // project this browser has selected
 let sessionList = [];           // latest session metadata from the server
 let projectList = [];           // latest project metadata from the server
+let projectFilter = '';         // live filter text in the projects add/search box
 let gotSessions = false;        // have we received the first sessions snapshot?
 let pendingNav = null;          // nav state parsed from the URL, awaiting server data
 let pendingNewFocus = false;    // a `new` we issued — its focus should switch us in
@@ -1392,36 +1393,30 @@ function renderProjects(list) {
   label.className = 'menutitle'; label.textContent = `projects · ${list.length}`;
   projectsEl.appendChild(label);
 
-  // add-project row: a name (→ create) or a git URL (→ clone)
+  // add/search row: the box does double duty. As you type it FILTERS the list
+  // below (substring match on name); Enter OPENS the project when the filter has
+  // narrowed to a single match. To create or clone you must type a name/URL and
+  // physically click a button — Enter never creates/clones.
   const add = document.createElement('div');
   add.id = 'addProject';
   const inp = document.createElement('input');
-  inp.placeholder = 'new project name, or a git URL / clawdbotatg repo to clone';
+  inp.placeholder = 'filter projects · or type a name / git URL and click create/clone';
+  inp.value = projectFilter;
   const arow = document.createElement('div'); arow.className = 'arow';
   const createBtn = document.createElement('button'); createBtn.textContent = '＋ create';
   const cloneBtn = document.createElement('button'); cloneBtn.textContent = '⤓ clone URL';
-  const looksUrl = (v) => /^(https?:\/\/|git@|ssh:\/\/)/.test(v.trim());
-  createBtn.onclick = () => { createProject(inp.value); inp.value = ''; };
-  cloneBtn.onclick = () => { addProjectFromUrl(inp.value); inp.value = ''; };
+  createBtn.onclick = () => { createProject(inp.value); inp.value = ''; projectFilter = ''; applyProjectFilter(); };
+  cloneBtn.onclick = () => { addProjectFromUrl(inp.value); inp.value = ''; projectFilter = ''; applyProjectFilter(); };
+  inp.addEventListener('input', () => { projectFilter = inp.value; applyProjectFilter(); });
   inp.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
     e.preventDefault();
-    const v = inp.value;
-    if (looksUrl(v)) addProjectFromUrl(v); else createProject(v);
-    inp.value = '';
+    const matches = filteredProjects();
+    if (matches.length === 1) selectProject(matches[0].pid);  // narrowed to one → open it
   });
   arow.appendChild(createBtn); arow.appendChild(cloneBtn);
-  const hint = document.createElement('div'); hint.className = 'ahint';
-  hint.textContent = 'create → new public repo under clawdbotatg; clone → git URL, owner/repo, or a clawdbotatg repo name';
-  add.appendChild(inp); add.appendChild(arow); add.appendChild(hint);
+  add.appendChild(inp); add.appendChild(arow);
   projectsEl.appendChild(add);
-
-  // no in-app remove: the list mirrors the repos on disk. To drop one, delete
-  // its folder under projects/ and the list follows within ~1s.
-  const note = document.createElement('div');
-  note.className = 'ahint'; note.style.opacity = '0.7';
-  note.textContent = 'this list mirrors the repos in projects/ — to remove one, delete its folder on disk and the list updates itself.';
-  projectsEl.appendChild(note);
 
   list.forEach(p => {
     const busyP = p.status === 'cloning', errP = p.status === 'error';
@@ -1477,6 +1472,33 @@ function renderProjects(list) {
     }
 
     projectsEl.appendChild(card);
+  });
+
+  applyProjectFilter();          // honor any live filter text after a re-render
+  // landing on the projects rung: the box takes focus so you can filter/create
+  // straight away. Don't steal focus while typing elsewhere or off this rung.
+  if (!isTouch && currentView() === 'projects' && document.activeElement !== inp &&
+      !(document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName))) {
+    inp.focus();
+    const n = inp.value.length; try { inp.setSelectionRange(n, n); } catch {}
+  }
+}
+
+// projects matching the live filter (case-insensitive substring on name). Empty
+// filter → everything. Drives both the Enter-to-open and the visual hide below.
+function filteredProjects() {
+  const q = projectFilter.trim().toLowerCase();
+  if (!q) return projectList.slice();
+  return projectList.filter(p => (p.name || '').toLowerCase().includes(q));
+}
+// show/hide the rendered cards to match the filter without rebuilding the DOM
+// (keeps input focus while typing).
+function applyProjectFilter() {
+  const q = projectFilter.trim().toLowerCase();
+  projectsEl.querySelectorAll('.scard').forEach(card => {
+    const p = projectList.find(x => x.pid === card.dataset.pid);
+    const hit = !q || (p && (p.name || '').toLowerCase().includes(q));
+    card.style.display = hit ? '' : 'none';
   });
 }
 
@@ -2296,6 +2318,10 @@ function setView(view) {
   refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
   syncUrl();                       // keep the URL in step with the depth we're at
   if (tty) setTimeout(() => { fit.fit(); sendResize(); term.scrollToBottom(); bottomJustifyTTY(); }, 60);
+  else if (projects && !isTouch) {  // landing on projects: box takes focus (skip touch — avoids popping the soft keyboard)
+    const inp = projectsEl.querySelector('#addProject input');
+    if (inp) { inp.focus(); const n = inp.value.length; try { inp.setSelectionRange(n, n); } catch {} }
+  }
   else if (view === 'transcript') feed.scrollTop = feed.scrollHeight;
   else if (pm) { renderPmFeed(); pmfeed.scrollTop = pmfeed.scrollHeight; }
 }
