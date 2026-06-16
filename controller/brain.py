@@ -127,10 +127,17 @@ class Brain:
         UI to show what the bot did). Mutates self.history."""
         self.history.append({"role": "user", "content": user_text})
         trace = []
-        for _ in range(MAX_STEPS):
+        seen = set()                 # tool-call signatures already run this turn
+        for step in range(MAX_STEPS):
+            # On the last step, forbid tools so we always end with an answer.
+            force_reply = step == MAX_STEPS - 1
+            msgs = self._messages()
+            if force_reply:
+                msgs = msgs + [{"role": "user", "content":
+                    "Enough tool calls — reply NOW using what you have: "
+                    "{\"reply\":\"...\"}. Do not call any tool."}]
             try:
-                raw = config.llm_chat(self._messages(), model=self.model,
-                                      max_tokens=1200, temperature=0.3)
+                raw = config.llm_chat(msgs, model=self.model, max_tokens=1200, temperature=0.3)
             except Exception as e:
                 reply = f"⚠️ LLM error: {e}"
                 self.history.append({"role": "assistant", "content": reply})
@@ -138,7 +145,6 @@ class Brain:
 
             action = self._parse(raw)
             if action is None:
-                # nudge the model back onto the protocol, once per loop iteration
                 self.history.append({"role": "assistant", "content": raw})
                 self.history.append({"role": "user", "content":
                     "Reply with ONE JSON object only: {\"thought\":..., \"tool\":..., "
@@ -152,16 +158,32 @@ class Brain:
 
             tool = action.get("tool")
             args = action.get("args") or {}
+            self.history.append({"role": "assistant", "content": json.dumps(action)})
+            # Don't re-run an identical call — that's the loop that never converges.
+            sig = tool + json.dumps(args, sort_keys=True)
+            if sig in seen:
+                self.history.append({"role": "user", "content":
+                    f"You already called {tool} with those args — its result is above. "
+                    "Do NOT call it again; answer the user now with {\"reply\":\"...\"}."})
+                continue
+            seen.add(sig)
             try:
                 result = self.call_tool(tool, args)
             except Exception as e:
                 result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
             trace.append({"tool": tool, "args": args, "result": result})
-            # feed the action + observation back so the model can continue
-            self.history.append({"role": "assistant", "content": json.dumps(action)})
             self.history.append({"role": "user", "content":
-                f"OBSERVATION ({tool}):\n{json.dumps(result, indent=2)[:4000]}"})
+                f"OBSERVATION ({tool}):\n{json.dumps(result, indent=2)[:16000]}"})
 
-        reply = "Stopped after several steps without a final answer. Ask me to continue."
+        # Exhausted steps without a reply — make one last reply-only call.
+        try:
+            raw = config.llm_chat(self._messages() + [{"role": "user", "content":
+                "Final answer now as {\"reply\":\"...\"} — no tools."}],
+                model=self.model, max_tokens=800, temperature=0.3)
+            action = self._parse(raw)
+            reply = str(action["reply"]) if action and "reply" in action else (
+                raw.strip() or "I gathered the data but couldn't summarize — ask me again.")
+        except Exception:
+            reply = "I gathered the data but couldn't summarize — ask me again."
         self.history.append({"role": "assistant", "content": reply})
         return {"reply": reply, "trace": trace}
