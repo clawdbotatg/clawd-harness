@@ -43,8 +43,12 @@ from pathlib import Path
 from urllib.parse import quote
 
 import fleet_ws
+import sysstats
 
 HERE = Path(__file__).resolve().parent
+
+# How often to sample + push CPU/RAM/disk/GPU to the relay for the roster cards.
+SYSSTATS_INTERVAL = float(os.environ.get("FLEET_SYSSTATS_INTERVAL", "10"))
 
 
 def _load_env_file():
@@ -83,6 +87,11 @@ ALLOW_EXEC = os.environ.get("FLEET_ALLOW_EXEC", "").lower() in ("1", "true", "ye
 # so the import is optional — without it, E2E is unavailable (proxy refused if
 # required, but ping/diagnostics still work).
 E2E_REQUIRE = os.environ.get("FLEET_E2E_REQUIRE", "1").lower() not in ("0", "false", "no")
+# Opt-in trusted control: when set, this worker accepts plaintext harness frames
+# from the relay's reserved controller ident (the box-resident PM brain) even
+# while E2E is required for mobiles. Server-to-server trust; off by default.
+CTL_IDENT = "__ctl__"
+CTL_ALLOW = os.environ.get("FLEET_CTL_ALLOW", "").lower() in ("1", "true", "yes")
 RP_ID = os.environ.get("FLEET_RP_ID", "h.atg.link")
 ORIGIN = os.environ.get("FLEET_ORIGIN", "https://" + RP_ID)
 PASSKEYS_FILE = Path(os.environ.get("FLEET_PASSKEY_FILE") or (HERE / ".clawd-fleet.passkeys.json"))
@@ -265,6 +274,10 @@ class Worker:
         # the local harness and reported to the relay for the roster. None until
         # the first poll succeeds. Just three integers — never titles or content.
         self.stats = None
+        # Latest system stats {cpu,ram,disk,gpu} sampled locally (sysstats.collect).
+        # None until the first sample; pushed to the relay on a steady timer since
+        # — unlike the counts — these change every tick.
+        self.sys = None
         # E2E state (per remote viewer)
         self.e2e_sessions = {}     # mobile_id -> e2e.Session (open channel)
         self.e2e_hs = {}           # mobile_id -> e2e.WorkerHandshake (in progress)
@@ -319,11 +332,30 @@ class Worker:
             pass
 
     def report_stats(self):
-        """Push the latest aggregate counts to the relay (no-op until polled, or
-        if the relay link is down — the next poll change, or the reconnect
-        re-send in serve_once, will catch it up)."""
-        if self.stats is not None:
-            self.send_relay(dict(self.stats, type="stats"))
+        """Push the latest aggregate counts + system stats to the relay (no-op
+        until something's been sampled, or if the relay link is down — the next
+        poll change, the sysstats tick, or the reconnect re-send in serve_once,
+        will catch it up). Always sends a *combined* snapshot (counts default to
+        zeros if not yet polled) so the relay can overwrite wholesale."""
+        if self.stats is None and self.sys is None:
+            return
+        payload = dict(self.stats or {"projects": 0, "sessions": 0, "active": 0},
+                       type="stats")
+        if self.sys is not None:
+            payload["sys"] = self.sys
+        self.send_relay(payload)
+
+    def sysstats_loop(self):
+        """Sample CPU/RAM/disk/GPU on a steady timer and push to the relay. Separate
+        from stats_loop (which only fires on a count *change*) because these metrics
+        move every tick — the roster wants a live read, not an edge-triggered one."""
+        while True:
+            try:
+                self.sys = sysstats.collect()
+                self.report_stats()
+            except Exception as e:
+                print(f"[worker {self.machine}] sysstats error: {e}", flush=True)
+            time.sleep(SYSSTATS_INTERVAL)
 
     def harness_http(self):
         base = self.harness_ws
@@ -503,7 +535,8 @@ class Worker:
         # required, plaintext proxy frames are refused — everything must arrive
         # through the secure channel (decrypted in _e2e_rec). Fail closed.
         if "type" in msg:
-            if E2E_REQUIRE:
+            trusted = CTL_ALLOW and frm == CTL_IDENT      # the box-resident PM brain
+            if E2E_REQUIRE and not trusted:
                 self.reply(frm, {"t": "e2e.err", "error": "secure channel required"})
                 return
             link = self._link_for(frm)
@@ -695,6 +728,7 @@ class Worker:
         # skip the loop (it would just spam "Connection refused" forever).
         if self.kind != "relay":
             threading.Thread(target=self.stats_loop, daemon=True).start()
+            threading.Thread(target=self.sysstats_loop, daemon=True).start()
         backoff = 1.0
         while True:
             try:

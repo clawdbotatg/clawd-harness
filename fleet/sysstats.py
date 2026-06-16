@@ -7,7 +7,8 @@ raising, so a roster push never breaks because one metric is unavailable.
 Shape (all percentages 0–100, byte counts raw):
   {"cpu":  {"pct", "load1", "cores"},
    "ram":  {"pct", "used", "total"},
-   "disk": {"pct", "used", "free", "total"}}
+   "disk": {"pct", "used", "free", "total"},
+   "gpu":  {"pct", "used", "total"}}          # NVIDIA only; omitted otherwise
 """
 import os
 import re
@@ -85,10 +86,35 @@ def _ram_macos():
     return {"pct": round(used / total * 100, 1), "used": used, "total": total}
 
 
+def gpu():
+    """NVIDIA GPU utilization via `nvidia-smi` (the one cross-platform probe that
+    needs no extra dep). Returns None on any machine without an NVIDIA GPU — macOS
+    / Apple-Silicon has no stdlib path, so those cards simply omit the GPU line."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=utilization.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    # First GPU only (multi-GPU boxes: report the first; raw bytes from MiB).
+    first = out.stdout.strip().splitlines()[0]
+    try:
+        util, used_mib, total_mib = (p.strip() for p in first.split(","))
+        used = int(used_mib) * 1024 * 1024
+        total = int(total_mib) * 1024 * 1024
+        return {"pct": round(float(util), 1), "used": used, "total": total}
+    except (ValueError, IndexError):
+        return None
+
+
 def collect():
-    """Best-effort {cpu, ram, disk}; missing probes are omitted (not None-valued)."""
+    """Best-effort {cpu, ram, disk, gpu}; missing probes are omitted (not None-valued)."""
     out = {}
-    for key, fn in (("cpu", cpu), ("ram", ram), ("disk", disk)):
+    for key, fn in (("cpu", cpu), ("ram", ram), ("disk", disk), ("gpu", gpu)):
         v = fn()
         if v:
             out[key] = v

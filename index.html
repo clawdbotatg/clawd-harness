@@ -296,6 +296,13 @@
   .scard .sblock { color:#ffce9e; font-size:12px; line-height:1.4; background:rgba(214,77,42,.10);
                    border-left:2px solid var(--err); padding:3px 8px; margin-top:1px; }
   .scard .smeta { color:var(--dim); font-size:11px; font-family:var(--mono); }
+  /* compact CPU/RAM/disk/GPU bars on a machine card */
+  .sysstats { display:flex; flex-direction:column; gap:2px; margin-top:2px; }
+  .sysrow { display:flex; align-items:center; gap:7px; font-family:var(--mono); font-size:10.5px; color:var(--dim); }
+  .syslab { flex:0 0 26px; text-transform:uppercase; letter-spacing:.04em; }
+  .systrack { flex:1; height:5px; min-width:34px; background:var(--raised); border:1px solid var(--edge); }
+  .sysfill { display:block; height:100%; }
+  .sysval { flex:0 0 auto; color:var(--dim); white-space:nowrap; }
   .scard .sclose { position:absolute; top:8px; right:9px; background:transparent; border:0; color:var(--dim);
                    font-size:15px; cursor:pointer; padding:2px 5px; line-height:1; }
   .scard .sclose:hover { color:var(--err); background:var(--raised); }
@@ -1178,6 +1185,34 @@ function handleJson(m) {
 // -- machines (the fleet's top rung) ----------------------------------------
 const machinesEl = document.getElementById('machinelist');
 const machinesBtn = document.getElementById('machinesBtn');
+
+// Compact CPU/RAM/disk/GPU line for a machine card. Each metric: a label, a tiny
+// proportional bar, and "% (used/total)". Bar tints amber→red as it fills, so a
+// loaded box reads at a glance. Byte metrics show a GB hint; CPU shows load×cores.
+function fmtGB(b) { return (b / 1073741824).toFixed(b >= 10737418240 ? 0 : 1) + 'G'; }
+function renderSysStats(sys) {
+  const wrap = document.createElement('div');
+  wrap.className = 'sysstats';
+  const metric = (label, pct, hint) => {
+    if (pct == null) return;
+    const row = document.createElement('div'); row.className = 'sysrow';
+    const lab = document.createElement('span'); lab.className = 'syslab'; lab.textContent = label;
+    const track = document.createElement('span'); track.className = 'systrack';
+    const fill = document.createElement('span'); fill.className = 'sysfill';
+    fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+    fill.style.background = pct >= 90 ? 'var(--err)' : pct >= 70 ? '#caa030' : 'var(--ok)';
+    track.appendChild(fill);
+    const val = document.createElement('span'); val.className = 'sysval';
+    val.textContent = pct.toFixed(0) + '%' + (hint ? ` ${hint}` : '');
+    row.append(lab, track, val); wrap.appendChild(row);
+  };
+  if (sys.cpu) metric('cpu', sys.cpu.pct, `(${sys.cpu.load1}×${sys.cpu.cores})`);
+  if (sys.ram) metric('ram', sys.ram.pct, `(${fmtGB(sys.ram.used)}/${fmtGB(sys.ram.total)})`);
+  if (sys.disk) metric('disk', sys.disk.pct, `(${fmtGB(sys.disk.free)} free)`);
+  if (sys.gpu) metric('gpu', sys.gpu.pct, `(${fmtGB(sys.gpu.used)}/${fmtGB(sys.gpu.total)})`);
+  return wrap;
+}
+
 function renderMachines(list) {
   machineList = list;
   machinesEl.innerHTML = '';
@@ -1239,6 +1274,9 @@ function renderMachines(list) {
         cl.append(a);
       }
       card.appendChild(cl);
+      // CPU / RAM / disk / GPU — best-effort per-machine load (sysstats.collect).
+      // Each metric is optional; a probe that failed on the box is just omitted.
+      if (m.stats.sys) card.appendChild(renderSysStats(m.stats.sys));
     }
     machinesEl.appendChild(card);
   });

@@ -258,7 +258,12 @@ def main():
             return bool(m and m.get("stats"))
         f = wait_for(has_stats, what="roster entry with stats")
         st = next(x for x in f["machines"] if x["id"] == MACHINE)["stats"]
-        assert st == {"projects": 1, "sessions": 1, "active": 0}, st
+        # Counts are exact; `sys` (CPU/RAM/disk/GPU) rides along on real machines but
+        # is best-effort/volatile, so assert the counts subset rather than equality.
+        assert {k: st.get(k) for k in ("projects", "sessions", "active")} == \
+            {"projects": 1, "sessions": 1, "active": 0}, st
+        if "sys" in st:   # if present, it must be a dict of metric blocks
+            assert isinstance(st["sys"], dict), st
     check("worker reports aggregate counts → roster stats", t_stats)
 
     # 2. harness `list` → projects + sessions tunnel back as machineMsgs

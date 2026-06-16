@@ -16,14 +16,15 @@ Protocol (all JSON text frames):
     (handshake via query: ?role=worker&machine=<id>&host=<name>&t=<token>)
     {type:"reply",  to:<mobileId>, msg:{...}}   # route a result to one mobile
     {type:"status", msg:{...}}                  # broadcast (e.g. busy/idle)
-    {type:"stats", projects:N, sessions:N, active:N}  # plaintext aggregate
-        counts only (no titles/content) — for the at-a-glance roster load
+    {type:"stats", projects:N, sessions:N, active:N, sys:{cpu,ram,disk,gpu}?}
+        # plaintext aggregate counts (no titles/content) + best-effort system
+        # stats (CPU/RAM/disk/GPU) — for the at-a-glance roster load
   mobile→relay:
     (handshake via query: ?role=mobile&t=<token>)
     {type:"list"}                               # ask for the machine roster
     {type:"toMachine", machine:<id|"*">, msg:{...}}
   relay→mobile:
-    {type:"machines", machines:[{id,host,kind,online,lastSeen,stats:{projects,sessions,active}|null}]}
+    {type:"machines", machines:[{id,host,kind,online,lastSeen,stats:{projects,sessions,active,sys?}|null}]}
     {type:"machineMsg", machine:<id>, msg:{...}}
     {type:"error", error:"..."}
   relay→worker:
@@ -128,6 +129,15 @@ SESSION_TTL = int(os.environ.get("FLEET_SESSION_TTL", "86400"))  # passkey sessi
 # surface, so /pm is gated by the SAME passkey session token (a `pmt` cookie the
 # browser sets after auth) — no weaker than the rest of the relay.
 CONTROLLER_PORT = int(os.environ.get("CONTROLLER_CHAT_PORT", "8799") or 8799)
+# The box-resident PM brain drives machines over a TRUSTED control path: it
+# connects as role=controller (gated by FLEET_CONTROLLER_TOKEN, a strong secret)
+# and the relay routes its toMachine frames to workers tagged from the reserved
+# ident below. Workers that opt in (FLEET_CTL_ALLOW=1) bridge these plaintext to
+# their local harness — server-to-server trust, separate from the phone's E2E.
+# The "box = brain" trade the operator chose: a compromised box could drive
+# machines, but the phone↔worker channel stays end-to-end encrypted regardless.
+CTL_IDENT = "__ctl__"
+CONTROLLER_TOKEN = os.environ.get("FLEET_CONTROLLER_TOKEN", "")
 # Configurable so tests/dev never clobber a real worker's provisioned file.
 PASSKEY_FILE = Path(os.environ.get("FLEET_PASSKEY_FILE") or (HERE / ".clawd-fleet.passkeys.json"))
 _passkey_lock = threading.Lock()
@@ -445,10 +455,14 @@ class Relay:
             for m in mobiles:
                 m.send_json(out)
             return
-        if t == "stats":             # plaintext aggregate counts for the roster
-            worker.stats = {"projects": int(frame.get("projects") or 0),
-                            "sessions": int(frame.get("sessions") or 0),
-                            "active": int(frame.get("active") or 0)}
+        if t == "stats":             # plaintext aggregate counts + sys stats for the roster
+            st = {"projects": int(frame.get("projects") or 0),
+                  "sessions": int(frame.get("sessions") or 0),
+                  "active": int(frame.get("active") or 0)}
+            sys = frame.get("sys")   # {cpu,ram,disk,gpu} — best-effort, may be absent
+            if isinstance(sys, dict):
+                st["sys"] = sys
+            worker.stats = st
             self.broadcast_roster()
             return
         if t == "uploadResult":      # answer to a pending HTTP /upload
@@ -576,6 +590,13 @@ class Handler(BaseHTTPRequestHandler):
         if not up:
             return self.send_error(400, "expected websocket")
         role = q.get("role", ["mobile"])[0]
+        # The trusted PM controller (box-resident): a strong shared token, then it
+        # joins as a pre-authed mobile under the reserved ident so the existing
+        # toMachine/machineMsg routing carries its (plaintext, trusted) control.
+        if role == "controller":
+            if not (CONTROLLER_TOKEN and _token_ok(q.get("t", [""])[0], CONTROLLER_TOKEN)):
+                return self.send_error(403, "bad controller token")
+            return self._serve_ws("controller", CTL_IDENT, "", "machine")
         # The worker token gates machine registration. The mobile's sole credential
         # is the passkey (PASSKEY_ONLY → no mobile token; the passkey gate runs after
         # connect, and the worker re-verifies authoritatively over the E2E channel).
