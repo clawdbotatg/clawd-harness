@@ -51,6 +51,26 @@ pass through a gate; reads are always free.
 Plus a per-target rate limit (`CONTROLLER_RATE_PER_MIN`, default 8) and an audit
 trail: every write appends an `action` event to the ledger.
 
+## Telegram front-end (optional)
+
+Talk to the PM from your phone. Set `CONTROLLER_TELEGRAM_TOKEN` to a bot token
+**that isn't already being polled elsewhere** (Telegram allows one `getUpdates`
+consumer per token — pointing it at a live bot 409s and disrupts it; the bridge
+detects this and disables itself rather than fight). Allowlist senders with
+`CONTROLLER_TELEGRAM_ALLOW` (default = Austin's id). Then `serve` starts the
+bridge automatically: allowlisted messages route to the same brain; replies come
+back as Telegram messages; `/reset` clears the chat.
+
+## Higher-level events (hooks → reactions)
+
+Every session's low-level Claude Code hooks (`Stop`, `Notification`, …) fan out
+as WS `hook` frames; the controller's **Reactor** (`events.py`) watches them
+across all sessions and fires *higher-level* events on transitions — a session
+crossing into `blocked` (edge-triggered, deduped), a turn finishing, a session
+ending. Handlers act on them: a `blocked` event **pushes a Telegram alert**, and
+the full feed is at `/api/notifications` (shown in the chat UI's "Recent
+events"). This is how a low-level hook causes a high-level reaction.
+
 ## The tool surface (read + write)
 
 Read: `get_world`, `get_attention`, `session_digest`, `list_tasks`, `get_task`.
@@ -71,6 +91,8 @@ triage entry point — each item names the `suggested_action` to clear it.
 | `CONTROLLER_AUTONOMY` | `confirm` | write gate |
 | `CONTROLLER_CHAT_PORT` | `8799` | chat UI port |
 | `CONTROLLER_LEDGER` | `../.clawd-controller.tasks.jsonl` | task log |
+| `CONTROLLER_TELEGRAM_TOKEN` | — | bot token (a dedicated, un-polled bot) |
+| `CONTROLLER_TELEGRAM_ALLOW` | `672968601` | csv of allowed Telegram user ids |
 
 ## Tests
 
@@ -85,5 +107,6 @@ python3 -m controller.test_mcp_stdio    # MCP as a real stdio subprocess
 `harness_client.py` (WS client + state) · `world.py` (snapshot + attention) ·
 `ledger.py` (event-sourced task log) · `verbs.py` (intent verbs + guard) ·
 `mcp.py` (MCP stdio server) · `brain.py` (Kimi brain) · `claude_brain.py`
-(Claude Code `-p` brain) · `chat_server.py` + `chat.html` (chat UI) ·
+(Claude Code `-p` brain) · `events.py` (Reactor: hooks → higher-level events) ·
+`telegram.py` (Telegram bridge) · `chat_server.py` + `chat.html` (chat UI) ·
 `mock_harness.py` (test double) · `__main__.py` (entry).

@@ -77,6 +77,8 @@
     <div id="att"><div class="empty">loading…</div></div>
     <h2 style="margin-top:18px">Fleet</h2>
     <div id="fleet" class="empty">loading…</div>
+    <h2 style="margin-top:18px">Recent events</h2>
+    <div id="events" class="empty">—</div>
   </aside>
 </main>
 <script>
@@ -140,6 +142,11 @@ async function refresh(){
       `<div class="att ${a.sev}"><div class="t"><span class="dot"></span>${a.title} <span class="badge">${a.cid}</span></div>
        <div class="s">${a.summary}</div><div class="a">→ ${a.suggested_action}</div></div>`).join("")
       : '<div class="empty">nothing needs you 🎉</div>';
+    const evs = ((await jget("/api/notifications")).events || []).slice(-8).reverse();
+    const icon = k => k==="blocked"?"⏳":k==="turn_done"?"✓":k==="ended"?"■":"·";
+    $("#events").innerHTML = evs.length ? evs.map(e =>
+      `<div class="badge">${icon(e.kind)} <b>${e.cid?e.cid.slice(0,8):""}</b> ${e.summary||e.kind}</div>`).join("")
+      : '<span class="empty">no events yet</span>';
   }catch(e){ /* server may be mid-restart */ }
 }
 add("bot","Hi — I'm your fleet PM. Ask me what needs your attention, or tell me to start work on a project.");

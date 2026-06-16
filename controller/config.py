@@ -60,6 +60,14 @@ MACHINE_ID = cfg("CONTROLLER_MACHINE", "self")
 CHAT_PORT = int(cfg("CONTROLLER_CHAT_PORT", "8799") or 8799)
 LEDGER_PATH = cfg("CONTROLLER_LEDGER", os.path.join(ROOT, ".clawd-controller.tasks.jsonl"))
 
+# Telegram front-end (optional). Set CONTROLLER_TELEGRAM_TOKEN to a bot token that
+# is NOT already being polled elsewhere (Telegram allows one getUpdates consumer
+# per token — pointing it at a live bot would 409 and disrupt that bot). Allowlist
+# is a comma-separated list of Telegram user ids permitted to drive the PM (for a
+# private chat the user id IS the chat id, so it's also the push target).
+TELEGRAM_TOKEN = cfg("CONTROLLER_TELEGRAM_TOKEN", "")
+TELEGRAM_ALLOW = [x.strip() for x in cfg("CONTROLLER_TELEGRAM_ALLOW", "672968601").split(",") if x.strip()]
+
 
 def harness_token():
     """The harness WS token — env override, else the .clawd-harness.token file."""

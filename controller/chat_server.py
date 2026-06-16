@@ -23,7 +23,7 @@ class ThreadingHTTPServer(ThreadingMixIn, TCPServer):
     allow_reuse_address = True
 
 
-def make_handler(router, verbs, guard, backend_getter):
+def make_handler(router, verbs, guard, backend_getter, reactor=None):
     chat_lock = threading.Lock()
     from . import config
 
@@ -62,6 +62,8 @@ def make_handler(router, verbs, guard, backend_getter):
                 return self._send(200, verbs.get_attention())
             if path == "/api/tasks":
                 return self._send(200, verbs.list_tasks())
+            if path == "/api/notifications":
+                return self._send(200, {"events": reactor.recent() if reactor else []})
             if path == "/api/state":
                 snap = verbs.get_world()
                 return self._send(200, {
@@ -107,8 +109,9 @@ def make_handler(router, verbs, guard, backend_getter):
     return Handler
 
 
-def serve_with_router(router, verbs, guard, backend_getter, port, bind="127.0.0.1"):
-    srv = ThreadingHTTPServer((bind, port), make_handler(router, verbs, guard, backend_getter))
+def serve_with_router(router, verbs, guard, backend_getter, port, bind="127.0.0.1", reactor=None):
+    srv = ThreadingHTTPServer((bind, port),
+                              make_handler(router, verbs, guard, backend_getter, reactor))
     print(f"[controller] chat UI on http://{bind}:{port}  "
           f"(backend={backend_getter()}, autonomy={guard.autonomy})", flush=True)
     srv.serve_forever()

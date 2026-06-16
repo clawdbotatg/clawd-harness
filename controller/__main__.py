@@ -15,6 +15,7 @@ import sys
 import time
 
 from . import config
+from .events import Reactor
 from .harness_client import HarnessClient
 from .ledger import TaskLedger
 from .mcp import MCPServer, TOOLS
@@ -23,12 +24,15 @@ from .world import World
 
 
 def build(connect_wait=4.0):
-    """Wire ledger + harness client(s) + world + verbs. Returns (verbs, clients,
-    guard, ledger). Single machine for now; the relay/multi-machine adapter adds
-    more clients to the same World."""
+    """Wire ledger + reactor + harness client(s) + world + verbs. Returns
+    (verbs, clients, guard, ledger, reactor). Single machine for now; the
+    relay/multi-machine adapter adds more clients (each with on_hook=reactor.feed)
+    to the same World + Reactor."""
     ledger = TaskLedger(config.LEDGER_PATH)
+    reactor = Reactor(ledger)
     token = config.harness_token()
-    client = HarnessClient(config.MACHINE_ID, config.HARNESS_WS, token).start()
+    client = HarnessClient(config.MACHINE_ID, config.HARNESS_WS, token,
+                           on_hook=reactor.feed).start()
     clients = {config.MACHINE_ID: client}
     guard = Guard(autonomy=config.AUTONOMY, rate_per_min=config.RATE_PER_MIN)
     world = World(clients, ledger)
@@ -38,7 +42,7 @@ def build(connect_wait=4.0):
         while time.time() < end and not (client.connected and client.sessions is not None
                                          and client.projects):
             time.sleep(0.05)
-    return verbs, clients, guard, ledger
+    return verbs, clients, guard, ledger, reactor
 
 
 def make_brain(backend, verbs, clients, guard):
@@ -56,12 +60,12 @@ def main(argv):
 
     if mode == "mcp":
         # MCP stdio server. Keep stdout clean for JSON-RPC; logs go to stderr.
-        verbs, clients, guard, ledger = build(connect_wait=3.0)
+        verbs, clients, guard, ledger, reactor = build(connect_wait=3.0)
         MCPServer(verbs).serve_stdio()
         return 0
 
     if mode in ("world", "attention", "tasks"):
-        verbs, clients, guard, ledger = build()
+        verbs, clients, guard, ledger, reactor = build()
         out = {"world": verbs.get_world, "attention": verbs.get_attention,
                "tasks": verbs.list_tasks}[mode]()
         print(json.dumps(out, indent=2))
@@ -69,7 +73,7 @@ def main(argv):
 
     if mode == "serve":
         from . import chat_server
-        verbs, clients, guard, ledger = build()
+        verbs, clients, guard, ledger, reactor = build()
         backend = config.cfg("CONTROLLER_BRAIN", "bankr").lower()
         brains = {}
 
@@ -99,8 +103,27 @@ def main(argv):
                 return active["brain"].chat(text)
 
         router = Router()
+
+        # Telegram front-end (optional) — same brain, on your phone.
+        tg = None
+        if config.TELEGRAM_TOKEN:
+            from .telegram import TelegramBridge
+            tg = TelegramBridge(config.TELEGRAM_TOKEN, config.TELEGRAM_ALLOW, router).start()
+
+        # Higher-level reactions: a session crossing into `blocked` (a low-level
+        # Claude Code hook) fires a controller event → push it to Telegram. The
+        # full event feed is also exposed at /api/notifications for the UI.
+        def on_event(e):
+            if e["kind"] == "blocked":
+                line = f"⏳ needs you — {e['machine']}/{e['cid'][:8]}: {e['summary']}"
+                print("[reactor] " + line, flush=True)
+                if tg:
+                    tg.notify(line)
+        reactor.on_event(on_event)
+
         chat_server.serve_with_router(router, verbs, guard,
-                                      lambda: active["backend"], config.CHAT_PORT)
+                                      lambda: active["backend"], config.CHAT_PORT,
+                                      reactor=reactor)
         return 0
 
     print(__doc__)

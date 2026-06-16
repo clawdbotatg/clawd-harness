@@ -228,12 +228,14 @@ whole stack is proud of being pure stdlib, disk-as-source-of-truth. So:
 - **Phase 2 — conversational controller** ✅. `verbs.py` (intent verbs, gated by
   autonomy/rate/audit) behind both an MCP server (`mcp.py`) and a chat brain
   (`brain.py` Kimi / `claude_brain.py` Claude Code). Confirm-gated by default.
-- **Phase 3 — bounded autonomy** ◑. The mechanism exists (autonomy=auto, task
-  ledger, attention loop); a standing "watch task → verify vs acceptance →
-  report" daemon loop is the remaining piece.
-- **Phase 4 — Telegram front-end** ☐. The chat API (`/api/chat`) is transport-
-  agnostic; wiring it to Telegram (push triage + command) is next. The web chat
-  UI ships now.
+- **Phase 3 — bounded autonomy** ◑. Autonomy gate + task ledger + an
+  event-driven **Reactor** (`events.py`): fleet hooks (`Stop`/`Notification`)
+  become higher-level events (`blocked`/`turn_done`/`ended`), pushed to handlers
+  and `/api/notifications`. Remaining: a standing "verify a finished task against
+  its acceptance" auto-loop.
+- **Phase 4 — Telegram front-end** ✅. `telegram.py` — allowlisted, stdlib,
+  routes messages to the same brain and lets the Reactor push `blocked` alerts to
+  your phone. Enabled by setting `CONTROLLER_TELEGRAM_TOKEN` (a dedicated bot).
 
 ## Decision log
 

@@ -17,11 +17,13 @@ from .wsclient import client_connect, ws_send, ws_read_message
 
 
 class HarnessClient:
-    def __init__(self, machine_id, ws_url, token, on_change=None):
+    def __init__(self, machine_id, ws_url, token, on_change=None, on_hook=None):
         self.machine_id = machine_id
         self.base = ws_url.rstrip("/")
         self.token = token
         self.on_change = on_change or (lambda *a: None)
+        # called with (machine_id, frame) for every `hook` frame — the Reactor's feed
+        self.on_hook = on_hook or (lambda *a: None)
 
         self.projects = {}        # pid -> projectMeta
         self.sessions = {}        # cid -> sessionMeta (incl. status/digest/blocked_on)
@@ -105,6 +107,8 @@ class HarnessClient:
                 self._focus_event.set()
             elif t == "exit":
                 self.sessions.pop(f.get("cid"), None)
+        if t == "hook":
+            self.on_hook(self.machine_id, f)        # → Reactor (higher-level events)
         self.on_change(self.machine_id, t)
 
     # -- outbound --------------------------------------------------------------
