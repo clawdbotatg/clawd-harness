@@ -48,9 +48,20 @@ BANKR_BASE_URL = cfg("BANKR_BASE_URL").rstrip("/")
 BANKR_API = (cfg("BANKR_API", "openai")).lower()
 
 # -- controller knobs ----------------------------------------------------------
-# The PM brain's model. kimi-k2.6 = a capable, tool-following reasoner on the
-# Bankr gateway (the user's pick). Naming stays qwen3-coder; this is a different job.
-BRAIN_MODEL = cfg("CONTROLLER_MODEL", "kimi-k2.6")
+# The PM brain's model. Default claude-haiku-4.5: in the bench_controller.py
+# survey it was the best speed-for-reliability — 0 leaks, completed every run,
+# ~6× faster than the old kimi-k2.6 default (3.9s vs ~25s p50 per turn). Naming
+# stays qwen3-coder; this is a different job. Override via CONTROLLER_MODEL.
+BRAIN_MODEL = cfg("CONTROLLER_MODEL", "claude-haiku-4.5")
+# The selectable model menu surfaced in the chat UI — the leak-aware top of the
+# bench_controller.py ranking (the leaky kimi-k2.7-code is deliberately left out;
+# add it here if you want its speed). Re-derive by running `python3 bench_controller.py`.
+BRAIN_MODELS = [m.strip() for m in cfg("CONTROLLER_MODELS",
+    "claude-haiku-4.5,kimi-k2.6,deepseek-v3.2,qwen3.7-plus,claude-sonnet-4.6").split(",")
+    if m.strip()]
+# Persisted model choice (picked from the UI) so it survives a daemon restart —
+# same pattern as PROMPT_PATH. Absent → BRAIN_MODEL.
+MODEL_PATH = cfg("CONTROLLER_MODEL_FILE", os.path.join(ROOT, ".clawd-controller.model.txt"))
 # Autonomy gate for write verbs: readonly (refuse) | confirm (dry-run unless
 # confirm=true) | auto (execute). Default confirm — safe but useful out of the box.
 AUTONOMY = cfg("CONTROLLER_AUTONOMY", "confirm").lower()

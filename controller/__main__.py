@@ -119,6 +119,15 @@ def main(argv):
                 active["backend"] = name
                 active["brain"] = get_brain(name)
 
+            # Model selection applies to the bankr brain (claude-code drives its
+            # own model). Persisted on the brain so a UI pick survives a restart.
+            def get_model(self):
+                return get_brain("bankr").model
+
+            def set_model(self, name):
+                get_brain("bankr").set_model(name)
+                return get_brain("bankr").model
+
             def chat(self, text):
                 brain = active["brain"]
                 back = active["backend"]

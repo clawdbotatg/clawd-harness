@@ -72,10 +72,11 @@
   <span class="pill" id="attBadge">—</span>
   <span class="sp"></span>
   <span class="badge">brain</span>
-  <select id="backend" title="Which model runs the PM">
-    <option value="bankr">Kimi K2.6 (Bankr)</option>
+  <select id="backend" title="Which engine runs the PM">
+    <option value="bankr">Bankr</option>
     <option value="claude-code">Claude Code -p</option>
   </select>
+  <select id="model" title="Which model the Bankr brain uses"></select>
   <a href="/debug" target="_blank" class="badge" style="text-decoration:none;color:#8fb6ff">🛠 debug</a>
   <span class="badge">writes</span>
   <select id="autonomy" title="Write autonomy">
@@ -173,7 +174,8 @@ $("#f").addEventListener("submit", e => { e.preventDefault(); const t = box.valu
 box.addEventListener("input", ()=>{ box.style.height="auto"; box.style.height=Math.min(box.scrollHeight,140)+"px"; });
 box.addEventListener("keydown", e => { if (e.key==="Enter" && !e.shiftKey){ e.preventDefault(); $("#f").requestSubmit(); }});
 $("#autonomy").onchange = async e => { await jpost("/api/autonomy", {autonomy:e.target.value}); };
-$("#backend").onchange = async e => { await jpost("/api/backend", {backend:e.target.value}); };
+$("#backend").onchange = async e => { await jpost("/api/backend", {backend:e.target.value}); refresh(); };
+$("#model").onchange = async e => { await jpost("/api/model", {model:e.target.value}); };
 
 // -- PM threads — multiple conversations, switch / new / clear / archive ------
 let threadState = {threads:[], current:null, archived_count:0};
@@ -244,6 +246,14 @@ async function refresh(){
     harnessInfo = st.harness || null;
     $("#autonomy").value = st.autonomy;
     if (st.backend) $("#backend").value = st.backend;
+    // model menu: only meaningful for the bankr backend (claude-code -p drives
+    // its own model). Populate once, keep the live selection in sync.
+    const msel = $("#model"), models = st.models || [];
+    if (msel.options.length !== models.length)
+      msel.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join("");
+    const bankr = st.backend === "bankr";
+    msel.style.display = bankr ? "" : "none";
+    if (bankr && st.model) msel.value = st.model;
     const n = st.attention_count;
     $("#attBadge").textContent = n ? (n+" need you") : "all clear";
     $("#attBadge").style.color = n ? "var(--high)" : "var(--ok)";

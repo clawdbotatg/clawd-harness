@@ -31,7 +31,14 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
     from .mcp import TOOLS
 
     def model_label():
-        return config.BRAIN_MODEL if backend_getter() == "bankr" else "claude-code -p"
+        if backend_getter() != "bankr":
+            return "claude-code -p"
+        # the live model on the bankr brain (a UI pick / persisted override), not
+        # just the config default
+        try:
+            return router.get_model()
+        except Exception:
+            return config.BRAIN_MODEL
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -111,7 +118,7 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
                 hparsed = _u.urlparse(hbase)
                 return self._send(200, {
                     "autonomy": guard.autonomy, "backend": backend_getter(),
-                    "model": model_label(),
+                    "model": model_label(), "models": config.BRAIN_MODELS,
                     "harness": {"base": hbase, "token": config.harness_token(),
                                 "port": hparsed.port or (443 if hparsed.scheme == "https" else 80)},
                     "machines": [{"id": m["id"], "connected": m["connected"],
@@ -146,6 +153,14 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
                     router.switch(name)
                     return self._send(200, {"ok": True, "backend": name})
                 return self._send(400, {"error": "backend must be bankr|claude-code"})
+            if path == "/api/model":
+                name = (data.get("model") or "").strip()
+                if name not in config.BRAIN_MODELS:
+                    return self._send(400, {"error": "unknown model",
+                                            "models": config.BRAIN_MODELS})
+                with chat_lock:                 # don't swap model mid-turn
+                    model = router.set_model(name)
+                return self._send(200, {"ok": True, "model": model})
             if path == "/api/reset":
                 with chat_lock:
                     router.reset()
