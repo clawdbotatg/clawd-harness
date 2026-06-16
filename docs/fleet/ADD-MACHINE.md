@@ -3,7 +3,8 @@
 **Goal:** get a new machine running its own [clawd-harness](../../README.md) **and**
 a fleet **worker**, so it shows up as a machine in the phone UI
 (`https://h.atg.link/?t=<TOKEN>`) next to the others and you can drive its Claude
-sessions from there.
+sessions from there — and, optionally, so the fleet **PM brain** can see and drive
+it too (**step 8**).
 
 This is the doc to hand a fresh Claude on the new machine. Follow it top to
 bottom. It is written to be complete: it calls out the two pieces that are **not
@@ -284,6 +285,55 @@ to Troubleshooting.
 On the box you can confirm the join: `ssh zkllmapi 'journalctl -u
 clawd-fleet-relay | grep -E "online|offline" | tail'`.
 
+## Step 8 — (optional) let the fleet PM brain drive this machine
+
+The fleet has an AI **project-manager brain** (the controller, see
+[`../CONTROLLER.md`](../CONTROLLER.md)) running on the box. It can see and drive
+**every** machine's sessions — you chat with it at `https://h.atg.link` (tap the
+status chip → PM drawer) or over Telegram, and it can triage, start work, and
+unblock sessions across the fleet.
+
+It reaches machines over a **trusted-control path** that is *separate from* the
+phone's end-to-end channel: the box-resident controller connects to the relay as a
+trusted `controller` role, and an opted-in worker bridges its (plaintext) control
+frames to the local harness. The trade is explicit — **a compromised box could
+drive machines** — but the phone⇄worker E2E traffic stays encrypted and unreadable
+to the relay/box regardless. So it's **opt-in per machine**.
+
+The box side is already set up (the relay holds `FLEET_CONTROLLER_TOKEN` and the
+controller runs in box mode). The **only per-machine step** is to opt this worker
+in by setting **`FLEET_CTL_ALLOW=1`** in its environment, then restart it. Put it
+wherever this machine's worker reads env so it persists:
+
+- **launchd (macOS):** add to the plist's `EnvironmentVariables` dict
+  `<key>FLEET_CTL_ALLOW</key><string>1</string>` (or to a `fleet/fleet.env` the
+  worker loads), then
+  `launchctl kickstart -k gui/$(id -u)/com.clawd.fleet-worker`.
+- **systemd (Linux):** add `FLEET_CTL_ALLOW=1` to the worker's `EnvironmentFile`
+  (e.g. `fleet.env`), then `sudo systemctl restart clawd-fleet-worker`.
+
+With it set, the worker accepts the box brain's trusted control even though E2E
+stays **required** for phones (the worker uses the plaintext reply path only for
+the reserved controller identity; everything else still goes through E2E).
+
+**Verify** the brain can see this machine — from a shell with box access:
+
+```bash
+ssh zkllmapi 'curl -s http://127.0.0.1:8799/api/world' \
+  | python3 -c "import sys,json;[print(m['id'],'sessions='+str(m['session_total'])) for m in json.load(sys.stdin)['machines']]"
+```
+
+This machine should show its real `session_total` (not `0`). Or just ask the PM
+at h.atg.link: *"what's on `<your-machine-id>`?"*. The controller re-pulls a
+machine's projects/sessions automatically whenever its worker (re)connects, so no
+controller restart is needed.
+
+> **Updating an existing machine's worker code** (e.g. to gain trusted-control
+> support): the worker machines are **git checkouts** that pull from `origin/main`
+> — so `git pull --ff-only` + restart the worker (NOT scp, which dirties the
+> checkout; scp is only how the box's flat `~/clawd-fleet/` copy is updated). See
+> the memory note "fleet-machine-update" for the per-machine ssh aliases/paths.
+
 ---
 
 ## Troubleshooting
@@ -313,6 +363,13 @@ come up. In order of likelihood:
 That's a harness problem, not fleet. Make sure step 1 worked (`lsof` shows
 `:8787`) and `claude` is logged into a subscription. See the root
 [`CLAUDE.md`](../../CLAUDE.md).
+
+**The PM brain lists this machine but shows `sessions: 0` for it** (phone access
+works, but the brain can't see its projects/sessions). The worker isn't opted into
+the trusted-control path — set `FLEET_CTL_ALLOW=1` in its env and restart it
+(**step 8**). Until then the worker refuses the box brain's control frames (E2E is
+required for everyone else), so only the aggregate roster entry shows. Confirm the
+worker reconnected in the relay log, then re-check `…:8799/api/world`.
 
 **Session titles are dumb first-prompt strings / auto-naming stopped.**
 The harness is missing `.clawd-harness.env` (or its `BANKR_*` keys) — see

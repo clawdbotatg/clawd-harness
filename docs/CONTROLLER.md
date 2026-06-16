@@ -184,6 +184,40 @@ The cheap tier continuously **compresses** raw session activity into the world
 model; the strong tier reasons over the *compressed* world, never the firehose.
 That's the unlock for both legibility and cost.
 
+## Multi-machine: the trusted-control path (as built)
+
+The brain runs **on the box, next to the relay** (`clawd-nerve-cord` /
+`zkllmapi`) — the box is the brain. But the box has *no harness of its own*, and
+the relay only ever sees **ciphertext** (the phone⇄worker channel is E2E,
+passkey-bound). A headless brain can't be a passkey-holding phone, so it can't use
+that path. Instead it drives machines over a separate **trusted-control path**:
+
+```
+controller (box) ──role=controller──▶ relay ──task(__ctl__)──▶ worker ──▶ local harness
+```
+
+- **relay** (`fleet/relay.py`): a `role=controller` connection gated by a strong
+  shared secret (`FLEET_CONTROLLER_TOKEN`) joins as a pre-authed mobile under the
+  reserved ident `__ctl__`; the *existing* `toMachine`/`machineMsg` routing
+  carries its control. No new wire protocol.
+- **worker** (`fleet/worker.py`): **opt-in** per machine via `FLEET_CTL_ALLOW=1`.
+  An opted-in worker bridges the reserved controller's **plaintext** harness
+  frames to its local harness *even while E2E is required for mobiles*, and replies
+  to it via the plaintext `reply()` (not the encrypting `reply_enc`), skipping PTY.
+- **controller** (`controller/relay_client.py`): `RelayFleet` connects
+  `role=controller`, demuxes the roster + per-machine `projects`/`sessions`/`hook`
+  into a live `{machine: RelayMachine}` map that *is* the `clients` World/Verbs
+  read. It re-pulls a machine's state on every worker (re)connect. Enabled by
+  setting `CONTROLLER_RELAY` (box mode) instead of `CONTROLLER_HARNESS_WS` (the
+  laptop's single-harness mode).
+
+**The trade, stated plainly:** this makes the box a trusted component for *control*
+(a compromised box could drive machines) — the deliberate "box = brain" choice.
+The phone⇄worker **E2E is untouched**: the relay still can't read or forge that
+traffic; only the opted-in trusted-control identity rides plaintext, and only on
+machines that set the flag. Wiring a machine in: **[`fleet/ADD-MACHINE.md`](fleet/ADD-MACHINE.md)
+step 8**.
+
 ---
 
 ## The task ledger — no database
