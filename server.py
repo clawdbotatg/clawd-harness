@@ -131,6 +131,18 @@ NAME_SYS_PROMPT = ("You name software-engineering sessions. Given a transcript, 
                    "reply with ONLY compact JSON and nothing else: "
                    '{"title": "<max 5 words>", "desc": "<max 12 words>"}. '
                    "The title is a terse label; the desc is a one-line summary.")
+# The *digest* is the volatile companion to the (stable) title/desc: a one-line
+# "what is this session doing right now", refreshed on every Stop so a controller
+# (or the GUI) can read live session state without re-parsing a transcript. See
+# docs/CONTROLLER.md (the reading phase). blocked_on catches a turn that ended by
+# asking the human something in plain text — a soft block the `waiting` flag (TUI
+# prompts only) misses.
+DIGEST_SYS_PROMPT = ("You summarize the live state of a software-engineering "
+                     "session for a dashboard. Given a transcript, reply with "
+                     "ONLY compact JSON and nothing else: "
+                     '{"digest": "<max 12 words: what it is doing right now>", '
+                     '"blocked_on": "<if it is waiting on a human decision, the '
+                     'question in <=12 words; else empty string>"}.')
 
 # Env vars that, when inherited, put a spawned `claude` into a nested/embedded
 # mode (e.g. it stops writing a normal session transcript). We scrub them so the
@@ -302,6 +314,8 @@ class ClaudeSession:
         self.busy = False                        # working (turn in flight) vs idle
         self.waiting = False                      # blocked on an interactive prompt (permission / question)
         self.last_tool = None
+        self.digest = ""                          # volatile "what it's doing now" (LLM, refreshed each Stop)
+        self.blocked_on = None                    # the open question if it ended asking the human (LLM)
         self.settings_path = None
 
     # -- registry shape --------------------------------------------------------
@@ -325,11 +339,17 @@ class ClaudeSession:
 
     def meta(self):
         """Menu-level snapshot broadcast to every client."""
+        # Deterministic, LLM-free status for the controller's attention queue:
+        # blocked (needs a human now) > working (turn in flight) > idle.
+        status = "blocked" if self.waiting else ("working" if self.busy else "idle")
         return {"cid": self.cid, "pid": self.pid,
                 "title": self.title or self._fallback_title(),
                 "desc": self.desc or "",
                 "named": bool(self.title),
                 "busy": self.busy, "waiting": self.waiting, "tool": self.last_tool,
+                "status": status,
+                "digest": self.digest or "",
+                "blocked_on": self.blocked_on or "",
                 "sessionId": self.session_id,
                 "promptCount": self.prompt_count,
                 "lastActive": self.last_active,
@@ -444,6 +464,10 @@ class ClaudeSession:
             # re-name at the 1/5/10/15/… milestones to sharpen as it grows.
             if (not self.title) or name_at_prompt(self.prompt_count):
                 threading.Thread(target=self._regenerate_name, daemon=True).start()
+            # The digest is volatile — refresh it every turn (not just at the
+            # naming milestones) so live session state stays current for the
+            # controller / dashboard. Cheap, async, in-memory only.
+            threading.Thread(target=self._regenerate_digest, daemon=True).start()
         elif ev == "Notification":
             # Fires both for "needs your permission / input" (mid-turn, busy) and
             # for a 60s-idle nudge (turn already Stopped, not busy). Only the
@@ -489,6 +513,24 @@ class ClaudeSession:
             print(f"[name {self.cid[:8]}] {self.title!r} — {self.desc!r}", flush=True)
             self.manager.save_registry()
             self.manager.broadcast_sessions()
+
+    def _regenerate_digest(self):
+        """Refresh the volatile 'what's happening now' digest from the transcript.
+        Companion to _regenerate_name, but fired on *every* Stop (naming fires only
+        at milestones) since that's when the turn's outcome is freshest. Held in
+        memory only — derived/ephemeral state, regenerated next turn (no registry).
+        See docs/CONTROLLER.md."""
+        text = self._transcript_text_for_naming()
+        if not text:
+            return
+        digest, blocked_on = generate_digest(text)
+        if digest is None:                          # naming off, or call failed
+            return
+        self.digest = (digest or "")[:140]
+        self.blocked_on = ((blocked_on or "").strip() or None)
+        if self.blocked_on:
+            self.blocked_on = self.blocked_on[:140]
+        self.manager.broadcast_sessions()
 
     def _transcript_text_for_naming(self, cap=3500):
         path = self.transcript_path or self._find_transcript()
@@ -1214,26 +1256,28 @@ class SessionManager:
 
 
 # ── AI naming (title + one-line description via Bankr LLM gateway) ─────────────
-def generate_name(transcript_text):
-    """Return (title, desc) for a coding session, or (None, None) if naming is
-    unconfigured or the call fails. Stdlib-only HTTP."""
+def _llm_json(sys_prompt, user_text, max_tokens=120):
+    """POST one (system, user) turn to the configured gateway and return the
+    parsed JSON object the model emitted, or None if naming is unconfigured, the
+    call fails, or no JSON is found. Stdlib-only HTTP — the single transport both
+    generate_name and generate_digest share (one place handles the
+    openai/anthropic/bankr body+auth differences; no drift)."""
     if not (BANKR_API_KEY and BANKR_BASE_URL):
-        return (None, None)
-    sys_prompt = NAME_SYS_PROMPT
+        return None
     try:
         if BANKR_API == "anthropic":
             url = f"{BANKR_BASE_URL}/v1/messages"
-            body = {"model": BANKR_MODEL, "max_tokens": 120,
+            body = {"model": BANKR_MODEL, "max_tokens": max_tokens,
                     "system": sys_prompt,
-                    "messages": [{"role": "user", "content": transcript_text}]}
+                    "messages": [{"role": "user", "content": user_text}]}
             headers = {"x-api-key": BANKR_API_KEY,
                        "anthropic-version": "2023-06-01",
                        "content-type": "application/json"}
         else:  # openai-compatible (incl. bankr — same body, different auth header)
             url = f"{BANKR_BASE_URL}/chat/completions"
-            body = {"model": BANKR_MODEL, "max_tokens": 120, "temperature": 0.3,
+            body = {"model": BANKR_MODEL, "max_tokens": max_tokens, "temperature": 0.3,
                     "messages": [{"role": "system", "content": sys_prompt},
-                                 {"role": "user", "content": transcript_text}]}
+                                 {"role": "user", "content": user_text}]}
             if BANKR_API == "bankr":
                 headers = {"X-API-Key": BANKR_API_KEY, "content-type": "application/json"}
             else:
@@ -1252,13 +1296,29 @@ def generate_name(transcript_text):
             raw = (((payload.get("choices") or [{}])[0]).get("message") or {}
                    ).get("content", "")
         m = re.search(r"\{[\s\S]*\}", raw)
-        if not m:
-            return (None, None)
-        parsed = json.loads(m.group(0))
-        return (parsed.get("title"), parsed.get("desc"))
+        return json.loads(m.group(0)) if m else None
     except Exception as e:
-        print(f"[name] generation failed: {e}", flush=True)
+        print(f"[llm] generation failed: {e}", flush=True)
+        return None
+
+
+def generate_name(transcript_text):
+    """Return (title, desc) for a coding session, or (None, None) if naming is
+    unconfigured or the call fails."""
+    parsed = _llm_json(NAME_SYS_PROMPT, transcript_text)
+    if not parsed:
         return (None, None)
+    return (parsed.get("title"), parsed.get("desc"))
+
+
+def generate_digest(transcript_text):
+    """Return (digest, blocked_on) — the volatile live-state summary — or
+    (None, None) if naming is unconfigured or the call fails. See
+    DIGEST_SYS_PROMPT and docs/CONTROLLER.md."""
+    parsed = _llm_json(DIGEST_SYS_PROMPT, transcript_text)
+    if not parsed:
+        return (None, None)
+    return (parsed.get("digest"), parsed.get("blocked_on"))
 
 
 def _strip_noise(text):

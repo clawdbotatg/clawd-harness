@@ -125,7 +125,8 @@ reconnect (i.e. the server restarted).
 ### sessionMeta
 ```jsonc
 { "cid", "pid", "title", "desc", "named":bool, "busy":bool, "waiting":bool,
-  "tool":<str|null>, "sessionId", "promptCount":int,
+  "tool":<str|null>, "status":"blocked|working|idle", "digest":str,
+  "blocked_on":str, "sessionId", "promptCount":int,
   "lastActive":float, "created":float, "alive":bool }
 ```
 - `waiting` = the session is blocked on an interactive TUI prompt (a permission
@@ -134,6 +135,17 @@ reconnect (i.e. the server restarted).
   (the turn is in flight, just parked). In the **projectMeta** counts a waiting
   session is tallied in `waitingCount` *instead of* `busyCount` (mutually
   exclusive) so a blocked session reads as "needs you", not "working".
+- `status` = the deterministic, LLM-free roll-up of `busy`/`waiting` for a
+  controller's attention queue: `blocked` (needs a human now) > `working` (turn
+  in flight) > `idle`.
+- `digest` = a volatile one-line "what this session is doing right now" (LLM,
+  refreshed on every `Stop` — see naming below). `""` until the first turn ends
+  or if naming is unconfigured. The *stable* label is `title`/`desc`; the digest
+  is the live state. Held in memory only (not persisted; regenerated each turn).
+- `blocked_on` = the open question if the turn ended by asking the human
+  something in plain text (LLM-inferred) — a *soft* block the `waiting` flag
+  (TUI prompts only) misses. `""` when not blocked. These three feed the AI
+  controller's read-model; see `docs/CONTROLLER.md`.
 - `cid` = stable console id (ours; survives claude's id rotation). **Address
   sessions by `cid`, never `sessionId`.**
 - `sessionId` = claude's own id; rotates on compaction/resume.
