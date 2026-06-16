@@ -27,3 +27,7 @@ fleet/*.log
 .DS_Store
 __pycache__/
 *.pyc
+
+# controller runtime (intent ledger + generated MCP config)
+.clawd-controller.tasks.jsonl
+controller/.mcp-config.json

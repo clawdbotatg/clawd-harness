@@ -1,9 +1,19 @@
 # The AI controller — a project-manager layer over the fleet
 
-> Status: **design + build in progress.** The reading phase (richer session
-> meta) is the first thing landing in `server.py`. The writing phase (intent
-> verbs) and the controller brain itself come after, and live *outside* the
-> harness.
+> Status: **built end-to-end** (Phases 0–2, plus the chat product). The reading
+> phase lives in `server.py`; everything else lives in **`controller/`** (a
+> harness client, never imports `server.py`). You can chat with the PM bot today
+> at `http://127.0.0.1:8799` (`python3 -m controller serve`), on either of two
+> brain backends (Kimi K2.6 / Claude Code `-p`), reading and writing the fleet
+> through one MCP tool surface. See **`controller/README.md`** to run it.
+>
+> As-built map: `controller/harness_client.py` (WS client), `world.py`
+> (snapshot + attention), `ledger.py` (event-sourced task log), `verbs.py`
+> (intent verbs + autonomy/rate/audit guard), `mcp.py` (MCP stdio server),
+> `brain.py` + `claude_brain.py` (the two brains), `chat_server.py` + `chat.html`
+> (the chat UI), `mock_harness.py` + `test_*.py` (tests). UI: session cards in
+> `index.html` now show `status`/`digest`/`blocked_on`; project cards show a
+> "needs you" badge from `waitingCount`.
 
 ## The idea in one paragraph
 
@@ -210,19 +220,20 @@ whole stack is proud of being pure stdlib, disk-as-source-of-truth. So:
 
 ## Phased plan
 
-- **Phase 0 — reading phase / richer meta** *(building now)*. Extend
-  `generate_name` machinery with `generate_digest`; add `status` + `digest` +
-  `blocked_on` to `meta()`. Upgrades GUI + fleet + future controller at once.
-  Self-contained, low-risk, useful immediately.
-- **Phase 1 — world-model observer + attention queue** (read-only). A relay
-  client that materializes the `world` object and the derived "needs you" queue
-  from existing broadcasts + the new meta. No actuation. Highest value-per-risk.
-- **Phase 2 — conversational controller** (confirm-gated). Strong-model tool-use
-  loop with the intent verbs; every action proposed → you confirm. MCP packaging.
-- **Phase 3 — bounded autonomy.** Chain spawn → task → watch `Stop` → report for
-  whitelisted low-stakes actions, under caps + audit + kill switch.
-- **Phase 4 — Telegram front-end.** Wire both modes to chat so triage *pushes*
-  to you and you command the fleet from your phone.
+- **Phase 0 — reading phase / richer meta** ✅. `generate_digest` + `status` /
+  `digest` / `blocked_on` on `meta()`; surfaced on the harness UI cards.
+- **Phase 1 — world-model observer + attention queue** ✅. `harness_client.py`
+  materializes the world; `world.py` derives the ranked "needs you" queue. Read
+  via `python3 -m controller world|attention`.
+- **Phase 2 — conversational controller** ✅. `verbs.py` (intent verbs, gated by
+  autonomy/rate/audit) behind both an MCP server (`mcp.py`) and a chat brain
+  (`brain.py` Kimi / `claude_brain.py` Claude Code). Confirm-gated by default.
+- **Phase 3 — bounded autonomy** ◑. The mechanism exists (autonomy=auto, task
+  ledger, attention loop); a standing "watch task → verify vs acceptance →
+  report" daemon loop is the remaining piece.
+- **Phase 4 — Telegram front-end** ☐. The chat API (`/api/chat`) is transport-
+  agnostic; wiring it to Telegram (push triage + command) is next. The web chat
+  UI ships now.
 
 ## Decision log
 

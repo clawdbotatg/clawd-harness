@@ -1,0 +1,111 @@
+"""Controller entry point.
+
+  python3 -m controller mcp        # MCP stdio server (for `claude -p` / any MCP client)
+  python3 -m controller serve      # chat UI + PM brain on CHAT_PORT (default 8799)
+  python3 -m controller world      # one-shot: print the world snapshot and exit
+  python3 -m controller attention  # one-shot: print the attention queue and exit
+  python3 -m controller tasks      # one-shot: print the task ledger and exit
+
+All modes connect to the harness at CONTROLLER_HARNESS_WS (default the local
+harness) as a WS client and share the ledger at CONTROLLER_LEDGER. Brain backend
+for `serve` is CONTROLLER_BRAIN=bankr|claude-code (switchable live in the UI).
+"""
+import json
+import sys
+import time
+
+from . import config
+from .harness_client import HarnessClient
+from .ledger import TaskLedger
+from .mcp import MCPServer, TOOLS
+from .verbs import Guard, Verbs
+from .world import World
+
+
+def build(connect_wait=4.0):
+    """Wire ledger + harness client(s) + world + verbs. Returns (verbs, clients,
+    guard, ledger). Single machine for now; the relay/multi-machine adapter adds
+    more clients to the same World."""
+    ledger = TaskLedger(config.LEDGER_PATH)
+    token = config.harness_token()
+    client = HarnessClient(config.MACHINE_ID, config.HARNESS_WS, token).start()
+    clients = {config.MACHINE_ID: client}
+    guard = Guard(autonomy=config.AUTONOMY, rate_per_min=config.RATE_PER_MIN)
+    world = World(clients, ledger)
+    verbs = Verbs(world, ledger, clients, guard)
+    if connect_wait:
+        end = time.time() + connect_wait
+        while time.time() < end and not (client.connected and client.sessions is not None
+                                         and client.projects):
+            time.sleep(0.05)
+    return verbs, clients, guard, ledger
+
+
+def make_brain(backend, verbs, clients, guard):
+    mcp = MCPServer(verbs)
+    if backend == "claude-code":
+        from .claude_brain import ClaudeCodeBrain
+        return ClaudeCodeBrain(guard)
+    from .brain import Brain
+    return Brain(call_tool=mcp.call_tool, tools=TOOLS,
+                 machine_ids=list(clients.keys()), guard=guard)
+
+
+def main(argv):
+    mode = argv[0] if argv else "serve"
+
+    if mode == "mcp":
+        # MCP stdio server. Keep stdout clean for JSON-RPC; logs go to stderr.
+        verbs, clients, guard, ledger = build(connect_wait=3.0)
+        MCPServer(verbs).serve_stdio()
+        return 0
+
+    if mode in ("world", "attention", "tasks"):
+        verbs, clients, guard, ledger = build()
+        out = {"world": verbs.get_world, "attention": verbs.get_attention,
+               "tasks": verbs.list_tasks}[mode]()
+        print(json.dumps(out, indent=2))
+        return 0
+
+    if mode == "serve":
+        from . import chat_server
+        verbs, clients, guard, ledger = build()
+        backend = config.cfg("CONTROLLER_BRAIN", "bankr").lower()
+        brains = {}
+
+        def get_brain(name):
+            if name not in brains:
+                brains[name] = make_brain(name, verbs, clients, guard)
+            return brains[name]
+
+        active = {"backend": backend, "brain": get_brain(backend)}
+
+        # a thin façade the chat server drives; supports live backend switching
+        class Router:
+            label = "router"
+
+            @property
+            def history(self):
+                return active["brain"].history
+
+            def reset(self):
+                active["brain"].reset()
+
+            def switch(self, name):
+                active["backend"] = name
+                active["brain"] = get_brain(name)
+
+            def chat(self, text):
+                return active["brain"].chat(text)
+
+        router = Router()
+        chat_server.serve_with_router(router, verbs, guard,
+                                      lambda: active["backend"], config.CHAT_PORT)
+        return 0
+
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
