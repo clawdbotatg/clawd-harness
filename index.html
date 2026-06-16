@@ -516,7 +516,25 @@ term.onRender(bottomJustifyTTY);
 // terminal). rAF so we measure after the browser has reflowed the new bar.
 function refitTTY() {
   if (currentView() !== 'tty') return;
-  requestAnimationFrame(() => { fit.fit(); sendResize(); term.scrollToBottom(); bottomJustifyTTY(); });
+  requestAnimationFrame(() => { fit.fit(); sendResize(); term.refresh(0, term.rows - 1); term.scrollToBottom(); bottomJustifyTTY(); });
+}
+
+// Showing the terminal un-hides #term from display:none. While hidden xterm
+// can't measure its container, so the grid keeps whatever size it last fit to
+// (often stale/tiny) and the first visible frame looks janky — you had to
+// resize the window to force a refit. One fit on a fixed 60ms timer was too
+// fragile: layout + web-font metrics settle at different moments across
+// devices, and if the single shot fired early the wrong size stuck. Instead
+// refit + force a *full* repaint at several settle points. fit() no-ops when
+// the dimensions are unchanged and refresh() is cheap, so the extra passes
+// cost nothing once the size has converged.
+function showTTY() {
+  if (currentView() !== 'tty') return;
+  // double rAF → measure only after the browser has laid out the now-visible panel
+  requestAnimationFrame(() => requestAnimationFrame(refitTTY));
+  setTimeout(refitTTY, 120);   // fallback for layout that settles a frame late
+  // glyph metrics can change when the monospace web-font finishes loading — refit once it's ready
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(refitTTY);
 }
 
 // The composer (footer) grows whenever an image chip is attached, a pending
@@ -1476,9 +1494,9 @@ function renderProjects(list) {
 
   applyProjectFilter();          // honor any live filter text after a re-render
   // landing on the projects rung: the box takes focus so you can filter/create
-  // straight away (touch included — pops the keyboard, which is what you want now
-  // the box is a filter). Don't steal focus while typing elsewhere or off this rung.
-  if (currentView() === 'projects' && document.activeElement !== inp &&
+  // straight away. Desktop-only — autofocus on touch would pop the soft keyboard.
+  // Don't steal focus while typing elsewhere or off this rung.
+  if (!isTouch && currentView() === 'projects' && document.activeElement !== inp &&
       !(document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName))) {
     inp.focus();
     const n = inp.value.length; try { inp.setSelectionRange(n, n); } catch {}
@@ -2318,8 +2336,8 @@ function setView(view) {
   try { localStorage.setItem('cc_view', view); } catch {}
   refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
   syncUrl();                       // keep the URL in step with the depth we're at
-  if (tty) setTimeout(() => { fit.fit(); sendResize(); term.scrollToBottom(); bottomJustifyTTY(); }, 60);
-  else if (projects) {  // landing on projects: box takes focus so you can filter/create right away
+  if (tty) showTTY();
+  else if (projects && !isTouch) {  // landing on projects: box takes focus (skip touch — avoids popping the soft keyboard)
     const inp = projectsEl.querySelector('#addProject input');
     if (inp) { inp.focus(); const n = inp.value.length; try { inp.setSelectionRange(n, n); } catch {} }
   }
