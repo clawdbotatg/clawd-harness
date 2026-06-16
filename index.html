@@ -212,13 +212,22 @@
   #panelBtn.on, #menuBtn.on, #projectsBtn.on, #machinesBtn.on, #pmBtn.on { color:var(--accent); border-color:var(--accent); }
   .bico { font-size:14px; line-height:1; }
   /* PM drawer — the Fleet PM (controller) chat, folded into the harness UI */
-  #pmDrawer { position:fixed; top:0; right:0; height:100%; width:min(440px,94vw); z-index:60;
+  #pmDrawer { position:fixed; top:0; right:0; height:100%; width:min(580px,96vw); z-index:60;
               background:var(--panel); border-left:1px solid var(--edge); display:flex; flex-direction:column;
               transform:translateX(100%); transition:transform .18s ease; box-shadow:-8px 0 28px rgba(0,0,0,.45); }
   #pmDrawer.open { transform:translateX(0); }
   #pmHead { display:flex; align-items:center; gap:8px; padding:11px 13px; border-bottom:1px solid var(--edge); }
   #pmHead b { font-size:14px; } #pmHead .pmsub { color:var(--dim); font-size:11px; font-family:var(--mono); flex:1; }
   #pmHead button { background:transparent; border:1px solid var(--edge); color:var(--dim); padding:4px 9px; font-size:13px; cursor:pointer; }
+  #pmTabs { display:flex; gap:5px; padding:7px 11px; border-bottom:1px solid var(--edge); }
+  #pmTabs button { background:transparent; border:1px solid var(--edge); color:var(--dim); border-radius:6px;
+                   padding:4px 13px; font-size:12px; font-family:var(--mono); cursor:pointer; }
+  #pmTabs button.on { color:var(--accent); border-color:var(--accent); }
+  .pmpane { display:none; flex:1; min-height:0; }
+  .pmpane.on { display:flex; }
+  #pmChatPane.on { flex-direction:column; }
+  #pmDebugFrame { border:0; width:100%; background:var(--bg); }
+  #pmDebugFrame.on { display:block; }
   #pmLog { flex:1; overflow:auto; padding:14px; display:flex; flex-direction:column; gap:9px; }
   .pmm { max-width:92%; padding:8px 11px; border-radius:11px; white-space:pre-wrap; word-wrap:break-word; font-size:13px; line-height:1.45; }
   .pmm.me { align-self:flex-end; background:var(--accent); color:#000; }
@@ -366,15 +375,21 @@
     <div id="pmHead">
       <b>🛰️ Fleet PM</b>
       <span class="pmsub" id="pmSub">connecting…</span>
-      <button id="pmDebug" title="Debug: prompt, tools, raw data">🛠</button>
       <button id="pmReset" title="Clear the conversation">⟲</button>
       <button id="pmClose" title="Close">✕</button>
     </div>
-    <div id="pmLog"></div>
-    <form id="pmForm">
-      <textarea id="pmBox" rows="1" placeholder="Ask the PM… (e.g. 'anything need me?')"></textarea>
-      <button id="pmSend" type="submit">Send</button>
-    </form>
+    <div id="pmTabs">
+      <button data-pt="chat" class="on">chat</button>
+      <button data-pt="debug" title="Prompt, tools, raw data">🛠 debug</button>
+    </div>
+    <div id="pmChatPane" class="pmpane on">
+      <div id="pmLog"></div>
+      <form id="pmForm">
+        <textarea id="pmBox" rows="1" placeholder="Ask the PM… (e.g. 'anything need me?')"></textarea>
+        <button id="pmSend" type="submit">Send</button>
+      </form>
+    </div>
+    <iframe id="pmDebugFrame" class="pmpane" title="Fleet PM debug"></iframe>
   </aside>
   <div id="sessionbar" hidden></div>
   <div id="rebootbar" hidden>
@@ -2513,7 +2528,9 @@ function showLogin(msg) {
 (function pmInit() {
   const btn = document.getElementById('pmBtn');
   if (FLEET) { btn.style.display = 'none'; return; }
-  const PM_BASE = `${location.protocol}//${location.hostname}:8799`;
+  // Same-origin: the harness reverse-proxies /pm/* to the controller, so the whole
+  // PM (chat + debug) lives on this one server/URL — no second port to visit.
+  const PM_BASE = '/pm';
   const drawer = document.getElementById('pmDrawer'), scrim = document.getElementById('pmScrim');
   const log = document.getElementById('pmLog'), box = document.getElementById('pmBox'), sub = document.getElementById('pmSub');
   let busy = false, greeted = false;
@@ -2557,8 +2574,18 @@ function showLogin(msg) {
     drawer.classList.remove('open'); scrim.hidden = true; btn.classList.remove('on');
     setTimeout(() => { drawer.hidden = true; }, 180);
   }
+  // tabs: chat (native) | debug (the controller's /debug page, lazy-loaded in an iframe)
+  const chatPane = document.getElementById('pmChatPane'), dbgFrame = document.getElementById('pmDebugFrame');
+  let dbgLoaded = false;
+  function showTab(t) {
+    document.querySelectorAll('#pmTabs button').forEach(b => b.classList.toggle('on', b.dataset.pt === t));
+    chatPane.classList.toggle('on', t === 'chat');
+    dbgFrame.classList.toggle('on', t === 'debug');
+    if (t === 'debug' && !dbgLoaded) { dbgFrame.src = PM_BASE + '/debug'; dbgLoaded = true; }
+  }
+  document.querySelectorAll('#pmTabs button').forEach(b => b.onclick = () => showTab(b.dataset.pt));
+
   btn.onclick = () => drawer.classList.contains('open') ? close() : open();
-  document.getElementById('pmDebug').onclick = () => window.open(PM_BASE + '/debug', '_blank');
   document.getElementById('pmClose').onclick = close;
   scrim.onclick = close;
   document.getElementById('pmReset').onclick = async () => {

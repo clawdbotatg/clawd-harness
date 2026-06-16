@@ -114,6 +114,12 @@ BANKR_API      = os.environ.get("BANKR_API", "openai").lower()   # openai | anth
 ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "") or "nPczCjzI2devNBz1zQrb"
 
+# The AI controller (PM brain) runs as a *separate* process (see controller/), but
+# we reverse-proxy /pm/* to it so the whole UI lives on one origin — the browser
+# never sees its port. Optional: if the controller isn't running, /pm/* 502s and
+# the harness UI's PM panel shows it offline. This proxies HTTP only (no import).
+CONTROLLER_PORT = int(os.environ.get("CONTROLLER_CHAT_PORT", "8799") or 8799)
+
 # A fresh id per server process. Sent to every client on connect; when a client
 # reconnects (e.g. after a daemon restart) and sees a *different* boot id, it
 # hard-reloads — fresh state clears any stale "thinking" spinner left mid-turn.
@@ -1489,6 +1495,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_file(HERE / "logo.png", "image/png")
         if path == "/logo-ui.png":
             return self._serve_file(HERE / "logo-ui.png", "image/png")
+        if path == "/pm" or path.startswith("/pm/"):
+            return self._proxy_pm("GET")
         if path == "/config":
             # Token-gated: it leaks workdir / lanIp / sessionId, which a malicious
             # site could grab via DNS-rebinding if this were open. The page sends
@@ -1514,7 +1522,40 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_upload()
         if path == "/tts":
             return self._handle_tts()
+        if path.startswith("/pm/"):
+            return self._proxy_pm("POST")
         self.send_error(404, "not found")
+
+    def _proxy_pm(self, method):
+        """Reverse-proxy /pm/* → the controller (sibling process on CONTROLLER_PORT)
+        so the PM chat + debug live on this one origin. The controller stays a
+        separate process; the browser never sees its port. 502 if it's down."""
+        import urllib.error
+        sub = self.path[len("/pm"):] or "/"
+        url = f"http://127.0.0.1:{CONTROLLER_PORT}{sub}"
+        body = None
+        headers = {}
+        if method == "POST":
+            n = int(self.headers.get("Content-Length", "0") or 0)
+            body = self.rfile.read(n) if n else b""
+            ct = self.headers.get("Content-Type")
+            if ct:
+                headers["Content-Type"] = ct
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                data, ctype, code = r.read(), r.headers.get("Content-Type", "application/octet-stream"), r.status
+        except urllib.error.HTTPError as e:
+            data, ctype, code = e.read(), e.headers.get("Content-Type", "application/json"), e.code
+        except Exception as e:
+            data = json.dumps({"error": f"controller unreachable: {e}"}).encode()
+            ctype, code = "application/json", 502
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _handle_tts(self):
         """Proxy a chunk of prose to ElevenLabs and stream the MP3 back. Keeps the

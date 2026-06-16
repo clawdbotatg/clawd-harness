@@ -75,11 +75,11 @@
   <section id="s-data">
     <h2>The information the PM reads</h2>
     <div class="row">
-      <button class="ghost" data-r="/api/world">get_world</button>
-      <button class="ghost" data-r="/api/attention">get_attention</button>
-      <button class="ghost" data-r="/api/tasks">list_tasks</button>
-      <button class="ghost" data-r="/api/notifications">notifications</button>
-      <button class="ghost" data-r="/api/state">state</button>
+      <button class="ghost" data-r="api/world">get_world</button>
+      <button class="ghost" data-r="api/attention">get_attention</button>
+      <button class="ghost" data-r="api/tasks">list_tasks</button>
+      <button class="ghost" data-r="api/notifications">notifications</button>
+      <button class="ghost" data-r="api/state">state</button>
     </div>
     <pre id="dataout" class="muted">pick one ↑</pre>
   </section>
@@ -98,23 +98,23 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
 // ---- prompt ----
 let DEFAULT_PROMPT = "";
 async function loadPrompt(){
-  const p = await jget('/api/prompt');
+  const p = await jget('api/prompt');
   DEFAULT_PROMPT = p.default || "";
   $('#prompt').value = p.prompt || "";
   $('#pstate').textContent = p.overridden ? 'overridden' : 'default';
   $('#pstate').className = 'tag' + (p.overridden ? ' over' : '');
 }
 $('#save').onclick = async () => {
-  const r = await jpost('/api/prompt', {prompt: $('#prompt').value});
+  const r = await jpost('api/prompt', {prompt: $('#prompt').value});
   $('#psaved').textContent = r.ok ? '✓ saved — applies to the next message' : ('error: '+(r.error||''));
   loadPrompt();
 };
-$('#reset').onclick = async () => { await jpost('/api/prompt', {reset:true}); $('#psaved').textContent='✓ reset to built-in'; loadPrompt(); };
+$('#reset').onclick = async () => { await jpost('api/prompt', {reset:true}); $('#psaved').textContent='✓ reset to built-in'; loadPrompt(); };
 $('#viewdef').onclick = () => { $('#prompt').value = DEFAULT_PROMPT; $('#psaved').textContent='(showing built-in default — Save to adopt it)'; };
 
 // ---- tools ----
 async function loadTools(){
-  const {tools} = await jget('/api/tools');
+  const {tools} = await jget('api/tools');
   const wrap = $('#tools'); wrap.innerHTML = '';
   tools.forEach(t => {
     const props = t.inputSchema.properties || {};
@@ -140,7 +140,7 @@ async function loadTools(){
       });
       const out = el.querySelector('.out'); out.textContent = 'running…'; out.className='out';
       try {
-        const r = await jpost('/api/tool', {name: t.name, args});
+        const r = await jpost('api/tool', {name: t.name, args});
         out.textContent = JSON.stringify(r.result, null, 2);
       } catch(err){ out.textContent = String(err); out.className='out err'; }
     };
