@@ -123,6 +123,11 @@ RP_ID = os.environ.get("FLEET_RP_ID", "h.atg.link")
 ORIGIN = os.environ.get("FLEET_ORIGIN", "https://" + RP_ID)
 REQUIRE_PASSKEY = (os.environ.get("FLEET_REQUIRE_PASSKEY", "1").lower() not in ("0", "false", "no")) or PASSKEY_ONLY
 SESSION_TTL = int(os.environ.get("FLEET_SESSION_TTL", "86400"))  # passkey session validity (24h)
+# The AI controller (PM brain) runs co-located on this box; we reverse-proxy
+# /pm/* to it so the brain lives on the one public origin. It's a fleet-driving
+# surface, so /pm is gated by the SAME passkey session token (a `pmt` cookie the
+# browser sets after auth) — no weaker than the rest of the relay.
+CONTROLLER_PORT = int(os.environ.get("CONTROLLER_CHAT_PORT", "8799") or 8799)
 # Configurable so tests/dev never clobber a real worker's provisioned file.
 PASSKEY_FILE = Path(os.environ.get("FLEET_PASSKEY_FILE") or (HERE / ".clawd-fleet.passkeys.json"))
 _passkey_lock = threading.Lock()
@@ -493,6 +498,53 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _pm_session_ok(self):
+        """The /pm surface is gated by the same passkey session as everything else:
+        the browser stores the session token (issued on passkey success) in a
+        `pmt` cookie scoped to /pm, so even the debug iframe's calls carry it.
+        Returns True iff a valid, unexpired session token is present."""
+        if not REQUIRE_PASSKEY:
+            return True
+        raw = self.headers.get("Cookie", "") or ""
+        tok = ""
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "pmt":
+                tok = v
+                break
+        return bool(tok) and session_valid(tok) is not None
+
+    def _proxy_pm(self, method):
+        """Reverse-proxy /pm/* → the co-located controller (CONTROLLER_PORT). Gated
+        by the passkey session (see _pm_session_ok). 401 unauthed, 502 if down."""
+        if not self._pm_session_ok():
+            return self._send_json({"error": "unauthorized — unlock with your passkey first"}, 401)
+        import urllib.error
+        import urllib.request
+        sub = self.path[len("/pm"):] or "/"
+        url = f"http://127.0.0.1:{CONTROLLER_PORT}{sub}"
+        headers, body = {}, None
+        if method == "POST":
+            n = int(self.headers.get("Content-Length", "0") or 0)
+            body = self.rfile.read(n) if n else b""
+            ct = self.headers.get("Content-Type")
+            if ct:
+                headers["Content-Type"] = ct
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                data, ctype, code = r.read(), r.headers.get("Content-Type", "application/octet-stream"), r.status
+        except urllib.error.HTTPError as e:
+            data, ctype, code = e.read(), e.headers.get("Content-Type", "application/json"), e.code
+        except Exception as e:
+            data, ctype, code = json.dumps({"error": f"controller offline: {e}"}).encode(), "application/json", 502
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _send_json(self, obj, code=200):
         body = json.dumps(obj).encode()
         self.send_response(code)
@@ -516,6 +568,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_file("favicon.png", "image/png")
         if path == "/logo-ui.png":
             return self._serve_file("logo-ui.png", "image/png")
+        if path == "/pm" or path.startswith("/pm/"):
+            return self._proxy_pm("GET")
         if path != "/ws":
             return self.send_error(404, "not found")
         up = (self.headers.get("Upgrade", "").lower() == "websocket")
@@ -550,6 +604,8 @@ class Handler(BaseHTTPRequestHandler):
         # machine — exactly where that session's claude will Read it.
         q = self._q()
         path = self.path.split("?")[0]
+        if path.startswith("/pm/"):
+            return self._proxy_pm("POST")
         if path != "/upload" or (not PASSKEY_ONLY and not _token_ok(q.get("t", [""])[0], MOBILE_TOKEN)):
             self.close_connection = True
             return self.send_error(403 if path == "/upload" else 404, "denied")

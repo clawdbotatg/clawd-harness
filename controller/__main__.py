@@ -30,18 +30,22 @@ def build(connect_wait=4.0):
     to the same World + Reactor."""
     ledger = TaskLedger(config.LEDGER_PATH)
     reactor = Reactor(ledger)
-    token = config.harness_token()
-    client = HarnessClient(config.MACHINE_ID, config.HARNESS_WS, token,
-                           on_hook=reactor.feed).start()
-    clients = {config.MACHINE_ID: client}
+    clients = {}
+    # The box deploy has no local harness (CONTROLLER_HARNESS_WS empty) → empty
+    # world for now; it still chats + serves the debug page. The laptop deploy
+    # points at its local harness. (Driving remote machines via the relay's
+    # trusted-control path is the next layer.)
+    if config.HARNESS_WS:
+        client = HarnessClient(config.MACHINE_ID, config.HARNESS_WS,
+                               config.harness_token(), on_hook=reactor.feed).start()
+        clients = {config.MACHINE_ID: client}
+        if connect_wait:
+            end = time.time() + connect_wait
+            while time.time() < end and not (client.connected and client.projects):
+                time.sleep(0.05)
     guard = Guard(autonomy=config.AUTONOMY, rate_per_min=config.RATE_PER_MIN)
     world = World(clients, ledger)
     verbs = Verbs(world, ledger, clients, guard)
-    if connect_wait:
-        end = time.time() + connect_wait
-        while time.time() < end and not (client.connected and client.sessions is not None
-                                         and client.projects):
-            time.sleep(0.05)
     return verbs, clients, guard, ledger, reactor
 
 

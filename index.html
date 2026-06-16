@@ -985,8 +985,18 @@ function e2eOnRecord(machine, rec) {
 
 const SESSION_KEY = 'cc_fleet_session';
 function loadSession() { try { const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); return (s && s.exp > Date.now()) ? s.tok : ''; } catch { return ''; } }
-function saveSession(tok, expMs) { try { localStorage.setItem(SESSION_KEY, JSON.stringify({ tok, exp: expMs || Date.now() + 86400000 })); } catch {} }
-function clearSession() { try { localStorage.removeItem(SESSION_KEY); } catch {} }
+function saveSession(tok, expMs) { try { localStorage.setItem(SESSION_KEY, JSON.stringify({ tok, exp: expMs || Date.now() + 86400000 })); } catch {} setPmCookie(tok); }
+function clearSession() { try { localStorage.removeItem(SESSION_KEY); } catch {} setPmCookie(''); }
+// Mirror the passkey session token into a /pm-scoped cookie so the relay can gate
+// the PM surface (chat + debug iframe) on the same auth. Set after every auth.
+function setPmCookie(tok) {
+  try {
+    const sec = location.protocol === 'https:' ? '; Secure' : '';
+    document.cookie = tok
+      ? `pmt=${tok}; path=/pm; max-age=86400; SameSite=Strict${sec}`
+      : `pmt=; path=/pm; max-age=0; SameSite=Strict${sec}`;
+  } catch {}
+}
 
 let lastAuthReq = null;
 function showPasskey(msg) {
@@ -1003,7 +1013,7 @@ function onAuthRequired(m) {
   lastAuthReq = m;
   if (m.reason === 'expired') clearSession();
   const sess = loadSession();
-  if (sess) { ws.send(JSON.stringify({ type: 'auth', session: sess })); return; }
+  if (sess) { setPmCookie(sess); ws.send(JSON.stringify({ type: 'auth', session: sess })); return; }
   // No web enrollment: if no passkey is provisioned, an admin must add one.
   if (!m.enrolled || !(m.credentialIds || []).length) {
     showPasskey('no passkey set up for this relay — an admin must provision one (see DEPLOY.md)');
@@ -2527,9 +2537,9 @@ function showLogin(msg) {
 //    a remote phone (that needs the relay to proxy it — a follow-up).
 (function pmInit() {
   const btn = document.getElementById('pmBtn');
-  if (FLEET) { btn.style.display = 'none'; return; }
-  // Same-origin: the harness reverse-proxies /pm/* to the controller, so the whole
-  // PM (chat + debug) lives on this one server/URL — no second port to visit.
+  // Same-origin in BOTH modes: direct → the harness reverse-proxies /pm/* to the
+  // local controller; fleet → the relay proxies /pm/* to the box-resident
+  // controller (gated by your passkey session via the pmt cookie). One UI, one URL.
   const PM_BASE = '/pm';
   const drawer = document.getElementById('pmDrawer'), scrim = document.getElementById('pmScrim');
   const log = document.getElementById('pmLog'), box = document.getElementById('pmBox'), sub = document.getElementById('pmSub');

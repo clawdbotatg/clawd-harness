@@ -11,9 +11,13 @@ still never imports `server.py` or reaches into harness internals.
 import os
 import sys
 
-_FLEET = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fleet")
-if _FLEET not in sys.path:
-    sys.path.insert(0, _FLEET)
+# Find fleet_ws.py whether we're in the monorepo (../fleet/fleet_ws.py) or the
+# box's flat deploy layout (sibling dir: ../fleet_ws.py next to controller/).
+_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _cand in (os.path.join(_PARENT, "fleet"), _PARENT):
+    if os.path.exists(os.path.join(_cand, "fleet_ws.py")) and _cand not in sys.path:
+        sys.path.insert(0, _cand)
+        break
 
 from fleet_ws import (  # noqa: E402
     client_connect,
