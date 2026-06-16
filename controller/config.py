@@ -59,6 +59,8 @@ HARNESS_WS = cfg("CONTROLLER_HARNESS_WS", "ws://127.0.0.1:8787")
 MACHINE_ID = cfg("CONTROLLER_MACHINE", "self")
 CHAT_PORT = int(cfg("CONTROLLER_CHAT_PORT", "8799") or 8799)
 LEDGER_PATH = cfg("CONTROLLER_LEDGER", os.path.join(ROOT, ".clawd-controller.tasks.jsonl"))
+# Persisted system-prompt override (edited from the debug page). Absent → built-in.
+PROMPT_PATH = cfg("CONTROLLER_PROMPT", os.path.join(ROOT, ".clawd-controller.prompt.txt"))
 
 # Telegram front-end (optional). Set CONTROLLER_TELEGRAM_TOKEN to a bot token that
 # is NOT already being polled elsewhere (Telegram allows one getUpdates consumer

@@ -16,6 +16,7 @@ from socketserver import TCPServer, ThreadingMixIn
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHAT_HTML = os.path.join(HERE, "chat.html")
+DEBUG_HTML = os.path.join(HERE, "debug.html")
 
 
 class ThreadingHTTPServer(ThreadingMixIn, TCPServer):
@@ -23,9 +24,10 @@ class ThreadingHTTPServer(ThreadingMixIn, TCPServer):
     allow_reuse_address = True
 
 
-def make_handler(router, verbs, guard, backend_getter, reactor=None):
+def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, prompt_brain=None):
     chat_lock = threading.Lock()
     from . import config
+    from .mcp import TOOLS
 
     def model_label():
         return config.BRAIN_MODEL if backend_getter() == "bankr" else "claude-code -p"
@@ -68,6 +70,23 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None):
                         return self._send(200, f.read(), "text/html; charset=utf-8")
                 except OSError:
                     return self._send(500, {"error": "chat.html missing"})
+            if path == "/debug":
+                try:
+                    with open(DEBUG_HTML, "rb") as f:
+                        return self._send(200, f.read(), "text/html; charset=utf-8")
+                except OSError:
+                    return self._send(500, {"error": "debug.html missing"})
+            if path == "/api/tools":
+                return self._send(200, {"tools": [
+                    {"name": n, "description": d, "inputSchema": s} for n, d, s in TOOLS]})
+            if path == "/api/prompt":
+                if not prompt_brain:
+                    return self._send(200, {"prompt": "", "overridden": False,
+                                            "note": "active backend has no editable prompt"})
+                return self._send(200, {
+                    "prompt": prompt_brain.current_prompt(),
+                    "default": prompt_brain.default_prompt(),
+                    "overridden": prompt_brain.prompt_override is not None})
             if path == "/api/world":
                 return self._send(200, verbs.get_world())
             if path == "/api/attention":
@@ -116,14 +135,32 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None):
             if path == "/api/reset":
                 router.reset()
                 return self._send(200, {"ok": True})
+            if path == "/api/tool":          # invoke a tool by hand (debug page)
+                if not mcp:
+                    return self._send(503, {"error": "tool runner unavailable"})
+                name = data.get("name")
+                args = data.get("args") or {}
+                try:
+                    result = mcp.call_tool(name, args)
+                except Exception as e:
+                    result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                return self._send(200, {"tool": name, "args": args, "result": result})
+            if path == "/api/prompt":        # edit / reset the system prompt
+                if not prompt_brain:
+                    return self._send(400, {"error": "active backend has no editable prompt"})
+                prompt_brain.set_prompt("" if data.get("reset") else data.get("prompt", ""))
+                return self._send(200, {"ok": True,
+                                        "overridden": prompt_brain.prompt_override is not None})
             return self._send(404, {"error": "not found"})
 
     return Handler
 
 
-def serve_with_router(router, verbs, guard, backend_getter, port, bind="127.0.0.1", reactor=None):
+def serve_with_router(router, verbs, guard, backend_getter, port, bind="127.0.0.1",
+                      reactor=None, mcp=None, prompt_brain=None):
     srv = ThreadingHTTPServer((bind, port),
-                              make_handler(router, verbs, guard, backend_getter, reactor))
-    print(f"[controller] chat UI on http://{bind}:{port}  "
+                              make_handler(router, verbs, guard, backend_getter,
+                                           reactor, mcp, prompt_brain))
+    print(f"[controller] chat UI on http://{bind}:{port}  ·  debug http://{bind}:{port}/debug  "
           f"(backend={backend_getter()}, autonomy={guard.autonomy})", flush=True)
     srv.serve_forever()

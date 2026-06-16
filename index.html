@@ -366,6 +366,7 @@
     <div id="pmHead">
       <b>🛰️ Fleet PM</b>
       <span class="pmsub" id="pmSub">connecting…</span>
+      <button id="pmDebug" title="Debug: prompt, tools, raw data">🛠</button>
       <button id="pmReset" title="Clear the conversation">⟲</button>
       <button id="pmClose" title="Close">✕</button>
     </div>
@@ -2557,6 +2558,7 @@ function showLogin(msg) {
     setTimeout(() => { drawer.hidden = true; }, 180);
   }
   btn.onclick = () => drawer.classList.contains('open') ? close() : open();
+  document.getElementById('pmDebug').onclick = () => window.open(PM_BASE + '/debug', '_blank');
   document.getElementById('pmClose').onclick = close;
   scrim.onclick = close;
   document.getElementById('pmReset').onclick = async () => {

@@ -26,6 +26,18 @@ python3 -m controller tasks            # the task ledger
 python3 -m controller mcp
 ```
 
+## Debug / inspector page — `http://127.0.0.1:8799/debug`
+
+(Also the 🛠 button in the PM drawer / chat header.) Three tabs:
+- **Prompt** — the exact system prompt the Bankr/Kimi brain gets each turn. Edit +
+  Save to override it live (persisted to `.clawd-controller.prompt.txt`, survives
+  restarts); Reset returns to the built-in. The Claude Code backend uses its own.
+- **Tools** — every tool the PM can call, with its schema, and a form to **run any
+  of them yourself** and see the raw result. Writes still pass the autonomy gate
+  (tick `confirm`).
+- **What the PM sees** — the raw `world` / `attention` / `tasks` / `notifications`
+  JSON the brain reads.
+
 ## The two brains (switchable live in the UI header)
 
 Both drive the **same tools** and share the **same task ledger** file, so you can

@@ -103,6 +103,10 @@ def main(argv):
                 return active["brain"].chat(text)
 
         router = Router()
+        debug_mcp = MCPServer(verbs)                 # tool runner for the debug page
+        # the editable system prompt belongs to the bankr brain (claude-code uses
+        # its own); expose that instance to the debug page regardless of backend.
+        prompt_brain = get_brain("bankr")
 
         # Telegram front-end (optional) — same brain, on your phone.
         tg = None
@@ -123,7 +127,7 @@ def main(argv):
 
         chat_server.serve_with_router(router, verbs, guard,
                                       lambda: active["backend"], config.CHAT_PORT,
-                                      reactor=reactor)
+                                      reactor=reactor, mcp=debug_mcp, prompt_brain=prompt_brain)
         return 0
 
     print(__doc__)

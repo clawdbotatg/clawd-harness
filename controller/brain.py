@@ -11,6 +11,7 @@ brain just drives. Under autonomy=confirm a write returns needs_confirm; the
 brain relays the proposal and waits for you to confirm in chat.
 """
 import json
+import os
 import re
 
 from . import config
@@ -74,13 +75,39 @@ class Brain:
         self.guard = guard
         self.model = model or config.BRAIN_MODEL
         self.history = []        # [{role, content}] user/assistant turns (no system)
+        # a tweakable system-prompt override (set from the debug page), persisted
+        # to disk so edits survive daemon restarts. None → use the built-in prompt.
+        self.prompt_override = None
+        try:
+            with open(config.PROMPT_PATH) as f:
+                self.prompt_override = f.read() or None
+        except OSError:
+            pass
 
     def reset(self):
         self.history = []
 
+    def default_prompt(self):
+        return _system_prompt(self.tools, self.machine_ids, self.guard.autonomy)
+
+    def current_prompt(self):
+        return self.prompt_override or self.default_prompt()
+
+    def set_prompt(self, text):
+        """Override the system prompt (or clear it with empty text). Persisted."""
+        text = (text or "").strip()
+        self.prompt_override = text or None
+        try:
+            if text:
+                with open(config.PROMPT_PATH, "w") as f:
+                    f.write(text)
+            elif os.path.exists(config.PROMPT_PATH):
+                os.remove(config.PROMPT_PATH)
+        except OSError:
+            pass
+
     def _messages(self):
-        sys = _system_prompt(self.tools, self.machine_ids, self.guard.autonomy)
-        return [{"role": "system", "content": sys}] + self.history
+        return [{"role": "system", "content": self.current_prompt()}] + self.history
 
     @staticmethod
     def _parse(text):

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet PM · debug</title>
+<style>
+  :root{ --bg:#0b0e14; --panel:#121722; --line:#1e2633; --txt:#cdd6e4; --dim:#7c889b;
+         --accent:#5db0ff; --ok:#3fb950; --warn:#ffb13d; --err:#ff5d5d; --mono:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  *{box-sizing:border-box}
+  body{margin:0;font:13.5px/1.5 -apple-system,system-ui,sans-serif;background:var(--bg);color:var(--txt)}
+  header{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5}
+  header h1{font-size:15px;margin:0}
+  header a{color:var(--accent);text-decoration:none;font-size:12.5px}
+  .tabs{display:flex;gap:6px;margin-left:auto}
+  .tabs button{background:#0d1320;color:var(--dim);border:1px solid var(--line);border-radius:7px;padding:6px 12px;cursor:pointer;font-size:12.5px}
+  .tabs button.on{color:var(--accent);border-color:var(--accent)}
+  main{max-width:980px;margin:0 auto;padding:18px}
+  section{display:none} section.on{display:block}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin:4px 0 12px}
+  textarea,input,button,select{font:inherit}
+  #prompt{width:100%;min-height:48vh;background:#0d1320;color:var(--txt);border:1px solid var(--line);border-radius:9px;padding:12px;font:12.5px/1.55 var(--mono);resize:vertical}
+  .row{display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap}
+  button.act{background:var(--accent);color:#001628;border:none;border-radius:8px;padding:8px 16px;font-weight:600;cursor:pointer}
+  button.ghost{background:#0d1320;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:8px 14px;cursor:pointer}
+  .tag{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+  .tag.over{color:var(--warn);border-color:#5a4422}
+  .tool{border:1px solid var(--line);border-radius:9px;margin-bottom:9px;background:var(--panel);overflow:hidden}
+  .tool>.hd{padding:10px 12px;cursor:pointer;display:flex;gap:9px;align-items:baseline}
+  .tool .nm{font-family:var(--mono);color:#8fb6ff;font-weight:600}
+  .tool .ds{color:var(--dim);font-size:12px;flex:1}
+  .tool.write .nm::after{content:" ✎ write";color:var(--warn);font-size:10px;font-weight:400}
+  .tool>.body{display:none;padding:0 12px 12px;border-top:1px solid var(--line)}
+  .tool.open>.body{display:block}
+  .fld{display:flex;gap:8px;align-items:center;margin:8px 0}
+  .fld label{width:120px;color:var(--dim);font-family:var(--mono);font-size:12px}
+  .fld input[type=text]{flex:1;background:#0d1320;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+  pre{background:#070a10;border:1px solid var(--line);border-radius:8px;padding:11px;overflow:auto;font:11.5px/1.5 var(--mono);color:#bcd;white-space:pre-wrap;word-break:break-word;max-height:55vh}
+  .muted{color:var(--dim);font-size:12px}
+  .err{color:var(--err)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🛠️ Fleet PM · debug</h1>
+  <a href="/">← chat</a>
+  <div class="tabs">
+    <button data-t="prompt" class="on">Prompt</button>
+    <button data-t="tools">Tools</button>
+    <button data-t="data">What the PM sees</button>
+  </div>
+</header>
+<main>
+  <section id="s-prompt" class="on">
+    <h2>System prompt <span id="pstate" class="tag"></span></h2>
+    <p class="muted">This is the exact system prompt the <b>Bankr (Kimi)</b> brain receives each turn
+       (the Claude Code backend uses its own). Edit + Save to override it live; it persists across
+       restarts. Reset returns to the built-in prompt.</p>
+    <textarea id="prompt" spellcheck="false"></textarea>
+    <div class="row">
+      <button class="act" id="save">Save override</button>
+      <button class="ghost" id="reset">Reset to default</button>
+      <button class="ghost" id="viewdef">View built-in default</button>
+      <span id="psaved" class="muted"></span>
+    </div>
+  </section>
+
+  <section id="s-tools">
+    <h2>Tools the PM can call <span class="muted">— run any of them yourself</span></h2>
+    <p class="muted">Writes go through the same autonomy gate as the bot. To actually execute a write,
+       tick <code>confirm</code> (and the controller must not be in read-only mode).</p>
+    <div id="tools"></div>
+  </section>
+
+  <section id="s-data">
+    <h2>The information the PM reads</h2>
+    <div class="row">
+      <button class="ghost" data-r="/api/world">get_world</button>
+      <button class="ghost" data-r="/api/attention">get_attention</button>
+      <button class="ghost" data-r="/api/tasks">list_tasks</button>
+      <button class="ghost" data-r="/api/notifications">notifications</button>
+      <button class="ghost" data-r="/api/state">state</button>
+    </div>
+    <pre id="dataout" class="muted">pick one ↑</pre>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const jget = async u => (await fetch(u)).json();
+const jpost = async (u,b) => (await fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})})).json();
+
+// tabs
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));
+  document.querySelectorAll('section').forEach(s=>s.classList.toggle('on', s.id==='s-'+b.dataset.t));
+});
+
+// ---- prompt ----
+let DEFAULT_PROMPT = "";
+async function loadPrompt(){
+  const p = await jget('/api/prompt');
+  DEFAULT_PROMPT = p.default || "";
+  $('#prompt').value = p.prompt || "";
+  $('#pstate').textContent = p.overridden ? 'overridden' : 'default';
+  $('#pstate').className = 'tag' + (p.overridden ? ' over' : '');
+}
+$('#save').onclick = async () => {
+  const r = await jpost('/api/prompt', {prompt: $('#prompt').value});
+  $('#psaved').textContent = r.ok ? '✓ saved — applies to the next message' : ('error: '+(r.error||''));
+  loadPrompt();
+};
+$('#reset').onclick = async () => { await jpost('/api/prompt', {reset:true}); $('#psaved').textContent='✓ reset to built-in'; loadPrompt(); };
+$('#viewdef').onclick = () => { $('#prompt').value = DEFAULT_PROMPT; $('#psaved').textContent='(showing built-in default — Save to adopt it)'; };
+
+// ---- tools ----
+async function loadTools(){
+  const {tools} = await jget('/api/tools');
+  const wrap = $('#tools'); wrap.innerHTML = '';
+  tools.forEach(t => {
+    const props = t.inputSchema.properties || {};
+    const req = new Set(t.inputSchema.required || []);
+    const isWrite = /WRITE/.test(t.description);
+    const el = document.createElement('div');
+    el.className = 'tool' + (isWrite ? ' write' : '');
+    const fields = Object.entries(props).map(([k,sc]) => {
+      const r = req.has(k) ? ' *' : '';
+      if (sc.type === 'boolean')
+        return `<div class="fld"><label>${k}${r}</label><input type="checkbox" data-k="${k}" data-bool="1"></div>`;
+      return `<div class="fld"><label>${k}${r}</label><input type="text" data-k="${k}" placeholder="${sc.type||'string'}"></div>`;
+    }).join('') || '<div class="muted">no arguments</div>';
+    el.innerHTML = `<div class="hd"><span class="nm">${t.name}</span><span class="ds">${t.description}</span></div>
+      <div class="body">${fields}<div class="row"><button class="act run">Run ▶</button></div><pre class="out muted">—</pre></div>`;
+    el.querySelector('.hd').onclick = () => el.classList.toggle('open');
+    el.querySelector('.run').onclick = async (e) => {
+      e.stopPropagation();
+      const args = {};
+      el.querySelectorAll('input[data-k]').forEach(inp => {
+        if (inp.dataset.bool) { if (inp.checked) args[inp.dataset.k] = true; }
+        else if (inp.value.trim() !== '') args[inp.dataset.k] = inp.value.trim();
+      });
+      const out = el.querySelector('.out'); out.textContent = 'running…'; out.className='out';
+      try {
+        const r = await jpost('/api/tool', {name: t.name, args});
+        out.textContent = JSON.stringify(r.result, null, 2);
+      } catch(err){ out.textContent = String(err); out.className='out err'; }
+    };
+    wrap.appendChild(el);
+  });
+}
+
+// ---- data ----
+document.querySelectorAll('[data-r]').forEach(b => b.onclick = async () => {
+  const out = $('#dataout'); out.textContent='loading…'; out.className='';
+  try { out.textContent = JSON.stringify(await jget(b.dataset.r), null, 2); }
+  catch(e){ out.textContent = String(e); out.className='err'; }
+});
+
+loadPrompt(); loadTools();
+</script>
+</body>
+</html>
