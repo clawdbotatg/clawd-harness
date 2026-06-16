@@ -50,7 +50,9 @@
   #sessionbar .stab .sdot.dead { background:var(--err); }
   #sessionbar .stab .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #status { font-size:11px; padding:3px 9px; border:1px solid var(--edge); text-transform:uppercase;
-            letter-spacing:.1em; color:var(--dim); white-space:nowrap; }
+            letter-spacing:.1em; color:var(--dim); white-space:nowrap; cursor:pointer; user-select:none; }
+  #status:hover { border-color:var(--edge-hi); color:var(--ink); }
+  #status.pmopen { border-color:var(--accent); color:var(--accent); }
   #status::before { content:"["; margin-right:5px; color:var(--dim); }
   #status::after  { content:"]"; margin-left:5px;  color:var(--dim); }
   #status.working { color:var(--accent); border-color:var(--accent-dim); background:var(--accent-bg); }
@@ -205,11 +207,11 @@
   #send:hover { border-color:var(--accent); }
   button:disabled { opacity:.4; cursor:default; }
   .hint { color:var(--dim); font-size:11px; padding:0 12px 8px; }
-  #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #pmBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
+  #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
               padding:5px 10px; font-size:12px; font-family:var(--mono); text-transform:lowercase; letter-spacing:.04em;
               white-space:nowrap; }
-  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover, #machinesBtn:hover, #pmBtn:hover { color:var(--ink); border-color:var(--edge-hi); }
-  #panelBtn.on, #menuBtn.on, #projectsBtn.on, #machinesBtn.on, #pmBtn.on { color:var(--accent); border-color:var(--accent); }
+  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover, #machinesBtn:hover:hover { color:var(--ink); border-color:var(--edge-hi); }
+  #panelBtn.on, #menuBtn.on, #projectsBtn.on, #machinesBtn.on.on { color:var(--accent); border-color:var(--accent); }
   .bico { font-size:14px; line-height:1; }
   /* PM drawer — the Fleet PM (controller) chat, folded into the harness UI */
   #pmDrawer { position:fixed; top:0; right:0; height:100%; width:min(580px,96vw); z-index:60;
@@ -245,7 +247,7 @@
   @media (pointer: coarse) {
     header { gap:8px; padding:8px 10px; }
     header .blbl { display:none; }
-    #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #pmBtn { padding:6px 9px; }
+    #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn { padding:6px 9px; }
     #status { font-size:11px; padding:3px 8px; }
     #brand { display:none; }
   }
@@ -362,13 +364,12 @@
     <h1 id="brand" title="All machines">clawd-harness</h1>
     <span class="meta" id="meta">connecting…</span>
     <span class="spacer"></span>
-    <button id="pmBtn" title="Fleet PM — chat with the controller"><span class="bico">🛰️</span><span class="blbl"> pm</span></button>
     <button id="machinesBtn" title="All machines"><span class="bico">⊞</span><span class="blbl"> machines</span></button>
     <button id="projectsBtn" title="All projects"><span class="bico">▦</span><span class="blbl"> projects</span></button>
     <button id="menuBtn" title="Sessions in this project"><span class="bico">≡</span><span class="blbl"> sessions</span></button>
     <button id="panelBtn" title="Show/hide the structured transcript"><span class="bico">▤</span><span class="blbl"> transcript</span></button>
     <button id="phoneBtn" title="Open on your phone"><span class="bico">▢</span><span class="blbl"> qr</span></button>
-    <span id="status"><span class="bico">⚪</span><span class="blbl"> —</span></span>
+    <span id="status" title="Fleet PM — click to open"><span class="bico">🛰️</span><span class="blbl"> pm</span></span>
   </header>
   <div id="pmScrim" hidden></div>
   <aside id="pmDrawer" hidden>
@@ -557,7 +558,10 @@ const statusEl = document.getElementById('status');
 // Status pill: emoji always shows; the word label is hidden on mobile (.blbl).
 // Set text via textContent (not innerHTML) so tool labels can't inject markup.
 function setStatus(emoji, text, cls) {
-  statusEl.className = cls || '';
+  // #status doubles as the Fleet PM launcher; preserve the open marker across
+  // session-status updates so the emoji state and the PM affordance coexist.
+  const open = statusEl.classList.contains('pmopen');
+  statusEl.className = (cls || '') + (open ? ' pmopen' : '');
   statusEl.innerHTML = '<span class="bico"></span><span class="blbl"></span>';
   statusEl.firstChild.textContent = emoji;
   statusEl.lastChild.textContent = ' ' + text;
@@ -2536,7 +2540,9 @@ function showLogin(msg) {
 //    Direct mode only for now; in fleet mode the controller isn't reachable from
 //    a remote phone (that needs the relay to proxy it — a follow-up).
 (function pmInit() {
-  const btn = document.getElementById('pmBtn');
+  // The PM launcher is folded into the #status indicator (one combined control:
+  // emoji session-status + click-to-open-PM).
+  const btn = document.getElementById('status');
   // Same-origin in BOTH modes: direct → the harness reverse-proxies /pm/* to the
   // local controller; fleet → the relay proxies /pm/* to the box-resident
   // controller (gated by your passkey session via the pmt cookie). One UI, one URL.
@@ -2575,13 +2581,13 @@ function showLogin(msg) {
     busy = false; box.focus(); refresh();
   }
   function open() {
-    drawer.hidden = false; scrim.hidden = false; btn.classList.add('on');
+    drawer.hidden = false; scrim.hidden = false; btn.classList.add('pmopen');
     requestAnimationFrame(() => drawer.classList.add('open'));
     if (!greeted) { greeted = true; add('bot', "Hi — I'm your fleet PM. Ask what needs you, or tell me to start work on a project."); }
     refresh(); setTimeout(() => box.focus(), 60);
   }
   function close() {
-    drawer.classList.remove('open'); scrim.hidden = true; btn.classList.remove('on');
+    drawer.classList.remove('open'); scrim.hidden = true; btn.classList.remove('pmopen');
     setTimeout(() => { drawer.hidden = true; }, 180);
   }
   // tabs: chat (native) | debug (the controller's /debug page, lazy-loaded in an iframe)
