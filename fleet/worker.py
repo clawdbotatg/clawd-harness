@@ -223,19 +223,30 @@ class HarnessLink:
                     continue
                 if kind == "pong":
                     continue
+                # The trusted controller (box brain) rides a plaintext path — no
+                # E2E session — so its harness frames go back via `reply`, not the
+                # encrypting `reply_enc`. It also doesn't render PTY, so skip binary.
+                trusted = (self.mobile_id == CTL_IDENT)
                 if kind == 0x2:  # binary PTY bytes → relay (sealed, tagged with this mobile)
-                    self.worker.send_pty_enc(self.mobile_id, data)
+                    if not trusted:
+                        self.worker.send_pty_enc(self.mobile_id, data)
                     continue
-                # text/JSON harness frame → wrap and route to the mobile verbatim
+                # text/JSON harness frame → wrap and route to the viewer verbatim
                 try:
                     frame = json.loads(data.decode("utf-8"))
                 except Exception:
                     continue
-                self.worker.reply_enc(self.mobile_id, frame)
+                if trusted:
+                    self.worker.reply(self.mobile_id, frame)
+                else:
+                    self.worker.reply_enc(self.mobile_id, frame)
         finally:
             self.dead = True
-            self.worker.reply_enc(self.mobile_id,
-                                  {"type": "error", "error": "harness link closed"})
+            err = {"type": "error", "error": "harness link closed"}
+            if self.mobile_id == CTL_IDENT:
+                self.worker.reply(self.mobile_id, err)
+            else:
+                self.worker.reply_enc(self.mobile_id, err)
             self.close()
 
     def send_text(self, frame):

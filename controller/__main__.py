@@ -31,11 +31,21 @@ def build(connect_wait=4.0):
     ledger = TaskLedger(config.LEDGER_PATH)
     reactor = Reactor(ledger)
     clients = {}
-    # The box deploy has no local harness (CONTROLLER_HARNESS_WS empty) → empty
-    # world for now; it still chats + serves the debug page. The laptop deploy
-    # points at its local harness. (Driving remote machines via the relay's
-    # trusted-control path is the next layer.)
-    if config.HARNESS_WS:
+    if config.RELAY_URL:
+        # Box mode: drive the whole fleet through the relay's trusted-control path.
+        # `clients` IS the fleet's live machine map — World/Verbs see machines come
+        # and go as the roster changes.
+        from .relay_client import RelayFleet
+        fleet = RelayFleet(config.RELAY_URL, config.RELAY_TOKEN, on_hook=reactor.feed).start()
+        clients = fleet.machines
+        if connect_wait:
+            end = time.time() + connect_wait
+            while time.time() < end and not fleet.connected:
+                time.sleep(0.05)
+            # brief grace for the roster + first per-machine state to arrive
+            time.sleep(min(1.5, max(0.0, end - time.time()) + 1.5))
+    elif config.HARNESS_WS:
+        # Laptop/direct mode: one local harness.
         client = HarnessClient(config.MACHINE_ID, config.HARNESS_WS,
                                config.harness_token(), on_hook=reactor.feed).start()
         clients = {config.MACHINE_ID: client}

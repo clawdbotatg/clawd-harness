@@ -61,6 +61,12 @@ RATE_PER_MIN = int(cfg("CONTROLLER_RATE_PER_MIN", "8") or 8)
 # local harness); the relay/multi-machine adapter layers on top of the same World.
 HARNESS_WS = cfg("CONTROLLER_HARNESS_WS", "ws://127.0.0.1:8787")
 MACHINE_ID = cfg("CONTROLLER_MACHINE", "self")
+# Box mode: instead of a local harness, drive the WHOLE fleet through the relay's
+# trusted-control path. Set CONTROLLER_RELAY (ws://127.0.0.1:8788) + the shared
+# CONTROLLER_RELAY_TOKEN (== the relay's FLEET_CONTROLLER_TOKEN). Takes precedence
+# over HARNESS_WS when set. See controller/relay_client.py.
+RELAY_URL = cfg("CONTROLLER_RELAY", "")
+RELAY_TOKEN = cfg("CONTROLLER_RELAY_TOKEN", "")
 CHAT_PORT = int(cfg("CONTROLLER_CHAT_PORT", "8799") or 8799)
 LEDGER_PATH = cfg("CONTROLLER_LEDGER", os.path.join(ROOT, ".clawd-controller.tasks.jsonl"))
 # Persisted system-prompt override (edited from the debug page). Absent → built-in.
