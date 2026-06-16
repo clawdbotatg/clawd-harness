@@ -64,6 +64,22 @@ def main():
         assert any(s["cid"] == "c1" for s in proj["sessions"]), proj["sessions"]
     check("world snapshot: machines→projects→sessions", t_snapshot)
 
+    def t_open_links():
+        # open_session/open_project are reads — allowed even under readonly.
+        guard.autonomy = "readonly"
+        r = verbs.open_session("self", "c1")
+        assert r["ok"] and r["nav"] and r["pid"] == "p1", r
+        assert r["path"].endswith("#/p/p1/s/c1") and r["port"], r
+        assert r["url"].startswith("http") and "#/p/p1/s/c1" in r["url"], r
+        rt = verbs.open_session("self", "c1", view="tty")
+        assert rt["path"].endswith("#/p/p1/s/c1/tty"), rt
+        rp = verbs.open_project("self", "p1")
+        assert rp["ok"] and rp["nav"] and rp["path"].endswith("#/p/p1"), rp
+        # unknown targets fail cleanly, no link
+        assert verbs.open_session("self", "nope")["ok"] is False
+        assert verbs.open_project("self", "nope")["ok"] is False
+    check("open_session/open_project build deep links (read-only)", t_open_links)
+
     def t_readonly_blocks_write():
         r = verbs.ask("self", "c1", "hello")
         assert r["ok"] is False and r.get("blocked"), r

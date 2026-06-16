@@ -60,6 +60,9 @@ the user EXPLICITLY names the session to reuse. The session you're being chatted
 from is off-limits as a work target.
 - If no project fits the task, say so and ask which project to use (or offer to \
 create_project) rather than reusing a session.
+- "open" / "take me to" / "send me to" a session or project → call open_session \
+(or open_project); the chat shows it as an Open button. Put the returned url in \
+your reply too so it works on phone/Telegram. These are reads — no confirm needed.
 - Under confirm autonomy, a write returns needs_confirm with a proposal — relay it \
 plainly and stop; only re-call with confirm=true after the user says yes.
 - Keep replies short and concrete. Cite cids/task ids. No filler."""
@@ -86,6 +89,13 @@ class Brain:
 
     def reset(self):
         self.history = []
+
+    # -- thread state (swap this brain's conversation in/out per PM thread) -----
+    def export_state(self):
+        return {"history": list(self.history)}
+
+    def import_state(self, state):
+        self.history = list((state or {}).get("history") or [])
 
     def default_prompt(self):
         return _system_prompt(self.tools, self.machine_ids, self.guard.autonomy)

@@ -11,6 +11,7 @@ write returns {ok, ...} or {ok:false, blocked|needs_confirm|error, ...}.
 """
 import collections
 import time
+import urllib.parse
 
 WRITE_VERBS = {"assign", "ask", "answer_prompt", "interrupt",
                "create_project", "clone_project"}
@@ -70,6 +71,54 @@ class Verbs:
     def note_task(self, task_id, text):
         t = self.ledger.note(task_id, text)
         return {"ok": bool(t), "task": t} if t else {"ok": False, "error": "no such task"}
+
+    # ── navigate: "send me to" a session/project in the harness UI ────────────
+    # Read-only — these build a deep link, they don't touch the fleet. The chat
+    # UI renders any result carrying `nav:true` as an "Open ↗" button (and the
+    # url is in the reply text too, so Telegram/non-browser clients still get it).
+    def _harness_link(self, pid=None, cid=None, view="transcript"):
+        """Build the deep link into the harness UI. Hash route mirrors index.html:
+        `#/` projects · `#/p/<pid>` sessions · `#/p/<pid>/s/<cid>` transcript ·
+        `…/tty` terminal. Returns both an absolute `url` and the host-relative
+        `path` + `port` so the browser can rebuild it against its own hostname
+        (so a link made on localhost still works when the chat is opened over LAN)."""
+        from . import config
+        base = config.harness_http_base()
+        token = config.harness_token()
+        if cid and pid:
+            frag = f"#/p/{pid}/s/{cid}" + ("/tty" if view == "tty" else "")
+        elif pid:
+            frag = f"#/p/{pid}"
+        else:
+            frag = "#/"
+        path = (f"/?t={urllib.parse.quote(token)}" if token else "/") + frag
+        parsed = urllib.parse.urlparse(base)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return {"url": base + path, "path": path, "port": port}
+
+    def open_session(self, machine, cid, view="transcript"):
+        """Deep link that jumps the user's browser straight to one session
+        (transcript, or its terminal with view='tty'). Use for 'take me to' /
+        'open' / 'send me to' a session."""
+        s = self.world.session_detail(machine, cid)
+        if s.get("error"):
+            return {"ok": False, "error": s["error"]}
+        pid = s.get("pid")
+        link = self._harness_link(pid, cid, view)
+        return {"ok": True, "nav": True, "machine": machine, "pid": pid,
+                "cid": cid, "view": view, "title": s.get("title") or cid, **link}
+
+    def open_project(self, machine, pid):
+        """Deep link to a project's session list in the harness UI."""
+        c = self.clients.get(machine)
+        if not c:
+            return {"ok": False, "error": f"no such machine: {machine}"}
+        proj = next((p for p in c.state()["projects"] if p.get("pid") == pid), None)
+        if not proj:
+            return {"ok": False, "error": f"no such project: {pid}"}
+        link = self._harness_link(pid)
+        return {"ok": True, "nav": True, "machine": machine, "pid": pid,
+                "name": proj.get("name") or pid, **link}
 
     # ── write (gated) ───────────────────────────────────────────────────────
     def _gate(self, verb, args, do):

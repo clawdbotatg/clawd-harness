@@ -28,6 +28,15 @@ TOOLS = [
         "suggested_action verb. Read this first to triage.", _S({})),
     ("session_digest", "Full current detail for one session.",
         _S({"machine": _STR, "cid": _STR}, ["machine", "cid"])),
+    ("open_session", "Build a deep link that opens ONE session in the harness UI — "
+        "the user's browser jumps straight to its transcript (or its terminal with "
+        "view='tty'). Use whenever the user says 'open' / 'take me to' / 'send me "
+        "to' a session. Read-only. The chat renders it as an Open button; include "
+        "the returned url in your reply too.",
+        _S({"machine": _STR, "cid": _STR, "view": _STR}, ["machine", "cid"])),
+    ("open_project", "Build a deep link that opens a project's session list in the "
+        "harness UI. Use to send the user to a project. Read-only.",
+        _S({"machine": _STR, "pid": _STR}, ["machine", "pid"])),
     ("list_tasks", "The task ledger (PM intent). Optional status filter "
         "(open|in_progress|blocked|review|done).", _S({"status": _STR})),
     ("get_task", "One task by id.", _S({"task_id": _STR}, ["task_id"])),
@@ -82,6 +91,10 @@ class MCPServer:
             return v.get_attention()
         if name == "session_digest":
             return v.session_digest(a["machine"], a["cid"])
+        if name == "open_session":
+            return v.open_session(a["machine"], a["cid"], a.get("view", "transcript"))
+        if name == "open_project":
+            return v.open_project(a["machine"], a["pid"])
         if name == "list_tasks":
             return v.list_tasks(a.get("status"))
         if name == "get_task":

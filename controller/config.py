@@ -71,6 +71,9 @@ CHAT_PORT = int(cfg("CONTROLLER_CHAT_PORT", "8799") or 8799)
 LEDGER_PATH = cfg("CONTROLLER_LEDGER", os.path.join(ROOT, ".clawd-controller.tasks.jsonl"))
 # Persisted system-prompt override (edited from the debug page). Absent → built-in.
 PROMPT_PATH = cfg("CONTROLLER_PROMPT", os.path.join(ROOT, ".clawd-controller.prompt.txt"))
+# Persisted PM chat threads (multiple concurrent conversations + their history),
+# so they survive a daemon restart. Mirrors .clawd-harness.sessions.json.
+THREADS_PATH = cfg("CONTROLLER_THREADS", os.path.join(ROOT, ".clawd-controller.threads.json"))
 
 # Telegram front-end (optional). Set CONTROLLER_TELEGRAM_TOKEN to a bot token that
 # is NOT already being polled elsewhere (Telegram allows one getUpdates consumer
@@ -91,6 +94,24 @@ def harness_token():
             return f.read().strip()
     except OSError:
         return ""
+
+
+def harness_http_base():
+    """The harness UI's HTTP origin, derived from the WS URL the controller dials
+    (ws→http, wss→https). Direct mode → the local harness; relay/box mode → the
+    relay (which serves the same unified index.html). This is the base the PM uses
+    to build deep links that 'send' the user from the chat into a specific
+    session/project. Override with CONTROLLER_HARNESS_HTTP if the UI is reachable
+    at a different origin than the WS endpoint."""
+    explicit = cfg("CONTROLLER_HARNESS_HTTP")
+    if explicit:
+        return explicit.rstrip("/")
+    base = RELAY_URL or HARNESS_WS or "ws://127.0.0.1:8787"
+    if base.startswith("wss://"):
+        return "https://" + base[len("wss://"):].rstrip("/")
+    if base.startswith("ws://"):
+        return "http://" + base[len("ws://"):].rstrip("/")
+    return base.rstrip("/")
 
 
 def llm_chat(messages, model=None, max_tokens=1024, temperature=0.4, timeout=60):

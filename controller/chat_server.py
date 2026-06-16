@@ -13,6 +13,7 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler
 from socketserver import TCPServer, ThreadingMixIn
+from urllib.parse import parse_qs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHAT_HTML = os.path.join(HERE, "chat.html")
@@ -95,11 +96,24 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
                 return self._send(200, verbs.list_tasks())
             if path == "/api/notifications":
                 return self._send(200, {"events": reactor.recent() if reactor else []})
+            if path == "/api/threads":
+                return self._send(200, router.list_threads())
+            if path == "/api/thread/messages":
+                qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+                tid = (parse_qs(qs).get("id") or [None])[0]
+                return self._send(200, router.thread_messages(tid))
             if path == "/api/state":
                 snap = verbs.get_world()
+                # harness link info so the UI can build deep links into sessions
+                # (rebuilt against the browser's own hostname client-side).
+                import urllib.parse as _u
+                hbase = config.harness_http_base()
+                hparsed = _u.urlparse(hbase)
                 return self._send(200, {
                     "autonomy": guard.autonomy, "backend": backend_getter(),
                     "model": model_label(),
+                    "harness": {"base": hbase, "token": config.harness_token(),
+                                "port": hparsed.port or (443 if hparsed.scheme == "https" else 80)},
                     "machines": [{"id": m["id"], "connected": m["connected"],
                                   "sessions": m["session_total"]} for m in snap["machines"]],
                     "attention_count": snap["attention_count"]})
@@ -133,8 +147,27 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
                     return self._send(200, {"ok": True, "backend": name})
                 return self._send(400, {"error": "backend must be bankr|claude-code"})
             if path == "/api/reset":
-                router.reset()
+                with chat_lock:
+                    router.reset()
                 return self._send(200, {"ok": True})
+            # -- PM threads (multiple conversations) --------------------------
+            # serialized with chat so a switch can't land mid-turn and clobber
+            # the brain history being swapped in/out.
+            if path == "/api/thread/new":
+                with chat_lock:
+                    return self._send(200, router.new_thread(data.get("title")))
+            if path == "/api/thread/select":
+                tid = data.get("id")
+                if not tid:
+                    return self._send(400, {"error": "id required"})
+                with chat_lock:
+                    return self._send(200, router.select_thread(tid))
+            if path == "/api/thread/clear":
+                with chat_lock:
+                    return self._send(200, router.clear_thread(data.get("id")))
+            if path == "/api/thread/archive":
+                with chat_lock:
+                    return self._send(200, router.archive_thread(data.get("id")))
             if path == "/api/tool":          # invoke a tool by hand (debug page)
                 if not mcp:
                     return self._send(503, {"error": "tool runner unavailable"})

@@ -50,6 +50,25 @@ switch mid-conversation:
 
 Set the startup default with `CONTROLLER_BRAIN=bankr|claude-code`.
 
+## Conversation threads (the chat analog of per-project sessions)
+
+The chat header has a **thread bar** — the PM equivalent of the harness's N
+sessions per project. Run several PM conversations at once and switch between
+them; each thread keeps its **own history** (per brain backend, so a Kimi↔Claude
+switch inside a thread keeps continuity) plus its display transcript.
+
+- **＋ new** — spawn a fresh thread (new context).
+- **click a tab** — switch to that thread; its transcript reloads.
+- **✕ on a tab** — *archive* it (hidden, restorable — click **🗄 N** to reveal
+  archived threads, then click one to restore it).
+- **🧹 clear** (header) — wipe the current thread's context but keep the slot.
+
+Threads persist to `.clawd-controller.threads.json` (gitignored), so they — and
+the brain history inside them — survive a daemon restart; `claude-code` threads
+carry their `--resume` id across too. API: `GET /api/threads`,
+`GET /api/thread/messages?id=`, `POST /api/thread/{new,select,clear,archive}`.
+Telegram shares the **current** thread.
+
 ## Autonomy (the write guard)
 
 Write verbs (assign / ask / answer_prompt / interrupt / create|clone project)
@@ -83,9 +102,33 @@ ending. Handlers act on them: a `blocked` event **pushes a Telegram alert**, and
 the full feed is at `/api/notifications` (shown in the chat UI's "Recent
 events"). This is how a low-level hook causes a high-level reaction.
 
+## Jump from the PM into a session ("take me there")
+
+The PM can **send you straight into a session or project** in the harness UI.
+Two ways, both backed by the read-only `open_session` / `open_project` verbs:
+
+- **Just ask the PM** — "open the blocked one", "take me to the Force Regenerate
+  session", "send me to the slop-computer-live project". The brain calls
+  `open_session`/`open_project`, and the chat renders a big **↗ Open** button
+  under its reply (the URL is in the reply text too, so it works from Telegram).
+- **Click it in the "Needs you" panel** — every attention item carries an
+  **open ↗** link straight to that session.
+
+A verb returns the deep link three ways so any client can use it: an absolute
+`url`, plus a host-relative `path` + `port` that the browser **rebuilds against
+its own hostname** — so a link minted on `127.0.0.1` still works when you opened
+the PM over the LAN from your phone. The link is the harness's own hash route
+(`#/p/<pid>/s/<cid>` transcript, `…/tty` terminal, `#/p/<pid>` a project), so a
+reload lands back on the same session. Pass `view:"tty"` for the terminal.
+
+The HTTP origin is derived from the harness WS URL (`ws→http`); override with
+`CONTROLLER_HARNESS_HTTP` if the UI lives at a different origin than the WS
+endpoint (e.g. behind the relay).
+
 ## The tool surface (read + write)
 
-Read: `get_world`, `get_attention`, `session_digest`, `list_tasks`, `get_task`.
+Read: `get_world`, `get_attention`, `session_digest`, `open_session`,
+`open_project`, `list_tasks`, `get_task`.
 Write: `create_task`, `set_task_status`, `note_task`, `assign`, `ask`,
 `answer_prompt`, `interrupt`, `create_project`, `clone_project`.
 
@@ -98,6 +141,7 @@ triage entry point — each item names the `suggested_action` to clear it.
 |---|---|---|
 | `CONTROLLER_HARNESS_WS` | `ws://127.0.0.1:8787` | harness to drive |
 | `CONTROLLER_HARNESS_TOKEN` | `.clawd-harness.token` | WS token |
+| `CONTROLLER_HARNESS_HTTP` | (derived from WS url) | UI origin for deep links |
 | `CONTROLLER_MODEL` | `kimi-k2.6` | bankr brain model |
 | `CONTROLLER_BRAIN` | `bankr` | startup backend |
 | `CONTROLLER_AUTONOMY` | `confirm` | write gate |
@@ -112,6 +156,7 @@ triage entry point — each item names the `suggested_action` to clear it.
 python3 -m controller.test_controller   # client → world → verbs (mock harness)
 python3 -m controller.test_mcp          # MCP dispatch (read + write)
 python3 -m controller.test_mcp_stdio    # MCP as a real stdio subprocess
+python3 -m controller.test_threads      # PM conversation threads (store + persist)
 ```
 
 ## Files
@@ -121,4 +166,5 @@ python3 -m controller.test_mcp_stdio    # MCP as a real stdio subprocess
 `mcp.py` (MCP stdio server) · `brain.py` (Kimi brain) · `claude_brain.py`
 (Claude Code `-p` brain) · `events.py` (Reactor: hooks → higher-level events) ·
 `telegram.py` (Telegram bridge) · `chat_server.py` + `chat.html` (chat UI) ·
-`mock_harness.py` (test double) · `__main__.py` (entry).
+`threads.py` (PM conversation threads) · `mock_harness.py` (test double) ·
+`__main__.py` (entry).

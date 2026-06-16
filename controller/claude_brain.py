@@ -60,6 +60,15 @@ class ClaudeCodeBrain:
         self.session_id = None
         self.history = []
 
+    # -- thread state (each PM thread keeps its own --resume continuity) --------
+    def export_state(self):
+        return {"history": list(self.history), "session_id": self.session_id}
+
+    def import_state(self, state):
+        state = state or {}
+        self.history = list(state.get("history") or [])
+        self.session_id = state.get("session_id")
+
     def _env(self):
         env = dict(os.environ)
         for k in SCRUB:

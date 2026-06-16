@@ -32,3 +32,4 @@ __pycache__/
 .clawd-controller.tasks.jsonl
 controller/.mcp-config.json
 .clawd-controller.prompt.txt
+.clawd-controller.threads.json

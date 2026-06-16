@@ -97,8 +97,13 @@ def main(argv):
             return brains[name]
 
         active = {"backend": backend, "brain": get_brain(backend)}
+        from .threads import Threads
+        threads = Threads(config.THREADS_PATH)
 
-        # a thin façade the chat server drives; supports live backend switching
+        # a thin façade the chat server drives. Supports live backend switching
+        # AND multiple PM conversation threads (the chat analog of per-project
+        # sessions): each thread keeps its own history per backend, swapped in/out
+        # of the shared brain around every (serialized) turn.
         class Router:
             label = "router"
 
@@ -106,7 +111,8 @@ def main(argv):
             def history(self):
                 return active["brain"].history
 
-            def reset(self):
+            def reset(self):                 # back-compat: clear the current thread
+                threads.clear()
                 active["brain"].reset()
 
             def switch(self, name):
@@ -114,7 +120,39 @@ def main(argv):
                 active["brain"] = get_brain(name)
 
             def chat(self, text):
-                return active["brain"].chat(text)
+                brain = active["brain"]
+                back = active["backend"]
+                brain.import_state(threads.state_for(back))
+                out = brain.chat(text)
+                threads.save_state(back, brain.export_state())
+                threads.record("me", text)
+                threads.record("bot", out.get("reply", ""), out.get("trace"))
+                threads.persist()
+                return out
+
+            # -- thread management (driven by the chat server endpoints) --------
+            def list_threads(self):
+                return threads.summary()
+
+            def thread_messages(self, tid=None):
+                return {"messages": threads.messages(tid)}
+
+            def new_thread(self, title=None):
+                threads.new(title=title)
+                return threads.summary()
+
+            def select_thread(self, tid):
+                ok = threads.select(tid)
+                return {"ok": ok, **threads.summary()}
+
+            def clear_thread(self, tid=None):
+                threads.clear(tid)
+                active["brain"].reset()
+                return threads.summary()
+
+            def archive_thread(self, tid=None):
+                threads.archive(tid)
+                return threads.summary()
 
         router = Router()
         debug_mcp = MCPServer(verbs)                 # tool runner for the debug page
