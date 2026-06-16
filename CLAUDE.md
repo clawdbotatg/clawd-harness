@@ -117,7 +117,7 @@ user-facing overview; this file orients an agent working **on** the code.
 - **AI session naming:** optional. Set `BANKR_API_KEY` + `BANKR_BASE_URL` +
   `BANKR_API` (`openai` | `anthropic` | `bankr`). `bankr` = OpenAI-compatible body
   at `https://llm.bankr.bot/v1/chat/completions` authed with an `X-API-Key` header.
-  Off → first-prompt titles. Regenerates at prompt 1, then every 5 (5, 10, 15,
+  Off → first-prompt titles. Regenerates at prompt 1, then every 3 (3, 6, 9,
   …) via `name_at_prompt()` — naming is cheap + async, so a steady cadence keeps
   a long session's title sharp. Secrets
   load from a gitignored **`.clawd-harness.env`** (`_load_env_file` at boot — the

@@ -125,12 +125,12 @@ CONTROLLER_PORT = int(os.environ.get("CONTROLLER_CHAT_PORT", "8799") or 8799)
 # hard-reloads — fresh state clears any stale "thinking" spinner left mid-turn.
 BOOT_ID = uuid.uuid4().hex
 
-# Re-name the session at prompt 1, then every 5 prompts (5, 10, 15, 20, …) so a
+# Re-name the session at prompt 1, then every 3 prompts (3, 6, 9, 12, …) so a
 # long-running session's title/desc keep sharpening. Naming is cheap + async, so
 # the steady cadence is worth it. The instant first-prompt naming lives in
 # _on_prompt; this gate fires on Stop once the turn's transcript exists.
 def name_at_prompt(count):
-    return count == 1 or (count >= 5 and count % 5 == 0)
+    return count <= 1 or count % 3 == 0
 # The naming instruction — a module constant so bench_naming.py tests the exact
 # same prompt the app uses (single source of truth; no drift).
 NAME_SYS_PROMPT = ("You name software-engineering sessions. Given a transcript, "
@@ -467,7 +467,7 @@ class ClaudeSession:
             data = {"last": obj.get("last_assistant_message", "")}
             # Turn complete → the transcript now has a real exchange. Name it if
             # it's still unnamed (so even a 1-prompt session gets a title), and
-            # re-name at the 1/5/10/15/… milestones to sharpen as it grows.
+            # re-name at the 1/3/6/9/… milestones to sharpen as it grows.
             if (not self.title) or name_at_prompt(self.prompt_count):
                 threading.Thread(target=self._regenerate_name, daemon=True).start()
             # The digest is volatile — refresh it every turn (not just at the
@@ -498,7 +498,7 @@ class ClaudeSession:
         the turn to finish): UserPromptSubmit fires before claude has written
         the transcript, so we can't read it yet — but the prompt is right here,
         and it's enough to label the session the instant it's created. The Stop
-        milestones (1, then every 5) re-name from the full transcript to sharpen."""
+        milestones (1, then every 3) re-name from the full transcript to sharpen."""
         self.prompt_count += 1
         if not self.first_prompt and prompt:
             self.first_prompt = prompt.strip().splitlines()[0][:200]
