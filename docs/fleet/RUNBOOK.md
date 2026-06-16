@@ -14,8 +14,8 @@ way, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | Relay-node worker | systemd `clawd-fleet-worker` → machine id `clawd-nerve-cord`, started `--kind relay`. No harness behind it — it registers purely so the **hub shows on the roster** as a muted, non-drivable infra card. Don't expect projects/sessions from it. |
 | Laptop proxy worker | launchd `com.clawd.fleet-worker` → machine id `austin-laptop`, bridges to the laptop's harness (`ws://127.0.0.1:8787`) |
 | nginx vhost | `/etc/nginx/sites-available/h.atg.link` → proxies `:443` to `127.0.0.1:8788` |
-| Code on box | `~/clawd-fleet/` (currently an **scp copy**, not a git clone — see "Drift") |
-| Auth | `~/clawd-fleet/fleet.env` (chmod 600): `FLEET_MOBILE_TOKEN` (URL credential) + `FLEET_WORKER_TOKEN` (machine registration) + `FLEET_WORKER_ALLOW=austin-laptop`. `exec` off (no `FLEET_ALLOW_EXEC`). |
+| Code on box | `~/clawd-harness/` — a **git checkout** of `clawdbotatg/clawd-harness` (deploy = `git pull`; mirrors repo layout: `fleet/` + controller package + root `index.html`) |
+| Auth | `~/clawd-harness/fleet/fleet.env` (chmod 600): `FLEET_MOBILE_TOKEN` (URL credential) + `FLEET_WORKER_TOKEN` (machine registration) + `FLEET_WORKER_ALLOW=austin-laptop`. `exec` off (no `FLEET_ALLOW_EXEC`). |
 
 > ℹ️ **The box runs a `--kind relay` worker** (`clawd-fleet-worker`, machine id
 > `clawd-nerve-cord`). It has **no harness behind it**, so it holds no projects or
@@ -50,7 +50,7 @@ ssh zkllmapi 'ss -tlnp | grep 8788'
 ssh zkllmapi 'journalctl -u clawd-fleet-relay | grep -E "online|offline" | tail'
 
 # the tokens (mobile = the URL credential; worker = machine registration)
-ssh zkllmapi 'grep -E "MOBILE_TOKEN|WORKER_TOKEN" ~/clawd-fleet/fleet.env'
+ssh zkllmapi 'grep -E "MOBILE_TOKEN|WORKER_TOKEN" ~/clawd-harness/fleet/fleet.env'
 ```
 The **mobile token** is what goes in the phone URL: `https://h.atg.link/?t=<MOBILE_TOKEN>`.
 To rotate, edit `fleet.env`, `sudo systemctl restart clawd-fleet-relay`, then update
@@ -65,7 +65,7 @@ sessions load → open a session to drive live Claude (terminal + transcript).
 **From the terminal (prototype diagnostics):** the relay is `127.0.0.1`-bound on
 the box, so connect via the public `wss://`:
 ```bash
-TOKEN=$(ssh zkllmapi 'cat ~/clawd-fleet/.clawd-fleet.token')
+TOKEN=$(ssh zkllmapi 'cat ~/clawd-harness/fleet/.clawd-fleet.token')
 python3 fleet_cli.py --relay wss://h.atg.link --token "$TOKEN"
 # at the prompt:  list   ·   @austin-laptop uname -a   ·   @* hostname
 ```
@@ -129,7 +129,8 @@ FLEET_RELAY=wss://h.atg.link FLEET_WORKER_TOKEN=<worker-token> \
 
 ## Stand up a relay on a fresh box (reproducible)
 
-1. Copy this repo to the box (ideally `git clone` — see Drift).
+1. `git clone https://github.com/clawdbotatg/clawd-harness.git` on the box (it's
+   public — see "Deploy updates to the box").
 2. `cp deploy/fleet.env.example fleet.env`; set a strong `FLEET_TOKEN`
    (`python3 -c "import secrets;print(secrets.token_urlsafe(24))"`).
 3. `sudo cp deploy/clawd-fleet-relay.service /etc/systemd/system/ &&
@@ -138,25 +139,24 @@ FLEET_RELAY=wss://h.atg.link FLEET_WORKER_TOKEN=<worker-token> \
    `sudo bash deploy/setup_tls.sh <domain> <email>` (adds an nginx vhost + cert).
 5. Workers connect with `FLEET_RELAY=wss://<domain>`.
 
-## Deploy updates to the box (scp)
+## Deploy updates to the box (git pull)
 
-The box's `~/clawd-fleet/` is an **scp copy, not a git checkout** — a historical
-artifact, not a constraint. (The repo `clawdbotatg/clawd-harness` is **public**,
-so a plain `git clone https://github.com/clawdbotatg/clawd-harness.git` on the box
-now works and converting to a real checkout is a viable cleanup — note the box
-layout is **flat** vs. the repo's `fleet/` + root split, so a checkout would also
-move `_serve_file`'s lookup to the `HERE.parent/<name>` branch.) Until then, ship
-changes by copying the files that changed and restarting:
+The box's `~/clawd-harness/` is a **git checkout** of `clawdbotatg/clawd-harness`
+(public → clones/pulls over HTTPS, no creds). It mirrors the repo layout:
+`relay.py`/`worker.py` under `fleet/`, the controller package at the root, and the
+shared `index.html`/`favicon.png` at the root (one level above `relay.py`, so
+`_serve_file` finds them via its `HERE.parent/<name>` branch). Ship changes by
+pushing and pulling:
 ```bash
-# from the harness root (fleet code lives in fleet/, the shared UI at the root):
-scp fleet/relay.py fleet/worker.py fleet/fleet_ws.py fleet/webauthn.py index.html favicon.png \
-    zkllmapi:~/clawd-fleet/
-ssh zkllmapi 'sudo systemctl restart clawd-fleet-relay clawd-fleet-worker'
+# from the harness root, after committing:
+git push origin main
+ssh zkllmapi 'cd ~/clawd-harness && git pull && \
+    sudo systemctl restart clawd-fleet-relay clawd-fleet-worker clawd-controller'
 ```
-The box stays **flat** — `index.html` lands next to `relay.py`, which `_serve_file`
-serves via its `HERE/<name>` check.
+UI-only `index.html` edits need **no restart** — the relay serves it fresh per
+request, so just `git pull` on the box. Gitignored runtime/secret files live next
+to the code that reads them (not in git): `fleet.env` + `.clawd-fleet.{token,passkeys.json,machine}`
+in `fleet/`; `controller.env` + `.clawd-controller.tasks.jsonl` at the repo root.
 Then verify with `journalctl -u clawd-fleet-relay -n 20` and the browser/loop
-checks above. (A git-clone conversion was deferred in 2026-06 — at the time the
-repo was assumed private; it's since **public**, so a clone is now unblocked,
-left as a cleanup. Don't `mv` the live dir without a working clone ready: the
-running services hold the old inode but a later restart needs the path.)
+checks above. (Migrated off scp in 2026-06; the prior flat scp dir is kept as
+`~/clawd-fleet.pre-git-backup` — safe to delete once the checkout is trusted.)

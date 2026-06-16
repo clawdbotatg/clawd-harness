@@ -20,7 +20,8 @@ user-facing overview; this file orients an agent working **on** the code.
 > `window.__FLEET__`: the harness serves it untouched (direct mode); the fleet relay
 > (`fleet/relay.py` `_serve_file`) injects the flag for fleet mode (machines rung +
 > passkey). There is now **one copy** (the old cp-to-fleet sync ritual is gone). To
-> change the fleet UI: edit this `index.html`, then `scp` it to the box (see
+> change the fleet UI: edit this `index.html`, then `git push` + `git pull` on the
+> box — the box is now a **git checkout** at `~/clawd-harness`, not an scp dir (see
 > `docs/fleet/DEPLOY.md`). The fleet/passkey code here is dormant unless `__FLEET__`
 > is set.
 

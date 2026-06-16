@@ -36,7 +36,8 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >   mode-aware** via `window.__FLEET__`: the harness serves it untouched → direct
 >   mode; the relay injects the flag (`relay.py` `_serve_file`) → fleet mode
 >   (machines rung + passkey). There is **one copy** now (the old cp-to-fleet
->   ritual is gone) — edit the harness root `index.html`, then `scp` it to the box.
+>   ritual is gone) — edit the harness root `index.html`, then `git push` + pull on
+>   the box (a git checkout now, not scp).
 >   **See `../docs/fleet/DEPLOY.md`.** No build, no React (that rebuild was
 >   reverted — archived on `archive/react-scaffold-eth`).
 > - New files: `webauthn.py`, `e2e.py` (E2E channel crypto), `test_webauthn.py`,
@@ -127,7 +128,9 @@ Corollary directions baked into the design:
   backend.zkllmapi.com. Touch nginx carefully; only add vhosts, never edit
   others'. Always `nginx -t` before reload.
 - Relay: `wss://h.atg.link` → nginx → `127.0.0.1:8788`. Cert via certbot
-  (auto-renew). Code at `~/clawd-fleet` on the box.
+  (auto-renew). Code at `~/clawd-harness` on the box — a **git checkout** of
+  `clawdbotatg/clawd-harness` (deploy = `git pull`, not scp). Box mirrors the repo
+  layout: `relay.py`/`worker.py` in `fleet/`, controller package + `index.html` above.
 - Services: `clawd-fleet-relay` and `clawd-fleet-worker` (systemd, enabled,
   auto-restart). `journalctl -u clawd-fleet-relay -f` to watch. Units +
   `setup_tls.sh` are versioned in `deploy/`.
@@ -147,13 +150,13 @@ Corollary directions baked into the design:
   Config + the worker token come from a gitignored **`fleet.env`** that
   `worker.py` self-loads (`_load_env_file`), so the secret stays out of the plist
   — same pattern as the harness's `.clawd-harness.env`.
-- **Updating prod:** the box keeps a **flat** `~/clawd-fleet/` (scp copy, not a git
-  checkout). The box layout is flat, so `index.html`/`favicon.png` sit **next to**
-  `relay.py` there (the relay's `_serve_file` checks `HERE/<name>` first, which
-  covers this). To ship a change, scp the fleet files from `fleet/` plus the shared
-  UI from the harness root:
-  `scp fleet/relay.py fleet/worker.py fleet/fleet_ws.py fleet/webauthn.py index.html favicon.png zkllmapi:~/clawd-fleet/`
-  then `ssh zkllmapi 'sudo systemctl restart clawd-fleet-relay clawd-fleet-worker'`.
+- **Updating prod:** the box is a **git checkout** at `~/clawd-harness` (mirrors the
+  repo layout — `relay.py`/`worker.py` in `fleet/`, `index.html`/`favicon.png` at the
+  repo root one level up; the relay's `_serve_file` checks `HERE/<name>` then
+  `HERE.parent/<name>`, which covers it). To ship a change, push and pull:
+  `git push origin main` then
+  `ssh zkllmapi 'cd ~/clawd-harness && git pull && sudo systemctl restart clawd-fleet-relay clawd-fleet-worker clawd-controller'`
+  (UI-only `index.html` edits skip the restart — served fresh per request).
   Don't `mv` the live dir for a clone unless the clone is ready — services hold the
   old inode but a later restart needs the path. See `../docs/fleet/RUNBOOK.md`.
 - **gotcha:** `pkill -f "worker.py"` over SSH matches its own command line and
@@ -193,13 +196,13 @@ Corollary directions baked into the design:
    non-allowlisted worker rejected, `exec` disabled. The mobile token no longer
    lingers in the URL — `index.html` migrates `?t=` into localStorage on load and
    strips it (replaceState); no-token shows a paste-the-token screen; the QR
-   re-appends it for pairing. **Remaining debt:** the box is still scp-deployed
-   (a leftover — the repo is now **public**, so a `git clone` on the box is
-   unblocked).
+   re-appends it for pairing. (The box was migrated off scp to a `git clone` at
+   `~/clawd-harness` — deploy is now `git pull` + restart.)
 
 ## Conventions
 - Git identity here (under `~/clawd/`): **clawdbotatg** /
-  `clawd@buidlguidl.com`, over **HTTPS**. Remote: `clawdbotatg/clawd-fleet`.
+  `clawd@buidlguidl.com`, over **HTTPS**. Remote: `clawdbotatg/clawd-harness`
+  (the fleet lives in this monorepo now; the standalone `clawd-fleet` repo is archived).
 - **Never commit** `.clawd-fleet.token`, `fleet.env`, `.clawd-fleet.machine`,
   `*.log` (gitignored). Scan diffs for secrets before committing.
 - Pure Python stdlib, no deps — keep it that way (matches clawd-harness).
