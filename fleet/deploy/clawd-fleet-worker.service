@@ -12,7 +12,7 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/clawd-fleet
 EnvironmentFile=/home/ubuntu/clawd-fleet/fleet.env
-ExecStart=/usr/bin/python3 /home/ubuntu/clawd-fleet/worker.py --machine zkllmapi-box --host zkllmapi --kind relay
+ExecStart=/usr/bin/python3 /home/ubuntu/clawd-fleet/worker.py --machine clawd-nerve-cord --host clawd-nerve-cord --kind relay
 Restart=always
 RestartSec=2
 

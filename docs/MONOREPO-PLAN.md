@@ -70,7 +70,7 @@ scp to the box. Update `docs/fleet/DEPLOY.md` paths. Update the memory `clawd-fl
 ## Verify (done when all true)
 - `localhost:8787` → 200, direct mode (no `__FLEET__` injection).
 - `relay.atg.link` → 200, fleet mode (`__FLEET__=true` injected).
-- 4 tests pass from `fleet/`. Relay active; `austin-laptop` + `zkllmapi-box` online.
+- 4 tests pass from `fleet/`. Relay active; `austin-laptop` + `clawd-nerve-cord` online.
 - `diff` proves there's now **one** `index.html` (no second copy).
 
 ## Decision already made

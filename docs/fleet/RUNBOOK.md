@@ -9,16 +9,16 @@ way, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 |---|---|
 | Public relay | **`wss://h.atg.link/ws`** (TLS via Let's Encrypt, auto-renew) |
 | Mobile UI | **`https://h.atg.link/?t=<TOKEN>`** — relay serves `index.html` at `/` |
-| AWS box | `ssh zkllmapi` — Ubuntu 24.04, user `ubuntu`, public IP `174.129.67.164` |
+| AWS box | **`clawd-nerve-cord`** (the lobster's central spine — the one always-on box that relays signals to the fleet *and* hosts the AI/PM brain). Reached via `ssh zkllmapi` (the ssh alias + the `zkllmapi.com` domain are unchanged). Ubuntu 24.04, user `ubuntu`, public IP `174.129.67.164` |
 | Relay process | systemd `clawd-fleet-relay` → `python3 relay.py`, bound `127.0.0.1:8788` |
-| Relay-node worker | systemd `clawd-fleet-worker` → machine id `zkllmapi-box`, started `--kind relay`. No harness behind it — it registers purely so the **hub shows on the roster** as a muted, non-drivable infra card. Don't expect projects/sessions from it. |
+| Relay-node worker | systemd `clawd-fleet-worker` → machine id `clawd-nerve-cord`, started `--kind relay`. No harness behind it — it registers purely so the **hub shows on the roster** as a muted, non-drivable infra card. Don't expect projects/sessions from it. |
 | Laptop proxy worker | launchd `com.clawd.fleet-worker` → machine id `austin-laptop`, bridges to the laptop's harness (`ws://127.0.0.1:8787`) |
 | nginx vhost | `/etc/nginx/sites-available/h.atg.link` → proxies `:443` to `127.0.0.1:8788` |
 | Code on box | `~/clawd-fleet/` (currently an **scp copy**, not a git clone — see "Drift") |
 | Auth | `~/clawd-fleet/fleet.env` (chmod 600): `FLEET_MOBILE_TOKEN` (URL credential) + `FLEET_WORKER_TOKEN` (machine registration) + `FLEET_WORKER_ALLOW=austin-laptop`. `exec` off (no `FLEET_ALLOW_EXEC`). |
 
 > ℹ️ **The box runs a `--kind relay` worker** (`clawd-fleet-worker`, machine id
-> `zkllmapi-box`). It has **no harness behind it**, so it holds no projects or
+> `clawd-nerve-cord`). It has **no harness behind it**, so it holds no projects or
 > sessions — it exists only to put the **hub itself** on the roster as a muted,
 > non-drivable "relay" card (topology awareness). The UI keys off `kind:"relay"`
 > in the roster: it skips it in auto-select and renders it as infra, not a machine

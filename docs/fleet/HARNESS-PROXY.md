@@ -126,7 +126,7 @@ harness's `index.html`, pointed at the relay):
 
 ## Acceptance check
 
-From a laptop, through `wss://h.atg.link`, pick the `zkllmapi-box` machine, create
+From a laptop, through `wss://h.atg.link`, pick the `clawd-nerve-cord` machine, create
 a session in a project, send "what is 2+2?", and see the assistant's answer come
 back via a `hook` `Stop` frame's `data.last` — with the live transcript streaming
 alongside. No changes to clawd-harness.

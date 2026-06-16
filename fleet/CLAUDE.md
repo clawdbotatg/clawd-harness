@@ -132,7 +132,7 @@ Corollary directions baked into the design:
   auto-restart). `journalctl -u clawd-fleet-relay -f` to watch. Units +
   `setup_tls.sh` are versioned in `deploy/`.
 - The box's `clawd-fleet-worker` runs **`--kind relay`** (`--machine
-  zkllmapi-box`, no harness behind it). It registers purely so the **hub shows on
+  clawd-nerve-cord`, no harness behind it). It registers purely so the **hub shows on
   the roster** as a muted, non-drivable "relay" card (topology awareness) — it
   holds no projects/sessions. The UI keys off `kind:"relay"` in the roster
   (`renderMachines`): skipped in auto-select, rendered as infra not a machine you
