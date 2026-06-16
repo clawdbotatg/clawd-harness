@@ -1476,8 +1476,9 @@ function renderProjects(list) {
 
   applyProjectFilter();          // honor any live filter text after a re-render
   // landing on the projects rung: the box takes focus so you can filter/create
-  // straight away. Don't steal focus while typing elsewhere or off this rung.
-  if (!isTouch && currentView() === 'projects' && document.activeElement !== inp &&
+  // straight away (touch included — pops the keyboard, which is what you want now
+  // the box is a filter). Don't steal focus while typing elsewhere or off this rung.
+  if (currentView() === 'projects' && document.activeElement !== inp &&
       !(document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName))) {
     inp.focus();
     const n = inp.value.length; try { inp.setSelectionRange(n, n); } catch {}
@@ -2318,7 +2319,7 @@ function setView(view) {
   refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
   syncUrl();                       // keep the URL in step with the depth we're at
   if (tty) setTimeout(() => { fit.fit(); sendResize(); term.scrollToBottom(); bottomJustifyTTY(); }, 60);
-  else if (projects && !isTouch) {  // landing on projects: box takes focus (skip touch — avoids popping the soft keyboard)
+  else if (projects) {  // landing on projects: box takes focus so you can filter/create right away
     const inp = projectsEl.querySelector('#addProject input');
     if (inp) { inp.focus(); const n = inp.value.length; try { inp.setSelectionRange(n, n); } catch {} }
   }
