@@ -205,17 +205,38 @@
   #send:hover { border-color:var(--accent); }
   button:disabled { opacity:.4; cursor:default; }
   .hint { color:var(--dim); font-size:11px; padding:0 12px 8px; }
-  #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
+  #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #pmBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
               padding:5px 10px; font-size:12px; font-family:var(--mono); text-transform:lowercase; letter-spacing:.04em;
               white-space:nowrap; }
-  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover, #machinesBtn:hover { color:var(--ink); border-color:var(--edge-hi); }
-  #panelBtn.on, #menuBtn.on, #projectsBtn.on, #machinesBtn.on { color:var(--accent); border-color:var(--accent); }
+  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover, #machinesBtn:hover, #pmBtn:hover { color:var(--ink); border-color:var(--edge-hi); }
+  #panelBtn.on, #menuBtn.on, #projectsBtn.on, #machinesBtn.on, #pmBtn.on { color:var(--accent); border-color:var(--accent); }
   .bico { font-size:14px; line-height:1; }
+  /* PM drawer — the Fleet PM (controller) chat, folded into the harness UI */
+  #pmDrawer { position:fixed; top:0; right:0; height:100%; width:min(440px,94vw); z-index:60;
+              background:var(--panel); border-left:1px solid var(--edge); display:flex; flex-direction:column;
+              transform:translateX(100%); transition:transform .18s ease; box-shadow:-8px 0 28px rgba(0,0,0,.45); }
+  #pmDrawer.open { transform:translateX(0); }
+  #pmHead { display:flex; align-items:center; gap:8px; padding:11px 13px; border-bottom:1px solid var(--edge); }
+  #pmHead b { font-size:14px; } #pmHead .pmsub { color:var(--dim); font-size:11px; font-family:var(--mono); flex:1; }
+  #pmHead button { background:transparent; border:1px solid var(--edge); color:var(--dim); padding:4px 9px; font-size:13px; cursor:pointer; }
+  #pmLog { flex:1; overflow:auto; padding:14px; display:flex; flex-direction:column; gap:9px; }
+  .pmm { max-width:92%; padding:8px 11px; border-radius:11px; white-space:pre-wrap; word-wrap:break-word; font-size:13px; line-height:1.45; }
+  .pmm.me { align-self:flex-end; background:var(--accent); color:#000; }
+  .pmm.bot { align-self:flex-start; background:var(--raised); border:1px solid var(--edge); color:var(--ink); }
+  .pmm .pmtr { margin-top:6px; padding-top:5px; border-top:1px dashed var(--edge); color:var(--dim); font-size:11px; font-family:var(--mono); }
+  .pmm.think { align-self:flex-start; color:var(--dim); font-style:italic; }
+  #pmForm { display:flex; gap:7px; padding:11px; border-top:1px solid var(--edge); }
+  #pmBox { flex:1; resize:none; background:var(--bg); color:var(--ink); border:1px solid var(--edge); border-radius:8px;
+           padding:9px; font:13px/1.4 inherit; max-height:120px; }
+  #pmBox:focus { outline:none; border-color:var(--accent); }
+  #pmSend { border-radius:8px; padding:0 15px; }
+  #pmScrim { position:fixed; inset:0; background:rgba(0,0,0,.4); z-index:59; }
+  #pmScrim[hidden], #pmDrawer[hidden] { display:none; }
   /* mobile: collapse header to icon-only buttons so the bar fits + stops over-scrolling */
   @media (pointer: coarse) {
     header { gap:8px; padding:8px 10px; }
     header .blbl { display:none; }
-    #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn { padding:6px 9px; }
+    #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #pmBtn { padding:6px 9px; }
     #status { font-size:11px; padding:3px 8px; }
     #brand { display:none; }
   }
@@ -332,6 +353,7 @@
     <h1 id="brand" title="All machines">clawd-harness</h1>
     <span class="meta" id="meta">connecting…</span>
     <span class="spacer"></span>
+    <button id="pmBtn" title="Fleet PM — chat with the controller"><span class="bico">🛰️</span><span class="blbl"> pm</span></button>
     <button id="machinesBtn" title="All machines"><span class="bico">⊞</span><span class="blbl"> machines</span></button>
     <button id="projectsBtn" title="All projects"><span class="bico">▦</span><span class="blbl"> projects</span></button>
     <button id="menuBtn" title="Sessions in this project"><span class="bico">≡</span><span class="blbl"> sessions</span></button>
@@ -339,6 +361,20 @@
     <button id="phoneBtn" title="Open on your phone"><span class="bico">▢</span><span class="blbl"> qr</span></button>
     <span id="status"><span class="bico">⚪</span><span class="blbl"> —</span></span>
   </header>
+  <div id="pmScrim" hidden></div>
+  <aside id="pmDrawer" hidden>
+    <div id="pmHead">
+      <b>🛰️ Fleet PM</b>
+      <span class="pmsub" id="pmSub">connecting…</span>
+      <button id="pmReset" title="Clear the conversation">⟲</button>
+      <button id="pmClose" title="Close">✕</button>
+    </div>
+    <div id="pmLog"></div>
+    <form id="pmForm">
+      <textarea id="pmBox" rows="1" placeholder="Ask the PM… (e.g. 'anything need me?')"></textarea>
+      <button id="pmSend" type="submit">Send</button>
+    </form>
+  </aside>
   <div id="sessionbar" hidden></div>
   <div id="rebootbar" hidden>
     <span class="rb-spin"></span>
@@ -2468,6 +2504,71 @@ function showLogin(msg) {
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
   inp.focus();
 }
+
+// ── Fleet PM drawer — the controller chat, folded into the harness UI. Talks to
+//    the controller (a sibling process on :8799) over its HTTP API via CORS.
+//    Direct mode only for now; in fleet mode the controller isn't reachable from
+//    a remote phone (that needs the relay to proxy it — a follow-up).
+(function pmInit() {
+  const btn = document.getElementById('pmBtn');
+  if (FLEET) { btn.style.display = 'none'; return; }
+  const PM_BASE = `${location.protocol}//${location.hostname}:8799`;
+  const drawer = document.getElementById('pmDrawer'), scrim = document.getElementById('pmScrim');
+  const log = document.getElementById('pmLog'), box = document.getElementById('pmBox'), sub = document.getElementById('pmSub');
+  let busy = false, greeted = false;
+
+  const api = async (path, opts) => (await fetch(PM_BASE + path, opts)).json();
+  function add(cls, text) {
+    const d = document.createElement('div'); d.className = 'pmm ' + cls; d.textContent = text;
+    log.appendChild(d); log.scrollTop = log.scrollHeight; return d;
+  }
+  function addBot(out) {
+    const d = add('bot', out.reply || '(no reply)');
+    if (out.trace && out.trace.length) {
+      const t = document.createElement('div'); t.className = 'pmtr';
+      t.textContent = 'did: ' + out.trace.map(x => x.tool).join(' → '); d.appendChild(t);
+    }
+    return d;
+  }
+  async function refresh() {
+    try {
+      const st = await api('/api/state'); const n = st.attention_count;
+      sub.textContent = `${st.model} · ${n ? n + ' need you' : 'all clear'}`;
+      sub.style.color = n ? 'var(--err)' : 'var(--dim)';
+    } catch (e) { sub.textContent = 'controller offline (:8799)'; sub.style.color = 'var(--err)'; }
+  }
+  async function send(text) {
+    if (busy || !text.trim()) return; busy = true;
+    add('me', text); const think = add('think', 'thinking…');
+    try {
+      const out = await api('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }) });
+      think.remove(); addBot(out);
+    } catch (e) { think.remove(); add('bot', '⚠️ controller unreachable on :8799'); }
+    busy = false; box.focus(); refresh();
+  }
+  function open() {
+    drawer.hidden = false; scrim.hidden = false; btn.classList.add('on');
+    requestAnimationFrame(() => drawer.classList.add('open'));
+    if (!greeted) { greeted = true; add('bot', "Hi — I'm your fleet PM. Ask what needs you, or tell me to start work on a project."); }
+    refresh(); setTimeout(() => box.focus(), 60);
+  }
+  function close() {
+    drawer.classList.remove('open'); scrim.hidden = true; btn.classList.remove('on');
+    setTimeout(() => { drawer.hidden = true; }, 180);
+  }
+  btn.onclick = () => drawer.classList.contains('open') ? close() : open();
+  document.getElementById('pmClose').onclick = close;
+  scrim.onclick = close;
+  document.getElementById('pmReset').onclick = async () => {
+    try { await api('/api/reset', { method: 'POST' }); } catch (e) {}
+    log.innerHTML = ''; greeted = false; add('bot', 'Conversation reset.');
+  };
+  document.getElementById('pmForm').addEventListener('submit', e => {
+    e.preventDefault(); const t = box.value; box.value = ''; box.style.height = 'auto'; send(t);
+  });
+  box.addEventListener('input', () => { box.style.height = 'auto'; box.style.height = Math.min(box.scrollHeight, 120) + 'px'; });
+  box.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('pmForm').requestSubmit(); } });
+})();
 
 connect();   // fleet: the passkey gate is the door. direct: the loopback harness needs no token, so always
              // connect; only a non-loopback (BIND=0.0.0.0) server that actually rejects surfaces a login
