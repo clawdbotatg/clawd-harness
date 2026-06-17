@@ -229,6 +229,7 @@
         background:transparent; border:1px solid var(--edge); color:var(--dim); border-radius:6px;
         padding:4px 9px; font-size:11px; font-family:var(--mono); cursor:pointer; }
   #sessionbar .pmctl:hover { border-color:var(--accent); color:var(--accent); }
+  #sessionbar select.pmctl { -webkit-appearance:none; appearance:none; padding-right:9px; }
   /* mobile: collapse header to icon-only buttons so the bar fits + stops over-scrolling */
   @media (pointer: coarse) {
     header { gap:8px; padding:8px 10px; }
@@ -658,6 +659,7 @@ let pmCurrent = null;    // selected thread id
 let pmMessages = [];     // current thread's transcript [{who,text,trace}]
 let pmArchOpen = false;  // whether archived threads are revealed in the bar
 let pmLoaded = false, pmBusy = false;
+let pmState = { models: [], model: '', backend: 'bankr' };  // /api/state cache for the model picker
 // PM thinking-spinner state (declared early — hoisted render fns touch it at boot)
 let pmThinkEl = null, pmThinkTimer = null, pmSpinTimer = null, pmThinkStart = 0, pmSpinFrame = 0;
 
@@ -2774,6 +2776,19 @@ function renderPmBar(bar, wasHidden) {
   if (archN) ctl(pmArchOpen ? 'hide archived' : '🗄 ' + archN, 'Show / hide archived threads',
                  () => { pmArchOpen = !pmArchOpen; renderPmBar(bar, false); });
   ctl('🛠', 'PM debug (prompt, tools, raw data)', () => window.open(PM_BASE + '/debug', '_blank'));
+  // model picker — only meaningful for the bankr backend (claude-code -p drives
+  // its own model). Fed from the cached /api/state (pmRefreshBadge keeps it warm).
+  if ((pmState.backend || 'bankr') === 'bankr' && (pmState.models || []).length) {
+    const sel = document.createElement('select');
+    sel.className = 'pmctl'; sel.title = 'PM model (Bankr brain)';
+    pmState.models.forEach(m => { const o = document.createElement('option'); o.value = m; o.textContent = m; sel.appendChild(o); });
+    if (pmState.model) sel.value = pmState.model;
+    sel.onchange = async e => {
+      const m = e.target.value;
+      try { await pmApi('/api/model', pmPost({ model: m })); pmState.model = m; } catch (err) {}
+    };
+    bar.appendChild(sel);
+  }
   bar.hidden = false;
   if (wasHidden) refitTTY();
 }
@@ -2789,6 +2804,7 @@ async function pmLoadMessages() {
 }
 async function openPM() {
   setView('pm');                       // show immediately (renders current state)
+  pmRefreshBadge();                    // populate pmState → the model picker shows without waiting for the poll
   try { pmApplyThreads(await pmApi('/api/threads')); } catch (e) { /* controller offline → greeting */ }
   await pmLoadMessages();
   syncComposer();                      // swap the footer box to this thread's draft
@@ -2839,6 +2855,11 @@ async function pmRefreshBadge() {
     const st = await pmApi('/api/state'); const n = st.attention_count;
     statusEl.title = 'Fleet PM — ' + (n ? n + ' need you' : 'all clear');
     statusEl.classList.toggle('needs', !!n);
+    // cache model/backend for the PM-bar picker; re-render the bar if it changed
+    const changed = st.model !== pmState.model || (st.models || []).join() !== (pmState.models || []).join()
+                    || st.backend !== pmState.backend;
+    pmState = { models: st.models || [], model: st.model || '', backend: st.backend || 'bankr' };
+    if (changed && currentView() === 'pm') renderSessionBar('pm');
   } catch (e) { statusEl.title = 'Fleet PM (controller offline)'; statusEl.classList.remove('needs'); }
 }
 // #status opens the PM view, or leaves it (back to projects/sessions) if already there.
