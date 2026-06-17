@@ -136,6 +136,12 @@ def name_at_prompt(count):
 NAME_SYS_PROMPT = ("You name software-engineering sessions. Given a transcript, "
                    "reply with ONLY compact JSON and nothing else: "
                    '{"title": "<max 5 words>", "desc": "<max 12 words>"}. '
+                   "Name the session by its MAIN objective — the overarching task "
+                   "it was set up to accomplish, usually established in the opening "
+                   "messages. Treat later one-off questions or tangents (a passing "
+                   "pricing/how-to/model question) as side-quests: do NOT let them "
+                   "redefine the name unless the session's whole focus has clearly "
+                   "and durably shifted to a new task. "
                    "The title is a terse label; the desc is a one-line summary.")
 # The *digest* is the volatile companion to the (stable) title/desc: a one-line
 # "what is this session doing right now", refreshed on every Stop so a controller
@@ -556,7 +562,16 @@ class ClaudeSession:
             elif ev.get("role") == "assistant" and ev.get("text"):
                 chunks.append("Claude: " + ev["text"])
         text = "\n".join(chunks)
-        return text[-cap:]
+        if len(text) <= cap:
+            return text
+        # Keep BOTH the session's founding context (the head — what it was set up
+        # to do) and the most recent activity (the tail), so a late tangent (a
+        # one-off question) can't evict the original objective from the namer's
+        # window. A pure tail-truncation (text[-cap:]) used to drop the opening
+        # task once a session got long, making the name chase whatever was latest.
+        head = int(cap * 0.45)
+        tail = cap - head - 3                        # 3 for the "\n…\n" elision marker
+        return text[:head] + "\n…\n" + text[-tail:]
 
     def resize(self, cols, rows):
         if self.master_fd is not None and cols and rows:
