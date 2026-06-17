@@ -690,12 +690,23 @@ function connect() {
   ws.onclose = () => {
     dot.classList.remove('up');
     for (const k of Object.keys(e2eChans)) delete e2eChans[k];   // sessions die with the connection → re-handshake
-    // A close *before* we ever opened, when the page itself was just served by the
-    // relay, almost always means auth (the box is clearly up). The browser hides
-    // the 403 behind code 1006, so we infer it: after a couple of pre-open closes,
-    // stop hammering a dead token and surface the paste-a-new-token screen. This is
-    // also how an expired token (weekly rotation) lands the user back at login.
-    if (!FLEET && !opened && ++authFails >= 2) {   // direct mode only: bad/expired harness token
+    // A close *before* we ever opened usually means auth: the browser hides the 403
+    // behind code 1006, so we infer a bad/expired token from repeated pre-open
+    // closes and surface the paste-a-new-token screen (also how a weekly rotation
+    // lands the user back at login). But
+    // when we KNOW the server is restarting (`_updating` — the `go`/reload path is
+    // in flight), a pre-open close is *expected*: the daemon is mid-respawn, not
+    // rejecting us. Tripping the login kill-switch here `return`s without arming
+    // another reconnect, tearing the loop down — so the BOOT_ID-after-reconnect
+    // reload never fires and the user is stranded on the "Updating…" overlay until
+    // the 25s safety net (or a manual reload). So while updating, skip the check
+    // and just keep retrying until the server is back and a new boot id reloads us.
+    // Threshold of 4 (≈4.8s at the 1200ms retry) — not 2 — so a *hard* restart
+    // (launchctl/env-change, which sends no `go`, so `_updating` is false) gets time
+    // to respawn before we mistake the gap for a bad token and strand the user on
+    // login instead of the BOOT_ID-after-reconnect reload. A truly expired token
+    // still surfaces login within a few seconds.
+    if (!FLEET && !opened && !_updating && ++authFails >= 4) {   // direct mode only: bad/expired harness token
       clearToken();
       return showLogin('Token expired or invalid — paste a current one.');
     }
