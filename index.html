@@ -520,22 +520,26 @@ function refitTTY() {
   requestAnimationFrame(() => { fit.fit(); sendResize(); term.refresh(0, term.rows - 1); term.scrollToBottom(); bottomJustifyTTY(); });
 }
 
-// A HARD repaint — exactly what dragging the window border does: re-fit, then
-// force xterm to CLEAR and RE-RENDER ITS ENTIRE BUFFER. We need the full
-// re-render, not term.refresh() (which only repaints rows xterm thinks changed),
-// because the server streams a session's replayed screen into the buffer while
-// #term is still display:none / mid-layout — those rows get a buffer entry but
-// never a paint, so they stay black ("only the characters that keep updating are
-// visible") until something forces a full redraw. Toggling the row count by one
-// and back drives xterm's resize path, which does that full clear+repaint — the
-// same code a window resize runs. That's the behaviour you get when you nudge
-// the window, done deliberately on landing.
+// A HARD repaint — exactly what dragging the window border does. The real bug:
+// term.open() and the first fit.fit() run at BOOT, while #term is display:none
+// (the app lands on the projects rung first). xterm measures the character cell
+// against a hidden element → caches a wrong/zero cell size → every row then
+// renders with squished, overlapping glyphs. fit.fit() and a resize round-trip
+// both REUSE that cached measurement, so they never fix it — only a window
+// resize did, because that path forces xterm to RE-MEASURE the cell while it's
+// visible. So we re-measure here: nudging fontSize down-and-back drives xterm's
+// own re-measure + full re-render pipeline (public options API) against the
+// now-visible element, then fit.fit() recomputes rows/cols with the correct
+// cell size. This is the behaviour you get when you nudge the window, done
+// deliberately on landing.
 function hardRepaint() {
   if (currentView() !== 'tty') return;
-  fit.fit();
-  const c = term.cols, r = term.rows;
-  if (r > 1) { term.resize(c, r - 1); term.resize(c, r); }   // round-trip → full re-render of the whole buffer
-  else term.refresh(0, term.rows - 1);
+  const el = document.getElementById('term');
+  if (!el || !el.clientHeight) return;     // still hidden / zero-size → measuring now would re-cache garbage; wait for a later pass
+  const fs = term.options.fontSize || 13;
+  term.options.fontSize = fs - 1;          // each assignment fires xterm's re-measure + full re-render…
+  term.options.fontSize = fs;              // …ending back at the right size, now measured while visible
+  fit.fit();                               // recompute rows/cols against the corrected cell size
   sendResize();
   term.scrollToBottom();
   bottomJustifyTTY();
