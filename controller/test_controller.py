@@ -80,6 +80,22 @@ def main():
         assert verbs.open_project("self", "nope")["ok"] is False
     check("open_session/open_project build deep links (read-only)", t_open_links)
 
+    def t_fleet_links():
+        # Fleet/box mode: machine-prefixed route, no token, no box-internal port —
+        # the browser rebuilds host-relative against the public relay origin.
+        from . import config
+        saved = config.RELAY_URL
+        config.RELAY_URL = "ws://127.0.0.1:8788"
+        try:
+            r = verbs.open_session("self", "c1", view="tty")
+            assert r["ok"] and r["path"] == "/#/m/self/p/p1/s/c1/tty", r
+            assert r["port"] is None and "?t=" not in r["path"], r
+            rp = verbs.open_project("self", "p1")
+            assert rp["path"] == "/#/m/self/p/p1" and rp["port"] is None, rp
+        finally:
+            config.RELAY_URL = saved
+    check("fleet deep links are machine-prefixed + host-relative", t_fleet_links)
+
     def t_readonly_blocks_write():
         r = verbs.ask("self", "c1", "hello")
         assert r["ok"] is False and r.get("blocked"), r

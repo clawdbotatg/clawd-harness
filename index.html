@@ -2691,7 +2691,12 @@ const pmApi = async (path, opts) => (await fetch(PM_BASE + path, opts)).json();
 // Rebuild a PM-minted deep link against THIS browser's hostname (so a link made
 // on localhost still opens over the LAN), matching the controller chat's navHref.
 function pmNavHref(r) {
-  if (r.port && r.path) return location.protocol + '//' + location.hostname + ':' + r.port + r.path;
+  // Direct mode carries an explicit port (the chat origin ≠ the harness origin),
+  // so rebuild host:port. Fleet mode omits the port (`port:null`) — the relay
+  // serves chat + harness at one public origin, so rebuild against location.origin
+  // (no box-internal :8788). Fall back to the absolute url for non-browser clients.
+  if (r.path) return r.port ? location.protocol + '//' + location.hostname + ':' + r.port + r.path
+                            : location.origin + r.path;
   return r.url || null;
 }
 // PM's own thinking spinner — independent of the session's singleton (a background

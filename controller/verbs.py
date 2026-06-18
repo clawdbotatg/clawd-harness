@@ -76,21 +76,32 @@ class Verbs:
     # Read-only — these build a deep link, they don't touch the fleet. The chat
     # UI renders any result carrying `nav:true` as an "Open ↗" button (and the
     # url is in the reply text too, so Telegram/non-browser clients still get it).
-    def _harness_link(self, pid=None, cid=None, view="transcript"):
+    def _harness_link(self, pid=None, cid=None, view="transcript", machine=None):
         """Build the deep link into the harness UI. Hash route mirrors index.html:
-        `#/` projects · `#/p/<pid>` sessions · `#/p/<pid>/s/<cid>` transcript ·
-        `…/tty` terminal. Returns both an absolute `url` and the host-relative
-        `path` + `port` so the browser can rebuild it against its own hostname
-        (so a link made on localhost still works when the chat is opened over LAN)."""
+        direct mode  `#/p/<pid>/s/<cid>` ; fleet/box mode is machine-prefixed —
+        `#/m/<machine>/p/<pid>/s/<cid>` (`…/tty` for the terminal). Returns an
+        absolute `url` plus a host-relative `path` (+ `port`) so the browser can
+        rebuild it against its own origin — see pmNavHref()/navHref() in the UI.
+
+        Fleet mode (CONTROLLER_RELAY set): the UI is served by the public relay at
+        its own origin under a passkey, so the link drops the harness `?t=` token
+        and the box-internal :8788 port (`port=None` → the browser rebuilds against
+        the public origin it's already viewing). Direct mode keeps the token+port."""
         from . import config
+        seg = ""
+        if config.fleet_mode() and machine:
+            seg = "m/" + urllib.parse.quote(machine) + "/"
+        if cid and pid:
+            frag = f"#/{seg}p/{pid}/s/{cid}" + ("/tty" if view == "tty" else "")
+        elif pid:
+            frag = f"#/{seg}p/{pid}"
+        else:
+            frag = f"#/{seg}"
+        if config.fleet_mode():
+            path = "/" + frag                       # → /#/m/<machine>/…  (host-relative)
+            return {"url": config.public_ui_base() + path, "path": path, "port": None}
         base = config.harness_http_base()
         token = config.harness_token()
-        if cid and pid:
-            frag = f"#/p/{pid}/s/{cid}" + ("/tty" if view == "tty" else "")
-        elif pid:
-            frag = f"#/p/{pid}"
-        else:
-            frag = "#/"
         path = (f"/?t={urllib.parse.quote(token)}" if token else "/") + frag
         parsed = urllib.parse.urlparse(base)
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -104,7 +115,7 @@ class Verbs:
         if s.get("error"):
             return {"ok": False, "error": s["error"]}
         pid = s.get("pid")
-        link = self._harness_link(pid, cid, view)
+        link = self._harness_link(pid, cid, view, machine=machine)
         return {"ok": True, "nav": True, "machine": machine, "pid": pid,
                 "cid": cid, "view": view, "title": s.get("title") or cid, **link}
 
@@ -116,7 +127,7 @@ class Verbs:
         proj = next((p for p in c.state()["projects"] if p.get("pid") == pid), None)
         if not proj:
             return {"ok": False, "error": f"no such project: {pid}"}
-        link = self._harness_link(pid)
+        link = self._harness_link(pid, machine=machine)
         return {"ok": True, "nav": True, "machine": machine, "pid": pid,
                 "name": proj.get("name") or pid, **link}
 

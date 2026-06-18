@@ -115,8 +115,11 @@ function add(cls, text){
 }
 function navHref(r){
   // Rebuild against THIS browser's hostname so a link minted on localhost still
-  // works when the chat is open over the LAN (phone). Fall back to the absolute url.
-  if (r.port && r.path) return location.protocol+"//"+location.hostname+":"+r.port+r.path;
+  // works when the chat is open over the LAN (phone). Direct mode carries an
+  // explicit port (chat origin ≠ harness origin); fleet mode omits it (relay
+  // serves both at one public origin → use location.origin, no :8788).
+  if (r.path) return r.port ? location.protocol+"//"+location.hostname+":"+r.port+r.path
+                            : location.origin+r.path;
   return r.url || null;
 }
 const GREETING = "Hi — I'm your fleet PM. Ask me what needs your attention, or tell me to start work on a project.";

@@ -107,6 +107,21 @@ def harness_token():
         return ""
 
 
+def _ws_to_http(base):
+    if base.startswith("wss://"):
+        return "https://" + base[len("wss://"):].rstrip("/")
+    if base.startswith("ws://"):
+        return "http://" + base[len("ws://"):].rstrip("/")
+    return base.rstrip("/")
+
+
+def fleet_mode():
+    """True in box mode: the controller drives the whole fleet through the relay,
+    so harness UI deep links must be machine-prefixed (`#/m/<machine>/…`) and
+    served from the relay's PUBLIC origin — not the box-internal WS endpoint."""
+    return bool(RELAY_URL)
+
+
 def harness_http_base():
     """The harness UI's HTTP origin, derived from the WS URL the controller dials
     (ws→http, wss→https). Direct mode → the local harness; relay/box mode → the
@@ -117,12 +132,24 @@ def harness_http_base():
     explicit = cfg("CONTROLLER_HARNESS_HTTP")
     if explicit:
         return explicit.rstrip("/")
-    base = RELAY_URL or HARNESS_WS or "ws://127.0.0.1:8787"
-    if base.startswith("wss://"):
-        return "https://" + base[len("wss://"):].rstrip("/")
-    if base.startswith("ws://"):
-        return "http://" + base[len("ws://"):].rstrip("/")
-    return base.rstrip("/")
+    return _ws_to_http(RELAY_URL or HARNESS_WS or "ws://127.0.0.1:8787")
+
+
+def public_ui_base():
+    """The PUBLIC origin the harness UI is actually reached at — for the absolute
+    url baked into deep links (Telegram/non-browser clients can't rebuild against a
+    browser origin). In fleet/box mode the controller dials the relay over a
+    box-internal `ws://127.0.0.1:8788`, but users reach the UI at the relay's public
+    host, so prefer an explicit CONTROLLER_HARNESS_HTTP, then the fleet relay host
+    (FLEET_RELAY, wss→https), before falling back to the WS-derived base."""
+    explicit = cfg("CONTROLLER_HARNESS_HTTP")
+    if explicit:
+        return explicit.rstrip("/")
+    if RELAY_URL:
+        fr = cfg("FLEET_RELAY")
+        if fr:
+            return _ws_to_http(fr)
+    return harness_http_base()
 
 
 def llm_chat(messages, model=None, max_tokens=1024, temperature=0.4, timeout=60):
