@@ -521,6 +521,17 @@ function bottomJustifyTTY() {
 }
 term.onRender(bottomJustifyTTY);
 
+// Sticky-bottom follow: the TTY should chase live output ONLY while the viewport
+// is already pinned to the bottom. The moment the user scrolls up to read, we
+// stop yanking them back down on every PTY burst; scrolling back to the bottom
+// re-arms the follow. (viewportY is the top line shown; baseY is the top line of
+// the bottom-most scroll position — equal ⇒ we're at the bottom.) A 1-row slop
+// keeps "almost at the bottom" counting as bottom across cell rounding.
+function ttyAtBottom() {
+  const b = term.buffer && term.buffer.active;
+  return !b || (b.baseY - b.viewportY) <= 1;
+}
+
 // Inserting/removing a header row (the session-tabs bar, the restart banner)
 // shrinks or grows <main> without firing a window resize, so xterm keeps its
 // stale row count and the TTY sits mis-positioned until you manually resize the
@@ -727,7 +738,7 @@ function connect() {
   ws.onmessage = (e) => {
     if (typeof e.data === 'string') { FLEET ? handleRelay(JSON.parse(e.data)) : handleJson(JSON.parse(e.data)); }
     else if (FLEET) { handleBinary(e.data); }
-    else { term.write(new Uint8Array(e.data), () => term.scrollToBottom()); scheduleHardRepaint(); }   // direct: raw PTY — debounce a hard repaint of the replayed screen
+    else { const stick = ttyAtBottom(); term.write(new Uint8Array(e.data), () => { if (stick) term.scrollToBottom(); }); scheduleHardRepaint(); }   // direct: raw PTY — follow only if already pinned to bottom; debounce a hard repaint of the replayed screen
   };
 }
 
@@ -1049,7 +1060,7 @@ function e2eOnRecord(machine, rec) {
     let out;
     try { out = await ch.session.open(rec); } catch { return; }   // drop bad/replayed
     if (machine !== currentMachine) return;
-    if (out.kind === E2E.KIND_BIN) { term.write(out.payload, () => term.scrollToBottom()); scheduleHardRepaint(); }
+    if (out.kind === E2E.KIND_BIN) { const stick = ttyAtBottom(); term.write(out.payload, () => { if (stick) term.scrollToBottom(); }); scheduleHardRepaint(); }
     else handleJson(JSON.parse(new TextDecoder().decode(out.payload)));
   }).catch(() => {});
 }
