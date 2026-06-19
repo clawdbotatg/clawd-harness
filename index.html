@@ -74,7 +74,7 @@
   #left  { flex:1; }
   #right { flex:1; background:var(--bg); }
   .col.hidden { display:none; }
-  #term { flex:1; min-height:0; padding:6px 4px 0 8px; margin-bottom:10px; background:#000; touch-action:pan-y;
+  #term { flex:1; min-height:0; padding:6px 4px 0 8px; background:#000; touch-action:pan-y;
           overflow:hidden; }
   /* bottom-justify the TTY: the xterm grid fills #term (so the PTY size claude sees is the
      real height), but claude prints its content into the TOP rows and leaves the rest of the
@@ -505,7 +505,14 @@ function bottomJustifyTTY() {
   // vanishes entirely. This is the "I can't see the tty at all" bug.
   if (last < 0) { screen.style.transform = ''; return; }
   const cell = rowsEl.children[0].offsetHeight || 0;
-  const off = Math.max(0, screen.clientHeight - (last + 1) * cell);
+  // Don't peg the last row flush to the very bottom edge — translate down LIFT px
+  // less. Two reasons: (1) it floats the content a hair clear of the footer instead
+  // of crowding it; (2) xterm's fit rounds the grid to whole rows, so the screen can
+  // end up 1-2px taller than #term's box and the last row clips at the bottom edge —
+  // LIFT absorbs that slop so the line is never sliced. Clamp ≥0 so a full screen
+  // (off already 0, content scrolled) is left untouched.
+  const LIFT = 8;
+  const off = Math.max(0, screen.clientHeight - (last + 1) * cell - LIFT);
   screen.style.transform = off ? 'translateY(' + off + 'px)' : '';
 }
 term.onRender(bottomJustifyTTY);
