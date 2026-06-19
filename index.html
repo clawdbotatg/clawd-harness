@@ -505,14 +505,18 @@ function bottomJustifyTTY() {
   // vanishes entirely. This is the "I can't see the tty at all" bug.
   if (last < 0) { screen.style.transform = ''; return; }
   const cell = rowsEl.children[0].offsetHeight || 0;
-  // Don't peg the last row flush to the very bottom edge — translate down LIFT px
-  // less. Two reasons: (1) it floats the content a hair clear of the footer instead
-  // of crowding it; (2) xterm's fit rounds the grid to whole rows, so the screen can
-  // end up 1-2px taller than #term's box and the last row clips at the bottom edge —
-  // LIFT absorbs that slop so the line is never sliced. Clamp ≥0 so a full screen
-  // (off already 0, content scrolled) is left untouched.
-  const LIFT = 8;
-  const off = Math.max(0, screen.clientHeight - (last + 1) * cell - LIFT);
+  // Anchor the last content row a constant GAP px above #term's inner bottom edge.
+  // Measure against the *container's* content height — NOT the rendered grid height
+  // (screen.clientHeight) — so the gap stays consistent regardless of xterm's
+  // whole-row fit rounding. Otherwise the sub-cell remainder leaks into the gap and
+  // some window heights look tight (~6px) while others look loose (~16px); GAP also
+  // keeps the row clear of the clip edge so it's never sliced. Clamp ≥0 so a full /
+  // scrolled screen (content taller than the viewport) stays pegged to the bottom.
+  const GAP = 12;
+  const termEl = document.getElementById('term');
+  const tcs = termEl && getComputedStyle(termEl);
+  const availH = termEl ? termEl.clientHeight - parseFloat(tcs.paddingTop) - parseFloat(tcs.paddingBottom) : screen.clientHeight;
+  const off = Math.max(0, availH - (last + 1) * cell - GAP);
   screen.style.transform = off ? 'translateY(' + off + 'px)' : '';
 }
 term.onRender(bottomJustifyTTY);
