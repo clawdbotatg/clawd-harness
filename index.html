@@ -699,7 +699,59 @@ let pmThinkEl = null, pmThinkTimer = null, pmSpinTimer = null, pmThinkStart = 0,
 
 function clearToken() { try { localStorage.removeItem(TOKEN_KEY); } catch {} }
 
+// -- staying current across reconnects, sleep/wake, and tab-switches -----------
+// The browser↔server socket can die invisibly: a laptop sleeps, wifi flips, a
+// deploy bounces the server, or a phone backgrounds the tab. When it comes back
+// we must (a) re-establish the socket and (b) RE-SUBSCRIBE — a fresh socket is a
+// blank server-side client with NO session bound, so until we re-subscribe the
+// TTY is frozen AND sends are dropped on the floor (a send carries no cid; the
+// server resolves it via the socket's bound session, which is None until we
+// subscribe). That's the "I hit enter, it vanished, reload brought it back" bug:
+// the reload re-subscribed; nothing else did.
+let reconnectTimer = null;     // single pending reconnect (idempotent scheduling)
+let hiddenAt = 0;              // when the tab was last backgrounded (to gauge "away a while?")
+let outbound = [];            // sends issued while the link was down — delivered once we're back (this tab only)
+function scheduleReconnect(delay) {
+  if (reconnectTimer) return;                       // already pending — don't stack sockets
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, delay);
+}
+// Deliver sends that couldn't go out while the socket was down, so the user never
+// has to re-type or re-hit-enter. The outbox is the cross-reload backstop; this is
+// the no-reload (auto-reconnect) one. Runs AFTER a (re)subscribe so the server has
+// a session bound before the send lands.
+function flushOutbound() {
+  if (!outbound.length || !ws || ws.readyState !== 1) return;
+  const q = outbound; outbound = [];
+  for (const it of q) { if (!hsend({ type: 'send', text: it.full })) outbound.push(it); }
+}
+// Send now if the link is live; if it's down, queue + kick a reconnect so the
+// text is delivered the moment we're back (and kept in the outbox for a reload).
+function deliverSend(cid, full, recover) {
+  stashOutbox(cid, recover);
+  if (!hsend({ type: 'send', text: full })) { outbound.push({ cid, full }); scheduleReconnect(0); }
+}
+// Pull a fresh copy of what we're viewing: re-subscribe replays the live TTY
+// screen + recent transcript (and, in fleet, re-ensures the secure channel). The
+// "refresh the tty so I'm looking at current state" primitive.
+function resync() {
+  if (!ws || ws.readyState !== 1) { scheduleReconnect(0); return; }
+  if (FLEET && currentMachine) hsend({ type: 'list' });
+  const v = currentView();
+  if (currentCid && (v === 'tty' || v === 'transcript')) subscribe(currentCid);   // only reset the term when we're actually viewing the session
+  flushOutbound();
+}
+// The tab/window/network just came back to life — make sure we're showing current
+// state. Down socket → reconnect (onopen re-subscribes). Live socket after a real
+// absence → resync. Quick glance → just repaint the buffer we already have.
+function wake() {
+  if (!ws || ws.readyState > 1) { scheduleReconnect(0); return; }
+  const awayMs = hiddenAt ? Date.now() - hiddenAt : 0;
+  if (awayMs > 3000) resync();
+  else if (currentView() === 'tty') hardRepaint();
+}
+
 function connect() {
+  if (ws && ws.readyState !== WebSocket.CLOSED) return;   // already connecting/open/closing — don't stack a second socket
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   // Fleet mode dials the RELAY as a mobile client; direct mode dials the harness.
   ws = new WebSocket(`${proto}://${location.host}/ws?${FLEET ? 'role=mobile' : 't=' + encodeURIComponent(token)}`);
@@ -709,13 +761,22 @@ function connect() {
   ws.onopen = () => {
     opened = true; authFails = 0;   // a successful open proves the token is good
     dot.classList.add('up');
-    if (!FLEET) { sendResize(); if (!currentCid) meta.textContent = ''; return; }  // direct: the harness pushes projects
+    if (!FLEET) {
+      sendResize();
+      // A fresh socket is unsubscribed server-side: re-bind the session so the PTY
+      // stream resumes AND sends can resolve their target again. (First boot has no
+      // currentCid yet — resolvePendingNav subscribes from the URL instead.)
+      if (currentCid) { subscribe(currentCid); flushOutbound(); }
+      else meta.textContent = '';
+      return;
+    }
     if (!currentMachine) { meta.textContent = ''; return; }   // on the machines rung — nothing to re-sync
     // Reconnects get a fresh relay mobile id → the worker opens a fresh harness
     // link, so re-fetch this machine's projects/sessions and re-subscribe.
     hsend({ type: 'list' });
     if (currentCid) hsend({ type: 'subscribe', cid: currentCid });
     sendResize();
+    flushOutbound();
   };
   ws.onclose = () => {
     dot.classList.remove('up');
@@ -741,7 +802,7 @@ function connect() {
       return showLogin('Token expired or invalid — paste a current one.');
     }
     meta.textContent = 'reconnecting…';
-    setTimeout(connect, 1200);
+    scheduleReconnect(800);
   };
   ws.onmessage = (e) => {
     if (typeof e.data === 'string') { FLEET ? handleRelay(JSON.parse(e.data)) : handleJson(JSON.parse(e.data)); }
@@ -754,13 +815,14 @@ function connect() {
 // current machine (toMachine); direct mode sends it straight to the harness —
 // so every call site that used to do ws.send(JSON.stringify(frame)) goes here.
 function hsend(frame) {
-  if (!ws || ws.readyState !== 1) return;
-  if (!FLEET) { ws.send(JSON.stringify(frame)); return; }
-  if (!currentMachine) return;
+  if (!ws || ws.readyState !== 1) return false;
+  if (!FLEET) { ws.send(JSON.stringify(frame)); return true; }
+  if (!currentMachine) return false;
   const ch = e2eChans[currentMachine];
-  if (ch && ch.status === 'open') { e2eSendFrame(currentMachine, frame); return; }
+  if (ch && ch.status === 'open') { e2eSendFrame(currentMachine, frame); return true; }
   e2eEnsure(currentMachine).catch(() => {});   // start the secure handshake if needed
   e2eChans[currentMachine].queue.push(frame);  // queued until the channel opens
+  return true;                                 // queued → delivers when the secure channel opens
 }
 
 // Relay → us. `machineMsg` carries a harness frame (act on it only if it's from
@@ -771,7 +833,7 @@ function handleRelay(m) {
     if (m.session) saveSession(m.session, m.expires);
     hidePasskey(); meta.textContent = '';
     // re-sync the viewed machine after a (re)auth — onopen's sends were pre-auth
-    if (currentMachine) { hsend({ type: 'list' }); if (currentCid) hsend({ type: 'subscribe', cid: currentCid }); sendResize(); }
+    if (currentMachine) { hsend({ type: 'list' }); if (currentCid) hsend({ type: 'subscribe', cid: currentCid }); sendResize(); flushOutbound(); }
     return;
   }
   if (m.type === 'machines') { hidePasskey(); renderMachines(m.machines || []); return; }
@@ -2180,8 +2242,7 @@ function sendMessage() {
     setTimeout(flushPendingSend, 8000);   // fallback if the SessionStart hook never lands
     return;
   }
-  hsend({ type: 'send', text: full });
-  stashOutbox(currentCid, text || full);  // hold until claude confirms (UserPromptSubmit) — survives a mid-send restart
+  deliverSend(currentCid, full, text || full);  // send now if live; if the link is down, queue + reconnect so you never re-hit-enter (also kept in the outbox for a reload)
   viewBeforeQuestion = null;          // you're acting here on purpose — don't auto-return
   addPending(full, text || ready.map(a => a.name).join(', ') || full);
   box.value = ''; autosizeBox(); clearDraft(); attachments = []; renderChips();
@@ -2936,6 +2997,16 @@ if (parseHash().view === 'pm') openPM();   // deep-linked straight to the PM
 connect();   // fleet: the passkey gate is the door. direct: the loopback harness needs no token, so always
              // connect; only a non-loopback (BIND=0.0.0.0) server that actually rejects surfaces a login
              // lazily via the authFails path in ws.onclose.
+
+// "Austin's back and looking at the window — make sure it's live." Bringing the
+// tab/window into focus, or the network returning, wakes us: reconnect if the
+// socket died while we were away, else resync the TTY to current state.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) hiddenAt = Date.now();
+  else { wake(); hiddenAt = 0; }
+});
+window.addEventListener('focus', wake);
+window.addEventListener('online', () => scheduleReconnect(0));
 </script>
 </body>
 </html>
