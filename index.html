@@ -2068,14 +2068,23 @@ function currentDraftId() {
 // On send we clear the draft but stash the text here; we only drop it once claude
 // confirms receipt (UserPromptSubmit). So if a restart/reload lands in that window,
 // the text comes back into the box instead of vanishing. (See syncComposer.)
+// *** sessionStorage, NOT localStorage — this is a PER-TAB recovery net. ***
+// A send is something ONE tab did; only that tab should recover it across its own
+// reload. In localStorage it bled across tabs: tab B (which never sent) inherits
+// tab A's pending text and resurrects it on reload — even after you deliberately
+// cleared the box. And the window is long, not a blink: claude can sit busy/queued
+// for minutes before UserPromptSubmit fires and clears the outbox. sessionStorage
+// survives a reload of this tab (its whole job) but dies with the tab and never
+// crosses to another one.
 const outboxKey = (cid) => 'cc_outbox:' + (cid || '_');
-function stashOutbox(cid, text) { try { if (cid && text) localStorage.setItem(outboxKey(cid), text); } catch {} }
-function clearOutbox(cid) { try { localStorage.removeItem(outboxKey(cid)); } catch {} }
+function stashOutbox(cid, text) { try { if (cid && text) sessionStorage.setItem(outboxKey(cid), text); } catch {} }
+function clearOutbox(cid) { try { sessionStorage.removeItem(outboxKey(cid)); } catch {} }
 // Text typed on the sessions list (no session yet) — survives reload before the
-// new session even exists; recovered into the new-session composer.
+// new session even exists; recovered into the new-session composer. Per-tab too
+// (sessionStorage), for the same reason as the outbox above.
 const PENDING_KEY = 'cc_pendingsend';
-function stashPending(text) { try { text ? localStorage.setItem(PENDING_KEY, text) : localStorage.removeItem(PENDING_KEY); } catch {} }
-function takePending() { try { const t = localStorage.getItem(PENDING_KEY) || ''; localStorage.removeItem(PENDING_KEY); return t; } catch { return ''; } }
+function stashPending(text) { try { text ? sessionStorage.setItem(PENDING_KEY, text) : sessionStorage.removeItem(PENDING_KEY); } catch {} }
+function takePending() { try { const t = sessionStorage.getItem(PENDING_KEY) || ''; sessionStorage.removeItem(PENDING_KEY); return t; } catch { return ''; } }
 
 let activeDraftId = null;   // which context's draft is currently sitting in the box
 // Persist the box into the context it belongs to (called as you type, and before any swap).
@@ -2118,7 +2127,7 @@ function syncComposer() {
   try {
     v = localStorage.getItem(draftKey(id)) || '';
     if (!v) v = String(id).startsWith('new:') ? takePending()                          // sessions composer recovers a queued send
-                                              : (localStorage.getItem(outboxKey(id)) || '');  // session recovers an unconfirmed send
+                                              : (sessionStorage.getItem(outboxKey(id)) || '');  // session recovers an unconfirmed send (per-tab)
   } catch {}
   box.value = v;
   autosizeBox();                             // size to the restored draft (or shrink back if empty)
