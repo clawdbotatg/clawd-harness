@@ -33,7 +33,12 @@
               overscroll-behavior:none;   /* kill the browser's back/forward swipe overscroll */
               font:13px/1.55 var(--mono); -webkit-font-smoothing:antialiased; }
   #app { display:flex; flex-direction:column; height:100%; }
-  header { display:flex; align-items:center; gap:11px; padding:7px 12px;
+  /* padding-top folds in the iOS status-bar / notch inset (env() is 0 in a normal
+     browser tab, ~47–59px in the installed standalone PWA) so the header clears the
+     clock/battery instead of colliding with them. See viewport-fit=cover + the
+     black-translucent status-bar meta. */
+  header { display:flex; align-items:center; gap:11px;
+           padding:calc(7px + env(safe-area-inset-top, 0px)) 12px 7px;
            border-bottom:1px solid var(--edge); background:var(--panel); }
   #logo { width:22px; height:22px; flex:0 0 auto; display:block; border:1px solid var(--edge); }
   header h1 { font-size:13px; margin:0; font-weight:600; letter-spacing:.5px; text-transform:lowercase; cursor:pointer; }
@@ -244,7 +249,7 @@
   #sessionbar select.pmctl { -webkit-appearance:none; appearance:none; padding-right:9px; }
   /* mobile: collapse header to icon-only buttons so the bar fits + stops over-scrolling */
   @media (pointer: coarse) {
-    header { gap:8px; padding:8px 10px; }
+    header { gap:8px; padding:calc(8px + env(safe-area-inset-top, 0px)) 10px 8px; }
     header .blbl { display:none; }
     #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn { padding:6px 9px; }
     #status { font-size:11px; padding:3px 8px; }
