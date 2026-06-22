@@ -1510,6 +1510,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_file(HERE / "logo.png", "image/png")
         if path == "/logo-ui.png":
             return self._serve_file(HERE / "logo-ui.png", "image/png")
+        if path == "/manifest.webmanifest":
+            return self._serve_manifest()
+        if path == "/sw.js":
+            return self._serve_file(HERE / "sw.js", "text/javascript; charset=utf-8")
+        if path in ("/icon-180.png", "/icon-192.png", "/icon-512.png"):
+            return self._serve_file(HERE / path.lstrip("/"), "image/png")
         if path == "/pm" or path.startswith("/pm/"):
             return self._proxy_pm("GET")
         if path == "/config":
@@ -1678,6 +1684,35 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_manifest(self):
+        # PWA manifest, served dynamically so direct mode can bake the token into
+        # start_url — an installed home-screen icon then authenticates the WS on a
+        # LAN bind (loopback ignores ?t=, so it's harmless there). The relay serves
+        # its OWN bare-start_url manifest (the passkey is the sole credential in
+        # fleet mode); see fleet/relay.py. start_url stays same-origin/same-scope so
+        # the launched window is treated as the installed app, not a browser tab.
+        start = f"/?t={TOKEN}" if TOKEN else "/"
+        man = {
+            "name": "clawd-harness", "short_name": "clawd",
+            "description": "Drive interactive Claude Code sessions from your phone.",
+            "start_url": start, "scope": "/", "display": "standalone",
+            "orientation": "portrait-primary",
+            "background_color": "#000000", "theme_color": "#000000",
+            "icons": [
+                {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
+                {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"},
+                {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png",
+                 "purpose": "maskable"},
+            ],
+        }
+        body = json.dumps(man).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/manifest+json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 

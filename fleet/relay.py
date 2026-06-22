@@ -512,6 +512,33 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_manifest(self):
+        # PWA manifest for fleet mode. start_url is BARE (no ?t=) — fleet is
+        # passkey-only (PASSKEY_ONLY), so the passkey is the sole credential and
+        # there is no URL token to bake. The launched standalone window unlocks
+        # with the passkey exactly like a browser tab does. (Direct mode bakes the
+        # harness token instead — see server.py _serve_manifest.)
+        man = {
+            "name": "clawd-harness", "short_name": "clawd",
+            "description": "Drive interactive Claude Code sessions from your phone.",
+            "start_url": "/", "scope": "/", "display": "standalone",
+            "orientation": "portrait-primary",
+            "background_color": "#000000", "theme_color": "#000000",
+            "icons": [
+                {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
+                {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"},
+                {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png",
+                 "purpose": "maskable"},
+            ],
+        }
+        body = json.dumps(man).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/manifest+json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _pm_session_ok(self):
         """The /pm surface is gated by the same passkey session as everything else:
         the browser stores the session token (issued on passkey success) in a
@@ -582,6 +609,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_file("favicon.png", "image/png")
         if path == "/logo-ui.png":
             return self._serve_file("logo-ui.png", "image/png")
+        if path == "/manifest.webmanifest":
+            return self._serve_manifest()
+        if path == "/sw.js":
+            return self._serve_file("sw.js", "text/javascript; charset=utf-8")
+        if path in ("/icon-180.png", "/icon-192.png", "/icon-512.png"):
+            return self._serve_file(path.lstrip("/"), "image/png")
         if path == "/pm" or path.startswith("/pm/"):
             return self._proxy_pm("GET")
         if path != "/ws":

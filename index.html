@@ -2,9 +2,21 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=0.9, minimum-scale=0.9, maximum-scale=0.9, user-scalable=no" />
+<meta name="viewport" content="width=device-width, initial-scale=0.9, minimum-scale=0.9, maximum-scale=0.9, user-scalable=no, viewport-fit=cover" />
 <title>clawd-harness</title>
 <link rel="icon" type="image/png" href="favicon.png" />
+<!-- PWA: installable home-screen app (see manifest.webmanifest + sw.js). The
+     manifest is served dynamically per-mode (direct bakes ?t=<token> into
+     start_url; the relay serves a bare start_url since the passkey is the sole
+     credential). iOS half-ignores the manifest, so the apple-* tags below are
+     what give the standalone full-screen feel + icon on iPhone. -->
+<link rel="manifest" href="manifest.webmanifest" />
+<meta name="theme-color" content="#000000" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="clawd" />
+<link rel="apple-touch-icon" href="icon-180.png" />
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 <style>
   /* ── terminal brutalist · amber phosphor ───────────────────────────────
@@ -650,6 +662,15 @@ let pendingNav = null;          // nav state parsed from the URL, awaiting serve
 let pendingNewFocus = false;    // a `new` we issued — its focus should switch us in
 let pendingSendText = null;     // text typed on the sessions list — delivered once the new session boots
 let lastWrittenHash = '';       // the hash we last wrote, so hashchange ignores our own writes
+
+// PWA: register the network-only service worker so the app is installable
+// (home-screen icon, standalone full-screen). The SW never caches (see sw.js),
+// so it can't strand a stale UI against the live-reload path. Best-effort only.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
 
 // Token handling: the relay still accepts ?t=<token> in the URL (so a shared
 // link / QR carries it), but we don't LEAVE it in the address bar — on first load
