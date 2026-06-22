@@ -1711,7 +1711,21 @@ function renderSessionBar(view) {
 // Identity: same git remote = same project (fallback to name when there's no
 // remote). A repo cloned on two boxes collapses to one entry; the harness
 // self-project is the canonical multi-machine case.
-function projectKey(p) { return (p.repoUrl || '').trim() || ('name:' + (p.name || '')); }
+//
+// The remote string varies cosmetically across machines for the SAME repo — a
+// trailing `.git`, a trailing slash, https vs ssh (git@host:owner/repo), case —
+// so normalize before keying or the project shows up once per variant. We strip
+// the scheme + the git@ ssh form, drop a trailing `.git`/slash, and lowercase.
+function normRepo(url) {
+  let s = (url || '').trim();
+  if (!s) return '';
+  s = s.replace(/^git@([^:]+):/, '$1/');                 // git@github.com:owner/repo → github.com/owner/repo
+  s = s.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '');    // strip scheme (https:// ssh:// …)
+  s = s.replace(/\.git$/i, '');                          // drop trailing .git
+  s = s.replace(/\/+$/, '');                             // drop trailing slash(es)
+  return s.toLowerCase();
+}
+function projectKey(p) { return normRepo(p.repoUrl) || ('name:' + (p.name || '')); }
 function isMachineOnline(id) { return machineList.some(m => m.id === id && m.online); }
 
 // Rebuild `unifiedProjects` from every machine's cached project list. Counts come
