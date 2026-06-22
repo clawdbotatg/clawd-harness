@@ -891,9 +891,11 @@ function handleRelay(m) {
     // re-sync after a (re)auth — onopen's sends were pre-auth. Fan out to every
     // machine for the unified list, then re-subscribe whatever session we're viewing.
     fleetBootstrap();
+    syncPushSubscription();   // re-register notifications with the (possibly restarted) relay
     if (currentMachine && currentCid) { hsend({ type: 'subscribe', cid: currentCid }); sendResize(); flushOutbound(); }
     return;
   }
+  if (m.type === 'pushOk') { reflectNotifyBtn(); return; }
   if (m.type === 'machines') { hidePasskey(); renderMachines(m.machines || []); return; }
   if (m.type === 'machineMsg') {
     const msg = m.msg || {};
@@ -1427,6 +1429,88 @@ function handleJson(m) {
 // -- machines (the fleet's top rung) ----------------------------------------
 const machinesEl = document.getElementById('machinelist');
 const machinesBtn = document.getElementById('machinesBtn');
+
+// ── Web Push: "ring me when a session needs me" ──────────────────────────────
+// A header bell opts you in. iOS only allows this for an INSTALLED PWA (Add to
+// Home Screen) and only from a user gesture — so the button is gated on feature
+// support + fleet mode and does the permission ask on click. The subscription is
+// registered with the relay over the authed WS as a RAW frame (not toMachine);
+// the relay fans it to the workers, which send the bodyless tickle. sw.js shows
+// the banner. Direct mode has no push sender, so this is fleet-only.
+const notifyBtn = document.getElementById('notifyBtn');
+const PUSH_ON_KEY = 'cc_push_on';
+const pushSupported = FLEET && 'serviceWorker' in navigator
+  && 'PushManager' in window && 'Notification' in window;
+
+function reflectNotifyBtn() {
+  if (!notifyBtn) return;
+  if (!pushSupported) { notifyBtn.hidden = true; return; }
+  notifyBtn.hidden = false;
+  const perm = Notification.permission;
+  const on = perm === 'granted' && localStorage.getItem(PUSH_ON_KEY) === '1';
+  notifyBtn.classList.toggle('on', on);
+  notifyBtn.querySelector('.bico').textContent = (perm === 'denied') ? '🔕' : '🔔';
+  notifyBtn.title = perm === 'denied'
+    ? 'Notifications blocked — enable for this site in iOS Settings'
+    : (on ? 'Alerts on — tap to turn off' : 'Notify me when a session needs me');
+}
+
+function urlB64ToUint8(b64) {
+  const pad = '='.repeat((4 - b64.length % 4) % 4);
+  const s = (b64 + pad).replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+}
+
+function sendPushSubscription(sub) {
+  if (ws && ws.readyState === 1)
+    ws.send(JSON.stringify({ type: 'pushSubscribe', subscription: sub.toJSON() }));
+}
+
+async function enableNotifications() {
+  try {
+    const perm = await Notification.requestPermission();   // must ride the click gesture
+    if (perm !== 'granted') { reflectNotifyBtn(); return; }
+    const reg = await navigator.serviceWorker.ready;
+    const r = await fetch('/push/vapidPublicKey', { cache: 'no-store' });
+    const key = (await r.json()).key || '';
+    if (!key) { meta.textContent = 'push not configured on relay'; return; }
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true, applicationServerKey: urlB64ToUint8(key) });
+    localStorage.setItem(PUSH_ON_KEY, '1');
+    sendPushSubscription(sub);
+    reflectNotifyBtn();
+  } catch (e) { meta.textContent = 'notif error: ' + ((e && e.message) || e); }
+}
+
+async function disableNotifications() {
+  localStorage.removeItem(PUSH_ON_KEY);
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub && ws && ws.readyState === 1)
+      ws.send(JSON.stringify({ type: 'pushUnsubscribe', endpoint: sub.endpoint }));
+  } catch {}
+  reflectNotifyBtn();
+}
+
+// Re-send our existing subscription after each (re)auth so a restarted relay
+// (which may have lost its list) gets it back. Cheap + idempotent (deduped by
+// endpoint on the relay).
+async function syncPushSubscription() {
+  if (!pushSupported || localStorage.getItem(PUSH_ON_KEY) !== '1'
+      || Notification.permission !== 'granted') return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) sendPushSubscription(sub);
+  } catch {}
+}
+
+if (notifyBtn) notifyBtn.onclick = () =>
+  (Notification.permission === 'granted' && localStorage.getItem(PUSH_ON_KEY) === '1')
+    ? disableNotifications() : enableNotifications();
+reflectNotifyBtn();
 
 // Compact CPU/RAM/disk/GPU line for a machine card. Each metric: a label, a tiny
 // proportional bar, and "% (used/total)". Bar tints amber→red as it fills, so a

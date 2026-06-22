@@ -96,6 +96,18 @@ RP_ID = os.environ.get("FLEET_RP_ID", "h.atg.link")
 ORIGIN = os.environ.get("FLEET_ORIGIN", "https://" + RP_ID)
 PASSKEYS_FILE = Path(os.environ.get("FLEET_PASSKEY_FILE") or (HERE / ".clawd-fleet.passkeys.json"))
 WORKER_ID_FILE = HERE / ".fleet.worker_id.json"
+# Shared fleet VAPID keypair for Web Push notifications (same file the relay
+# reads for the public half). This worker signs + sends the bodyless "a session
+# needs you" tickle straight to the phone's push service. Guarded import: no
+# cryptography → no push, worker otherwise unaffected.
+VAPID_FILE = Path(os.environ.get("FLEET_VAPID_FILE") or (HERE / ".clawd-fleet.vapid.json"))
+NOTIFY_THROTTLE = 8.0   # seconds; collapse a session's notification bursts
+try:
+    import webpush as webpushmod
+    HAVE_WEBPUSH = webpushmod.HAVE_CRYPTO
+except Exception:
+    webpushmod = None
+    HAVE_WEBPUSH = False
 try:
     import e2e as e2emod
     import webauthn
@@ -285,6 +297,11 @@ class Worker:
         # the local harness and reported to the relay for the roster. None until
         # the first poll succeeds. Just three integers — never titles or content.
         self.stats = None
+        # Web Push: subscriptions handed down by the relay (the phone's, opaque)
+        # and per-session notify state for "needs you" detection + throttling.
+        self.push_subs = []
+        self._notify = {}          # cid -> {"last": ts, "waiting": bool}
+        self.vapid = webpushmod.VapidKeys.load(str(VAPID_FILE)) if HAVE_WEBPUSH else None
         # Latest system stats {cpu,ram,disk,gpu} sampled locally (sysstats.collect).
         # None until the first sample; pushed to the relay on a steady timer since
         # — unlike the counts — these change every tick.
@@ -320,6 +337,57 @@ class Worker:
             print(f"[worker {machine}] ⚠ E2E required but unavailable "
                   f"({'cryptography missing' if not HAVE_E2E else 'identity init failed'}) "
                   f"— the harness proxy is disabled (diagnostics still work).", flush=True)
+        if self.vapid and self.vapid.can_send:
+            print(f"[worker {machine}] Web Push enabled (VAPID loaded) — will ring "
+                  f"the phone when a session needs you", flush=True)
+        else:
+            why = "no cryptography" if not HAVE_WEBPUSH else f"no/invalid {VAPID_FILE.name}"
+            print(f"[worker {machine}] Web Push off ({why}) — notifications disabled",
+                  flush=True)
+
+    # ── Web Push: ring the phone when a session needs the user ───────────────
+    def cache_push_subs(self, subs, replace=False):
+        """Merge subscriptions pushed down by the relay (dedupe by endpoint)."""
+        by_ep = {} if replace else {s.get("endpoint"): s for s in self.push_subs}
+        for s in subs:
+            if s.get("endpoint"):
+                by_ep[s["endpoint"]] = s
+        self.push_subs = list(by_ep.values())
+
+    def maybe_notify(self, frame):
+        """Inspect a broadcast harness `hook` frame and ring the phone when the
+        session crosses into 'needs you': a finished turn (Stop) or a block on the
+        user (waiting=true — permission prompt / plan approval / idle nudge).
+        Per-session throttle collapses bursts. No-op without subs or a signer."""
+        if not self.push_subs or not (self.vapid and self.vapid.can_send):
+            return
+        cid = frame.get("cid")
+        ev = frame.get("event")
+        waiting = bool(frame.get("waiting"))
+        st = self._notify.setdefault(cid, {"last": 0.0, "waiting": False})
+        # Fire on Stop (turn done) or on a fresh transition into waiting (so a
+        # block that lingers across hooks only rings once).
+        fire = (ev == "Stop") or (waiting and not st["waiting"])
+        st["waiting"] = waiting
+        if not fire:
+            return
+        now = time.time()
+        if now - st["last"] < NOTIFY_THROTTLE:
+            return
+        st["last"] = now
+        threading.Thread(target=self._send_push_all, daemon=True).start()
+
+    def _send_push_all(self):
+        """Send the bodyless tickle to every subscription; prune any the push
+        service reports permanently gone (404/410)."""
+        dead = []
+        for sub in list(self.push_subs):
+            code = self.vapid.send_tickle(sub)
+            if code in (404, 410):
+                dead.append(sub.get("endpoint"))
+        if dead:
+            self.push_subs = [s for s in self.push_subs
+                              if s.get("endpoint") not in dead]
 
     # ── outbound frames to the relay ─────────────────────────────────────────
     def reply(self, to, msg):
@@ -672,6 +740,12 @@ class Worker:
                 except Exception:
                     continue
                 t = frame.get("type")
+                if t == "hook":
+                    # Broadcast to every harness client (server.py) → this standing
+                    # link sees Stop/Notification for ALL sessions even with no
+                    # viewer attached, which is exactly when the phone needs a ping.
+                    self.maybe_notify(frame)
+                    continue
                 if t == "projects":
                     nproj = len(frame.get("projects") or [])
                 elif t == "sessions":
@@ -726,6 +800,10 @@ class Worker:
                     self.drop_mobile(frame.get("mobile"))
                 elif t == "upload":
                     self.handle_upload(frame)
+                elif t == "pushSubs":          # full set on (re)connect
+                    self.cache_push_subs(frame.get("subs") or [], replace=True)
+                elif t == "pushSub":           # one new subscription
+                    self.cache_push_subs([frame.get("sub") or {}])
         finally:
             self.wfile = None
             self._drop_all_links()

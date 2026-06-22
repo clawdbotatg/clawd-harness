@@ -11,3 +11,34 @@ self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 // No respondWith() → the browser performs its default network fetch, uncached.
 self.addEventListener('fetch', () => {});
+
+// Web Push: the worker sends a BODYLESS tickle (no payload — keeps session
+// content off the wire and clear of the E2E boundary), so the banner text lives
+// here, not in the message. If a payload ever is attached, prefer it.
+self.addEventListener('push', (e) => {
+  let title = 'clawd', body = 'a session needs you';
+  try {
+    if (e.data) {
+      const d = e.data.json();
+      title = d.title || title;
+      body = d.body || body;
+    }
+  } catch (_) { /* bodyless tickle → use the defaults */ }
+  e.waitUntil(self.registration.showNotification(title, {
+    body,
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    tag: 'clawd-attention',   // collapse a burst into one banner
+    renotify: true,
+  }));
+});
+
+// Tapping the notification focuses an open app window or opens one.
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil((async () => {
+    const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of all) { if ('focus' in c) return c.focus(); }
+    if (self.clients.openWindow) return self.clients.openWindow('/');
+  })());
+});

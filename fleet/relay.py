@@ -155,6 +155,42 @@ def save_passkeys(creds):
         PASSKEY_FILE.write_text(json.dumps(creds))
 
 
+# ── Web Push (VAPID) brokering ──────────────────────────────────────────────
+# The relay stays pure-stdlib: it NEVER signs or sends pushes (no crypto). It only
+# (a) serves the fleet's VAPID *public* key so the phone can subscribe, and
+# (b) stores the opaque subscription JSON the phone hands it and fans it out to
+# the workers, which do the signing+sending (they already have `cryptography`).
+# The .clawd-fleet.vapid.json file is the shared keypair (generate once, copy to
+# the box + every worker); here we read only its "public" field.
+VAPID_FILE = Path(os.environ.get("FLEET_VAPID_FILE") or (HERE / ".clawd-fleet.vapid.json"))
+PUSH_SUBS_FILE = Path(os.environ.get("FLEET_PUSH_SUBS_FILE") or (HERE / ".clawd-fleet.push-subs.json"))
+_push_lock = threading.Lock()
+
+
+def vapid_public_key():
+    """The fleet VAPID public key (base64url uncompressed point) the phone
+    subscribes with, or '' if push isn't provisioned on this box."""
+    try:
+        return json.loads(VAPID_FILE.read_text()).get("public", "")
+    except Exception:
+        return ""
+
+
+def load_push_subs():
+    try:
+        return json.loads(PUSH_SUBS_FILE.read_text())
+    except Exception:
+        return []
+
+
+def save_push_subs(subs):
+    with _push_lock:
+        try:
+            PUSH_SUBS_FILE.write_text(json.dumps(subs))
+        except Exception:
+            pass
+
+
 def find_passkey(cred_id):
     for c in load_passkeys():
         if c.get("id") == cred_id:
@@ -257,6 +293,7 @@ class Relay:
         self.lock = threading.Lock()
         self.uploads = {}   # upload_id -> {"event":Event, "result":dict|None}
         self.upload_seq = 0
+        self.push_subs = load_push_subs()   # phone Web Push subscriptions (opaque)
 
     # ── image upload bridge (HTTP POST → worker over WS → harness → back) ─────
     def new_upload(self):
@@ -300,8 +337,13 @@ class Relay:
             if old and old is not conn:
                 old.dead = True  # a reconnect supersedes the stale connection
             self.workers[conn.ident] = conn
+            subs = list(self.push_subs)
         print(f"[relay] worker online: {conn.ident} ({conn.host})", flush=True)
         self.broadcast_roster()
+        # Hand the worker the current push subscriptions so it can ring the phone
+        # for its sessions (it caches them; new ones arrive via pushSub below).
+        if subs:
+            conn.send_json({"type": "pushSubs", "subs": subs})
 
     def drop_worker(self, conn):
         with self.lock:
@@ -402,6 +444,32 @@ class Relay:
 
         if t == "list":
             mobile.send_json({"type": "machines", "machines": self.roster()})
+            return
+        if t == "pushSubscribe":
+            # The phone enabled notifications: store its (opaque) Web Push
+            # subscription and fan it out to every worker so they can ring it.
+            # Dedupe by endpoint so re-enabling / reconnecting doesn't pile up.
+            sub = frame.get("subscription") or {}
+            ep = sub.get("endpoint")
+            if not ep:
+                return
+            with self.lock:
+                self.push_subs = [s for s in self.push_subs if s.get("endpoint") != ep]
+                self.push_subs.append(sub)
+                workers = list(self.workers.values())
+                subs_snapshot = list(self.push_subs)
+            save_push_subs(subs_snapshot)
+            for w in workers:
+                w.send_json({"type": "pushSub", "sub": sub})
+            mobile.send_json({"type": "pushOk"})
+            print(f"[relay] push subscription stored ({len(subs_snapshot)} total)", flush=True)
+            return
+        if t == "pushUnsubscribe":
+            ep = (frame.get("endpoint") or "")
+            with self.lock:
+                self.push_subs = [s for s in self.push_subs if s.get("endpoint") != ep]
+                subs_snapshot = list(self.push_subs)
+            save_push_subs(subs_snapshot)
             return
         if t == "toMachine":
             target = frame.get("machine")
@@ -615,6 +683,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_file("sw.js", "text/javascript; charset=utf-8")
         if path in ("/icon-180.png", "/icon-192.png", "/icon-512.png"):
             return self._serve_file(path.lstrip("/"), "image/png")
+        if path == "/push/vapidPublicKey":
+            # Public key — safe to serve unauthenticated; it's what the phone
+            # subscribes with. Empty string if push isn't provisioned on this box.
+            body = json.dumps({"key": vapid_public_key()}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return self.wfile.write(body)
         if path == "/pm" or path.startswith("/pm/"):
             return self._proxy_pm("GET")
         if path != "/ws":
