@@ -225,11 +225,11 @@
   #send:hover { border-color:var(--accent); }
   button:disabled { opacity:.4; cursor:default; }
   .hint { color:var(--dim); font-size:11px; padding:0 12px 8px; }
-  #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
+  #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #notifyBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
               padding:5px 10px; font-size:12px; font-family:var(--mono); text-transform:lowercase; letter-spacing:.04em;
               white-space:nowrap; }
-  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover, #machinesBtn:hover:hover { color:var(--ink); border-color:var(--edge-hi); }
-  #panelBtn.on, #menuBtn.on, #projectsBtn.on, #machinesBtn.on.on { color:var(--accent); border-color:var(--accent); }
+  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover, #machinesBtn:hover:hover, #notifyBtn:hover { color:var(--ink); border-color:var(--edge-hi); }
+  #panelBtn.on, #menuBtn.on, #projectsBtn.on, #machinesBtn.on.on, #notifyBtn.on { color:var(--accent); border-color:var(--accent); }
   .bico { font-size:14px; line-height:1; }
   /* Fleet PM — folded into the harness as a first-class view: PM threads ride the
      same #sessionbar tab strip, and the chat reuses the transcript #feed look.
@@ -251,7 +251,7 @@
   @media (pointer: coarse) {
     header { gap:8px; padding:calc(8px + env(safe-area-inset-top, 0px)) 10px 8px; }
     header .blbl { display:none; }
-    #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn { padding:6px 9px; }
+    #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #notifyBtn { padding:6px 9px; }
     #status { font-size:11px; padding:3px 8px; }
     #brand { display:none; }
   }
@@ -315,11 +315,28 @@
   #newSession:hover { color:var(--accent); border-color:var(--accent-dim); }
   .menutitle { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.16em;
                padding:0 2px 2px; }
-  #qrmodal { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex;
+  #qrmodal, #machinesmodal { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex;
              align-items:center; justify-content:center; z-index:50; }
-  #qrmodal[hidden] { display:none; }
+  #qrmodal[hidden], #machinesmodal[hidden] { display:none; }
   .qrcard { background:var(--panel); border:1px solid var(--edge); border-top:2px solid var(--accent);
             padding:22px; text-align:center; max-width:340px; }
+  /* machines roster overlay: a scrollable card of read-only machine stats */
+  .machinescard { text-align:left; width:min(440px,92vw); max-width:440px; max-height:80vh;
+            display:flex; flex-direction:column; }
+  .machinescard #machinelist { flex:1; min-height:0; overflow-y:auto; margin-bottom:12px; }
+  .machinescard #machinesclose { align-self:center; }
+  .scard.ro { cursor:default; }
+  .scard.offline { opacity:.55; }
+  .scard.offline:hover { border-color:var(--edge); }
+  /* per-project machine selector on the sessions rung (multi-machine projects only) */
+  .machinepick { display:flex; align-items:center; gap:8px; padding:4px 2px 8px; flex-wrap:wrap; }
+  .machinepick .mplabel { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.12em; }
+  .machinepick select { background:var(--panel); color:var(--ink); border:1px solid var(--edge);
+            border-radius:4px; padding:4px 6px; font-family:var(--mono); font-size:12px; }
+  .machinepick .setdefault { background:transparent; border:1px solid var(--edge); color:var(--dim);
+            border-radius:4px; padding:4px 8px; font-size:11px; cursor:pointer; }
+  .machinepick .setdefault:hover { color:var(--accent); border-color:var(--accent-dim); }
+  .scount.smach { color:var(--dim); border-color:var(--edge); }
   #qrcode { background:#fff; padding:12px; display:inline-block; }
   #qrcode img, #qrcode canvas { display:block; }
   .qrurl { font-family:var(--mono); font-size:11px; color:var(--dim);
@@ -375,11 +392,12 @@
     <h1 id="brand" title="All machines">clawd-harness</h1>
     <span class="meta" id="meta">connecting…</span>
     <span class="spacer"></span>
-    <button id="machinesBtn" title="All machines"><span class="bico">⊞</span><span class="blbl"> machines</span></button>
     <button id="projectsBtn" title="All projects"><span class="bico">▦</span><span class="blbl"> projects</span></button>
     <button id="menuBtn" title="Sessions in this project"><span class="bico">≡</span><span class="blbl"> sessions</span></button>
     <button id="panelBtn" title="Show/hide the structured transcript"><span class="bico">▤</span><span class="blbl"> transcript</span></button>
     <button id="phoneBtn" title="Open on your phone"><span class="bico">▢</span><span class="blbl"> qr</span></button>
+    <button id="machinesBtn" title="Fleet machines"><span class="bico">🖥️</span><span class="blbl"> machines</span></button>
+    <button id="notifyBtn" title="Notify me when a session needs me" hidden><span class="bico">🔔</span><span class="blbl"> alerts</span></button>
     <span id="status" title="Fleet PM — click to open"><span class="bico">🛰️</span><span class="blbl"> pm</span></span>
   </header>
   <div id="sessionbar" hidden></div>
@@ -400,6 +418,12 @@
       <button id="qrclose">close</button>
     </div>
   </div>
+  <div id="machinesmodal" hidden>
+    <div class="qrcard machinescard">
+      <div id="machinelist"></div>
+      <button id="machinesclose">close</button>
+    </div>
+  </div>
   <div id="login" hidden>
     <div class="qrcard">
       <img src="logo-ui.png" class="brandlogo" alt="clawd-harness" />
@@ -418,9 +442,6 @@
     </div>
   </div>
   <main>
-    <section class="col hidden" id="machines">
-      <div id="machinelist"></div>
-    </section>
     <section class="col hidden" id="projects">
       <div id="projectlist"></div>
     </section>
@@ -654,13 +675,22 @@ const pendingEl = document.getElementById('pending');
 const composer = document.querySelector('footer');
 
 let ws = null, decoder = new TextDecoder();
-let currentMachine = null;      // fleet machine this browser is driving (null = machines rung)
+let currentMachine = null;      // fleet machine the viewed project resolved to (null = none yet)
 let machineList = [];           // latest roster from the relay
 let currentCid = null;          // session this browser is viewing
 let currentTitle = '';          // title of the viewed session (for the breadcrumb)
-let currentPid = null;          // project this browser has selected
-let sessionList = [];           // latest session metadata from the server
-let projectList = [];           // latest project metadata from the server
+let currentPid = null;          // project this browser has selected (the resolved machine's pid)
+let sessionList = [];           // latest session metadata for the resolved machine
+let projectList = [];           // latest project metadata for the resolved machine
+// Fleet projects-first model: the landing rung is a UNIFIED project list merged
+// across every machine (a project = same git remote, fallback name — see projectKey).
+// `perMachine` caches each machine's raw lists (the relay can't aggregate — names are
+// E2E-encrypted), `unifiedProjects` is the merged view that drives the top rung, and
+// `currentProjectKey` is the open project's identity (the fleet nav anchor; the machine
+// behind it is implicit, resolved from a per-project default).
+let perMachine = {};            // machineId -> { projectList, sessionList, gotProjects, gotSessions }
+let unifiedProjects = new Map();// projectKey -> { key, name, repoUrl, pinned, machines:[{machineId,pid,online,sessionCount,busyCount,waitingCount,status}] }
+let currentProjectKey = null;   // identity key of the open project (fleet); direct mode leaves this null
 let projectFilter = '';         // live filter text in the projects add/search box
 let gotSessions = false;        // have we received the first sessions snapshot?
 let pendingNav = null;          // nav state parsed from the URL, awaiting server data
@@ -761,7 +791,7 @@ function deliverSend(cid, full, recover) {
 // "refresh the tty so I'm looking at current state" primitive.
 function resync() {
   if (!ws || ws.readyState !== 1) { scheduleReconnect(0); return; }
-  if (FLEET && currentMachine) hsend({ type: 'list' });
+  if (FLEET) fleetBootstrap();          // re-list every machine so the unified rung stays fresh
   const v = currentView();
   if (currentCid && (v === 'tty' || v === 'transcript')) subscribe(currentCid);   // only reset the term when we're actually viewing the session
   flushOutbound();
@@ -858,8 +888,10 @@ function handleRelay(m) {
   if (m.type === 'authOk') {
     if (m.session) saveSession(m.session, m.expires);
     hidePasskey(); meta.textContent = '';
-    // re-sync the viewed machine after a (re)auth — onopen's sends were pre-auth
-    if (currentMachine) { hsend({ type: 'list' }); if (currentCid) hsend({ type: 'subscribe', cid: currentCid }); sendResize(); flushOutbound(); }
+    // re-sync after a (re)auth — onopen's sends were pre-auth. Fan out to every
+    // machine for the unified list, then re-subscribe whatever session we're viewing.
+    fleetBootstrap();
+    if (currentMachine && currentCid) { hsend({ type: 'subscribe', cid: currentCid }); sendResize(); flushOutbound(); }
     return;
   }
   if (m.type === 'machines') { hidePasskey(); renderMachines(m.machines || []); return; }
@@ -1149,16 +1181,59 @@ function e2eOnCtl(machine, msg) {
 }
 
 // Decrypt a record (from the JSON path or the binary PTY path) in seq order.
+// PROJECTS-FIRST: we keep an E2E channel to EVERY machine so the unified project
+// list can merge across the fleet, so records arrive from machines other than the
+// one we're viewing. PTY bytes only paint when they're for the viewed machine;
+// JSON is routed through handleMachineJson, which feeds the merge for all machines
+// but only drives the session/terminal for the one we're currently in.
 function e2eOnRecord(machine, rec) {
   const ch = e2eChans[machine];
   if (!ch || !ch.session) return;
   ch.recvChain = ch.recvChain.then(async () => {
     let out;
     try { out = await ch.session.open(rec); } catch { return; }   // drop bad/replayed
-    if (machine !== currentMachine) return;
-    if (out.kind === E2E.KIND_BIN) { const stick = ttyAtBottom(); term.write(out.payload, () => { if (stick) term.scrollToBottom(); }); scheduleHardRepaint(); }
-    else handleJson(JSON.parse(new TextDecoder().decode(out.payload)));
+    if (out.kind === E2E.KIND_BIN) {
+      if (machine !== currentMachine) return;                      // only the viewed terminal paints
+      const stick = ttyAtBottom(); term.write(out.payload, () => { if (stick) term.scrollToBottom(); }); scheduleHardRepaint();
+    } else {
+      handleMachineJson(machine, JSON.parse(new TextDecoder().decode(out.payload)));
+    }
   }).catch(() => {});
+}
+
+// Fleet-mode demux for a decrypted harness frame tagged with its source machine.
+// `projects`/`sessions` from ANY machine update that machine's cache (and the merge);
+// every other frame (focus/hello/transcript/hook/exit/…) only matters for the machine
+// whose session we're viewing, so it's handed to the unchanged single-session handleJson.
+function handleMachineJson(machine, m) {
+  if (m.type === 'projects') {
+    const pm = perMachine[machine] || (perMachine[machine] = {});
+    pm.projectList = m.projects || [];
+    pm.gotProjects = true;
+    mergeProjects();
+    if (machine === currentMachine) {
+      projectList = pm.projectList;
+      if (currentPid && !projectList.some(p => p.pid === currentPid)) currentPid = null;
+    }
+    renderProjectRung();
+    refreshBreadcrumb();
+    resolvePendingNav();                 // a restored URL may name a project we just learned about
+    return;
+  }
+  if (m.type === 'sessions') {
+    const pm = perMachine[machine] || (perMachine[machine] = {});
+    pm.sessionList = m.sessions || [];
+    pm.gotSessions = true;
+    if (machine === currentMachine) {
+      sessionList = pm.sessionList; gotSessions = true;
+      renderSessions();
+      refreshBreadcrumb();
+      resolvePendingNav();               // …or a session
+    }
+    return;
+  }
+  if (machine !== currentMachine) return;   // all other frames act only on the viewed machine
+  handleJson(m);
 }
 
 const SESSION_KEY = 'cc_fleet_session';
@@ -1399,9 +1474,12 @@ function renderMachines(list) {
     // non-clickable infra card (opening it would only hang on an empty list).
     const isRelay = m.kind === 'relay';
     const card = document.createElement('div');
-    card.className = 'scard' + (m.id === currentMachine ? ' active' : '') + (isRelay ? ' relay' : '');
-    if (isRelay) { card.style.opacity = '0.7'; card.style.cursor = 'default'; }
-    else card.onclick = () => selectMachine(m.id);
+    // Read-only roster overview (no longer a navigable rung): the machine behind a
+    // project is chosen via the per-project default + the sessions-rung select, not
+    // by picking a machine here. Cards are informational only.
+    card.className = 'scard ro' + (m.id === currentMachine ? ' active' : '') + (isRelay ? ' relay' : '');
+    card.style.cursor = 'default';
+    if (isRelay) card.style.opacity = '0.7';
     const row = document.createElement('div'); row.className = 'row';
     const sdot = document.createElement('span');
     sdot.className = 'sdot' + (m.online ? '' : ' dead');
@@ -1447,25 +1525,13 @@ function renderMachines(list) {
     }
     machinesEl.appendChild(card);
   });
+  // Roster changed: connect any newly-online machine and re-merge (online flags
+  // gate which entries are selectable in the unified list).
+  fleetBootstrap();
+  mergeProjects();
+  renderProjectRung();
   refreshBreadcrumb();
-  resolvePendingNav();        // a URL we restored from may name a machine
-}
-
-// Switch the machine we're driving. A different machine is a different harness,
-// so everything below the rung (projects/sessions/terminal) is wiped, then we
-// ask the new machine for its projects + sessions.
-function selectMachine(id) {
-  e2eEnsure(id).catch(() => {});   // start the secure handshake inside this tap gesture
-  if (id !== currentMachine) {
-    currentMachine = id;
-    currentPid = null; currentCid = null; currentTitle = '';
-    projectList = []; sessionList = []; gotSessions = false;
-    term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
-    if (activeType) { activeType.finish(); activeType = null; }
-    projectsEl.innerHTML = ''; sessionsEl.innerHTML = '';
-  }
-  hsend({ type: 'list' });    // fetch this machine's projects + sessions
-  setView('projects');
+  resolvePendingNav();        // a URL we restored from may resolve now that the roster is in
 }
 
 // -- projects (top rung) ----------------------------------------------------
@@ -1490,12 +1556,12 @@ function refreshBreadcrumb(view) {
     renderSessionBar(view);
     return;
   }
-  // machines rung: blank. projects rung: machine name. deeper: machine / project.
+  // projects rung: blank. Deeper: the project name (the machine is abstracted away —
+  // it surfaces only via the sessions-rung select when a project spans machines).
   let crumb = '';
-  if (view !== 'machines' && currentMachine) {
-    crumb = currentMachine;
+  if (view !== 'projects') {
     const pn = projectName(currentPid);
-    if (view !== 'projects' && pn) crumb += ' / ' + pn;
+    if (pn) crumb = pn;
   }
   meta.textContent = crumb;
   // Show the AI session name above the message box, but only when a specific
@@ -1557,27 +1623,193 @@ function renderSessionBar(view) {
   if (wasHidden) refitTTY();
 }
 
-function selectProject(pid) {
-  currentPid = pid;
+// ---- fleet: unified projects across machines -------------------------------
+// Identity: same git remote = same project (fallback to name when there's no
+// remote). A repo cloned on two boxes collapses to one entry; the harness
+// self-project is the canonical multi-machine case.
+function projectKey(p) { return (p.repoUrl || '').trim() || ('name:' + (p.name || '')); }
+function isMachineOnline(id) { return machineList.some(m => m.id === id && m.online); }
+
+// Rebuild `unifiedProjects` from every machine's cached project list. Counts come
+// straight from each projectMeta (sessionCount/busy/waiting), so this needs only
+// the `projects` frames, not the per-session lists.
+function mergeProjects() {
+  const map = new Map();
+  for (const mid of Object.keys(perMachine)) {
+    const online = isMachineOnline(mid);
+    for (const p of (perMachine[mid].projectList || [])) {
+      const key = projectKey(p);
+      let g = map.get(key);
+      if (!g) { g = { key, name: p.name || '', repoUrl: p.repoUrl || '', pinned: false, machines: [] }; map.set(key, g); }
+      if (!g.name && p.name) g.name = p.name;
+      if (!g.repoUrl && p.repoUrl) g.repoUrl = p.repoUrl;
+      if (p.pinned) g.pinned = true;
+      g.machines.push({ machineId: mid, pid: p.pid, online,
+        sessionCount: p.sessionCount || 0, busyCount: p.busyCount || 0,
+        waitingCount: p.waitingCount || 0, status: p.status });
+    }
+  }
+  unifiedProjects = map;
+}
+
+// Have all online machines reported their project list yet? Lets nav tell "still
+// loading" apart from "this project genuinely doesn't exist" for deep links.
+function allMachinesReplied() {
+  if (!machineList.length) return false;
+  const online = machineList.filter(m => m.online && m.kind !== 'relay');
+  if (!online.length) return true;
+  return online.every(m => perMachine[m.id] && perMachine[m.id].gotProjects);
+}
+
+// Per-project default machine (localStorage), and the auto-pick when none is set:
+// prefer the saved default, else an online machine that already has sessions, else
+// the first online machine; fall back to any (offline) entry so the card still renders.
+const DEFAULT_MACHINE_KEY = 'cc_proj_default';
+function loadDefaults() { try { return JSON.parse(localStorage.getItem(DEFAULT_MACHINE_KEY) || '{}'); } catch { return {}; } }
+function defaultMachineFor(key) { return loadDefaults()[key] || null; }
+function setDefaultMachine(key, id) { const d = loadDefaults(); d[key] = id; try { localStorage.setItem(DEFAULT_MACHINE_KEY, JSON.stringify(d)); } catch {} }
+function pickMachineEntry(g) {
+  if (!g || !g.machines.length) return null;
+  const online = g.machines.filter(m => m.online);
+  const pool = online.length ? online : g.machines;
+  const pref = defaultMachineFor(g.key);
+  return pool.find(m => m.machineId === pref)
+      || pool.find(m => (m.sessionCount || 0) > 0)
+      || pool[0];
+}
+
+// The rows the project rung renders, normalized across both modes. Fleet rows are
+// keyed by project identity and carry machine fan-out; direct rows are 1:1 with pid.
+function projectRows() {
+  if (!FLEET) return projectList.map(p => ({ id: p.pid, name: p.name, repoUrl: p.repoUrl,
+    pinned: p.pinned, sessionCount: p.sessionCount || 0, busyCount: p.busyCount || 0,
+    waitingCount: p.waitingCount || 0, status: p.status, error: p.error,
+    machineCount: 1, online: true }));
+  return [...unifiedProjects.values()].map(g => {
+    const def = pickMachineEntry(g);                 // counts reflect the machine you'd open (default-machine semantics)
+    return { id: g.key, name: g.name, repoUrl: g.repoUrl, pinned: g.pinned,
+      sessionCount: def ? def.sessionCount : 0, busyCount: def ? def.busyCount : 0,
+      waitingCount: def ? def.waitingCount : 0, status: def ? def.status : '', error: '',
+      machineCount: g.machines.length, online: g.machines.some(m => m.online),
+      machineName: def ? def.machineId : '' };
+  });
+}
+function selectedProjectId() { return FLEET ? currentProjectKey : currentPid; }
+
+// Open every machine's E2E channel and ask each for its project list, so the
+// unified rung can merge. Serialized: the passkey modal is a single shared element,
+// so concurrent handshakes would fight over it — silent resumes are fast, fresh
+// passkeys go one machine at a time.
+let bootstrapping = false;
+async function fleetBootstrap() {
+  if (!FLEET || bootstrapping) return;
+  bootstrapping = true;
+  try {
+    const live = machineList.filter(m => m.online && m.kind !== 'relay');
+    // Resumable machines first: they re-attach with no passkey, so the common case
+    // (everything seen within the resume TTL) loads instantly and silently. Machines
+    // needing a fresh safe-word come last and one at a time, so a pending prompt
+    // never hides the projects of machines that were ready to load.
+    const order = live.slice().sort((a, b) => (e2eLoadResume(b.id) ? 1 : 0) - (e2eLoadResume(a.id) ? 1 : 0));
+    for (const m of order) {
+      const ch = e2eChans[m.id];
+      if (ch && ch.status === 'open') { e2eSendFrame(m.id, { type: 'list' }); continue; }
+      try { await e2eEnsure(m.id); e2eSendFrame(m.id, { type: 'list' }); } catch {}
+    }
+  } finally { bootstrapping = false; }
+}
+
+// Point the deep-rung state (currentMachine + its cached lists) at a machine. A
+// machine change wipes the viewed-session view (cids are machine-scoped) and
+// re-lists to be sure the cache is fresh.
+function attachMachine(machineId) {
+  if (machineId !== currentMachine) {
+    currentMachine = machineId;
+    currentCid = null; currentTitle = '';
+    term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
+    if (activeType) { activeType.finish(); activeType = null; }
+  }
+  e2eEnsure(machineId).then(() => e2eSendFrame(machineId, { type: 'list' })).catch(() => {});
+  const pm = perMachine[machineId] || (perMachine[machineId] = {});
+  projectList = pm.projectList || [];
+  sessionList = pm.sessionList || [];
+  gotSessions = !!pm.gotSessions;
+}
+
+// Open a unified project: resolve it to (machine, pid) via the default, attach, and
+// drop onto its sessions rung.
+function resolveProject(key) {
+  const g = unifiedProjects.get(key);
+  const entry = pickMachineEntry(g);
+  if (!entry) { setView('projects'); return; }
+  currentProjectKey = key;
+  attachMachine(entry.machineId);
+  currentPid = entry.pid;
   renderSessions();
   setView('sessions');
 }
 
+// Header machine-select: re-point the open project at another of its machines.
+function switchProjectMachine(machineId) {
+  const g = unifiedProjects.get(currentProjectKey);
+  const entry = g && g.machines.find(m => m.machineId === machineId);
+  if (!entry) return;
+  attachMachine(machineId);
+  currentPid = entry.pid;
+  renderSessions();
+  refreshBreadcrumb();
+  syncUrl();
+}
+
+function selectProject(id) {
+  if (FLEET) { resolveProject(id); return; }   // id is the project identity key
+  currentPid = id;
+  renderSessions();
+  setView('sessions');
+}
+
+// Creating/cloning needs a host machine. In the unified view there's no "current"
+// machine until you open a project, so target the default-attached one, falling back
+// to the first online machine. (Direct mode talks straight to the local harness.)
+function ensureTargetMachine() {
+  if (!FLEET) return true;
+  if (currentMachine && isMachineOnline(currentMachine)) return true;
+  const on = machineList.find(m => m.online && m.kind !== 'relay');
+  if (!on) { meta.textContent = 'no online machine to host a new project'; return false; }
+  currentMachine = on.id;
+  e2eEnsure(on.id).catch(() => {});
+  return true;
+}
 function createProject(name) {
-  if (!name.trim()) return;
+  if (!name.trim() || !ensureTargetMachine()) return;
   hsend({ type: 'createProject', name: name.trim() });
 }
 function addProjectFromUrl(url) {
-  if (!url.trim()) return;
+  if (!url.trim() || !ensureTargetMachine()) return;
   hsend({ type: 'addProject', repoUrl: url.trim() });
 }
+// Direct mode entry point: a `projects` frame for the (single) local harness.
+// Fleet mode never calls this — its rung is driven by mergeProjects/renderProjectRung.
 function renderProjects(list) {
   projectList = list;
   // a freshly selected project that vanished (removed) → drop the selection
   if (currentPid && !list.some(p => p.pid === currentPid)) currentPid = null;
+  renderProjectRung();
+}
+
+// Render the project rung from normalized rows (unified across machines in fleet
+// mode, 1:1 with the local harness in direct mode).
+function renderProjectRung() {
+  const rows = projectRows();
+  const selId = selectedProjectId();
+  // Preserve the filter box's focus + caret across the rebuild: fleet broadcasts a
+  // `projects` frame per machine, so this can re-run while you're mid-type.
+  const oldInp = projectsEl.querySelector('#addProject input');
+  const keepFocus = oldInp && document.activeElement === oldInp;
+  const selStart = oldInp ? oldInp.selectionStart : null, selEnd = oldInp ? oldInp.selectionEnd : null;
   projectsEl.innerHTML = '';
   const label = document.createElement('div');
-  label.className = 'menutitle'; label.textContent = `projects · ${list.length}`;
+  label.className = 'menutitle'; label.textContent = `projects · ${rows.length}`;
   projectsEl.appendChild(label);
 
   // add/search row: the box does double duty. As you type it FILTERS the list
@@ -1599,23 +1831,24 @@ function renderProjects(list) {
     if (e.key !== 'Enter') return;
     e.preventDefault();
     const matches = filteredProjects();
-    if (matches.length === 1) selectProject(matches[0].pid);  // narrowed to one → open it
+    if (matches.length === 1) selectProject(matches[0].id);  // narrowed to one → open it
   });
   arow.appendChild(createBtn); arow.appendChild(cloneBtn);
   add.appendChild(inp); add.appendChild(arow);
   projectsEl.appendChild(add);
 
-  list.forEach(p => {
+  rows.forEach(p => {
     const busyP = p.status === 'cloning', errP = p.status === 'error';
+    const offline = FLEET && !p.online;         // every machine hosting this project is offline
     const card = document.createElement('div');
-    card.className = 'scard' + (p.pid === currentPid ? ' active' : '') +
-                     (busyP ? ' cloning' : errP ? ' error' : '');
-    card.dataset.pid = p.pid;
-    if (!busyP && !errP) card.onclick = () => selectProject(p.pid);
+    card.className = 'scard' + (p.id === selId ? ' active' : '') +
+                     (busyP ? ' cloning' : errP ? ' error' : '') + (offline ? ' offline' : '');
+    card.dataset.id = p.id;
+    if (!busyP && !errP && !offline) card.onclick = () => selectProject(p.id);
 
     const row = document.createElement('div'); row.className = 'row';
     const sdot = document.createElement('span');
-    sdot.className = 'sdot' + (busyP ? ' cloning' : errP ? ' err' : '');
+    sdot.className = 'sdot' + (busyP ? ' cloning' : errP ? ' err' : offline ? ' dead' : '');
     const title = document.createElement('span');
     title.className = 'stitle'; title.textContent = p.name;
     row.appendChild(sdot); row.appendChild(title);
@@ -1623,6 +1856,13 @@ function renderProjects(list) {
       const tag = document.createElement('span');
       tag.className = 'scount'; tag.textContent = 'this app'; tag.title = 'the running harness — live-editable';
       row.appendChild(tag);
+    }
+    if (p.machineCount > 1) {                    // multi-machine project: surface the fan-out
+      const mt = document.createElement('span');
+      mt.className = 'scount smach';
+      mt.textContent = `🖥️ ${p.machineCount}`;
+      mt.title = `installed on ${p.machineCount} machines (default: ${p.machineName})`;
+      row.appendChild(mt);
     }
     if (p.waitingCount > 0) {
       const need = document.createElement('span');
@@ -1656,35 +1896,45 @@ function renderProjects(list) {
       const se = document.createElement('div');
       se.className = 'serror'; se.textContent = p.error || 'failed';
       card.appendChild(se);
+    } else if (offline) {
+      const sm = document.createElement('div');
+      sm.className = 'smeta'; sm.textContent = 'machine offline';
+      card.appendChild(sm);
     }
 
     projectsEl.appendChild(card);
   });
 
   applyProjectFilter();          // honor any live filter text after a re-render
+  if (keepFocus) {               // we owned focus before the rebuild — keep it, caret intact
+    inp.focus();
+    try { inp.setSelectionRange(selStart, selEnd); } catch {}
+  }
   // landing on the projects rung: the box takes focus so you can filter/create
   // straight away. Desktop-only — autofocus on touch would pop the soft keyboard.
   // Don't steal focus while typing elsewhere or off this rung.
-  if (!isTouch && currentView() === 'projects' && document.activeElement !== inp &&
+  else if (!isTouch && currentView() === 'projects' && document.activeElement !== inp &&
       !(document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName))) {
     inp.focus();
     const n = inp.value.length; try { inp.setSelectionRange(n, n); } catch {}
   }
 }
 
-// projects matching the live filter (case-insensitive substring on name). Empty
+// rows matching the live filter (case-insensitive substring on name). Empty
 // filter → everything. Drives both the Enter-to-open and the visual hide below.
 function filteredProjects() {
   const q = projectFilter.trim().toLowerCase();
-  if (!q) return projectList.slice();
-  return projectList.filter(p => (p.name || '').toLowerCase().includes(q));
+  const rows = projectRows();
+  if (!q) return rows;
+  return rows.filter(p => (p.name || '').toLowerCase().includes(q));
 }
 // show/hide the rendered cards to match the filter without rebuilding the DOM
 // (keeps input focus while typing).
 function applyProjectFilter() {
   const q = projectFilter.trim().toLowerCase();
+  const rows = projectRows();
   projectsEl.querySelectorAll('.scard').forEach(card => {
-    const p = projectList.find(x => x.pid === card.dataset.pid);
+    const p = rows.find(x => String(x.id) === card.dataset.id);
     const hit = !q || (p && (p.name || '').toLowerCase().includes(q));
     card.style.display = hit ? '' : 'none';
   });
@@ -1779,6 +2029,36 @@ function renderSessions() {
   const pn = projectName(currentPid);
   label.textContent = (pn ? pn + ' · ' : '') + `sessions · ${list.length}`;
   sessionsEl.appendChild(label);
+
+  // Machine select: shown only when this project lives on more than one machine.
+  // Switching re-points the sessions list at that machine; ★ pins it as the default
+  // so opening the project lands there next time. A single-machine project shows
+  // nothing — the machine stays invisible, as intended.
+  if (FLEET && currentProjectKey) {
+    const g = unifiedProjects.get(currentProjectKey);
+    if (g && g.machines.length > 1) {
+      const mrow = document.createElement('div'); mrow.className = 'machinepick';
+      const lbl = document.createElement('span'); lbl.className = 'mplabel'; lbl.textContent = 'machine';
+      const sel = document.createElement('select');
+      g.machines.forEach(me => {
+        const opt = document.createElement('option');
+        opt.value = me.machineId;
+        opt.textContent = me.machineId + (me.online ? '' : ' · offline') + ` · ${me.sessionCount || 0} sess`;
+        opt.disabled = !me.online;
+        if (me.machineId === currentMachine) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      sel.onchange = () => switchProjectMachine(sel.value);
+      const star = document.createElement('button');
+      star.className = 'setdefault';
+      const isDef = defaultMachineFor(currentProjectKey) === currentMachine;
+      star.textContent = isDef ? '★ default' : '☆ set default';
+      star.title = 'make this the default machine for this project';
+      star.onclick = () => { setDefaultMachine(currentProjectKey, currentMachine); renderSessions(); };
+      mrow.append(lbl, sel, star);
+      sessionsEl.appendChild(mrow);
+    }
+  }
 
   const add = document.createElement('button');
   add.id = 'newSession'; add.textContent = '＋  new session';
@@ -2478,7 +2758,6 @@ else {
 // projects → sessions → transcript → tty. Mobile defaults to the transcript
 // (native scroll, markdown, no xterm pain) for a session; the app opens on the
 // projects rung. Drop to the tty only to get surgical.
-const machinesPanel = document.getElementById('machines');
 const projectsPanel = document.getElementById('projects');
 const menuPanel = document.getElementById('menu');
 const leftPanel = document.getElementById('left');
@@ -2490,35 +2769,34 @@ const menuBtn = document.getElementById('menuBtn');
 const projectsBtn = document.getElementById('projectsBtn');
 function setView(view) {
   const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects',
-        machines = view === 'machines', pm = view === 'pm';
-  machinesPanel.classList.toggle('hidden', !machines);
+        pm = view === 'pm';
   projectsPanel.classList.toggle('hidden', !projects);
   menuPanel.classList.toggle('hidden', !sessions);
   leftPanel.classList.toggle('hidden', !tty);
   rightPanel.classList.toggle('hidden', !(view === 'transcript'));
   pmPanel.classList.toggle('hidden', !pm);
   document.getElementById('keys').style.display = (tty && isTouch) ? '' : 'none';  // key bar only for touch (the desktop terminal takes these keys natively)
-  // Composer is hidden on the machines + projects rungs (nothing to talk to). On
-  // the sessions list it stays, but a message there starts a new session rather
-  // than going to a session you're not viewing — say so in the placeholder.
-  // The PM view keeps the composer (it talks to the current PM thread).
-  composer.style.display = (projects || machines) ? 'none' : '';
+  // Composer is hidden on the projects rung (nothing to talk to). On the sessions
+  // list it stays, but a message there starts a new session rather than going to a
+  // session you're not viewing — say so in the placeholder. The PM view keeps the
+  // composer (it talks to the current PM thread).
+  composer.style.display = projects ? 'none' : '';
   box.placeholder = pm ? 'message → fleet PM' : sessions ? 'message → new session' : 'message';
   syncComposer();              // each level has its own draft — swap the box to this one's
   panelBtn.innerHTML = tty ? '<span class="bico">▤</span><span class="blbl"> transcript</span>'
                            : '<span class="bico">❯</span><span class="blbl"> terminal</span>';
   menuBtn.classList.toggle('on', sessions);
   projectsBtn.classList.toggle('on', projects);
-  machinesBtn.classList.toggle('on', machines);
   statusEl.classList.toggle('pmopen', pm);
   try { localStorage.setItem('cc_view', view); } catch {}
   refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
   syncUrl();                       // keep the URL in step with the depth we're at
   if (tty) showTTY();
-  else if (projects && !isTouch) {  // landing on projects: box takes focus (skip touch — avoids popping the soft keyboard)
+  else if (projects && !isTouch) {  // landing on projects: filter box takes focus (skip touch — avoids popping the soft keyboard)
     const inp = projectsEl.querySelector('#addProject input');
     if (inp) { inp.focus(); const n = inp.value.length; try { inp.setSelectionRange(n, n); } catch {} }
   }
+  else if (sessions && !isTouch) box.focus();   // landing on sessions: composer ready so you can type a new prompt straight away
   else if (view === 'transcript') feed.scrollTop = feed.scrollHeight;
   else if (pm) { renderPmFeed(); pmfeed.scrollTop = pmfeed.scrollHeight; }
 }
@@ -2526,10 +2804,10 @@ function setView(view) {
 // Each is a manual nav, so it cancels any pending question auto-return (navTo wraps that).
 const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; setView(v); };
 panelBtn.onclick = () => navTo(currentView() === 'tty' ? 'transcript' : 'tty');
-menuBtn.onclick = () => { if (currentPid) navTo('sessions'); else navTo(FLEET && !currentMachine ? 'machines' : 'projects'); };
-projectsBtn.onclick = () => navTo(FLEET && !currentMachine ? 'machines' : 'projects');
-machinesBtn.onclick = () => navTo('machines');
-document.getElementById('brand').onclick = () => navTo(FLEET ? 'machines' : 'projects');
+menuBtn.onclick = () => { if (currentPid) navTo('sessions'); else navTo('projects'); };
+projectsBtn.onclick = () => navTo('projects');
+machinesBtn.onclick = () => openMachines();          // 🖥️ roster overlay (no longer a rung)
+document.getElementById('brand').onclick = () => navTo('projects');
 if (!FLEET) machinesBtn.style.display = 'none';   // no machines rung when talking to a harness directly
 pendingNav = parseHash();        // restore project / session / depth from the URL…
 setView(pendingNav.view);        // …optimistically; resolvePendingNav refines once data lands
@@ -2541,31 +2819,26 @@ setView(pendingNav.view);        // …optimistically; resolvePendingNav refines
 let viewBeforeQuestion = null;
 function currentView() {
   if (!pmPanel.classList.contains('hidden')) return 'pm';
-  if (!machinesPanel.classList.contains('hidden')) return 'machines';
   if (!projectsPanel.classList.contains('hidden')) return 'projects';
   if (!menuPanel.classList.contains('hidden')) return 'sessions';
   if (!leftPanel.classList.contains('hidden')) return 'tty';
   return 'transcript';
 }
 
-// -- URL routing: machine / project / session / depth live in the hash (the `?t=`
-// token stays in the query) so a reload — or a shared link — lands back where you
-// were. Shapes: `#/` machines · `#/m/<machine>` projects ·
-// `#/m/<machine>/p/<pid>` sessions · `…/s/<cid>` transcript · `…/s/<cid>/tty` tty.
+// -- URL routing: project / session / depth live in the hash (the `?t=` token stays
+// in the query) so a reload — or a shared link — lands back where you were. The
+// machine is NOT in the URL: it's a per-project preference, resolved from the default.
+// Shapes (both modes): `#/` projects · `#/p/<key>` sessions · `…/s/<cid>` transcript ·
+// `…/s/<cid>/tty` tty. `<key>` is the project identity in fleet, the pid in direct mode.
 function parseHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
-  const nav = { view: FLEET ? 'machines' : 'projects', machine: null, pid: null, cid: null };
-  let i = 0;
+  const nav = { view: 'projects', key: null, cid: null };
   if (parts[0] === 'pm') { nav.view = 'pm'; return nav; }   // Fleet PM (its own top-level view)
-  if (FLEET) {                                   // fleet: a machine prefixes the path
-    if (parts[0] !== 'm' || !parts[1]) return nav;
-    nav.machine = decodeURIComponent(parts[1]); nav.view = 'projects'; i = 2;
-  }
-  if (parts[i] === 'p' && parts[i + 1]) {
-    nav.pid = decodeURIComponent(parts[i + 1]); nav.view = 'sessions';
-    if (parts[i + 2] === 's' && parts[i + 3]) {
-      nav.cid = decodeURIComponent(parts[i + 3]);
-      nav.view = parts[i + 4] === 'tty' ? 'tty' : 'transcript';
+  if (parts[0] === 'p' && parts[1]) {
+    nav.key = decodeURIComponent(parts[1]); nav.view = 'sessions';
+    if (parts[2] === 's' && parts[3]) {
+      nav.cid = decodeURIComponent(parts[3]);
+      nav.view = parts[4] === 'tty' ? 'tty' : 'transcript';
     }
   }
   return nav;
@@ -2575,10 +2848,9 @@ function syncUrl() {
   const v = currentView();
   if (v === 'pm') { const h = '#/pm'; if (h !== location.hash) { lastWrittenHash = h; location.hash = h; } return; }
   let h = '#/';
-  if (FLEET && currentMachine && v !== 'machines') h += 'm/' + encodeURIComponent(currentMachine);
-  if ((!FLEET || currentMachine) && currentPid && v !== 'machines' && v !== 'projects') {
-    if (h !== '#/') h += '/';
-    h += 'p/' + encodeURIComponent(currentPid);
+  const pkey = FLEET ? currentProjectKey : currentPid;
+  if (pkey && v !== 'projects') {
+    h += 'p/' + encodeURIComponent(pkey);
     if ((v === 'transcript' || v === 'tty') && currentCid) {
       h += '/s/' + encodeURIComponent(currentCid);
       if (v === 'tty') h += '/tty';
@@ -2586,30 +2858,21 @@ function syncUrl() {
   }
   if (h !== location.hash) { lastWrittenHash = h; location.hash = h; }
 }
-// Re-apply pendingNav as server data arrives (project list, then session list).
-// Returns early — leaving pendingNav set — until the data it names shows up.
+// Re-apply pendingNav as server data arrives. Returns early — leaving pendingNav
+// set — until the data it names shows up; it's re-driven on every projects/sessions
+// frame and on each roster change.
 function resolvePendingNav() {
   const nav = pendingNav;
   if (!nav) return;
   if (nav.view === 'pm') { pendingNav = null; openPM(); return; }   // PM is harness-data-independent
-  if (nav.machine) {
-    if (!machineList.length) return;                         // roster not in yet
-    if (!machineList.some(x => x.id === nav.machine)) {      // machine is gone
-      pendingNav = null; currentMachine = null; setView('machines'); return;
-    }
-    if (currentMachine !== nav.machine) {                    // attach to it + fetch its list
-      currentMachine = nav.machine;
-      currentPid = null; currentCid = null; currentTitle = '';
-      projectList = []; sessionList = []; gotSessions = false;
-      hsend({ type: 'list' });
-    }
-  }
-  if (nav.pid) {
+  if (FLEET) { resolvePendingNavFleet(nav); return; }
+  // -- direct mode: key is the local pid --------------------------------------
+  if (nav.key) {
     if (!projectList.length) return;                         // projects not in yet
-    if (!projectList.some(p => p.pid === nav.pid)) {         // project is gone
+    if (!projectList.some(p => p.pid === nav.key)) {         // project is gone
       pendingNav = null; currentPid = null; setView('projects'); return;
     }
-    currentPid = nav.pid;
+    currentPid = nav.key;
     renderSessions();
   }
   if (nav.cid) {
@@ -2621,6 +2884,36 @@ function resolvePendingNav() {
     currentPid = s.pid;
     subscribe(nav.cid);
   }
+  pendingNav = null;
+  setView(nav.view);
+}
+// Fleet deep-link resolution against the async multi-machine fan-out: wait for the
+// roster + enough machines to reply, tell "still loading" apart from "gone", and
+// re-point the machine when the named session lives off the default.
+function resolvePendingNavFleet(nav) {
+  if (!nav.key) { pendingNav = null; setView('projects'); return; }
+  if (!machineList.length) return;                           // roster not in yet
+  const g = unifiedProjects.get(nav.key);
+  if (!g) {
+    if (!allMachinesReplied()) return;                       // still loading — keep waiting
+    pendingNav = null; currentProjectKey = null; setView('projects'); return;   // genuinely gone
+  }
+  // Prefer the machine that actually has the named session; else the default pick.
+  let entry = null;
+  if (nav.cid) entry = g.machines.find(me => ((perMachine[me.machineId] || {}).sessionList || []).some(s => s.cid === nav.cid));
+  if (!entry) entry = pickMachineEntry(g);
+  if (!entry) { pendingNav = null; setView('projects'); return; }
+  currentProjectKey = nav.key;
+  attachMachine(entry.machineId);
+  currentPid = entry.pid;
+  renderSessions();
+  if (!nav.cid) { pendingNav = null; setView(nav.view); return; }
+  const pm = perMachine[currentMachine] || {};
+  if (!pm.gotSessions) return;                               // that machine's sessions not in yet
+  const s = (pm.sessionList || []).find(x => x.cid === nav.cid);
+  if (!s) { pendingNav = null; setView('sessions'); return; }   // session gone
+  currentPid = s.pid;
+  subscribe(nav.cid);
   pendingNav = null;
   setView(nav.view);
 }
@@ -2646,24 +2939,22 @@ function restoreViewAfterQuestion() {
 // the iOS back-gesture feel. projects → sessions → transcript → tty.
 // The two deep rungs are ordered by device preference: desktop dives into the
 // terminal first (transcript one rung deeper), touch into the transcript first.
-const LEVELS = (FLEET ? ['machines'] : []).concat(
-  isTouch ? ['projects', 'sessions', 'transcript', 'tty']
-          : ['projects', 'sessions', 'tty', 'transcript']);
+// Fleet and direct share the same stack now — projects is the top rung in both
+// (the machines rung is gone; the roster lives in the 🖥️ overlay).
+const LEVELS = isTouch ? ['projects', 'sessions', 'transcript', 'tty']
+                       : ['projects', 'sessions', 'tty', 'transcript'];
 function stepLevel(dir) {
   const i = LEVELS.indexOf(currentView());
   if (i === -1) return;
   let next = LEVELS[Math.min(LEVELS.length - 1, Math.max(0, i + dir))];
-  // diving past the machines rung needs a chosen machine; pick the first online
-  // one (selectMachine fetches its projects + drops us on the projects rung).
-  if (FLEET && next === 'projects' && !currentMachine) {
-    const on = machineList.find(m => m.online && m.kind !== 'relay');
-    if (!on) return;
-    selectMachine(on.id);
-    return;
-  }
   // diving past projects needs a selected project; fall back to the last one we
   // were on (currentPid persists), else the first ready project, else stay put.
   if (next === 'sessions' && !currentPid) {
+    if (FLEET) {
+      const r = projectRows().find(x => x.online && x.status !== 'cloning' && x.status !== 'error');
+      if (!r) return;
+      resolveProject(r.id); return;     // resolveProject lands us on the sessions rung
+    }
     const ready = projectList.find(p => p.status !== 'cloning' && p.status !== 'error');
     if (!ready) return;
     currentPid = ready.pid; renderSessions();
@@ -2786,6 +3077,14 @@ document.getElementById('phoneBtn').onclick = () => {
 };
 document.getElementById('qrclose').onclick = () => { qrmodal.hidden = true; };
 qrmodal.onclick = (e) => { if (e.target === qrmodal) qrmodal.hidden = true; };
+
+// -- machines roster overlay (the 🖥️ button) ---------------------------------
+// Read-only fleet overview with per-machine stats. Replaces the old machines rung;
+// renderMachines keeps it live on every roster broadcast.
+const machinesModal = document.getElementById('machinesmodal');
+function openMachines() { renderMachines(machineList); machinesModal.hidden = false; }
+document.getElementById('machinesclose').onclick = () => { machinesModal.hidden = true; };
+machinesModal.onclick = (e) => { if (e.target === machinesModal) machinesModal.hidden = true; };
 
 // -- token entry (only when we have none) ------------------------------------
 function showLogin(msg) {
@@ -3010,7 +3309,7 @@ async function pmRefreshBadge() {
 }
 // #status opens the PM view, or leaves it (back to projects/sessions) if already there.
 statusEl.onclick = () => {
-  if (currentView() === 'pm') navTo(FLEET && !currentMachine ? 'machines' : (currentPid ? 'sessions' : 'projects'));
+  if (currentView() === 'pm') navTo(currentPid ? 'sessions' : 'projects');
   else openPM();
 };
 pmRefreshBadge();
