@@ -805,7 +805,10 @@ function renderNeedsBar() {
   if (!FLEET) return;
   const bar = document.getElementById('needsbar');
   if (!bar) return;
-  const items = needsYouSessions().filter(x => x.cid !== currentCid);   // not the one you're in
+  // Hide only the session you're actively READING (transcript/tty); on a list/roster
+  // view, surface every blocked session including this one.
+  const inSession = currentView() === 'transcript' || currentView() === 'tty';
+  const items = needsYouSessions().filter(x => !(inSession && x.cid === currentCid));
   if (!items.length) { bar.hidden = true; bar.textContent = ''; return; }
   bar.textContent = '';
   const lbl = document.createElement('span'); lbl.className = 'nb-lbl'; lbl.textContent = '⏳';
@@ -3131,6 +3134,7 @@ function setView(view) {
   else if (sessions && !isTouch) box.focus();   // landing on sessions: composer ready so you can type a new prompt straight away
   else if (view === 'transcript') feed.scrollTop = feed.scrollHeight;
   else if (pm) { renderPmFeed(); pmfeed.scrollTop = pmfeed.scrollHeight; }
+  if (typeof renderNeedsBar === 'function') renderNeedsBar();   // depth changed → re-filter the bar
 }
 // the toggle button hops between the two deep views; projects/sessions have their own entries.
 // Each is a manual nav, so it cancels any pending question auto-return (navTo wraps that).
