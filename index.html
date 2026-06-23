@@ -304,6 +304,12 @@
                 border:1px dashed var(--edge); color:var(--dim); font:inherit;
                 font-size:12px; padding:5px 10px; cursor:pointer; }
   .maddtoggle:hover { color:var(--accent); border-color:var(--accent); }
+  /* "default for new repos" toggle on a machine card: a checkbox that pins the
+     global clone target so the projects rung stops auto-picking the first host */
+  .cdefault { margin-top:8px; display:flex; align-items:center; gap:7px;
+              color:var(--dim); font-size:12px; cursor:pointer; user-select:none; }
+  .cdefault input { accent-color:var(--accent); cursor:pointer; margin:0; }
+  .cdefault.on { color:var(--accent); }
   /* the card: a plain hairline box; the whole border lights amber when active/hovered */
   .scard { border:1px solid var(--edge); padding:11px 14px; background:var(--panel);
            cursor:pointer; display:flex; flex-direction:column; gap:4px; position:relative; }
@@ -1813,6 +1819,20 @@ function renderMachines(list) {
       // Each metric is optional; a probe that failed on the box is just omitted.
       if (m.stats.sys) card.appendChild(renderSysStats(m.stats.sys));
     }
+    // "Default for new repos": pin THIS host as the clone target the projects rung
+    // uses, instead of letting it auto-pick the first online machine. A single global
+    // choice — checking one box clears the others on re-render. Online machines only.
+    if (m.online) {
+      const isDef = cloneDefaultMachine() === m.id;
+      const def = document.createElement('label');
+      def.className = 'cdefault' + (isDef ? ' on' : '');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = isDef;
+      cb.onchange = () => { setCloneDefaultMachine(cb.checked ? m.id : null); renderMachines(machineList); };
+      const txt = document.createElement('span'); txt.textContent = 'default for new repos';
+      def.append(cb, txt);
+      card.appendChild(def);
+    }
     // Add-project: clone or create a repo directly ONTO this host. The roster is
     // the only place you target a specific machine (the projects rung picks the
     // default for you). Online machines only — an offline box can't clone.
@@ -1986,6 +2006,13 @@ const DEFAULT_MACHINE_KEY = 'cc_proj_default';
 function loadDefaults() { try { return JSON.parse(localStorage.getItem(DEFAULT_MACHINE_KEY) || '{}'); } catch { return {}; } }
 function defaultMachineFor(key) { return loadDefaults()[key] || null; }
 function setDefaultMachine(key, id) { const d = loadDefaults(); d[key] = id; try { localStorage.setItem(DEFAULT_MACHINE_KEY, JSON.stringify(d)); } catch {} }
+// Global default HOST for new repos created/cloned from the projects rung — a single
+// value, distinct from the per-project map above (which picks where an EXISTING
+// unified project opens). Set/cleared by a checkbox on each machine card; read by
+// ensureTargetMachine() so the projects rung stops auto-picking the first online box.
+const CLONE_DEFAULT_KEY = 'cc_clone_default';
+function cloneDefaultMachine() { try { return localStorage.getItem(CLONE_DEFAULT_KEY) || null; } catch { return null; } }
+function setCloneDefaultMachine(id) { try { id ? localStorage.setItem(CLONE_DEFAULT_KEY, id) : localStorage.removeItem(CLONE_DEFAULT_KEY); } catch {} }
 function pickMachineEntry(g) {
   if (!g || !g.machines.length) return null;
   const online = g.machines.filter(m => m.online);
@@ -2102,6 +2129,10 @@ function selectProject(id) {
 // to the first online machine. (Direct mode talks straight to the local harness.)
 function ensureTargetMachine() {
   if (!FLEET) return true;
+  // An explicit clone default (set via the machine roster checkbox) wins outright —
+  // that's the whole point of pinning one: deterministic host for new repos.
+  const pref = cloneDefaultMachine();
+  if (pref && isMachineOnline(pref)) { currentMachine = pref; e2eEnsure(pref).catch(() => {}); return true; }
   if (currentMachine && isMachineOnline(currentMachine)) return true;
   const on = machineList.find(m => m.online && m.kind !== 'relay');
   if (!on) { meta.textContent = 'no online machine to host a new project'; return false; }
