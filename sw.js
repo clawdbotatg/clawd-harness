@@ -16,20 +16,21 @@ self.addEventListener('fetch', () => {});
 // content off the wire and clear of the E2E boundary), so the banner text lives
 // here, not in the message. If a payload ever is attached, prefer it.
 self.addEventListener('push', (e) => {
-  let title = 'clawd', body = 'a session needs you', url = '/';
+  let title = 'clawd', body = 'a session needs you', url = '/', tag = 'clawd-attention';
   try {
     if (e.data) {
       const d = e.data.json();   // encrypted payload from the worker (if present)
       title = d.title || title;
       body = d.body || body;
       url = d.url || url;        // deep link to the session that needs you
+      if (d.tag) tag = 'clawd:' + d.tag;   // per-session → distinct sessions coexist
     }
   } catch (_) { /* bodyless tickle → generic banner, opens at the roster */ }
   e.waitUntil(self.registration.showNotification(title, {
     body,
     icon: '/icon-192.png',
     badge: '/icon-192.png',
-    tag: 'clawd-attention',   // collapse a burst into one banner
+    tag,                      // same session collapses; different sessions don't clobber
     renotify: true,
     data: { url },
   }));

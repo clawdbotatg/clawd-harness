@@ -415,8 +415,11 @@ class Worker:
         # project exists on several machines (parseHash understands #/m/<machine>/…).
         m = quote(self.machine, safe="")
         url = f"/#/m/{m}/p/{quote(key, safe='')}/s/{cid}" if key else f"/#/m/{m}"
-        return json.dumps({"title": f"{self.machine} · {title}",
-                           "body": "needs you", "url": url}).encode("utf-8")
+        # tag = the session, so repeated pings from the SAME session collapse into
+        # one banner but DIFFERENT sessions show side by side (a shared tag made a
+        # second session's notif overwrite the first).
+        return json.dumps({"title": f"{self.machine} · {title}", "body": "needs you",
+                           "url": url, "tag": f"{self.machine}:{cid}"}).encode("utf-8")
 
     def _send_push_all(self, payload=None):
         """Send the (encrypted, deep-linking) push to every subscription; prune any
