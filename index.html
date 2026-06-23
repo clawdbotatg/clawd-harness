@@ -56,6 +56,18 @@
                 overflow-x:auto; white-space:nowrap; scrollbar-width:none; }
   #sessionbar::-webkit-scrollbar { display:none; }
   #sessionbar[hidden] { display:none; }
+  /* "needs you" bar: any session blocked on the user, across ALL machines — the
+     reliable way to reach a blocked session when iOS won't deep-link a notif tap
+     into an already-open app. Tap a chip to jump straight in. */
+  #needsbar { display:flex; align-items:center; gap:6px; padding:5px 12px;
+              border-bottom:1px solid var(--accent-dim); background:var(--accent-bg);
+              overflow-x:auto; white-space:nowrap; scrollbar-width:none; }
+  #needsbar::-webkit-scrollbar { display:none; }
+  #needsbar[hidden] { display:none; }
+  #needsbar .nb-lbl { color:var(--accent); font-size:11px; flex:0 0 auto; letter-spacing:.04em; }
+  #needsbar .nb-chip { flex:0 0 auto; background:var(--accent); color:#000; border:none;
+                       font:inherit; font-size:12px; padding:4px 9px; cursor:pointer; }
+  #needsbar .nb-chip:hover { opacity:.85; }
   #sessionbar .stab { display:inline-flex; align-items:center; gap:6px; flex:0 0 auto;
                       padding:4px 9px; border:1px solid var(--edge); background:transparent;
                       color:var(--dim); font-size:12px; font-family:var(--mono); cursor:pointer;
@@ -409,6 +421,7 @@
     <span id="status" title="Fleet PM — click to open"><span class="bico">🛰️</span><span class="blbl"> pm</span></span>
   </header>
   <div id="sessionbar" hidden></div>
+  <div id="needsbar" hidden></div>
   <div id="rebootbar" hidden>
     <span class="rb-spin"></span>
     <span id="rebootmsg"></span>
@@ -762,8 +775,49 @@ if ('serviceWorker' in navigator) {
       else { pendingNav = parseHash(); resolvePendingNav(); }
     } catch (_) {}
   }
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) consumePendingDeeplink(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { consumePendingDeeplink(); renderNeedsBar(); } });
   window.addEventListener('load', () => consumePendingDeeplink());
+}
+
+// "Needs you" bar: scan every loaded machine for sessions blocked on the user and
+// surface them as tap-to-jump chips. This is the reliable cross-thread path on iOS
+// (a notif tap can't deep-link an already-open app, but returning to the app shows
+// you exactly what's waiting). Pure client-side — uses session data the app already
+// has (s.waiting), and a chip tap reuses the machine-aware deep-link resolver.
+function needsYouSessions() {
+  const out = [];
+  for (const mid in perMachine) {
+    const pm = perMachine[mid] || {};
+    const projById = {};
+    for (const p of (pm.projectList || [])) projById[p.pid] = p;
+    for (const s of (pm.sessionList || [])) {
+      if (!s.waiting || s.alive === false) continue;
+      const p = projById[s.pid];
+      const key = p ? projectKey(p) : null;
+      if (!key) continue;
+      out.push({ machine: mid, cid: s.cid, title: s.title || s.cid.slice(0, 6),
+                 hash: `#/m/${encodeURIComponent(mid)}/p/${encodeURIComponent(key)}/s/${s.cid}` });
+    }
+  }
+  return out;
+}
+function renderNeedsBar() {
+  if (!FLEET) return;
+  const bar = document.getElementById('needsbar');
+  if (!bar) return;
+  const items = needsYouSessions().filter(x => x.cid !== currentCid);   // not the one you're in
+  if (!items.length) { bar.hidden = true; bar.textContent = ''; return; }
+  bar.textContent = '';
+  const lbl = document.createElement('span'); lbl.className = 'nb-lbl'; lbl.textContent = '⏳ needs you:';
+  bar.appendChild(lbl);
+  for (const it of items) {
+    const chip = document.createElement('button');
+    chip.className = 'nb-chip';
+    chip.textContent = it.machine.replace(/^clawd-/, '') + ' · ' + it.title;
+    chip.onclick = () => { location.hash = it.hash; };   // → hashchange → resolvePendingNav (machine-aware)
+    bar.appendChild(chip);
+  }
+  bar.hidden = false;
 }
 
 // Token handling: the relay still accepts ?t=<token> in the URL (so a shared
@@ -1321,6 +1375,7 @@ function handleMachineJson(machine, m) {
       refreshBreadcrumb();
       resolvePendingNav();               // …or a session
     }
+    renderNeedsBar();                    // any machine's blocked sessions → the needs-you bar
     return;
   }
   if (machine !== currentMachine) return;   // all other frames act only on the viewed machine
