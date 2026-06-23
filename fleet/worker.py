@@ -358,19 +358,17 @@ class Worker:
         self.push_subs = list(by_ep.values())
 
     def maybe_notify(self, frame):
-        """Inspect a broadcast harness `hook` frame and ring the phone when the
-        session crosses into 'needs you': a finished turn (Stop) or a block on the
-        user (waiting=true — permission prompt / plan approval / idle nudge).
-        Per-session throttle collapses bursts. No-op without subs or a signer."""
+        """Inspect a broadcast harness `hook` frame and ring the phone ONLY when the
+        session blocks on the user (waiting=true — a permission prompt, plan
+        approval, or an AskUserQuestion). Deliberately NOT on routine turn-completion
+        (Stop), which floods the session you're actively chatting in. Fires once per
+        block (the false→true transition); per-session throttle collapses bursts."""
         if not self.push_subs or not (self.vapid and self.vapid.can_send):
             return
         cid = frame.get("cid")
-        ev = frame.get("event")
         waiting = bool(frame.get("waiting"))
         st = self._notify.setdefault(cid, {"last": 0.0, "waiting": False})
-        # Fire on Stop (turn done) or on a fresh transition into waiting (so a
-        # block that lingers across hooks only rings once).
-        fire = (ev == "Stop") or (waiting and not st["waiting"])
+        fire = waiting and not st["waiting"]    # only the moment it becomes blocked
         st["waiting"] = waiting
         if not fire:
             return
