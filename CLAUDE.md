@@ -162,7 +162,9 @@ user-facing overview; this file orients an agent working **on** the code.
   falling back if the named project/session is gone). `syncUrl()` no-ops while a
   restore is pending; a `lastWrittenHash` guard keeps our own writes from
   re-triggering the `hashchange` handler. Creating a session switches you into it
-  (`pendingNewFocus` → the server's `focus` reply opens the new `cid`).
+  (`pendingNewFocus` → the server's `focus` reply opens the new `cid`). **Building
+  a link into a specific session (incl. the fleet `#/m/<machine>/p/<projectKey>/s/<cid>`
+  form + how notifications construct them): see [`docs/DEEPLINKS.md`](docs/DEEPLINKS.md).**
 
 ## Two non-obvious gotchas (baked into server.py — don't regress)
 1. **`SCRUB_ENV`** — scrub `CLAUDECODE` / `CLAUDE_CODE_*` / `ANTHROPIC_API_KEY`

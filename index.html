@@ -929,7 +929,6 @@ function handleRelay(m) {
     // machine for the unified list, then re-subscribe whatever session we're viewing.
     fleetBootstrap();
     syncPushSubscription();   // re-register notifications with the (possibly restarted) relay
-    flushClog();              // ship any buffered deep-link debug to the relay logs
     if (currentMachine && currentCid) { hsend({ type: 'subscribe', cid: currentCid }); sendResize(); flushOutbound(); }
     return;
   }
@@ -3032,21 +3031,7 @@ document.getElementById('reloadBtn').onclick = () => location.reload();   // man
 machinesBtn.onclick = () => openMachines();          // 🖥️ roster overlay (no longer a rung)
 document.getElementById('brand').onclick = () => navTo('projects');
 if (!FLEET) machinesBtn.style.display = 'none';   // no machines rung when talking to a harness directly
-// Debug observability: mirror deep-link routing decisions to the relay so they
-// surface in the box logs (journalctl -u clawd-fleet-relay). Buffered until the
-// WS is authed, then flushed. Lets us see what URL the PWA actually booted with.
-let _clogQ = [];
-function clog(msg) {
-  if (FLEET && ws && ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'clientLog', msg })); } catch (_) {} }
-  else _clogQ.push(msg);
-}
-function flushClog() {
-  if (!(FLEET && ws && ws.readyState === 1)) return;
-  for (const m of _clogQ.splice(0)) { try { ws.send(JSON.stringify({ type: 'clientLog', msg: m })); } catch (_) {} }
-}
 pendingNav = parseHash();        // restore project / session / depth from the URL…
-clog('BOOT hash=' + JSON.stringify(location.hash) + ' nav=' + JSON.stringify(pendingNav)
-     + ' standalone=' + !!(window.matchMedia && matchMedia('(display-mode: standalone)').matches));
 setView(pendingNav.view);        // …optimistically; resolvePendingNav refines once data lands
 
 // Auto-surface the TUI when claude asks something interactive (AskUserQuestion,
@@ -3139,8 +3124,6 @@ function resolvePendingNavFleet(nav) {
   if (!nav.key) { pendingNav = null; setView('projects'); return; }
   if (!machineList.length) return;                           // roster not in yet
   const g = unifiedProjects.get(nav.key);
-  if (nav.cid) clog('RESOLVE key=' + nav.key + ' navMachine=' + nav.machine + ' gFound=' + !!g
-                    + ' roster=' + machineList.length + ' projKeys=' + JSON.stringify([...unifiedProjects.keys()]));
   if (!g) {
     if (!allMachinesReplied()) return;                       // still loading — keep waiting
     pendingNav = null; currentProjectKey = null; setView('projects'); return;   // genuinely gone
@@ -3153,8 +3136,6 @@ function resolvePendingNavFleet(nav) {
   if (nav.machine) entry = g.machines.find(me => me.machineId === nav.machine);
   if (!entry && nav.cid) entry = g.machines.find(me => ((perMachine[me.machineId] || {}).sessionList || []).some(s => s.cid === nav.cid));
   if (!entry) entry = pickMachineEntry(g);
-  if (nav.cid) clog('RESOLVE entry=' + (entry && entry.machineId) + ' navMachine=' + nav.machine
-                    + ' gMachines=' + JSON.stringify((g.machines || []).map(m => m.machineId)));
   if (!entry) { pendingNav = null; setView('projects'); return; }
   currentProjectKey = nav.key;
   attachMachine(entry.machineId);
@@ -3162,9 +3143,6 @@ function resolvePendingNavFleet(nav) {
   renderSessions();
   if (!nav.cid) { pendingNav = null; setView(nav.view); return; }
   const pm = perMachine[currentMachine] || {};
-  if (nav.cid) clog('RESOLVE attached=' + currentMachine + ' gotSessions=' + !!pm.gotSessions
-                    + ' sessCount=' + ((pm.sessionList || []).length)
-                    + ' hasCid=' + ((pm.sessionList || []).some(x => x.cid === nav.cid)));
   if (!pm.gotSessions) return;                               // that machine's sessions not in yet
   const s = (pm.sessionList || []).find(x => x.cid === nav.cid);
   if (!s) { pendingNav = null; setView('sessions'); return; }   // session gone
