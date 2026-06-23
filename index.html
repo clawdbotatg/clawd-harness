@@ -929,6 +929,7 @@ function handleRelay(m) {
     // machine for the unified list, then re-subscribe whatever session we're viewing.
     fleetBootstrap();
     syncPushSubscription();   // re-register notifications with the (possibly restarted) relay
+    flushClog();              // [TEMP DEBUG]
     if (currentMachine && currentCid) { hsend({ type: 'subscribe', cid: currentCid }); sendResize(); flushOutbound(); }
     return;
   }
@@ -3031,7 +3032,20 @@ document.getElementById('reloadBtn').onclick = () => location.reload();   // man
 machinesBtn.onclick = () => openMachines();          // 🖥️ roster overlay (no longer a rung)
 document.getElementById('brand').onclick = () => navTo('projects');
 if (!FLEET) machinesBtn.style.display = 'none';   // no machines rung when talking to a harness directly
+// [TEMP DEBUG] mirror URL writes + boot/resolve to the relay log so we can see
+// what URL an installed PWA (hidden address bar) is actually on. Remove when the
+// URL/reload/deep-link work is verified.
+let _clogQ = [];
+function clog(msg) {
+  if (FLEET && ws && ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'clientLog', msg })); } catch (_) {} }
+  else _clogQ.push(msg);
+}
+function flushClog() {
+  if (!(FLEET && ws && ws.readyState === 1)) return;
+  for (const m of _clogQ.splice(0)) { try { ws.send(JSON.stringify({ type: 'clientLog', msg: m })); } catch (_) {} }
+}
 pendingNav = parseHash();        // restore project / session / depth from the URL…
+clog('BOOT hash=' + JSON.stringify(location.hash) + ' nav=' + JSON.stringify(pendingNav));
 setView(pendingNav.view);        // …optimistically; resolvePendingNav refines once data lands
 
 // Auto-surface the TUI when claude asks something interactive (AskUserQuestion,
@@ -3086,6 +3100,8 @@ function syncUrl() {
       if (v === 'tty') h += '/tty';
     }
   }
+  if (typeof clog === 'function') clog('SYNCURL writes=' + JSON.stringify(h)
+      + ' view=' + v + ' machine=' + currentMachine + ' projKey=' + currentProjectKey + ' cid=' + currentCid);
   if (h !== location.hash) { lastWrittenHash = h; location.hash = h; }
 }
 // Re-apply pendingNav as server data arrives. Returns early — leaving pendingNav
@@ -3145,6 +3161,8 @@ function resolvePendingNavFleet(nav) {
   const pm = perMachine[currentMachine] || {};
   if (!pm.gotSessions) return;                               // that machine's sessions not in yet
   const s = (pm.sessionList || []).find(x => x.cid === nav.cid);
+  if (typeof clog === 'function') clog('FLEETRESOLVE machine=' + nav.machine + '→' + currentMachine
+      + ' key=' + nav.key + ' cid=' + nav.cid + ' sessFound=' + !!s + (s ? ' →OPEN' : ' →sessions list'));
   if (!s) { pendingNav = null; setView('sessions'); return; }   // session gone
   currentPid = s.pid;
   subscribe(nav.cid);
