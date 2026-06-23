@@ -395,6 +395,7 @@
     <button id="projectsBtn" title="All projects"><span class="bico">▦</span><span class="blbl"> projects</span></button>
     <button id="menuBtn" title="Sessions in this project"><span class="bico">≡</span><span class="blbl"> sessions</span></button>
     <button id="panelBtn" title="Show/hide the structured transcript"><span class="bico">▤</span><span class="blbl"> transcript</span></button>
+    <button id="reloadBtn" title="Reload (recover a blank screen)"><span class="bico">⟳</span><span class="blbl"> reload</span></button>
     <button id="phoneBtn" title="Open on your phone"><span class="bico">▢</span><span class="blbl"> qr</span></button>
     <button id="machinesBtn" title="Fleet machines"><span class="bico">🖥️</span><span class="blbl"> machines</span></button>
     <button id="notifyBtn" title="Notify me when a session needs me" hidden><span class="bico">🔔</span><span class="blbl"> alerts</span></button>
@@ -796,14 +797,42 @@ function resync() {
   if (currentCid && (v === 'tty' || v === 'transcript')) subscribe(currentCid);   // only reset the term when we're actually viewing the session
   flushOutbound();
 }
+// PWA escape hatch. A backgrounded mobile socket can come back DEAD while
+// readyState still reads OPEN — so if a real resume doesn't yield a live socket
+// shortly, the body is stuck blank with no manual refresh. Reload (the draft +
+// URL hash both survive a reload). Gate on navigator.onLine so a genuine network
+// outage doesn't spin reloads against the cached shell.
+let resumeReloadTimer = null;
+function armResumeReload() {
+  clearTimeout(resumeReloadTimer);
+  resumeReloadTimer = setTimeout(() => {
+    if (!_updating && navigator.onLine && (!ws || ws.readyState !== 1)) location.reload();
+  }, 6000);
+}
+function clearResumeReload() { clearTimeout(resumeReloadTimer); resumeReloadTimer = null; }
+
 // The tab/window/network just came back to life — make sure we're showing current
-// state. Down socket → reconnect (onopen re-subscribes). Live socket after a real
-// absence → resync. Quick glance → just repaint the buffer we already have.
+// state. The blank-screen-on-resume bug: a backgrounded mobile PWA gets its socket
+// silently killed by the OS, but readyState can still read OPEN on resume (the
+// close event hasn't landed yet). resync()→subscribe() WIPES the view (term.reset
+// + feed clear) and then sends a `subscribe` the server never answers over that
+// zombie socket (fleet mode even queues it into a dead e2e channel and reports
+// success) → permanent blank screen, which a PWA has no reload button to escape.
+// So after any real absence DON'T trust the socket: tear it down and reconnect —
+// onopen re-subscribes over a provably-live link, so the replay actually arrives
+// and the body repaints. A quick glance (still within 3s) just repaints the buffer
+// we already have.
 function wake() {
-  if (!ws || ws.readyState > 1) { scheduleReconnect(0); return; }
   const awayMs = hiddenAt ? Date.now() - hiddenAt : 0;
-  if (awayMs > 3000) resync();
-  else if (currentView() === 'tty') hardRepaint();
+  if (awayMs > 3000) {
+    if (ws && ws.readyState <= 1) { try { ws.close(); } catch {} }
+    ws = null;                 // force connect() past its "already have a socket" guard
+    scheduleReconnect(0);
+    armResumeReload();         // …and reload if that reconnect never goes live
+    return;
+  }
+  if (!ws || ws.readyState > 1) { scheduleReconnect(0); return; }
+  if (currentView() === 'tty') hardRepaint();
 }
 
 function connect() {
@@ -816,6 +845,7 @@ function connect() {
 
   ws.onopen = () => {
     opened = true; authFails = 0;   // a successful open proves the token is good
+    clearResumeReload();            // live again → no need for the resume backstop reload
     dot.classList.add('up');
     if (!FLEET) {
       sendResize();
@@ -2904,6 +2934,7 @@ const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; setView(v
 panelBtn.onclick = () => navTo(currentView() === 'tty' ? 'transcript' : 'tty');
 menuBtn.onclick = () => { if (currentPid) navTo('sessions'); else navTo('projects'); };
 projectsBtn.onclick = () => navTo('projects');
+document.getElementById('reloadBtn').onclick = () => location.reload();   // manual escape hatch — draft + hash survive a reload
 machinesBtn.onclick = () => openMachines();          // 🖥️ roster overlay (no longer a rung)
 document.getElementById('brand').onclick = () => navTo('projects');
 if (!FLEET) machinesBtn.style.display = 'none';   // no machines rung when talking to a harness directly
