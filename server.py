@@ -237,12 +237,20 @@ def _safe_name(name):
     return slug or "project"
 
 
+def _scrub_url_creds(url):
+    """Strip any embedded userinfo (`user:token@`) from an http(s) URL so a
+    credential baked into a remote (e.g. `gh repo create --clone` writing a
+    tokenized URL) never gets stored in the registry or broadcast to the UI."""
+    return re.sub(r"(https?://)[^/@]*@", r"\1", url or "")
+
+
 def _git_remote_url(path):
-    """Best-effort origin URL for a repo (empty string if none)."""
+    """Best-effort origin URL for a repo (empty string if none). Credentials
+    embedded in the URL are scrubbed — we display/persist this value."""
     try:
         r = subprocess.run(["git", "remote", "get-url", "origin"],
                            cwd=path, capture_output=True, text=True, timeout=5)
-        return r.stdout.strip() if r.returncode == 0 else ""
+        return _scrub_url_creds(r.stdout.strip()) if r.returncode == 0 else ""
     except Exception:
         return ""
 
@@ -271,7 +279,7 @@ class Project:
         self.pid = pid
         self.name = name
         self.path = path                         # abs path to the repo
-        self.repo_url = repo_url
+        self.repo_url = _scrub_url_creds(repo_url)  # never store/broadcast embedded creds
         self.status = status                     # ready | cloning | error
         self.error = error
         self.created = created or time.time()
