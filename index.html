@@ -272,15 +272,22 @@
   .scard .swait { color:#ffce9e; border-color:var(--err); background:rgba(214,77,42,.12);
                   animation:pulse 1.1s ease-in-out infinite; }
   .scard .serror { color:var(--err); font-size:12px; word-break:break-word; }
-  #addProject { display:flex; flex-direction:column; gap:8px; border:1px dashed var(--edge);
+  #addProject, .madd { display:flex; flex-direction:column; gap:8px; border:1px dashed var(--edge);
                 padding:12px 14px; }
-  #addProject input { background:var(--raised); color:var(--ink); border:1px solid var(--edge);
+  #addProject input, .madd input { background:var(--raised); color:var(--ink); border:1px solid var(--edge);
                       padding:9px 11px; font:inherit; }
-  @media (pointer: coarse) { #addProject input { font-size:18px; } }
-  #addProject input:focus { outline:none; border-color:var(--accent); }
-  #addProject .arow { display:flex; gap:8px; }
-  #addProject .arow button { flex:1; font-size:13px; padding:8px 10px; }
-  #addProject .ahint { color:var(--dim); font-size:11px; }
+  @media (pointer: coarse) { #addProject input, .madd input { font-size:18px; } }
+  #addProject input:focus, .madd input:focus { outline:none; border-color:var(--accent); }
+  #addProject .arow, .madd .arow { display:flex; gap:8px; }
+  #addProject .arow button, .madd .arow button { flex:1; font-size:13px; padding:8px 10px; }
+  #addProject .ahint, .madd .ahint { color:var(--dim); font-size:11px; }
+  /* per-machine add-project: a slim toggle that unfolds the clone/create form
+     inside the machine's roster card (the only place to target a SPECIFIC host) */
+  .madd { margin-top:8px; padding:10px 12px; }
+  .maddtoggle { margin-top:8px; align-self:flex-start; background:transparent;
+                border:1px dashed var(--edge); color:var(--dim); font:inherit;
+                font-size:12px; padding:5px 10px; cursor:pointer; }
+  .maddtoggle:hover { color:var(--accent); border-color:var(--accent); }
   /* the card: a plain hairline box; the whole border lights amber when active/hovered */
   .scard { border:1px solid var(--edge); padding:11px 14px; background:var(--panel);
            cursor:pointer; display:flex; flex-direction:column; gap:4px; position:relative; }
@@ -395,8 +402,8 @@
     <button id="projectsBtn" title="All projects"><span class="bico">▦</span><span class="blbl"> projects</span></button>
     <button id="menuBtn" title="Sessions in this project"><span class="bico">≡</span><span class="blbl"> sessions</span></button>
     <button id="panelBtn" title="Show/hide the structured transcript"><span class="bico">▤</span><span class="blbl"> transcript</span></button>
-    <button id="reloadBtn" title="Reload (recover a blank screen)"><span class="bico">⟳</span><span class="blbl"> reload</span></button>
-    <button id="phoneBtn" title="Open on your phone"><span class="bico">▢</span><span class="blbl"> qr</span></button>
+    <button id="reloadBtn" title="Reload (recover a blank screen)"><span class="bico">⟳</span></button>
+    <button id="phoneBtn" title="Open on your phone"><span class="bico">▢</span></button>
     <button id="machinesBtn" title="Fleet machines"><span class="bico">🖥️</span></button>
     <button id="notifyBtn" title="Notify me when a session needs me" hidden><span class="bico">🔔</span></button>
     <span id="status" title="Fleet PM — click to open"><span class="bico">🛰️</span><span class="blbl"> pm</span></span>
@@ -1460,6 +1467,11 @@ function handleJson(m) {
 const machinesEl = document.getElementById('machinelist');
 const machinesBtn = document.getElementById('machinesBtn');
 
+// Open-state for the per-machine add-project form. renderMachines re-runs on every
+// roster heartbeat (~1s), so we stash which machine's form is unfolded + its draft
+// text/caret and restore them after the rebuild (mirrors the projects-rung filter).
+let machineAdd = { id: null, value: '', start: null, end: null, focused: false };
+
 // ── Web Push: "ring me when a session needs me" ──────────────────────────────
 // A header bell opts you in. iOS only allows this for an INSTALLED PWA (Add to
 // Home Screen) and only from a user gesture — so the button is gated on feature
@@ -1569,6 +1581,48 @@ function renderSysStats(sys) {
   return wrap;
 }
 
+// Per-machine add-project affordance: a slim toggle that unfolds a clone/create
+// form scoped to ONE host. Open-state + draft text live in `machineAdd` so the ~1s
+// roster re-render doesn't collapse it or drop what you're typing.
+function renderMachineAdd(machineId) {
+  const open = machineAdd.id === machineId;
+  const wrap = document.createElement('div');
+  const toggle = document.createElement('button');
+  toggle.className = 'maddtoggle';
+  toggle.textContent = open ? '× close' : '＋ add project';
+  toggle.onclick = () => {
+    if (machineAdd.id === machineId) machineAdd = { id: null, value: '', start: null, end: null, focused: false };
+    else machineAdd = { id: machineId, value: '', start: null, end: null, focused: true };
+    renderMachines(machineList);
+  };
+  wrap.appendChild(toggle);
+  if (!open) return wrap;
+
+  const form = document.createElement('div');
+  form.className = 'madd';
+  const inp = document.createElement('input');
+  inp.placeholder = 'new repo name · or git URL to clone';
+  inp.value = machineAdd.value;
+  inp.addEventListener('input', () => {
+    machineAdd.value = inp.value;
+    machineAdd.start = inp.selectionStart; machineAdd.end = inp.selectionEnd;
+  });
+  inp.addEventListener('focus', () => { machineAdd.focused = true; });
+  inp.addEventListener('blur', () => { machineAdd.focused = false; });
+  const arow = document.createElement('div'); arow.className = 'arow';
+  const createBtn = document.createElement('button'); createBtn.textContent = '＋ create';
+  const cloneBtn = document.createElement('button'); cloneBtn.textContent = '⤓ clone URL';
+  const done = () => { machineAdd = { id: null, value: '', start: null, end: null, focused: false }; renderMachines(machineList); };
+  createBtn.onclick = () => { createProjectOnMachine(machineId, inp.value); done(); };
+  cloneBtn.onclick = () => { cloneProjectOnMachine(machineId, inp.value); done(); };
+  arow.append(createBtn, cloneBtn);
+  const hint = document.createElement('div'); hint.className = 'ahint';
+  hint.textContent = 'create = new empty repo · clone = pull an existing git URL — onto this machine';
+  form.append(inp, arow, hint);
+  wrap.appendChild(form);
+  return wrap;
+}
+
 function renderMachines(list) {
   machineList = list;
   machinesEl.innerHTML = '';
@@ -1637,6 +1691,10 @@ function renderMachines(list) {
       // Each metric is optional; a probe that failed on the box is just omitted.
       if (m.stats.sys) card.appendChild(renderSysStats(m.stats.sys));
     }
+    // Add-project: clone or create a repo directly ONTO this host. The roster is
+    // the only place you target a specific machine (the projects rung picks the
+    // default for you). Online machines only — an offline box can't clone.
+    if (m.online) card.appendChild(renderMachineAdd(m.id));
     machinesEl.appendChild(card);
   });
   // Roster changed: connect any newly-online machine and re-merge (online flags
@@ -1646,6 +1704,15 @@ function renderMachines(list) {
   renderProjectRung();
   refreshBreadcrumb();
   resolvePendingNav();        // a URL we restored from may resolve now that the roster is in
+  // Restore focus + caret to an open add-project form so a roster heartbeat mid-type
+  // doesn't yank you out of the box.
+  if (machineAdd.id && machineAdd.focused) {
+    const inp = machinesEl.querySelector('.madd input');
+    if (inp) {
+      inp.focus();
+      if (machineAdd.start != null) try { inp.setSelectionRange(machineAdd.start, machineAdd.end); } catch {}
+    }
+  }
 }
 
 // -- projects (top rung) ----------------------------------------------------
@@ -1915,6 +1982,32 @@ function createProject(name) {
 function addProjectFromUrl(url) {
   if (!url.trim() || !ensureTargetMachine()) return;
   hsend({ type: 'addProject', repoUrl: url.trim() });
+}
+// Like hsend(), but for an EXPLICIT machine — without disturbing currentMachine /
+// the deep-rung view. Used by the per-machine add-project form so you can clone or
+// create a repo onto a SPECIFIC host (the projects rung only picks a default for
+// you). The new project's cloning→ready frames arrive over this opened channel and
+// merge into the unified list like any other.
+function hsendTo(machineId, frame) {
+  if (!ws || ws.readyState !== 1) return false;
+  if (!FLEET) { ws.send(JSON.stringify(frame)); return true; }
+  const ch = e2eChans[machineId];
+  if (ch && ch.status === 'open') { e2eSendFrame(machineId, frame); return true; }
+  e2eEnsure(machineId).catch(() => {});       // start the secure handshake if needed
+  e2eChans[machineId].queue.push(frame);      // queued until the channel opens
+  return true;
+}
+function createProjectOnMachine(machineId, name) {
+  name = (name || '').trim();
+  if (!name || !isMachineOnline(machineId)) return;
+  hsendTo(machineId, { type: 'createProject', name });
+  meta.textContent = `creating ${name} on ${machineId}…`;
+}
+function cloneProjectOnMachine(machineId, url) {
+  url = (url || '').trim();
+  if (!url || !isMachineOnline(machineId)) return;
+  hsendTo(machineId, { type: 'addProject', repoUrl: url });
+  meta.textContent = `cloning onto ${machineId}…`;
 }
 // Direct mode entry point: a `projects` frame for the (single) local harness.
 // Fleet mode never calls this — its rung is driven by mergeProjects/renderProjectRung.
