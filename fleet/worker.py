@@ -411,7 +411,10 @@ class Worker:
         title = meta.get("title") or "a session"
         pid = meta.get("pid")
         key = self._project_key(pid) if pid else ""
-        url = f"/#/p/{quote(key, safe='')}/s/{cid}" if key else "/#/"
+        # Machine-prefixed so the deep link lands on THIS host even when the same
+        # project exists on several machines (parseHash understands #/m/<machine>/…).
+        m = quote(self.machine, safe="")
+        url = f"/#/m/{m}/p/{quote(key, safe='')}/s/{cid}" if key else f"/#/m/{m}"
         return json.dumps({"title": f"{self.machine} · {title}",
                            "body": "needs you", "url": url}).encode("utf-8")
 

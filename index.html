@@ -3054,13 +3054,18 @@ function currentView() {
 // `…/s/<cid>/tty` tty. `<key>` is the project identity in fleet, the pid in direct mode.
 function parseHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
-  const nav = { view: 'projects', key: null, cid: null };
+  const nav = { view: 'projects', key: null, cid: null, machine: null };
   if (parts[0] === 'pm') { nav.view = 'pm'; return nav; }   // Fleet PM (its own top-level view)
-  if (parts[0] === 'p' && parts[1]) {
-    nav.key = decodeURIComponent(parts[1]); nav.view = 'sessions';
-    if (parts[2] === 's' && parts[3]) {
-      nav.cid = decodeURIComponent(parts[3]);
-      nav.view = parts[4] === 'tty' ? 'tty' : 'transcript';
+  // Optional machine prefix (#/m/<machine>/…) — disambiguates a project that
+  // exists on several machines so a deep link lands on the RIGHT host, not the
+  // project's default pick. Written by syncUrl in fleet mode + by notifications.
+  let i = 0;
+  if (parts[0] === 'm' && parts[1]) { nav.machine = decodeURIComponent(parts[1]); i = 2; }
+  if (parts[i] === 'p' && parts[i + 1]) {
+    nav.key = decodeURIComponent(parts[i + 1]); nav.view = 'sessions';
+    if (parts[i + 2] === 's' && parts[i + 3]) {
+      nav.cid = decodeURIComponent(parts[i + 3]);
+      nav.view = parts[i + 4] === 'tty' ? 'tty' : 'transcript';
     }
   }
   return nav;
@@ -3072,6 +3077,9 @@ function syncUrl() {
   let h = '#/';
   const pkey = FLEET ? currentProjectKey : currentPid;
   if (pkey && v !== 'projects') {
+    // Fleet: prefix the machine so the URL is unambiguous when the same project
+    // lives on multiple hosts (reload/share/deep-link land on this exact machine).
+    if (FLEET && currentMachine) h += 'm/' + encodeURIComponent(currentMachine) + '/';
     h += 'p/' + encodeURIComponent(pkey);
     if ((v === 'transcript' || v === 'tty') && currentCid) {
       h += '/s/' + encodeURIComponent(currentCid);
@@ -3120,9 +3128,13 @@ function resolvePendingNavFleet(nav) {
     if (!allMachinesReplied()) return;                       // still loading — keep waiting
     pendingNav = null; currentProjectKey = null; setView('projects'); return;   // genuinely gone
   }
-  // Prefer the machine that actually has the named session; else the default pick.
+  // Pick the machine: an explicit machine in the URL wins (a deep link to a
+  // specific host); else the machine that already has the named session loaded;
+  // else the project's default. This is what stops a deep link to a non-default
+  // host (session on head, default heart) from landing on the wrong machine.
   let entry = null;
-  if (nav.cid) entry = g.machines.find(me => ((perMachine[me.machineId] || {}).sessionList || []).some(s => s.cid === nav.cid));
+  if (nav.machine) entry = g.machines.find(me => me.machineId === nav.machine);
+  if (!entry && nav.cid) entry = g.machines.find(me => ((perMachine[me.machineId] || {}).sessionList || []).some(s => s.cid === nav.cid));
   if (!entry) entry = pickMachineEntry(g);
   if (!entry) { pendingNav = null; setView('projects'); return; }
   currentProjectKey = nav.key;
