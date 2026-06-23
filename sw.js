@@ -45,10 +45,13 @@ self.addEventListener('notificationclick', (e) => {
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const c of all) {
       if ('focus' in c) {
+        // Already-open app: iOS PWAs ignore WindowClient.navigate(), so tell the
+        // page to route itself in-app via postMessage (navigate() is best-effort).
+        try { c.postMessage({ type: 'deeplink', url }); } catch (_) {}
         try { if ('navigate' in c) await c.navigate(url); } catch (_) {}
         return c.focus();
       }
     }
-    if (self.clients.openWindow) return self.clients.openWindow(url);
+    if (self.clients.openWindow) return self.clients.openWindow(url);   // cold open: honored
   })());
 });

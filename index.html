@@ -713,6 +713,20 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   });
+  // A notification tapped while the app is ALREADY OPEN: iOS PWAs ignore the
+  // SW's WindowClient.navigate(), so the SW posts the deep link here and we route
+  // in-app — set the hash → hashchange → resolvePendingNav drills to the session
+  // (incl. switching machines). Cold-open uses openWindow and doesn't hit this.
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    const d = e.data || {};
+    if (d.type !== 'deeplink' || typeof d.url !== 'string') return;
+    const i = d.url.indexOf('#');
+    const hash = i >= 0 ? d.url.slice(i) : '';
+    if (typeof clog === 'function') clog('DEEPLINK msg url=' + JSON.stringify(d.url) + ' curHash=' + JSON.stringify(location.hash));
+    if (!hash) return;
+    if (hash !== location.hash) { location.hash = hash; }      // → hashchange → resolve
+    else { pendingNav = parseHash(); resolvePendingNav(); }    // same hash → force re-resolve
+  });
 }
 
 // Token handling: the relay still accepts ?t=<token> in the URL (so a shared
