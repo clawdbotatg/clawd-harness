@@ -105,16 +105,31 @@ Open it by setting `location.href`/`location.hash`, or from a service worker
 
 ## How push notifications use this
 
-The notification path is the live example: the worker watches its harness for
-"needs you" hooks, then builds exactly this deep-link and sends it (encrypted) in
-the push payload; the service worker navigates to it on tap.
+The notification path is the live example: the worker watches its harness for a
+session blocking on the user (`waiting=true`), builds exactly this deep-link, and
+sends it (encrypted) in the push payload; the service worker opens it on tap.
 
 - `fleet/worker.py` → `_push_payload()` builds `/#/m/<machine>/p/<key>/s/<cid>`
-  (caches pid→name/repoUrl from the roster stream to compute the key).
-- `sw.js` → `notificationclick` reads `notification.data.url` and focuses +
-  `navigate()`s an open window there, or `openWindow()`s it.
+  (caches pid→name/repoUrl from the roster stream to compute the key); tag =
+  `<machine>:<cid>` so distinct sessions don't clobber each other's notifications.
+- `sw.js` → `notificationclick` opens `notification.data.url` via `openWindow()`,
+  and also stashes it in the Cache as a fallback pickup.
 
-See `docs/fleet/` and the fleet-notifications memory for the full push design.
+### ⚠️ iOS limitation: deep-link on tap only works when the PWA is CLOSED
+
+A notification tap deep-links into the right session **only when the installed PWA
+is fully terminated** (cold launch via `openWindow`). When the app is already
+**open or backgrounded**, iOS does not fire `notificationclick` in a way that can
+navigate — it just foregrounds the app where you left off. This is an Apple
+constraint, not fixable in our code.
+
+**The cover for the already-open case is the "needs you" bar** (`renderNeedsBar`
+in `index.html`): whenever you return to the app it scans every machine's sessions
+for `s.waiting` and shows each blocked session as a tap-to-jump chip (which just
+sets the machine-qualified hash → `resolvePendingNav`). So: closed app → tap
+notif lands you in the session; open app → return and tap the chip.
+
+See `docs/fleet/` and the fleet-push-notifications memory for the full design.
 
 ---
 
