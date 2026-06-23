@@ -712,6 +712,11 @@ let lastWrittenHash = '';       // the hash we last wrote, so hashchange ignores
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js').catch(() => {});
+    // Diagnostic: ask the active SW its version so we can tell if the new build
+    // (with the postMessage deep-link path) actually activated on this device.
+    navigator.serviceWorker.ready.then((reg) => {
+      try { (reg.active || navigator.serviceWorker.controller).postMessage({ type: 'ping' }); } catch (_) {}
+    });
   });
   // A notification tapped while the app is ALREADY OPEN: iOS PWAs ignore the
   // SW's WindowClient.navigate(), so the SW posts the deep link here and we route
@@ -719,6 +724,7 @@ if ('serviceWorker' in navigator) {
   // (incl. switching machines). Cold-open uses openWindow and doesn't hit this.
   navigator.serviceWorker.addEventListener('message', (e) => {
     const d = e.data || {};
+    if (d.type === 'pong') { clog('SW pong version=' + d.version + ' controller=' + !!navigator.serviceWorker.controller); return; }
     if (d.type !== 'deeplink' || typeof d.url !== 'string') return;
     const i = d.url.indexOf('#');
     const hash = i >= 0 ? d.url.slice(i) : '';

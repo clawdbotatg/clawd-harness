@@ -7,8 +7,16 @@
 // (WS {type:"reload"}) + the `Cache-Control: no-store` headers the server/relay
 // already send. So we take over the scope only to claim installability, and let
 // every request fall through to the normal network path.
+const SW_VERSION = 'v2-postmsg';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+// Diagnostic: the page pings on load; we pong our version so the page can log
+// whether THIS sw (with the postMessage deep-link path) is actually the active one.
+self.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'ping') {
+    try { e.source.postMessage({ type: 'pong', version: SW_VERSION }); } catch (_) {}
+  }
+});
 // No respondWith() → the browser performs its default network fetch, uncached.
 self.addEventListener('fetch', () => {});
 
