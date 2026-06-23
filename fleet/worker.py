@@ -409,6 +409,11 @@ class Worker:
         title = meta.get("title") or "a session"
         pid = meta.get("pid")
         key = self._project_key(pid) if pid else ""
+        # Body = what it's actually waiting on. blocked_on may not be written yet at
+        # the instant it blocks (LLM lag) → fall back to the live digest, then a
+        # generic line; the in-app needs-you bar shows the precise ask a moment later.
+        body = ((meta.get("blocked_on") or "").strip()
+                or (meta.get("digest") or "").strip() or "needs you")
         # Machine-prefixed so the deep link lands on THIS host even when the same
         # project exists on several machines (parseHash understands #/m/<machine>/…).
         m = quote(self.machine, safe="")
@@ -416,7 +421,7 @@ class Worker:
         # tag = the session, so repeated pings from the SAME session collapse into
         # one banner but DIFFERENT sessions show side by side (a shared tag made a
         # second session's notif overwrite the first).
-        return json.dumps({"title": f"{self.machine} · {title}", "body": "needs you",
+        return json.dumps({"title": f"{self.machine} · {title}", "body": body,
                            "url": url, "tag": f"{self.machine}:{cid}"}).encode("utf-8")
 
     def _send_push_all(self, payload=None):
@@ -804,7 +809,9 @@ class Worker:
                     # cache cid → project/title so a notification can name the
                     # session and deep-link to it (see _push_payload).
                     self._sessions_meta = {s.get("cid"): {"pid": s.get("pid"),
-                                                          "title": s.get("title")}
+                                                          "title": s.get("title"),
+                                                          "blocked_on": s.get("blocked_on"),
+                                                          "digest": s.get("digest")}
                                            for s in sess if s.get("cid")}
                 else:
                     continue
