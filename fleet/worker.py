@@ -34,6 +34,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -302,6 +303,7 @@ class Worker:
         self.push_subs = []
         self._notify = {}          # cid -> {"last": ts, "waiting": bool}
         self._sessions_meta = {}   # cid -> {"pid":..,"title":..} for deep-link payloads
+        self._projects_meta = {}   # pid -> {"name":..,"repoUrl":..} → unified projectKey
         self.vapid = webpushmod.VapidKeys.load(str(VAPID_FILE)) if HAVE_WEBPUSH else None
         # Latest system stats {cpu,ram,disk,gpu} sampled locally (sysstats.collect).
         # None until the first sample; pushed to the relay on a steady timer since
@@ -379,14 +381,37 @@ class Worker:
         payload = self._push_payload(cid)
         threading.Thread(target=self._send_push_all, args=(payload,), daemon=True).start()
 
+    @staticmethod
+    def _norm_repo(url):
+        """Mirror of index.html normRepo(): canonicalize a git remote so the same
+        repo unifies across machines. MUST stay byte-identical to the JS or the
+        deep-link projectKey won't match the UI's."""
+        s = (url or "").strip()
+        if not s:
+            return ""
+        s = re.sub(r"^git@([^:]+):", r"\1/", s)            # git@host:owner/repo → host/owner/repo
+        s = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", s)  # strip scheme
+        s = re.sub(r"\.git$", "", s, flags=re.I)            # drop trailing .git
+        s = re.sub(r"/+$", "", s)                           # drop trailing slash
+        return s.lower()
+
+    def _project_key(self, pid):
+        """The unified projectKey the fleet UI routes on: normalized repo, else
+        name:<name> (mirror of index.html projectKey())."""
+        p = self._projects_meta.get(pid) or {}
+        return self._norm_repo(p.get("repoUrl")) or ("name:" + (p.get("name") or ""))
+
     def _push_payload(self, cid):
         """Build the encrypted-push body: a friendly title + a deep link to the
-        session so tapping the notification jumps straight to it. Falls back to the
-        machine view if we don't yet know the session's project id."""
+        session so tapping the notification jumps straight to it. The fleet UI
+        routes on `#/p/<urlencoded projectKey>/s/<cid>` and resolves the machine
+        from the cid itself, so that's the form we emit (NOT a machine-prefixed
+        path — parseHash doesn't understand those)."""
         meta = self._sessions_meta.get(cid) or {}
         title = meta.get("title") or "a session"
         pid = meta.get("pid")
-        url = f"/#/m/{self.machine}/p/{pid}/s/{cid}" if pid else f"/#/m/{self.machine}"
+        key = self._project_key(pid) if pid else ""
+        url = f"/#/p/{quote(key, safe='')}/s/{cid}" if key else "/#/"
         return json.dumps({"title": f"{self.machine} · {title}",
                            "body": "needs you", "url": url}).encode("utf-8")
 
@@ -761,7 +786,13 @@ class Worker:
                     self.maybe_notify(frame)
                     continue
                 if t == "projects":
-                    nproj = len(frame.get("projects") or [])
+                    projs = frame.get("projects") or []
+                    nproj = len(projs)
+                    # cache pid → name/repoUrl so a notification can build the
+                    # unified projectKey the UI routes on (see _project_key).
+                    self._projects_meta = {p.get("pid"): {"name": p.get("name"),
+                                                          "repoUrl": p.get("repoUrl")}
+                                           for p in projs if p.get("pid")}
                 elif t == "sessions":
                     sess = frame.get("sessions") or []
                     nsess = len(sess)
