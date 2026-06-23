@@ -7,7 +7,7 @@
 // (WS {type:"reload"}) + the `Cache-Control: no-store` headers the server/relay
 // already send. So we take over the scope only to claim installability, and let
 // every request fall through to the normal network path.
-const SW_VERSION = 'v2-postmsg';
+const SW_VERSION = 'v3-cachenav';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 // Diagnostic: the page pings on load; we pong our version so the page can log
@@ -50,13 +50,15 @@ self.addEventListener('notificationclick', (e) => {
   e.notification.close();
   const url = (e.notification.data && e.notification.data.url) || '/';
   e.waitUntil((async () => {
+    // Stash the target in the Cache so the page picks it up when it next loads OR
+    // becomes visible. This is the ONLY reliable path on iOS: a notif tap can't
+    // navigate (or reliably postMessage) an already-open PWA, but iOS DOES
+    // foreground it — and the page reads this on visibilitychange.
+    try { const c = await caches.open('clawd-nav'); await c.put(new Request('/__deeplink'), new Response(url)); } catch (_) {}
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const c of all) {
       if ('focus' in c) {
-        // Already-open app: iOS PWAs ignore WindowClient.navigate(), so tell the
-        // page to route itself in-app via postMessage (navigate() is best-effort).
-        try { c.postMessage({ type: 'deeplink', url }); } catch (_) {}
-        try { if ('navigate' in c) await c.navigate(url); } catch (_) {}
+        try { c.postMessage({ type: 'deeplink', url }); } catch (_) {}   // foreground fast-path
         return c.focus();
       }
     }

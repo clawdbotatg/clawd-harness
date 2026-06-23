@@ -735,7 +735,7 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', (e) => {
     const d = e.data || {};
     if (d.type === 'pong') { clog('SW pong version=' + d.version + ' controller=' + !!navigator.serviceWorker.controller); return; }
-    if (d.type !== 'deeplink' || typeof d.url !== 'string') return;
+    if (d.type !== 'deeplink' || typeof d.url !== 'string') { consumePendingDeeplink(); return; }
     const i = d.url.indexOf('#');
     const hash = i >= 0 ? d.url.slice(i) : '';
     if (typeof clog === 'function') clog('DEEPLINK msg url=' + JSON.stringify(d.url) + ' curHash=' + JSON.stringify(location.hash));
@@ -743,6 +743,27 @@ if ('serviceWorker' in navigator) {
     if (hash !== location.hash) { location.hash = hash; }      // → hashchange → resolve
     else { pendingNav = parseHash(); resolvePendingNav(); }    // same hash → force re-resolve
   });
+  // Robust deep-link pickup (the iOS path that actually works): the SW stashes a
+  // tapped notification's target in the Cache; the page consumes it on load AND
+  // whenever it becomes visible — which is exactly when iOS foregrounds the PWA
+  // after a notif tap. This is what switches sessions on an already-open app.
+  async function consumePendingDeeplink() {
+    try {
+      const c = await caches.open('clawd-nav');
+      const r = await c.match(new Request('/__deeplink'));
+      if (!r) return;
+      await c.delete(new Request('/__deeplink'));
+      const url = await r.text();
+      const i = url.indexOf('#');
+      const hash = i >= 0 ? url.slice(i) : '';
+      if (typeof clog === 'function') clog('PENDING deeplink url=' + JSON.stringify(url) + ' curHash=' + JSON.stringify(location.hash));
+      if (!hash) return;
+      if (hash !== location.hash) location.hash = hash;
+      else { pendingNav = parseHash(); resolvePendingNav(); }
+    } catch (_) {}
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) consumePendingDeeplink(); });
+  window.addEventListener('load', () => consumePendingDeeplink());
 }
 
 // Token handling: the relay still accepts ?t=<token> in the URL (so a shared
