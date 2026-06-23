@@ -735,11 +735,6 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').then((reg) => {
       reg.update().catch(() => {});
     }).catch(() => {});
-    // Diagnostic: ask the active SW its version so we can tell if the new build
-    // (with the postMessage deep-link path) actually activated on this device.
-    navigator.serviceWorker.ready.then((reg) => {
-      try { (reg.active || navigator.serviceWorker.controller).postMessage({ type: 'ping' }); } catch (_) {}
-    });
   });
   // A notification tapped while the app is ALREADY OPEN: iOS PWAs ignore the
   // SW's WindowClient.navigate(), so the SW posts the deep link here and we route
@@ -747,11 +742,9 @@ if ('serviceWorker' in navigator) {
   // (incl. switching machines). Cold-open uses openWindow and doesn't hit this.
   navigator.serviceWorker.addEventListener('message', (e) => {
     const d = e.data || {};
-    if (d.type === 'pong') { clog('SW pong version=' + d.version + ' controller=' + !!navigator.serviceWorker.controller); return; }
     if (d.type !== 'deeplink' || typeof d.url !== 'string') { consumePendingDeeplink(); return; }
     const i = d.url.indexOf('#');
     const hash = i >= 0 ? d.url.slice(i) : '';
-    if (typeof clog === 'function') clog('DEEPLINK msg url=' + JSON.stringify(d.url) + ' curHash=' + JSON.stringify(location.hash));
     if (!hash) return;
     if (hash !== location.hash) { location.hash = hash; }      // → hashchange → resolve
     else { pendingNav = parseHash(); resolvePendingNav(); }    // same hash → force re-resolve
@@ -769,7 +762,6 @@ if ('serviceWorker' in navigator) {
       const url = await r.text();
       const i = url.indexOf('#');
       const hash = i >= 0 ? url.slice(i) : '';
-      if (typeof clog === 'function') clog('PENDING deeplink url=' + JSON.stringify(url) + ' curHash=' + JSON.stringify(location.hash));
       if (!hash) return;
       if (hash !== location.hash) location.hash = hash;
       else { pendingNav = parseHash(); resolvePendingNav(); }
@@ -1034,7 +1026,6 @@ function handleRelay(m) {
     // machine for the unified list, then re-subscribe whatever session we're viewing.
     fleetBootstrap();
     syncPushSubscription();   // re-register notifications with the (possibly restarted) relay
-    flushClog();              // [TEMP DEBUG]
     if (currentMachine && currentCid) { hsend({ type: 'subscribe', cid: currentCid }); sendResize(); flushOutbound(); }
     return;
   }
@@ -3138,20 +3129,7 @@ document.getElementById('reloadBtn').onclick = () => location.reload();   // man
 machinesBtn.onclick = () => openMachines();          // 🖥️ roster overlay (no longer a rung)
 document.getElementById('brand').onclick = () => navTo('projects');
 if (!FLEET) machinesBtn.style.display = 'none';   // no machines rung when talking to a harness directly
-// [TEMP DEBUG] mirror URL writes + boot/resolve to the relay log so we can see
-// what URL an installed PWA (hidden address bar) is actually on. Remove when the
-// URL/reload/deep-link work is verified.
-let _clogQ = [];
-function clog(msg) {
-  if (FLEET && ws && ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'clientLog', msg })); } catch (_) {} }
-  else _clogQ.push(msg);
-}
-function flushClog() {
-  if (!(FLEET && ws && ws.readyState === 1)) return;
-  for (const m of _clogQ.splice(0)) { try { ws.send(JSON.stringify({ type: 'clientLog', msg: m })); } catch (_) {} }
-}
 pendingNav = parseHash();        // restore project / session / depth from the URL…
-clog('BOOT hash=' + JSON.stringify(location.hash) + ' nav=' + JSON.stringify(pendingNav));
 setView(pendingNav.view);        // …optimistically; resolvePendingNav refines once data lands
 
 // Auto-surface the TUI when claude asks something interactive (AskUserQuestion,
@@ -3206,8 +3184,6 @@ function syncUrl() {
       if (v === 'tty') h += '/tty';
     }
   }
-  if (typeof clog === 'function') clog('SYNCURL writes=' + JSON.stringify(h)
-      + ' view=' + v + ' machine=' + currentMachine + ' projKey=' + currentProjectKey + ' cid=' + currentCid);
   if (h !== location.hash) { lastWrittenHash = h; location.hash = h; }
 }
 // Re-apply pendingNav as server data arrives. Returns early — leaving pendingNav
@@ -3275,8 +3251,6 @@ function resolvePendingNavFleet(nav) {
   const pm = perMachine[currentMachine] || {};
   if (!pm.gotSessions) return;                               // that machine's sessions not in yet
   const s = (pm.sessionList || []).find(x => x.cid === nav.cid);
-  if (typeof clog === 'function') clog('FLEETRESOLVE machine=' + nav.machine + '→' + currentMachine
-      + ' key=' + nav.key + ' cid=' + nav.cid + ' sessFound=' + !!s + (s ? ' →OPEN' : ' →sessions list'));
   if (!s) { pendingNav = null; setView('sessions'); return; }   // session gone
   currentPid = s.pid;
   subscribe(nav.cid);
