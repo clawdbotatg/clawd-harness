@@ -445,6 +445,11 @@ class Relay:
         if t == "list":
             mobile.send_json({"type": "machines", "machines": self.roster()})
             return
+        if t == "clientLog":
+            # Debug observability: the mobile mirrors its deep-link routing here so
+            # it shows in journalctl -u clawd-fleet-relay. Truncated, never trusted.
+            print(f"[relay] clientLog {mobile.ident}: {str(frame.get('msg'))[:500]}", flush=True)
+            return
         if t == "pushSubscribe":
             # The phone enabled notifications: store its (opaque) Web Push
             # subscription and fan it out to every worker so they can ring it.
