@@ -417,7 +417,6 @@
     <span class="spacer"></span>
     <button id="projectsBtn" title="All projects"><span class="bico">▦</span><span class="blbl"> projects</span></button>
     <button id="menuBtn" title="Sessions in this project"><span class="bico">≡</span><span class="blbl"> sessions</span></button>
-    <button id="panelBtn" title="Show/hide the structured transcript"><span class="bico">▤</span><span class="blbl"> transcript</span></button>
     <button id="reloadBtn" title="Reload (recover a blank screen)"><span class="bico">⟳</span></button>
     <button id="phoneBtn" title="Open on your phone"><span class="bico">▢</span></button>
     <button id="machinesBtn" title="Fleet machines"><span class="bico">🖥️</span></button>
@@ -537,9 +536,9 @@ document.addEventListener('touchend', (e) => {
 const isTouch = window.matchMedia('(pointer: coarse)').matches;
 // Preferred deep view when you dive into a session: desktop drives the live
 // terminal (full keyboard, drives the TUI directly); touch reads the transcript
-// (native scroll/markdown, no xterm input pain). You can still toggle to the
-// other with the panel button — this is just the default landing.
-const DEEP_VIEW = isTouch ? 'transcript' : 'tty';
+// The session view is the live terminal (tty) on every device — the transcript
+// view was pulled. On touch the tty is read-only (you type in the composer).
+const DEEP_VIEW = 'tty';
 const term = new Terminal({
   fontFamily: 'ui-monospace, Menlo, Monaco, "Courier New", monospace',
   fontSize: 13, cursorBlink: !isTouch,
@@ -567,6 +566,15 @@ function bottomJustifyTTY() {
   const screen = term.element && term.element.querySelector('.xterm-screen');
   const rowsEl = term.element && term.element.querySelector('.xterm-rows');
   if (!screen || !rowsEl || !rowsEl.children.length) return;
+  // Once there's scrollback, the content already exceeds the viewport so the offset
+  // below clamps to 0 — but the DOM measurement (offsetHeight/getComputedStyle) runs
+  // on EVERY render, including every frame of a touch-drag, thrashing layout and
+  // making scrolling stutter. Bail cheaply (no layout reads) in that regime; justify
+  // only matters for short, non-scrolling content.
+  if (term.buffer && term.buffer.active && term.buffer.active.baseY > 0) {
+    if (screen.style.transform) screen.style.transform = '';
+    return;
+  }
   let last = -1;
   for (let i = 0; i < rowsEl.children.length; i++)
     if (rowsEl.children[i].textContent.trim()) last = i;
@@ -796,7 +804,7 @@ function needsYouSessions() {
       // ("what it's doing now") is the fallback, then a generic line.
       const ask = (s.blocked_on || '').trim() || (s.digest || '').trim();
       out.push({ machine: mid, cid: s.cid, title: s.title || s.cid.slice(0, 6), ask,
-                 hash: `#/m/${encodeURIComponent(mid)}/p/${encodeURIComponent(key)}/s/${s.cid}` });
+                 hash: `#/m/${encodeURIComponent(mid)}/p/${encodeURIComponent(key)}/s/${s.cid}/tty` });
     }
   }
   return out;
@@ -3099,7 +3107,6 @@ const leftPanel = document.getElementById('left');
 const rightPanel = document.getElementById('right');
 const pmPanel = document.getElementById('pm');
 const pmfeed = document.getElementById('pmfeed');
-const panelBtn = document.getElementById('panelBtn');
 const menuBtn = document.getElementById('menuBtn');
 const projectsBtn = document.getElementById('projectsBtn');
 function setView(view) {
@@ -3118,8 +3125,6 @@ function setView(view) {
   composer.style.display = projects ? 'none' : '';
   box.placeholder = pm ? 'message → fleet PM' : sessions ? 'message → new session' : 'message';
   syncComposer();              // each level has its own draft — swap the box to this one's
-  panelBtn.innerHTML = tty ? '<span class="bico">▤</span><span class="blbl"> transcript</span>'
-                           : '<span class="bico">❯</span><span class="blbl"> terminal</span>';
   menuBtn.classList.toggle('on', sessions);
   projectsBtn.classList.toggle('on', projects);
   statusEl.classList.toggle('pmopen', pm);
@@ -3139,7 +3144,6 @@ function setView(view) {
 // the toggle button hops between the two deep views; projects/sessions have their own entries.
 // Each is a manual nav, so it cancels any pending question auto-return (navTo wraps that).
 const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; setView(v); };
-panelBtn.onclick = () => navTo(currentView() === 'tty' ? 'transcript' : 'tty');
 menuBtn.onclick = () => { if (currentPid) navTo('sessions'); else navTo('projects'); };
 projectsBtn.onclick = () => navTo('projects');
 document.getElementById('reloadBtn').onclick = () => location.reload();   // manual escape hatch — draft + hash survive a reload
@@ -3159,7 +3163,7 @@ function currentView() {
   if (!projectsPanel.classList.contains('hidden')) return 'projects';
   if (!menuPanel.classList.contains('hidden')) return 'sessions';
   if (!leftPanel.classList.contains('hidden')) return 'tty';
-  return 'transcript';
+  return 'tty';   // transcript view was pulled; the session view is always the terminal
 }
 
 // -- URL routing: project / session / depth live in the hash (the `?t=` token stays
@@ -3180,7 +3184,7 @@ function parseHash() {
     nav.key = decodeURIComponent(parts[i + 1]); nav.view = 'sessions';
     if (parts[i + 2] === 's' && parts[i + 3]) {
       nav.cid = decodeURIComponent(parts[i + 3]);
-      nav.view = parts[i + 4] === 'tty' ? 'tty' : 'transcript';
+      nav.view = 'tty';   // a session always opens in the terminal now
     }
   }
   return nav;
@@ -3298,8 +3302,7 @@ function restoreViewAfterQuestion() {
 // terminal first (transcript one rung deeper), touch into the transcript first.
 // Fleet and direct share the same stack now — projects is the top rung in both
 // (the machines rung is gone; the roster lives in the 🖥️ overlay).
-const LEVELS = isTouch ? ['projects', 'sessions', 'transcript', 'tty']
-                       : ['projects', 'sessions', 'tty', 'transcript'];
+const LEVELS = ['projects', 'sessions', 'tty'];   // transcript view pulled
 function stepLevel(dir) {
   const i = LEVELS.indexOf(currentView());
   if (i === -1) return;
