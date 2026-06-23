@@ -21,6 +21,7 @@ the box (relay reads public) and every worker machine (reads private).
 """
 import base64
 import json
+import os
 import time
 import urllib.request
 import urllib.error
@@ -31,6 +32,8 @@ try:
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     HAVE_CRYPTO = True
 except Exception:                                   # pragma: no cover
     HAVE_CRYPTO = False
@@ -39,6 +42,40 @@ except Exception:                                   # pragma: no cover
 def _b64u(b: bytes) -> str:
     """base64url, no padding (JWT / VAPID convention)."""
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def _b64u_dec(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _encrypt_aes128gcm(ua_public_b64u, auth_b64u, plaintext):
+    """Encrypt a Web Push payload for one subscription (RFC 8291 + RFC 8188,
+    aes128gcm content encoding). `ua_public_b64u` / `auth_b64u` are the
+    subscription's keys.p256dh / keys.auth. Returns the body to POST with header
+    `Content-Encoding: aes128gcm`. End-to-end to the phone: only the device's
+    private key can decrypt — the relay and push service see ciphertext only."""
+    ua_pub_bytes = _b64u_dec(ua_public_b64u)            # 65-byte uncompressed point
+    auth_secret = _b64u_dec(auth_b64u)                  # 16-byte auth secret
+    ua_pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), ua_pub_bytes)
+    as_priv = ec.generate_private_key(ec.SECP256R1())   # ephemeral application key
+    as_pub_bytes = as_priv.public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    shared = as_priv.exchange(ec.ECDH(), ua_pub)        # ECDH → 32-byte secret
+
+    # RFC 8291: key the ECDH secret with the subscription auth secret.
+    ikm = HKDF(algorithm=hashes.SHA256(), length=32, salt=auth_secret,
+               info=b"WebPush: info\x00" + ua_pub_bytes + as_pub_bytes).derive(shared)
+    salt = os.urandom(16)
+    cek = HKDF(algorithm=hashes.SHA256(), length=16, salt=salt,
+               info=b"Content-Encoding: aes128gcm\x00").derive(ikm)
+    nonce = HKDF(algorithm=hashes.SHA256(), length=12, salt=salt,
+                 info=b"Content-Encoding: nonce\x00").derive(ikm)
+
+    # Single record: plaintext + 0x02 last-record delimiter, AES-128-GCM sealed.
+    ct = AESGCM(cek).encrypt(nonce, plaintext + b"\x02", None)
+    # RFC 8188 header: salt(16) | record_size(4) | idlen(1) | keyid(as_public).
+    header = salt + (4096).to_bytes(4, "big") + bytes([len(as_pub_bytes)]) + as_pub_bytes
+    return header + ct
 
 
 def generate_keys():
@@ -117,19 +154,34 @@ class VapidKeys:
         jwt = f"{header}.{claims}.{sig}"
         return f"vapid t={jwt},k={self.public_b64u}"
 
-    def send_tickle(self, subscription, ttl=86400, timeout=10):
-        """POST a bodyless push to subscription['endpoint']. Returns the HTTP status
-        (201 = accepted, 404/410 = subscription gone → caller should drop it), or
-        None on a network error. Never raises."""
+    def send(self, subscription, data=None, ttl=86400, timeout=10):
+        """POST a push to subscription['endpoint']. With `data` (bytes) it's sent as
+        an aes128gcm-encrypted payload (so the phone can deep-link); without, it's a
+        bodyless tickle. Any encryption hiccup falls back to bodyless rather than
+        dropping the alert. Returns the HTTP status (201 accepted, 404/410 = gone →
+        caller should drop the sub) or None on a network error. Never raises."""
         if not self.can_send:
             return None
         endpoint = subscription.get("endpoint")
         if not endpoint:
             return None
-        req = urllib.request.Request(endpoint, data=b"", method="POST")
+        body = b""
+        encoding = None
+        if data is not None:
+            keys = subscription.get("keys") or {}
+            p256dh, auth = keys.get("p256dh"), keys.get("auth")
+            if p256dh and auth:
+                try:
+                    body = _encrypt_aes128gcm(p256dh, auth, data)
+                    encoding = "aes128gcm"
+                except Exception:
+                    body, encoding = b"", None     # degrade to a bodyless tickle
+        req = urllib.request.Request(endpoint, data=body, method="POST")
         req.add_header("Authorization", self._auth_header(endpoint))
         req.add_header("TTL", str(ttl))
-        req.add_header("Content-Length", "0")
+        req.add_header("Content-Length", str(len(body)))
+        if encoding:
+            req.add_header("Content-Encoding", encoding)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.status
@@ -137,3 +189,7 @@ class VapidKeys:
             return e.code
         except Exception:
             return None
+
+    def send_tickle(self, subscription, ttl=86400, timeout=10):
+        """Bodyless push (generic banner). Thin wrapper over send()."""
+        return self.send(subscription, data=None, ttl=ttl, timeout=timeout)

@@ -16,29 +16,38 @@ self.addEventListener('fetch', () => {});
 // content off the wire and clear of the E2E boundary), so the banner text lives
 // here, not in the message. If a payload ever is attached, prefer it.
 self.addEventListener('push', (e) => {
-  let title = 'clawd', body = 'a session needs you';
+  let title = 'clawd', body = 'a session needs you', url = '/';
   try {
     if (e.data) {
-      const d = e.data.json();
+      const d = e.data.json();   // encrypted payload from the worker (if present)
       title = d.title || title;
       body = d.body || body;
+      url = d.url || url;        // deep link to the session that needs you
     }
-  } catch (_) { /* bodyless tickle → use the defaults */ }
+  } catch (_) { /* bodyless tickle → generic banner, opens at the roster */ }
   e.waitUntil(self.registration.showNotification(title, {
     body,
     icon: '/icon-192.png',
     badge: '/icon-192.png',
     tag: 'clawd-attention',   // collapse a burst into one banner
     renotify: true,
+    data: { url },
   }));
 });
 
-// Tapping the notification focuses an open app window or opens one.
+// Tap → navigate to the session's deep link: focus an open window and route it
+// there (its hashchange router handles the rest), else open a new one at the URL.
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
+  const url = (e.notification.data && e.notification.data.url) || '/';
   e.waitUntil((async () => {
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const c of all) { if ('focus' in c) return c.focus(); }
-    if (self.clients.openWindow) return self.clients.openWindow('/');
+    for (const c of all) {
+      if ('focus' in c) {
+        try { if ('navigate' in c) await c.navigate(url); } catch (_) {}
+        return c.focus();
+      }
+    }
+    if (self.clients.openWindow) return self.clients.openWindow(url);
   })());
 });

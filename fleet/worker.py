@@ -301,6 +301,7 @@ class Worker:
         # and per-session notify state for "needs you" detection + throttling.
         self.push_subs = []
         self._notify = {}          # cid -> {"last": ts, "waiting": bool}
+        self._sessions_meta = {}   # cid -> {"pid":..,"title":..} for deep-link payloads
         self.vapid = webpushmod.VapidKeys.load(str(VAPID_FILE)) if HAVE_WEBPUSH else None
         # Latest system stats {cpu,ram,disk,gpu} sampled locally (sysstats.collect).
         # None until the first sample; pushed to the relay on a steady timer since
@@ -375,14 +376,27 @@ class Worker:
         if now - st["last"] < NOTIFY_THROTTLE:
             return
         st["last"] = now
-        threading.Thread(target=self._send_push_all, daemon=True).start()
+        payload = self._push_payload(cid)
+        threading.Thread(target=self._send_push_all, args=(payload,), daemon=True).start()
 
-    def _send_push_all(self):
-        """Send the bodyless tickle to every subscription; prune any the push
-        service reports permanently gone (404/410)."""
+    def _push_payload(self, cid):
+        """Build the encrypted-push body: a friendly title + a deep link to the
+        session so tapping the notification jumps straight to it. Falls back to the
+        machine view if we don't yet know the session's project id."""
+        meta = self._sessions_meta.get(cid) or {}
+        title = meta.get("title") or "a session"
+        pid = meta.get("pid")
+        url = f"/#/m/{self.machine}/p/{pid}/s/{cid}" if pid else f"/#/m/{self.machine}"
+        return json.dumps({"title": f"{self.machine} · {title}",
+                           "body": "needs you", "url": url}).encode("utf-8")
+
+    def _send_push_all(self, payload=None):
+        """Send the (encrypted, deep-linking) push to every subscription; prune any
+        the push service reports permanently gone (404/410). A crypto hiccup inside
+        send() degrades to a bodyless tickle rather than dropping the alert."""
         dead = []
         for sub in list(self.push_subs):
-            code = self.vapid.send_tickle(sub)
+            code = self.vapid.send(sub, payload)
             if code in (404, 410):
                 dead.append(sub.get("endpoint"))
         if dead:
@@ -752,6 +766,11 @@ class Worker:
                     sess = frame.get("sessions") or []
                     nsess = len(sess)
                     nactive = sum(1 for s in sess if s.get("busy"))
+                    # cache cid → project/title so a notification can name the
+                    # session and deep-link to it (see _push_payload).
+                    self._sessions_meta = {s.get("cid"): {"pid": s.get("pid"),
+                                                          "title": s.get("title")}
+                                           for s in sess if s.get("cid")}
                 else:
                     continue
                 if nproj is None or nsess is None:
