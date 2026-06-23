@@ -710,8 +710,18 @@ let lastWrittenHash = '';       // the hash we last wrote, so hashchange ignores
 // (home-screen icon, standalone full-screen). The SW never caches (see sw.js),
 // so it can't strand a stale UI against the live-reload path. Best-effort only.
 if ('serviceWorker' in navigator) {
+  // iOS PWAs cling to a stale service worker even after the bytes change, which
+  // strands new SW code (the deep-link postMessage path). Force the update: check
+  // on load, and when a new SW takes control, reload once so the page uses it.
+  let _swReloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (_swReloaded) return; _swReloaded = true;
+    location.reload();
+  });
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    navigator.serviceWorker.register('sw.js').then((reg) => {
+      reg.update().catch(() => {});
+    }).catch(() => {});
     // Diagnostic: ask the active SW its version so we can tell if the new build
     // (with the postMessage deep-link path) actually activated on this device.
     navigator.serviceWorker.ready.then((reg) => {
