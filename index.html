@@ -1957,10 +1957,11 @@ function mergeProjects() {
     for (const p of (perMachine[mid].projectList || [])) {
       const key = projectKey(p);
       let g = map.get(key);
-      if (!g) { g = { key, name: p.name || '', repoUrl: p.repoUrl || '', pinned: false, machines: [] }; map.set(key, g); }
+      if (!g) { g = { key, name: p.name || '', repoUrl: p.repoUrl || '', pinned: false, lastTouched: 0, machines: [] }; map.set(key, g); }
       if (!g.name && p.name) g.name = p.name;
       if (!g.repoUrl && p.repoUrl) g.repoUrl = p.repoUrl;
       if (p.pinned) g.pinned = true;
+      if ((p.lastTouched || 0) > g.lastTouched) g.lastTouched = p.lastTouched || 0;  // warmth = warmest machine
       g.machines.push({ machineId: mid, pid: p.pid, online,
         sessionCount: p.sessionCount || 0, busyCount: p.busyCount || 0,
         waitingCount: p.waitingCount || 0, status: p.status });
@@ -1998,18 +1999,29 @@ function pickMachineEntry(g) {
 // The rows the project rung renders, normalized across both modes. Fleet rows are
 // keyed by project identity and carry machine fan-out; direct rows are 1:1 with pid.
 function projectRows() {
-  if (!FLEET) return projectList.map(p => ({ id: p.pid, name: p.name, repoUrl: p.repoUrl,
-    pinned: p.pinned, sessionCount: p.sessionCount || 0, busyCount: p.busyCount || 0,
-    waitingCount: p.waitingCount || 0, status: p.status, error: p.error,
-    machineCount: 1, online: true }));
-  return [...unifiedProjects.values()].map(g => {
-    const def = pickMachineEntry(g);                 // counts reflect the machine you'd open (default-machine semantics)
-    return { id: g.key, name: g.name, repoUrl: g.repoUrl, pinned: g.pinned,
-      sessionCount: def ? def.sessionCount : 0, busyCount: def ? def.busyCount : 0,
-      waitingCount: def ? def.waitingCount : 0, status: def ? def.status : '', error: '',
-      machineCount: g.machines.length, online: g.machines.some(m => m.online),
-      machineName: def ? def.machineId : '' };
-  });
+  let rows;
+  if (!FLEET) {
+    rows = projectList.map(p => ({ id: p.pid, name: p.name, repoUrl: p.repoUrl,
+      pinned: p.pinned, sessionCount: p.sessionCount || 0, busyCount: p.busyCount || 0,
+      waitingCount: p.waitingCount || 0, status: p.status, error: p.error,
+      lastTouched: p.lastTouched || 0, machineCount: 1, online: true }));
+  } else {
+    rows = [...unifiedProjects.values()].map(g => {
+      const def = pickMachineEntry(g);               // counts reflect the machine you'd open (default-machine semantics)
+      return { id: g.key, name: g.name, repoUrl: g.repoUrl, pinned: g.pinned,
+        sessionCount: def ? def.sessionCount : 0, busyCount: def ? def.busyCount : 0,
+        waitingCount: def ? def.waitingCount : 0, status: def ? def.status : '', error: '',
+        lastTouched: g.lastTouched || 0,
+        machineCount: g.machines.length, online: g.machines.some(m => m.online),
+        machineName: def ? def.machineId : '' };
+    });
+  }
+  // Pinned (the harness itself) first, then warmest first — whichever project
+  // you last spun up a session in / sent a prompt to floats to the top. Stable
+  // sort keeps equal-warmth ties in their incoming order.
+  rows.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0)
+                   || (b.lastTouched || 0) - (a.lastTouched || 0));
+  return rows;
 }
 function selectedProjectId() { return FLEET ? currentProjectKey : currentPid; }
 

@@ -290,12 +290,13 @@ class Project:
                 "repo_url": self.repo_url, "status": self.status,
                 "created": self.created}
 
-    def meta(self, session_count=0, busy_count=0, waiting_count=0):
+    def meta(self, session_count=0, busy_count=0, waiting_count=0, last_touched=0.0):
         return {"pid": self.pid, "name": self.name, "path": self.path,
                 "repoUrl": self.repo_url, "status": self.status,
                 "error": self.error, "sessionCount": session_count,
                 "busyCount": busy_count, "waitingCount": waiting_count,
-                "created": self.created, "pinned": self.pinned}
+                "created": self.created, "pinned": self.pinned,
+                "lastTouched": last_touched}
 
 
 # ── PTY-backed Claude session ─────────────────────────────────────────────────
@@ -304,7 +305,8 @@ class ClaudeSession:
     clients currently *subscribed* to it. Owned by a SessionManager."""
 
     def __init__(self, manager, cid, session_id, resuming, pid="",
-                 title="", desc="", prompt_count=0, first_prompt="", created=0.0):
+                 title="", desc="", prompt_count=0, first_prompt="", created=0.0,
+                 last_active=0.0):
         self.manager = manager
         self.pid = pid                           # owning project id
         self.cid = cid                           # stable console id (ours; survives claude rotation)
@@ -316,7 +318,7 @@ class ClaudeSession:
         self.desc = desc
         self.prompt_count = prompt_count
         self.first_prompt = first_prompt
-        self.last_active = self.created
+        self.last_active = last_active or self.created   # warmth: drives project sort
 
         self.master_fd = None
         self.os_pid = None                       # claude's process pid (not the project pid)
@@ -343,7 +345,7 @@ class ClaudeSession:
         return {"cid": self.cid, "pid": self.pid, "session_id": self.session_id,
                 "title": self.title, "desc": self.desc,
                 "prompt_count": self.prompt_count, "first_prompt": self.first_prompt,
-                "created": self.created}
+                "created": self.created, "last_active": self.last_active}
 
     def workdir(self):
         """Where this session's claude runs — its project's repo path."""
@@ -924,7 +926,8 @@ class SessionManager:
                 title=e.get("title", ""), desc=e.get("desc", ""),
                 prompt_count=e.get("prompt_count", 0),
                 first_prompt=e.get("first_prompt", ""),
-                created=e.get("created", 0.0))
+                created=e.get("created", 0.0),
+                last_active=e.get("last_active", 0.0))
             self.sessions[s.cid] = s
             s.start()
         # No auto-created session: with zero projects there are legitimately zero
@@ -1155,9 +1158,28 @@ class SessionManager:
         with self.lock:
             return self.projects.get(pid)
 
+    def _project_last_active(self):
+        """pid -> most recent session activity (max last_active over its
+        sessions), the raw input to the warmth sort. No lock: reads sessions
+        the same lock-free way as `_ordered()`."""
+        latest = {}
+        for s in self.sessions.values():
+            if s.last_active > latest.get(s.pid, 0.0):
+                latest[s.pid] = s.last_active
+        return latest
+
+    def _warmth(self, p, latest):
+        """How 'warm' a project is: its most-recently-active session, falling
+        back to its own creation time. Spinning up a session or sending a prompt
+        bumps a session's last_active → floats the project to the top."""
+        return max(latest.get(p.pid, 0.0), p.created)
+
     def _ordered_projects(self):
-        # pinned (the harness itself) first, then by creation time
-        return sorted(self.projects.values(), key=lambda p: (not p.pinned, p.created))
+        # pinned (the harness itself) first, then warmest first (most recently
+        # touched session at top), creation time as the fallback/tiebreak.
+        latest = self._project_last_active()
+        return sorted(self.projects.values(),
+                      key=lambda p: (not p.pinned, -self._warmth(p, latest)))
 
     def session_count(self, pid):
         with self.lock:
@@ -1178,7 +1200,9 @@ class SessionManager:
             return total, busy, waiting
 
     def projects_meta(self):
-        return [p.meta(*self.session_counts(p.pid))
+        latest = self._project_last_active()
+        return [p.meta(*self.session_counts(p.pid),
+                       last_touched=self._warmth(p, latest))
                 for p in self._ordered_projects()]
 
     # -- session crud ----------------------------------------------------------
