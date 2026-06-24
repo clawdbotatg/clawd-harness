@@ -1359,6 +1359,10 @@ const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
 function e2eLoadResume(m) { try { const s = JSON.parse(localStorage.getItem('cc_e2e_rs_' + m) || 'null'); return (s && s.exp > Date.now()) ? s : null; } catch { return null; } }
 function e2eSaveResume(m, id, master) { try { localStorage.setItem('cc_e2e_rs_' + m, JSON.stringify({ id, master, exp: Date.now() + RESUME_TTL_MS })); } catch {} }
 function e2eClearResume(m) { try { localStorage.removeItem('cc_e2e_rs_' + m); } catch {} }
+// Reject after ms — races a handshake so an unreachable machine can't block the
+// serialized fresh-passkey leg of fleetBootstrap forever (the handshake itself
+// keeps running in the background and merges its projects in if it ever lands).
+function e2eTimeout(ms) { return new Promise((_, rej) => setTimeout(() => rej(new Error('e2e-timeout')), ms)); }
 
 // Reveal the gnome first, then prompt for the passkey. We let the modal paint for
 // REVEAL_MS so you actually SEE "what's the safe word?" before the OS sheet, then
@@ -2191,7 +2195,16 @@ async function fleetBootstrap() {
     for (const m of order) {
       const ch = e2eChans[m.id];
       if (ch && ch.status === 'open') { e2eSendFrame(m.id, { type: 'list' }); continue; }
-      try { await e2eEnsure(m.id); e2eSendFrame(m.id, { type: 'list' }); } catch {}
+      // Kick the handshake + list. Resumable machines re-attach SILENTLY (no
+      // passkey modal), so we do NOT await them — they run concurrently and a
+      // single asleep/unreachable box can no longer wedge this loop and blank
+      // every other machine's projects (the "0 projects when one machine sleeps"
+      // bug). Only a FRESH-passkey machine is awaited (the modal is one shared
+      // element, so those must go one at a time) — and even then it's time-boxed
+      // so an unreachable box can't stall the queue waiting on a reply that never
+      // comes.
+      const go = e2eEnsure(m.id).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
+      if (!e2eLoadResume(m.id)) { try { await Promise.race([go, e2eTimeout(20000)]); } catch {} }
     }
   } finally { bootstrapping = false; }
 }

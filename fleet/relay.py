@@ -61,6 +61,12 @@ HERE = Path(__file__).resolve().parent
 BIND = os.environ.get("FLEET_BIND", "0.0.0.0")
 PORT = int(os.environ.get("FLEET_PORT", "8788"))
 PING_EVERY = 20.0  # keep NAT mappings warm
+# A worker whose WS goes half-open (laptop sleeps, NAT drops the mapping) keeps
+# kernel-buffered writes succeeding for a long time, so `dead` never flips on its
+# own — it just stops answering our pings. If we haven't heard a pong (or any
+# frame) in this long, presume it asleep/gone and drop it so the roster stops
+# advertising it as online. ~3 missed pings; a live worker pongs every PING_EVERY.
+STALE_AFTER = float(os.environ.get("FLEET_STALE_AFTER", str(3 * PING_EVERY)))
 
 # Passkey-only mode: there is NO mobile URL token — the passkey is the sole user
 # credential (verified at the relay edge as a doorman, and AUTHORITATIVELY by the
@@ -284,6 +290,15 @@ class Conn:
             fleet_ws.ws_send(self.wfile, self.lock, b"", opcode=0x9)
         except Exception:
             self.dead = True
+
+    def close(self):
+        """Tear down the underlying socket so a parked read thread unblocks and
+        the peer notices it's been dropped (and a real worker reconnects). Used by
+        the staleness reaper on a half-open connection that won't error on its own."""
+        try:
+            self.wfile.close()   # shares the fd with rfile → both ends unblock
+        except Exception:
+            pass
 
 
 class Relay:
@@ -541,10 +556,25 @@ class Relay:
     def ping_loop(self):
         while True:
             time.sleep(PING_EVERY)
+            now = time.time()
             with self.lock:
                 conns = list(self.workers.values()) + list(self.mobiles.values())
+            stale = []
             for c in conns:
                 c.ping()
+                # A half-open worker keeps accepting our pings into the kernel
+                # buffer but never pongs back. If it's gone silent past the
+                # threshold, reap it here — its blocking read thread may stay
+                # parked until TCP finally breaks (minutes), and until then the
+                # roster would keep showing it online and route frames into a
+                # black hole. Workers only (don't evict a backgrounded phone).
+                if c.role == "worker" and not c.dead and (now - c.last_seen) > STALE_AFTER:
+                    c.dead = True
+                    stale.append(c)
+            for w in stale:
+                print(f"[relay] worker stale ({int(now - w.last_seen)}s silent), dropping: {w.ident}", flush=True)
+                self.drop_worker(w)   # removes from roster + broadcasts the change
+                w.close()             # unblock its read thread / force a reconnect
 
 
 RELAY = Relay()
