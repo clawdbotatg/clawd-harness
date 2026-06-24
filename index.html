@@ -3152,6 +3152,25 @@ function execCommandCopy(text) {
   document.body.removeChild(ta);
   term.focus();
 }
+// Honor OSC 52 — the escape sequence a TUI emits to put text on the system
+// clipboard (ESC ] 52 ; c ; <base64> BEL). claude's TUI enables mouse tracking,
+// so a drag-select is consumed by claude (not xterm) — claude makes its OWN
+// selection, prints "N chars copied", and copies it via OSC 52. xterm ignores
+// OSC 52 unless we wire it up, so that copy silently went nowhere (and the Cmd+C
+// path above finds nothing, because xterm never made a local selection). With
+// this, simply selecting in claude lands the text on the clipboard — no Cmd+C
+// needed. Returning true marks the sequence handled so it isn't passed on.
+term.parser.registerOscHandler(52, (data) => {
+  const semi = data.indexOf(';');                 // data = "<targets>;<base64|?>"
+  if (semi < 0) return true;
+  const b64 = data.slice(semi + 1);
+  if (!b64 || b64 === '?') return true;           // '?' is a clipboard *query*, not a write
+  let text;
+  try { text = decodeURIComponent(escape(atob(b64))); }   // base64 → UTF-8
+  catch { try { text = atob(b64); } catch { return true; } }
+  copyToClipboard(text);
+  return true;
+});
 
 // Control-key bar: send raw escape sequences straight to the PTY (bypasses
 // xterm, so it drives TUI menus even on touch where the terminal is read-only).
