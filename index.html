@@ -120,6 +120,16 @@
      handler — that's the "swipe-back is janky on the TUI" bug. Pin it to pan-y like main. */
   .xterm-viewport, .xterm-screen, .xterm-scroll-area { touch-action:pan-y !important; }
   .xterm-viewport { -webkit-overflow-scrolling:touch; }   /* momentum scroll on iOS instead of frame-by-frame drag */
+  /* WHY THE TTY WOULDN'T SCROLL ON TOUCH: xterm's DOM renderer stacks .xterm-screen
+     (the text layer) ON TOP of the scrollable .xterm-viewport. A finger-pan therefore
+     lands on the screen — which is overflow:visible, not a scroll container — so the
+     browser has nothing to pan and the viewport behind it never moves. (Mouse wheel
+     works because xterm forwards wheel deltas in JS; touch has no such forwarding.)
+     Make the text layer click-through on touch so the pan reaches the real scroll box
+     and iOS scrolls it on the compositor thread — smooth, not the old choppy path.
+     Touch is read-only here (disableStdin) so we lose nothing but in-TTY link taps;
+     the transcript view keeps real markdown links. */
+  @media (pointer: coarse) { .xterm-screen { pointer-events:none !important; } }
   #feed, #pmfeed { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
           padding:12px; display:flex; flex-direction:column; gap:9px;
           width:100%; max-width:880px; align-self:center; }
