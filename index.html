@@ -616,6 +616,26 @@ function bottomJustifyTTY() {
 }
 term.onRender(bottomJustifyTTY);
 
+// Repaint on scroll — the companion to the touch-scroll fix above. xterm's DOM
+// renderer diff-updates only the cells it believes changed. When the viewport is
+// scrolled by the COMPOSITOR (native finger-pan, now that .xterm-screen is
+// click-through on touch) instead of through xterm's own scrollLines path, that
+// dirty-tracking is bypassed: rows render half-updated and old glyphs bleed under
+// the new ones — the "text looks torn when I scroll up" bug. Force a full redraw
+// of every visible row on each scroll, rAF-throttled so momentum stays smooth.
+// NOT hardRepaint() — that scrollToBottom()s, which would yank you off the line
+// you scrolled up to read; refresh() repaints in place without moving the viewport.
+(function wireScrollRepaint() {
+  const vp = term.element && term.element.querySelector('.xterm-viewport');
+  if (!vp) return;
+  let raf = 0;
+  const repaint = () => { raf = 0; term.refresh(0, term.rows - 1); };
+  vp.addEventListener('scroll', () => {
+    if (raf) return;                       // coalesce multiple scroll events into one redraw per frame
+    raf = requestAnimationFrame(repaint);
+  }, { passive: true });
+})();
+
 // Sticky-bottom follow: the TTY should chase live output ONLY while the viewport
 // is already pinned to the bottom. The moment the user scrolls up to read, we
 // stop yanking them back down on every PTY burst; scrolling back to the bottom
