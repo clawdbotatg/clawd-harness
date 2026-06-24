@@ -4,6 +4,15 @@ A web **harness** for driving interactive (subscription-billed) Claude Code
 sessions from a browser. Forked from `clawd-console`. `README.md` is the
 user-facing overview; this file orients an agent working **on** the code.
 
+> **Relationship to `claude-p-agent`** (`projects/claude-p-agent`): that repo is the
+> generic agent pattern — `claude -p` + a `CLAUDE.md` persona + trust-tagged channels,
+> with a build tool that delegates real coding to managed Claude Code sessions. **This
+> harness is the worker/session manager that build tool delegates to:** when the agent
+> runs its `code` helper, it drives this harness (over the WS protocol) to spawn and
+> supervise the real `claude` worker sessions. claude-p-agent is the brain pattern;
+> the harness is the engine behind its hands. (The live voice agent's adapter is
+> `projects/clawd-video-chat`.)
+
 > **Multi-machine?** The fleet (relay/worker layer that drives N harnesses from
 > one phone via a public relay) now lives **in this repo** under **[`fleet/`](fleet/)**
 > — see **[`fleet/CLAUDE.md`](fleet/CLAUDE.md)**. It was folded in from the former
