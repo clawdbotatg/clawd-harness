@@ -3005,8 +3005,40 @@ term.attachCustomKeyEventHandler((e) => {
     sendKeys('\n');
     return false;  // stop xterm from also sending a plain \r (which submits)
   }
+  // Copy the selection. xterm renders its selection internally — it's NOT a DOM
+  // selection — so the browser's native Cmd/Ctrl+C copies nothing. Wire it up
+  // ourselves: Cmd+C (mac) and Ctrl+Shift+C (the terminal-standard copy combo
+  // that doesn't collide with Ctrl+C = SIGINT). Only when something's selected,
+  // so a bare Cmd/Ctrl+C with no selection still reaches the PTY.
+  if (e.type === 'keydown' && e.key.toLowerCase() === 'c' && term.hasSelection() &&
+      ((e.metaKey && !e.ctrlKey) || (e.ctrlKey && e.shiftKey))) {
+    e.preventDefault();
+    e.stopPropagation();
+    copyToClipboard(term.getSelection());
+    return false;
+  }
   return true;
 });
+// navigator.clipboard needs a secure context (https / localhost); on a plain-http
+// LAN URL it's undefined, so fall back to a throwaway textarea + execCommand.
+function copyToClipboard(text) {
+  if (!text) return;
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).catch(() => execCommandCopy(text));
+  } else {
+    execCommandCopy(text);
+  }
+}
+function execCommandCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+  document.body.appendChild(ta);
+  ta.focus(); ta.select();
+  try { document.execCommand('copy'); } catch {}
+  document.body.removeChild(ta);
+  term.focus();
+}
 
 // Control-key bar: send raw escape sequences straight to the PTY (bypasses
 // xterm, so it drives TUI menus even on touch where the terminal is read-only).
