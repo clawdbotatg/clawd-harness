@@ -1067,6 +1067,7 @@ function connect() {
   ws.onmessage = (e) => {
     if (typeof e.data === 'string') { FLEET ? handleRelay(JSON.parse(e.data)) : handleJson(JSON.parse(e.data)); }
     else if (FLEET) { handleBinary(e.data); }
+    else if (pendingNewFocus) { /* awaiting a new session's focus — drop stragglers from the session we just left so they don't paint over the about-to-spawn blank one */ }
     else { const stick = ttyAtBottom(); term.write(new Uint8Array(e.data), () => { if (stick) term.scrollToBottom(); }); scheduleHardRepaint(); }   // direct: raw PTY — follow only if already pinned to bottom; debounce a hard repaint of the replayed screen
   };
 }
@@ -1400,6 +1401,7 @@ function e2eOnRecord(machine, rec) {
     try { out = await ch.session.open(rec); } catch { return; }   // drop bad/replayed
     if (out.kind === E2E.KIND_BIN) {
       if (machine !== currentMachine) return;                      // only the viewed terminal paints
+      if (pendingNewFocus) return;                                 // awaiting a new session's focus — drop the leaving session's stragglers (see newSession)
       const stick = ttyAtBottom(); term.write(out.payload, () => { if (stick) term.scrollToBottom(); }); scheduleHardRepaint();
     } else {
       handleMachineJson(machine, JSON.parse(new TextDecoder().decode(out.payload)));
@@ -2396,6 +2398,14 @@ function openSession(cid) {
 function newSession() {
   if (!currentPid) { setView('projects'); return; }   // need a project to host it
   pendingNewFocus = true;          // the focus that comes back should switch us into it
+  // We're still subscribed to the session we're leaving (the server only swaps the
+  // subscription when we `subscribe` the new cid, which can't happen until the focus
+  // reply brings it). So blank the shared terminal NOW — otherwise the old session's
+  // last-painted screen (and any live bytes it keeps streaming) shows through the gap
+  // while the fresh claude spawns, i.e. "new session in project A shows project B's TTY".
+  currentCid = null;               // anything still streaming for the old cid is now stale
+  term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
+  if (activeType) { activeType.finish(); activeType = null; }
   hsend({ type: 'new', pid: currentPid });
   setView(DEEP_VIEW);              // server replies with a focus → subscribe once it's spawned
 }
