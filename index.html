@@ -936,6 +936,50 @@ function clearToken() { try { localStorage.removeItem(TOKEN_KEY); } catch {} }
 let reconnectTimer = null;     // single pending reconnect (idempotent scheduling)
 let hiddenAt = 0;              // when the tab was last backgrounded (to gauge "away a while?")
 let outbound = [];            // sends issued while the link was down — delivered once we're back (this tab only)
+
+// Fleet relay auth gate. A fresh relay socket is unauthed and the relay drops
+// every non-`auth` frame until the passkey factor is satisfied (relay.py
+// from_mobile). So any toMachine frame (the e2e handshake + all encrypted
+// session traffic) sent before authOk is lost — and a dropped e2e hello hangs
+// the channel, blanking the TTY. relaySend() buffers such frames until we're
+// authed, then flushRelayOutbox() delivers them in order. `auth` frames are sent
+// directly (they're what makes us authed), never buffered. Reset per socket in
+// connect(); flipped true by setRelayAuthed() on authOk / a no-passkey `machines`.
+let relayAuthed = false;
+let resyncedThisSocket = false;   // fleetResync() runs once per authed socket
+let relayOutbox = [];             // toMachine frames awaiting the auth gate
+function relaySend(obj) {
+  if (relayAuthed && ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); return true; }
+  relayOutbox.push(obj);
+  return false;
+}
+function flushRelayOutbox() {
+  if (!relayAuthed || !ws || ws.readyState !== 1) return;
+  const q = relayOutbox; relayOutbox = [];
+  for (const o of q) ws.send(JSON.stringify(o));
+}
+// The socket just passed the relay's passkey gate (authOk, or a no-passkey relay
+// that hands us `machines` straight away). Enable relay sends and flush anything
+// that queued behind the gate. fleetResync() (the re-list + re-subscribe) is
+// driven from the `machines` handler so it always runs against a fresh roster.
+function setRelayAuthed() {
+  if (relayAuthed) { flushRelayOutbox(); return; }
+  relayAuthed = true;
+  flushRelayOutbox();
+}
+// Re-sync everything now that the relay link is authed: re-list every machine for
+// the unified roster, and re-subscribe the session we're viewing through the full
+// subscribe() (resets the stale buffer + arms the hard repaint). Runs once per
+// socket, after auth, with a fresh roster — the single owner of reconnect re-sync.
+function fleetResync() {
+  if (resyncedThisSocket) return;
+  resyncedThisSocket = true;
+  fleetBootstrap();
+  syncPushSubscription();          // re-register notifications with the (possibly restarted) relay
+  const v = currentView();
+  if (currentMachine && currentCid && (v === 'tty' || v === 'transcript')) { subscribe(currentCid); sendResize(); }
+  flushOutbound();
+}
 function scheduleReconnect(delay) {
   if (reconnectTimer) return;                       // already pending — don't stack sockets
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, delay);
@@ -1030,6 +1074,11 @@ function wake() {
 function connect() {
   if (ws && ws.readyState !== WebSocket.CLOSED) return;   // already connecting/open/closing — don't stack a second socket
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  // A new socket starts unauthed: reset the relay auth gate so nothing leaks out
+  // before authOk, and drop any frames buffered against the previous (dead) socket
+  // — they reference e2e channels that onclose tore down, so re-sending them is
+  // meaningless; the fresh handshake re-buffers what it needs.
+  relayAuthed = false; resyncedThisSocket = false; relayOutbox = [];
   // Fleet mode dials the RELAY as a mobile client; direct mode dials the harness.
   ws = new WebSocket(`${proto}://${location.host}/ws?${FLEET ? 'role=mobile' : 't=' + encodeURIComponent(token)}`);
   ws.binaryType = 'arraybuffer';
@@ -1049,18 +1098,16 @@ function connect() {
       return;
     }
     if (!currentMachine) { meta.textContent = ''; return; }   // on the machines rung — nothing to re-sync
-    // Reconnects get a fresh relay mobile id → the worker opens a fresh harness
-    // link, so re-fetch this machine's projects/sessions and re-subscribe.
-    hsend({ type: 'list' });
-    // Go through the full subscribe() (not a raw `subscribe` frame) so a fleet
-    // reconnect resets the stale buffer AND arms the visible re-measure. A raw
-    // frame writes the replayed screen into xterm but never schedules a hard
-    // repaint, so when a backgrounded mobile PWA's socket is silently killed and
-    // wake() reconnects, the tty paints blank (against hidden-tab cell metrics)
-    // until a manual reload — the recurring "come back to a blank session" bug.
-    if (currentCid) subscribe(currentCid);
-    sendResize();
-    flushOutbound();
+    // Deliberately DON'T list/subscribe or kick the e2e handshake here. A fresh
+    // relay socket is unauthed, and the relay SILENTLY DROPS every non-`auth`
+    // frame until the passkey gate is passed (relay.py from_mobile). Firing the
+    // e2e hello/resume now means it never reaches the worker, the channel sticks
+    // in 'handshaking' forever, and the TTY sits blank with no prompt — the
+    // "come back to a blank session, reload to get the passkey" bug. Instead we
+    // wait: the relay sends `authRequired` (→ onAuthRequired shows the passkey if
+    // there's no live session) or, once authed, `authOk` then `machines`, and
+    // setRelayAuthed()/the machines handler drive the re-list + re-subscribe over
+    // a provably-authed link. See setRelayAuthed()/fleetResync().
   };
   ws.onclose = () => {
     dot.classList.remove('up');
@@ -1117,15 +1164,22 @@ function handleRelay(m) {
   if (m.type === 'authOk') {
     if (m.session) saveSession(m.session, m.expires);
     hidePasskey(); meta.textContent = '';
-    // re-sync after a (re)auth — onopen's sends were pre-auth. Fan out to every
-    // machine for the unified list, then re-subscribe whatever session we're viewing.
-    fleetBootstrap();
-    syncPushSubscription();   // re-register notifications with the (possibly restarted) relay
-    if (currentMachine && currentCid) { hsend({ type: 'subscribe', cid: currentCid }); sendResize(); flushOutbound(); }
+    // Open the auth gate so buffered toMachine frames (the e2e handshake) can flow.
+    // The actual re-list + re-subscribe is driven from the `machines` frame the
+    // relay sends right after authOk, so fleetResync() always runs with a fresh
+    // roster (and the e2e handshake — which prompts for the passkey when its resume
+    // material has expired — now happens over a provably-authed link).
+    setRelayAuthed();
     return;
   }
   if (m.type === 'pushOk') { reflectNotifyBtn(); return; }
-  if (m.type === 'machines') { hidePasskey(); renderMachines(m.machines || []); return; }
+  if (m.type === 'machines') {
+    hidePasskey();
+    setRelayAuthed();                 // a no-passkey relay hands us `machines` with no authOk — gate opens here
+    renderMachines(m.machines || []); // populate the roster first…
+    fleetResync();                    // …then re-list + re-subscribe over the authed link (once per socket)
+    return;
+  }
   if (m.type === 'machineMsg') {
     const msg = m.msg || {};
     if (msg.t === 'e2e.shello' || msg.t === 'e2e.resumed' || msg.t === 'e2e.done' || msg.t === 'e2e.err') { e2eOnCtl(m.machine, msg); return; }
@@ -1390,7 +1444,7 @@ async function e2eEnsure(machine) {
   return ch.ready;
 }
 
-function e2eSendCtl(machine, msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'toMachine', machine, msg })); }
+function e2eSendCtl(machine, msg) { relaySend({ type: 'toMachine', machine, msg }); }   // buffered until the relay auth gate is passed
 
 function e2eSendFrame(machine, frame) {
   const ch = e2eChans[machine];
@@ -1398,7 +1452,7 @@ function e2eSendFrame(machine, frame) {
   const bytes = new TextEncoder().encode(JSON.stringify(frame));
   ch.sendChain = ch.sendChain.then(async () => {
     const rec = await ch.session.seal(E2E.KIND_JSON, bytes);
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'toMachine', machine, msg: { t: 'e2e.rec', r: b64uEnc(rec) } }));
+    relaySend({ type: 'toMachine', machine, msg: { t: 'e2e.rec', r: b64uEnc(rec) } });   // buffered until authed
   }).catch(() => {});
 }
 
