@@ -1793,6 +1793,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, client, frame):
         t = frame.get("type")
+        if t == "ping":
+            # App-level liveness probe. A browser can't read native WS pong from JS,
+            # so the client pings over this channel to prove the FULL path is live
+            # (in fleet: browser→relay→worker→harness and back, exercising the e2e
+            # channel). A returned pong lets the client repaint in place instead of
+            # tearing the socket down + resetting the terminal on every tab-switch.
+            client.send_json({"type": "pong", "id": frame.get("id")})
+            return
         if t == "subscribe":
             MGR.subscribe_client(client, frame.get("cid"))
         elif t == "list":

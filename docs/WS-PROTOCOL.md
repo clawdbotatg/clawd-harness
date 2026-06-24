@@ -64,6 +64,7 @@ viewer** (each with its own `client.cid`).
 | `resize` | `cols`, `rows`, `cid?` | Resize the PTY window. |
 | `restart` | `reason?` | Request a graceful self-restart (fires once all sessions idle). |
 | `restartCancel` | — | Cancel a pending restart. |
+| `ping` | `id?` | Liveness probe. Server immediately replies `{type:"pong", id}` (echoing `id`). Lets a client prove the *full* path is live (in fleet: browser→relay→worker→harness and back over the e2e channel) before deciding whether to repaint in place vs. tear down + re-subscribe. A pre-`pong` harness just ignores it — the prober falls back to reconnect on timeout, so it's backward-safe. |
 
 `input` vs `send`: `send` is what you want for prompts — it handles the
 TUI's paste-vs-submit timing (`SEND_SETTLE`). `input` is for raw control

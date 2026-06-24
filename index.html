@@ -979,28 +979,52 @@ function armResumeReload() {
 }
 function clearResumeReload() { clearTimeout(resumeReloadTimer); resumeReloadTimer = null; }
 
+// App-level liveness probe — "is the WHOLE path actually alive?" A browser can't
+// observe native WS ping/pong from JS, and a backgrounded socket can come back
+// reading OPEN while being functionally dead (the OS killed it; the close event
+// hasn't landed). So we send a `ping` and wait for the server's `pong`: in fleet
+// that round-trip traverses browser→relay→worker→harness and back through the e2e
+// channel, so a pong proves the entire chain — not just our nearest hop — is live.
+// Resolves true on pong, false on timeout (~1.5s) or a non-OPEN socket.
+let pingSeq = 0, liveProbe = null;
+function onPong(id) {
+  if (!liveProbe || liveProbe.id !== id) return;
+  clearTimeout(liveProbe.timer);
+  const cb = liveProbe.cb; liveProbe = null; cb(true);
+}
+function probeLiveness(cb) {
+  if (!ws || ws.readyState !== 1) { cb(false); return; }
+  const id = ++pingSeq;
+  const timer = setTimeout(() => {
+    if (liveProbe && liveProbe.id === id) { liveProbe = null; cb(false); }
+  }, 1500);
+  liveProbe = { id, cb, timer };
+  if (!hsend({ type: 'ping', id })) { clearTimeout(timer); liveProbe = null; cb(false); }
+}
+
 // The tab/window/network just came back to life — make sure we're showing current
-// state. The blank-screen-on-resume bug: a backgrounded mobile PWA gets its socket
-// silently killed by the OS, but readyState can still read OPEN on resume (the
-// close event hasn't landed yet). resync()→subscribe() WIPES the view (term.reset
-// + feed clear) and then sends a `subscribe` the server never answers over that
-// zombie socket (fleet mode even queues it into a dead e2e channel and reports
-// success) → permanent blank screen, which a PWA has no reload button to escape.
-// So after any real absence DON'T trust the socket: tear it down and reconnect —
-// onopen re-subscribes over a provably-live link, so the replay actually arrives
-// and the body repaints. A quick glance (still within 3s) just repaints the buffer
-// we already have.
+// state WITHOUT needlessly blanking it. The old bug cut both ways: a backgrounded
+// mobile PWA's socket gets silently killed yet reads OPEN, so trusting it strands a
+// blank screen; but blindly tearing the socket down on every >3s absence (the prior
+// fix) means a desktop tab-switch — where the socket is genuinely still alive —
+// resets the terminal (term.reset, and in fleet a full e2e re-handshake) and shows
+// the void until the replay maybe repaints. That re-introduced the "come back to a
+// black session, reload to fix" annoyance on desktop. So: probe before destroying.
+// A pong proves the chain is live → just hardRepaint() the buffer we already kept
+// (no reset, no gap). Silence → it really is dead → tear down + reconnect, and
+// onopen re-subscribes over a provably-live link so the replay actually lands. A
+// quick glance (≤3s) can't have died — repaint and skip the probe.
 function wake() {
   const awayMs = hiddenAt ? Date.now() - hiddenAt : 0;
-  if (awayMs > 3000) {
+  if (!ws || ws.readyState > 1) { scheduleReconnect(0); return; }
+  if (awayMs <= 3000) { if (currentView() === 'tty') hardRepaint(); return; }
+  probeLiveness((alive) => {
+    if (alive) { if (currentView() === 'tty') hardRepaint(); flushOutbound(); return; }
     if (ws && ws.readyState <= 1) { try { ws.close(); } catch {} }
     ws = null;                 // force connect() past its "already have a socket" guard
     scheduleReconnect(0);
     armResumeReload();         // …and reload if that reconnect never goes live
-    return;
-  }
-  if (!ws || ws.readyState > 1) { scheduleReconnect(0); return; }
-  if (currentView() === 'tty') hardRepaint();
+  });
 }
 
 function connect() {
@@ -1552,6 +1576,7 @@ document.getElementById('rebootCancel').onclick = () => {
 };
 
 function handleJson(m) {
+  if (m.type === 'pong') { onPong(m.id); return; }   // liveness probe came back → chain is alive (see wake())
   if (m.type === 'reload') {        // server saw index.html change on disk → live-reload
     // Direct mode only: this page IS the harness's served HTML, so a disk edit
     // means reload. In fleet mode the page comes from the RELAY (its own copy) —
