@@ -2185,6 +2185,7 @@ function switchProjectMachine(machineId) {
 }
 
 function selectProject(id) {
+  projectFilter = '';                          // clear the filter on the way in, so coming back shows all projects
   if (FLEET) { resolveProject(id); return; }   // id is the project identity key
   currentPid = id;
   renderSessions();
