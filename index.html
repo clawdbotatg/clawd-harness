@@ -3597,6 +3597,27 @@ function openMachines() { renderMachines(machineList); machinesModal.hidden = fa
 document.getElementById('machinesclose').onclick = () => { machinesModal.hidden = true; };
 machinesModal.onclick = (e) => { if (e.target === machinesModal) machinesModal.hidden = true; };
 
+// -- global Esc → projects rung ----------------------------------------------
+// Universal "take me home": pressing Escape anywhere pops you back out to the
+// projects rung — UNLESS something else legitimately owns the key. We yield to,
+// in order: a handler that already consumed it (defaultPrevented); the gate
+// overlays (login / passkey) where there's nowhere to go yet; an open modal
+// (Esc closes it instead); and the live terminal, where claude's TUI uses Esc to
+// back out of its own menus (the xterm helper textarea lives inside #term). Bubble
+// phase so those inner owners get first refusal.
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || e.defaultPrevented) return;
+  if (!document.getElementById('login').hidden ||
+      !document.getElementById('passkey').hidden) return;   // gated — nowhere to go
+  if (!qrmodal.hidden) { qrmodal.hidden = true; e.preventDefault(); return; }
+  if (!machinesModal.hidden) { machinesModal.hidden = true; e.preventDefault(); return; }
+  const el = document.activeElement;
+  if (el && el.closest && el.closest('#term')) return;      // live terminal owns Esc (claude's TUI)
+  if (currentView() === 'projects') return;                 // already home
+  e.preventDefault();
+  navTo('projects');
+});
+
 // -- token entry (only when we have none) ------------------------------------
 function showLogin(msg) {
   const el = document.getElementById('login');
