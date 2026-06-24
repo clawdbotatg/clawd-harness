@@ -696,21 +696,25 @@ function showTTY() {
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(hardRepaint);
 }
 
-// After subscribing we set this flag; the replayed screen arrives as one or more
-// async PTY bursts (see ws.onmessage). We can't repaint until that content is in
-// the buffer, so we debounce: each PTY write reschedules, and ~80ms after the
-// burst goes quiet we hard-repaint ONCE. Cleared after firing so live streaming
-// during an active turn never triggers it (that content paints normally).
-let hardRepaintTimer = null, pendingHardRepaint = false;
+// After subscribing we open a window during which the replayed screen — which
+// arrives as one or more async PTY bursts (see ws.onmessage) — each reschedules a
+// debounced hard-repaint. Why a WINDOW and not a one-shot flag: over a slow fleet
+// relay the replay can land in several bursts spread across a second or two,
+// sometimes well after a single backstop would have fired and disarmed. A one-shot
+// arm writes those late bursts into the buffer but skips the visible re-measure, so
+// the screen sits blank until a manual reload (the bug). Re-arming across the whole
+// window means any burst inside it still forces the re-measure. The window is only
+// set right after a (re)subscribe, so steady live streaming never re-triggers it.
+let hardRepaintTimer = null, repaintArmedUntil = 0;
 function armHardRepaint() {
-  pendingHardRepaint = true;
+  repaintArmedUntil = Date.now() + 2500;
   scheduleHardRepaint();
-  setTimeout(() => { if (pendingHardRepaint) { pendingHardRepaint = false; hardRepaint(); } }, 600);  // backstop if a burst never goes quiet
+  setTimeout(hardRepaint, 600);  // re-measure even if no burst arrives; on an empty/already-correct buffer it's a harmless no-op
 }
 function scheduleHardRepaint() {
-  if (!pendingHardRepaint || currentView() !== 'tty') return;
+  if (currentView() !== 'tty' || Date.now() > repaintArmedUntil) return;
   clearTimeout(hardRepaintTimer);
-  hardRepaintTimer = setTimeout(() => { pendingHardRepaint = false; hardRepaint(); }, 80);
+  hardRepaintTimer = setTimeout(hardRepaint, 80);
 }
 
 // The composer (footer) grows whenever an image chip is attached, a pending
@@ -1024,7 +1028,13 @@ function connect() {
     // Reconnects get a fresh relay mobile id → the worker opens a fresh harness
     // link, so re-fetch this machine's projects/sessions and re-subscribe.
     hsend({ type: 'list' });
-    if (currentCid) hsend({ type: 'subscribe', cid: currentCid });
+    // Go through the full subscribe() (not a raw `subscribe` frame) so a fleet
+    // reconnect resets the stale buffer AND arms the visible re-measure. A raw
+    // frame writes the replayed screen into xterm but never schedules a hard
+    // repaint, so when a backgrounded mobile PWA's socket is silently killed and
+    // wake() reconnects, the tty paints blank (against hidden-tab cell metrics)
+    // until a manual reload — the recurring "come back to a blank session" bug.
+    if (currentCid) subscribe(currentCid);
     sendResize();
     flushOutbound();
   };
