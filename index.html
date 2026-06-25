@@ -1258,6 +1258,12 @@ const E2E = (() => {
   async function resumeSession(master, rn) { return new Session(await resumeKeyset(master, rn)).init(); }
   const resumeConfirm = (master, rn) => hmac(master, concat(te.encode('fleet-e2e/1 resume-confirm'), rn));
 
+  // Batched passkey: one assertion authorizes several channels by committing to the
+  // sorted set of their transcript hashes. Mirrors batch_challenge in fleet/e2e.py —
+  // bytes must match (sorted ascending by raw Th, length-prefixed, then hashed).
+  const cmpBytes = (a, b) => { const n = Math.min(a.length, b.length); for (let i = 0; i < n; i++) { if (a[i] !== b[i]) return a[i] - b[i]; } return a.length - b.length; };
+  async function batchChallenge(thList) { return sha256(concat(te.encode('fleet-e2e/1 webauthn-batch'), lp(...thList.slice().sort(cmpBytes)))); }
+
   // An open channel: directional AES-GCM keys + monotonic sequence. seal/open are
   // serialized by the caller (sendChain/recvChain) so sequence order is preserved.
   class Session {
@@ -1317,8 +1323,8 @@ const E2E = (() => {
         keys = await keySchedule(Z, midB, epk_m, n_m, epk_w, n_w, ik_w);
         ikW = ik_w;
         return {
-          challenge: keys.challenge, ikW: ik_w,
-          build: async (assertion) => ({ t: 'e2e.auth', assertion, cf_m: b64uEnc(await hmac(keys.kc_m, te.encode('fleet-e2e/1 client-finished'))) }),
+          challenge: keys.challenge, Th: keys.Th, ikW: ik_w,
+          build: async (assertion, batch) => { const m = { t: 'e2e.auth', assertion, cf_m: b64uEnc(await hmac(keys.kc_m, te.encode('fleet-e2e/1 client-finished'))) }; if (batch) m.batch = batch; return m; },
         };
       },
       async done(sd) {
@@ -1337,8 +1343,8 @@ const E2E = (() => {
     return b32.match(/.{1,5}/g).join(' ');
   }
 
-  return { client, resumeSession, resumeConfirm, KIND_JSON, KIND_BIN, _fp, _eq: eq,
-    _test: { keySchedule, Session, lp, sha256, hmac, hkdf, concat, u64, rd64, verifySig, resumeKeyset } };
+  return { client, resumeSession, resumeConfirm, batchChallenge, KIND_JSON, KIND_BIN, _fp, _eq: eq,
+    _test: { keySchedule, Session, lp, sha256, hmac, hkdf, concat, u64, rd64, verifySig, resumeKeyset, batchChallenge } };
 })();
 // [e2e-core-end]
 
@@ -1370,17 +1376,16 @@ const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
 function e2eLoadResume(m) { try { const s = JSON.parse(localStorage.getItem('cc_e2e_rs_' + m) || 'null'); return (s && s.exp > Date.now()) ? s : null; } catch { return null; } }
 function e2eSaveResume(m, id, master) { try { localStorage.setItem('cc_e2e_rs_' + m, JSON.stringify({ id, master, exp: Date.now() + RESUME_TTL_MS })); } catch {} }
 function e2eClearResume(m) { try { localStorage.removeItem('cc_e2e_rs_' + m); } catch {} }
-// Reject after ms — races a handshake so an unreachable machine can't block the
-// serialized fresh-passkey leg of fleetBootstrap forever (the handshake itself
-// keeps running in the background and merges its projects in if it ever lands).
-function e2eTimeout(ms) { return new Promise((_, rej) => setTimeout(() => rej(new Error('e2e-timeout')), ms)); }
 
 // Reveal the gnome first, then prompt for the passkey. We let the modal paint for
 // REVEAL_MS so you actually SEE "what's the safe word?" before the OS sheet, then
 // auto-fire (works on desktop / while the tap activation is fresh). If the browser
 // needs an explicit gesture (iOS), the modal stays and the tap fires it.
 const REVEAL_MS = 350;
-function e2eGetAssertion(machine, challengeBytes) {
+// One passkey assertion over `challengeBytes`, shown behind the gnome modal with
+// `subtitle`. Used for both a single channel and a BATCH of them (the batch challenge
+// commits to every channel's Th, so one Face ID covers them all — see fireBatch).
+function e2eAssertionPrompt(subtitle, challengeBytes) {
   const req = lastAuthReq || {};
   const get = () => navigator.credentials.get({ publicKey: {
     challenge: challengeBytes, rpId: req.rpId || location.hostname,
@@ -1390,7 +1395,7 @@ function e2eGetAssertion(machine, challengeBytes) {
     authenticatorData: b64uEnc(a.response.authenticatorData), signature: b64uEnc(a.response.signature) }));
   return new Promise((resolve) => {
     const el = document.getElementById('passkey');
-    document.getElementById('passkeysub').textContent = 'unlock ' + machine + ' — whisper the safe word';
+    document.getElementById('passkeysub').textContent = subtitle;
     const btn = document.getElementById('passkeybtn');
     btn.textContent = 'whisper the safe word 🔒';
     let firing = false;
@@ -1402,6 +1407,45 @@ function e2eGetAssertion(machine, challengeBytes) {
     el.hidden = false;
     setTimeout(fire, REVEAL_MS);
   });
+}
+
+// Batch coordinator: when several machines need a fresh handshake at once (the cold
+// reload that used to throw one Face ID per machine), each parks here after deriving
+// its transcript hash Th. A short debounce lets the others arrive, then we compute
+// ONE batch challenge over all the Th's, prompt ONCE, and hand the same assertion to
+// every participant. The worker accepts it only if its own Th is in the committed set
+// — so it's one gesture with identical per-channel security. A machine that arrives
+// after the window just forms its own (next) batch. Quiet window resets on each
+// arrival; a hard ceiling stops a slow joiner from delaying the prompt forever.
+const E2E_BATCH_QUIET_MS = 450, E2E_BATCH_HARD_MS = 1500;
+let e2ePendingBatch = null;   // { parts:[{machine, Th, resolve, reject}], quiet, hard }
+function e2eRequestAssertion(machine, ThBytes) {
+  return new Promise((resolve, reject) => {
+    if (!e2ePendingBatch) e2ePendingBatch = { parts: [], quiet: null, hard: null };
+    const b = e2ePendingBatch;
+    b.parts.push({ machine, Th: ThBytes, resolve, reject });
+    if (b.quiet) clearTimeout(b.quiet);
+    b.quiet = setTimeout(() => e2eFireBatch(b), E2E_BATCH_QUIET_MS);
+    if (!b.hard) b.hard = setTimeout(() => e2eFireBatch(b), E2E_BATCH_HARD_MS);
+  });
+}
+async function e2eFireBatch(b) {
+  if (e2ePendingBatch !== b) return;     // already fired (quiet/hard race)
+  e2ePendingBatch = null;
+  clearTimeout(b.quiet); clearTimeout(b.hard);
+  const parts = b.parts, thList = parts.map(p => p.Th);
+  try {
+    const challenge = await E2E.batchChallenge(thList);
+    const names = parts.map(p => p.machine).join(', ');
+    const subtitle = parts.length > 1
+      ? ('unlock ' + parts.length + ' machines (' + names + ') — whisper the safe word')
+      : ('unlock ' + names + ' — whisper the safe word');
+    const assertion = await e2eAssertionPrompt(subtitle, challenge);
+    const batch = thList.map(b64uEnc);   // worker sorts internally; order here doesn't matter
+    for (const p of parts) p.resolve({ assertion, batch });
+  } catch (e) {
+    for (const p of parts) p.reject(e);
+  }
 }
 
 async function e2eEnsure(machine, opts = {}) {
@@ -1440,11 +1484,11 @@ async function e2eEnsure(machine, opts = {}) {
     meta.textContent = 'securing ' + machine + '…';
     e2eSendCtl(machine, await cli.hello());
     const sh = await ch.dSH;                              // ServerHello (worker-signed)
-    const { challenge, ikW, build } = await cli.auth(sh); // verify sig + pin, derive keys
+    const { Th, ikW, build } = await cli.auth(sh); // verify sig + pin, derive keys
     if (!pinB64) { e2eSetPin(machine, b64uEnc(ikW)); ch.firstPin = true; }   // TOFU
-    const assertion = await e2eGetAssertion(machine, challenge);      // Face ID, channel-bound
+    const { assertion, batch } = await e2eRequestAssertion(machine, Th);  // one Face ID, batched across machines
     hidePasskey();
-    e2eSendCtl(machine, await build(assertion));          // ClientAuth
+    e2eSendCtl(machine, await build(assertion, batch));   // ClientAuth (batch-bound)
     const sd = await ch.dSD;                              // ServerDone (key confirmation)
     ch.session = await cli.done(sd);
     ch.fp = await cli.fingerprint();
@@ -2200,33 +2244,21 @@ function projectRows() {
 function selectedProjectId() { return FLEET ? currentProjectKey : currentPid; }
 
 // Open every machine's E2E channel and ask each for its project list, so the
-// unified rung can merge. Serialized: the passkey modal is a single shared element,
-// so concurrent handshakes would fight over it — silent resumes are fast, fresh
-// passkeys go one machine at a time.
+// unified rung can merge. Every channel is kicked CONCURRENTLY now: resumable
+// machines re-attach silently, and fresh-passkey machines rendezvous at the batch
+// barrier (e2eRequestAssertion) so ONE Face ID unlocks them all. No more
+// one-modal-at-a-time serialization — that was the source of the per-machine
+// passkey stack. A single asleep/unreachable box can't wedge the others.
 let bootstrapping = false;
-async function fleetBootstrap() {
+function fleetBootstrap() {
   if (!FLEET || bootstrapping) return;
   bootstrapping = true;
   try {
     const live = machineList.filter(m => m.online && m.kind !== 'relay');
-    // Resumable machines first: they re-attach with no passkey, so the common case
-    // (everything seen within the resume TTL) loads instantly and silently. Machines
-    // needing a fresh safe-word come last and one at a time, so a pending prompt
-    // never hides the projects of machines that were ready to load.
-    const order = live.slice().sort((a, b) => (e2eLoadResume(b.id) ? 1 : 0) - (e2eLoadResume(a.id) ? 1 : 0));
-    for (const m of order) {
+    for (const m of live) {
       const ch = e2eChans[m.id];
       if (ch && ch.status === 'open') { e2eSendFrame(m.id, { type: 'list' }); continue; }
-      // Kick the handshake + list. Resumable machines re-attach SILENTLY (no
-      // passkey modal), so we do NOT await them — they run concurrently and a
-      // single asleep/unreachable box can no longer wedge this loop and blank
-      // every other machine's projects (the "0 projects when one machine sleeps"
-      // bug). Only a FRESH-passkey machine is awaited (the modal is one shared
-      // element, so those must go one at a time) — and even then it's time-boxed
-      // so an unreachable box can't stall the queue waiting on a reply that never
-      // comes.
-      const go = e2eEnsure(m.id, { auto: true }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
-      if (!e2eLoadResume(m.id)) { try { await Promise.race([go, e2eTimeout(20000)]); } catch {} }
+      e2eEnsure(m.id, { auto: true }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
     }
   } finally { bootstrapping = false; }
 }

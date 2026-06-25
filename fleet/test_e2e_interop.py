@@ -44,6 +44,11 @@ def main():
     sig_msg = b"transcript-T1-stand-in"
     sig = e2e.sign_raw(idp, sig_msg)
 
+    # Batched passkey: a set of transcript hashes (UNSORTED on purpose — both sides
+    # must sort canonically before hashing, so this catches a sort/encoding drift).
+    batch_ths = [bytes((i * 23 + off) & 0xFF for i in range(32)) for off in (40, 5, 200)]
+    batch_ch_py = e2e.batch_challenge(batch_ths)
+
     vectors = {
         "Z": Z.hex(), "mid": mid.hex(), "epk_m": epk_m.hex(), "epk_w": epk_w.hex(),
         "n_m": n_m.hex(), "n_w": n_w.hex(), "ik_w": ik_w.hex(),
@@ -52,6 +57,7 @@ def main():
         "js_seal_plain": "hello from the mobile",
         "ik_w_sig": ik_w_sig.hex(), "sig": sig.hex(), "sig_msg": sig_msg.hex(),
         "resume_master": resume_master.hex(), "resume_rn": resume_rn.hex(),
+        "batch_ths": [t.hex() for t in batch_ths],
     }
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
@@ -106,6 +112,12 @@ def main():
         fails.append("JS failed to verify a Python ECDSA signature")
     else:
         print("  ✓ JS (WebCrypto) verifies a Python ECDSA P-256 signature")
+
+    # 5) batched passkey challenge — JS and Python sort+hash the set identically
+    if js.get("batchCh") != batch_ch_py.hex():
+        fails.append(f"batch_challenge: py={batch_ch_py.hex()} js={js.get('batchCh')}")
+    else:
+        print("  ✓ batched passkey challenge identical (sorted set commitment)")
 
     if fails:
         print("\nINTEROP FAILURES:")

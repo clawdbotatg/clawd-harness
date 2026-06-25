@@ -165,6 +165,20 @@ def _confirm(kc, tag):
     return hmac.new(kc, tag, hashlib.sha256).digest()
 
 
+# ── batched passkey ceremony ─────────────────────────────────────────────────
+def batch_challenge(th_list):
+    """The WebAuthn challenge for a BATCHED unlock: one assertion (one Face ID)
+    authorizes several channels at once by committing to the full SET of their
+    transcript hashes. The set is sorted so order can't be tampered, then
+    length-prefixed and hashed. A worker accepts the shared assertion only if its
+    own Th is in the set (see WorkerHandshake.finish), so the relay can neither
+    add/drop a channel (changes the challenge → assertion invalid) nor steer the
+    assertion onto a channel the human never saw. Same per-channel security as the
+    single-channel challenge; just one gesture instead of N. Mirrors
+    E2E.batchChallenge in index.html — bytes must match."""
+    return sha256(b"fleet-e2e/1 webauthn-batch" + lp(*sorted(th_list)))
+
+
 # ── resumption (§7): fresh per-resume keys from the master + a worker nonce ───
 def resume_keys(resume_master, rn):
     """Derive a fresh directional key set for a resumed session. A new `rn` each
@@ -281,10 +295,23 @@ class WorkerHandshake:
         expect = _confirm(self.keys["kc_m"], b"fleet-e2e/1 client-finished")
         if not hmac.compare_digest(expect, b64u_dec(client_auth["cf_m"])):
             raise E2EError("confirm")
-        ch = self.keys["webauthn_challenge"]
+        batch = client_auth.get("batch")
+        if batch:
+            # Batched ceremony: one assertion covers several channels. Accept it
+            # only if THIS channel's transcript hash is in the committed set — that
+            # binding (plus the challenge committing to the exact set) is what stops
+            # a hostile relay replaying the assertion onto a channel not in the set.
+            th_list = [b64u_dec(t) for t in batch]
+            my_th = self.keys["Th"]
+            if not any(hmac.compare_digest(t, my_th) for t in th_list):
+                raise E2EError("batch-membership")
+            ch = batch_challenge(th_list)          # sorts internally → matches the client
+            ckey = b64u(my_th)                     # per-channel replay key (Th unique per handshake)
+        else:
+            ch = self.keys["webauthn_challenge"]   # legacy single-channel assertion
+            ckey = b64u(ch)
         if not self.verify_assertion(client_auth["assertion"], ch):
             raise E2EError("passkey")
-        ckey = b64u(ch)
         if ckey in self.seen:
             raise E2EError("replay")
         self.seen.add(ckey)

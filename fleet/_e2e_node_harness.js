@@ -35,11 +35,16 @@ const xh = (u) => Buffer.from(u).toString('hex');
 
   const sigOk = await T.verifySig(hx(v.ik_w_sig), hx(v.sig), hx(v.sig_msg));
 
+  // batched passkey challenge over a (deliberately unsorted) set of transcript hashes
+  const batchThs = (v.batch_ths || []).map(hx);
+  const batchCh = batchThs.length ? xh(await E2E.batchChallenge(batchThs)) : null;
+
   process.stdout.write(JSON.stringify({
     ks: ksOut,
     rk: rkOut,
     opened: { kind: opened.kind, payload: Buffer.from(opened.payload).toString('utf8') },
     sealed: xh(sealed),
     sigOk,
+    batchCh,
   }));
 })().catch((e) => { process.stderr.write('NODEERR ' + (e.stack || e)); process.exit(1); });

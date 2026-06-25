@@ -148,6 +148,37 @@ def main():
     rec2 = csess2.seal(e2e.KIND_JSON, b"late")
     check("record past the hard TTL rejected", _raises(lambda: wsess2.open(rec2, now=future)))
 
+    print("batched passkey (one Face ID, several channels):")
+    # Fresh authenticator + passkey file: an Apple platform authenticator (Face ID)
+    # always reports sign_count 0, and the worker's stored count stays 0, so one
+    # assertion satisfies every channel. (Earlier tests bumped the shared file's
+    # count above 0, which would defeat the 0/0 rule — so the batch world is clean.)
+    pk_b = FakePasskey()
+    verify_b = make_worker_verifier(pk_b)
+    sessions, assertion, ths = run_batch(idp, pk_b, verify_b, n=3)
+    check("one assertion opens all 3 channels",
+          len(sessions) == 3 and all(cs.k_send == ws.k_recv for cs, ws in sessions))
+    for cs, ws in sessions:
+        rb = cs.seal(e2e.KIND_JSON, b'{"type":"input"}')
+        ws.open(rb)   # each channel is independently usable (own keys), raises if not
+    check("each batched channel has its own working keys", True)
+    # The security property: a hostile relay must not be able to ride the human's
+    # one assertion onto a channel the human never saw on the unlock screen.
+    def _inject(add_th_to_set):
+        mid = "evil-extra"
+        W = e2e.WorkerHandshake(idp, mid, verify_b, set())
+        C = e2e.ClientHandshake(mid, e2e.pub_raw(idp.public_key()), lambda ch: None)
+        sh = W.server_hello(C.client_hello())
+        epk_w = e2e.b64u_dec(sh["epk_w"]); n_w = e2e.b64u_dec(sh["n_w"]); ik_w = e2e.b64u_dec(sh["ik_w"])
+        keys = e2e.key_schedule(e2e.ecdh(C.eph, epk_w), mid, C.epk_m, C.n_m, epk_w, n_w, ik_w)
+        lst = [e2e.b64u(t) for t in ths] + ([e2e.b64u(keys["Th"])] if add_th_to_set else [])
+        cf_m = e2e.hmac.new(keys["kc_m"], b"fleet-e2e/1 client-finished", e2e.hashlib.sha256).digest()
+        W.finish({"assertion": assertion, "cf_m": e2e.b64u(cf_m), "batch": lst})
+    check("relay can't ride the assertion onto an unseen channel (Th not in set)",
+          _raises(lambda: _inject(False)))     # membership check refuses
+    check("relay can't smuggle the channel into the set (challenge no longer matches)",
+          _raises(lambda: _inject(True)))      # adding the Th changes the committed set → assertion invalid
+
     if FAILED:
         print("\nFAILURES:", FAILED)
         sys.exit(1)
@@ -159,6 +190,31 @@ def _raises(fn):
         fn(); return False
     except Exception:
         return True
+
+
+def run_batch(idp, pk, verify, n=3):
+    """The batched ceremony: N concurrent handshakes share ONE passkey assertion
+    (one Face ID). Returns (sessions, assertion, ths). Uses sign_count 0 to model an
+    Apple platform authenticator (Face ID), which always reports 0; real machines
+    also keep independent counters, so one assertion satisfies each worker."""
+    seen, hs = set(), []
+    for i in range(n):
+        mid = f"machine-{i}"
+        W = e2e.WorkerHandshake(idp, mid, verify, seen)
+        C = e2e.ClientHandshake(mid, e2e.pub_raw(idp.public_key()), lambda ch: None)
+        sh = W.server_hello(C.client_hello())
+        epk_w = e2e.b64u_dec(sh["epk_w"]); n_w = e2e.b64u_dec(sh["n_w"]); ik_w = e2e.b64u_dec(sh["ik_w"])
+        keys = e2e.key_schedule(e2e.ecdh(C.eph, epk_w), mid, C.epk_m, C.n_m, epk_w, n_w, ik_w)
+        hs.append((W, keys))
+    ths = [keys["Th"] for (_, keys) in hs]
+    assertion = pk.assertion(e2e.batch_challenge(ths), count=0)   # Apple platform authenticator → 0
+    sessions = []
+    for (W, keys) in hs:
+        cf_m = e2e.hmac.new(keys["kc_m"], b"fleet-e2e/1 client-finished", e2e.hashlib.sha256).digest()
+        done, wsess = W.finish({"assertion": assertion, "cf_m": e2e.b64u(cf_m),
+                                "batch": [e2e.b64u(t) for t in ths]})
+        sessions.append((e2e.Session(keys, "mobile"), wsess))
+    return sessions, assertion, ths
 
 
 def _pin_attack(pk, verify):
