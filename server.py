@@ -330,6 +330,7 @@ class ClaudeSession:
 
         self.clients = set()                     # _Clients currently viewing this session
         self.clients_lock = threading.Lock()
+        self.client_sizes = {}                   # client -> (cols, rows); PTY follows the LARGEST
 
         self.transcript_path = None
         self._live_transcript = None             # live path from hooks; may rotate on compaction
@@ -583,12 +584,36 @@ class ClaudeSession:
         tail = cap - head - 3                        # 3 for the "\n…\n" elision marker
         return text[:head] + "\n…\n" + text[-tail:]
 
-    def resize(self, cols, rows):
-        if self.master_fd is not None and cols and rows:
-            try:
-                self._set_winsize(self.master_fd, int(rows), int(cols))
-            except OSError:
-                pass
+    def set_client_size(self, client, cols, rows):
+        """Record one client's viewport and drive the PTY to the LARGEST size
+        any subscribed client wants. There's a single shared PTY, so we can't
+        give each client its own grid — but "biggest wins" means a phone joining
+        never shrinks a desktop's terminal (the old last-write-wins did exactly
+        that: the smallest viewport clobbered everyone), while a lone phone still
+        fits because it's the only — hence largest — client."""
+        if not (cols and rows):
+            return
+        with self.clients_lock:
+            self.client_sizes[client] = (int(cols), int(rows))
+        self._apply_max_winsize()
+
+    def _forget_client_size(self, client):
+        with self.clients_lock:
+            had = self.client_sizes.pop(client, None)
+        if had:
+            self._apply_max_winsize()
+
+    def _apply_max_winsize(self):
+        with self.clients_lock:
+            sizes = list(self.client_sizes.values())
+        if not sizes or self.master_fd is None:
+            return
+        cols = max(c for c, _ in sizes)
+        rows = max(r for _, r in sizes)
+        try:
+            self._set_winsize(self.master_fd, rows, cols)
+        except OSError:
+            pass
 
     # -- write channel ---------------------------------------------------------
     def write(self, data: bytes):
@@ -793,6 +818,7 @@ class ClaudeSession:
     def unsubscribe(self, client):
         with self.clients_lock:
             self.clients.discard(client)
+        self._forget_client_size(client)   # recompute max so a leaving desktop releases its size
 
     def _to_subscribers_bytes(self, data: bytes):
         with self.clients_lock:
@@ -1833,7 +1859,7 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"[ws {s.cid[:8]}] send: {txt[:60]!r}", flush=True)
                 s.send_message(txt)
             elif t == "resize":
-                s.resize(frame.get("cols"), frame.get("rows"))
+                s.set_client_size(client, frame.get("cols"), frame.get("rows"))
 
 
 class ThreadingHTTPServer(ThreadingMixIn, TCPServer):
