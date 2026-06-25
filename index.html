@@ -1478,21 +1478,47 @@ async function e2eEnsure(machine, opts = {}) {
         e2eClearResume(machine); ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred();
       }
     }
-    // 2) Full handshake (passkey via the gnome modal).
-    const pinB64 = e2ePin(machine);
-    const cli = E2E.client(machine, pinB64 ? b64uDec(pinB64) : null);
-    meta.textContent = 'securing ' + machine + '…';
-    e2eSendCtl(machine, await cli.hello());
-    const sh = await ch.dSH;                              // ServerHello (worker-signed)
-    const { Th, ikW, build } = await cli.auth(sh); // verify sig + pin, derive keys
-    if (!pinB64) { e2eSetPin(machine, b64uEnc(ikW)); ch.firstPin = true; }   // TOFU
-    const { assertion, batch } = await e2eRequestAssertion(machine, Th);  // one Face ID, batched across machines
-    hidePasskey();
-    e2eSendCtl(machine, await build(assertion, batch));   // ClientAuth (batch-bound)
-    const sd = await ch.dSD;                              // ServerDone (key confirmation)
-    ch.session = await cli.done(sd);
-    ch.fp = await cli.fingerprint();
-    e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);  // no-passkey reloads
+    // 2) Full handshake. Try the BATCHED ceremony first (one Face ID unlocks every
+    //    fresh machine at once). If a worker rejects the batch assertion — an old or
+    //    asleep worker that predates batch support — fall back to a single LEGACY
+    //    assertion for just this machine: one extra Face ID, identical per-channel
+    //    security (the worker still verifies a channel-bound require-UV passkey), and
+    //    it self-heals the moment that worker is updated. So a stale box degrades to
+    //    one prompt, it never breaks. Worst case 2 iterations (batch → legacy).
+    let legacy = false;
+    for (;;) {
+      const pinB64 = e2ePin(machine);
+      const cli = E2E.client(machine, pinB64 ? b64uDec(pinB64) : null);
+      meta.textContent = 'securing ' + machine + '…';
+      e2eSendCtl(machine, await cli.hello());
+      const sh = await ch.dSH;                            // ServerHello (worker-signed)
+      const { Th, challenge, ikW, build } = await cli.auth(sh);   // verify sig + pin, derive keys
+      if (!pinB64) { e2eSetPin(machine, b64uEnc(ikW)); ch.firstPin = true; }   // TOFU
+      let authFrame;
+      if (legacy) {                                       // just this machine, its own challenge
+        authFrame = await build(await e2eAssertionPrompt('unlock ' + machine + ' — whisper the safe word', challenge));
+      } else {                                            // batched: one Face ID, many machines
+        const { assertion, batch } = await e2eRequestAssertion(machine, Th);
+        authFrame = await build(assertion, batch);
+      }
+      hidePasskey();
+      e2eSendCtl(machine, authFrame);                     // ClientAuth
+      try {
+        const sd = await ch.dSD;                          // ServerDone (key confirmation)
+        ch.session = await cli.done(sd);
+        ch.fp = await cli.fingerprint();
+        e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);  // no-passkey reloads
+        break;                                            // channel open
+      } catch (e) {
+        // A worker that didn't accept the batched assertion (likely pre-batch code):
+        // reset the handshake and retry this one machine the legacy way. 'server-confirm'
+        // means the worker DID accept but key confirmation failed — a real integrity
+        // problem, so don't paper over it.
+        if (legacy || (e && e.message) === 'server-confirm') throw e;
+        legacy = true;
+        ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred(); ch.dRes = e2eDeferred();
+      }
+    }
     ch.status = 'open'; delete e2eFailUntil[machine];
     meta.textContent = ch.firstPin ? ('🔒 pinned · ' + ch.fp) : '';
     const q = ch.queue; ch.queue = [];
