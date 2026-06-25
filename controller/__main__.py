@@ -7,8 +7,9 @@
   python3 -m controller tasks      # one-shot: print the task ledger and exit
 
 All modes connect to the harness at CONTROLLER_HARNESS_WS (default the local
-harness) as a WS client and share the ledger at CONTROLLER_LEDGER. Brain backend
-for `serve` is CONTROLLER_BRAIN=bankr|claude-code (switchable live in the UI).
+harness) as a WS client and share the ledger at CONTROLLER_LEDGER. The `serve`
+brain is a minimal claude-p-agent (`claude -p` + the fleet MCP tools); see
+controller/agent.py.
 """
 import json
 import sys
@@ -18,7 +19,7 @@ from . import config
 from .events import Reactor
 from .harness_client import HarnessClient
 from .ledger import TaskLedger
-from .mcp import MCPServer, TOOLS
+from .mcp import MCPServer
 from .verbs import Guard, Verbs
 from .world import World
 
@@ -59,14 +60,11 @@ def build(connect_wait=4.0):
     return verbs, clients, guard, ledger, reactor
 
 
-def make_brain(backend, verbs, clients, guard):
-    mcp = MCPServer(verbs)
-    if backend == "claude-code":
-        from .claude_brain import ClaudeCodeBrain
-        return ClaudeCodeBrain(guard)
-    from .brain import Brain
-    return Brain(call_tool=mcp.call_tool, tools=TOOLS,
-                 machine_ids=list(clients.keys()), guard=guard)
+def make_brain(guard):
+    """The one PM brain: a minimal claude-p-agent (`claude -p` + the fleet MCP
+    tools, on your subscription). See controller/agent.py."""
+    from .agent import AgentBrain
+    return AgentBrain(guard)
 
 
 def main(argv):
@@ -88,52 +86,31 @@ def main(argv):
     if mode == "serve":
         from . import chat_server
         verbs, clients, guard, ledger, reactor = build()
-        backend = config.cfg("CONTROLLER_BRAIN", "bankr").lower()
-        brains = {}
-
-        def get_brain(name):
-            if name not in brains:
-                brains[name] = make_brain(name, verbs, clients, guard)
-            return brains[name]
-
-        active = {"backend": backend, "brain": get_brain(backend)}
+        brain = make_brain(guard)
         from .threads import Threads
         threads = Threads(config.THREADS_PATH)
 
-        # a thin façade the chat server drives. Supports live backend switching
-        # AND multiple PM conversation threads (the chat analog of per-project
-        # sessions): each thread keeps its own history per backend, swapped in/out
-        # of the shared brain around every (serialized) turn.
+        # a thin façade the chat server drives. One PM brain (a minimal
+        # claude-p-agent), but multiple conversation threads (the chat analog of
+        # per-project sessions): each thread keeps its own brain state, swapped
+        # in/out of the shared brain around every (serialized) turn.
+        STATE_KEY = brain.label
+
         class Router:
             label = "router"
 
             @property
             def history(self):
-                return active["brain"].history
+                return brain.history
 
             def reset(self):                 # back-compat: clear the current thread
                 threads.clear()
-                active["brain"].reset()
-
-            def switch(self, name):
-                active["backend"] = name
-                active["brain"] = get_brain(name)
-
-            # Model selection applies to the bankr brain (claude-code drives its
-            # own model). Persisted on the brain so a UI pick survives a restart.
-            def get_model(self):
-                return get_brain("bankr").model
-
-            def set_model(self, name):
-                get_brain("bankr").set_model(name)
-                return get_brain("bankr").model
+                brain.reset()
 
             def chat(self, text):
-                brain = active["brain"]
-                back = active["backend"]
-                brain.import_state(threads.state_for(back))
+                brain.import_state(threads.state_for(STATE_KEY))
                 out = brain.chat(text)
-                threads.save_state(back, brain.export_state())
+                threads.save_state(STATE_KEY, brain.export_state())
                 threads.record("me", text)
                 threads.record("bot", out.get("reply", ""), out.get("trace"))
                 threads.persist()
@@ -156,7 +133,7 @@ def main(argv):
 
             def clear_thread(self, tid=None):
                 threads.clear(tid)
-                active["brain"].reset()
+                brain.reset()
                 return threads.summary()
 
             def archive_thread(self, tid=None):
@@ -165,9 +142,8 @@ def main(argv):
 
         router = Router()
         debug_mcp = MCPServer(verbs)                 # tool runner for the debug page
-        # the editable system prompt belongs to the bankr brain (claude-code uses
-        # its own); expose that instance to the debug page regardless of backend.
-        prompt_brain = get_brain("bankr")
+        # the editable persona (debug page) is the PM brain's own private.md prompt
+        prompt_brain = brain
 
         # Telegram front-end (optional) — same brain, on your phone.
         tg = None
@@ -187,7 +163,7 @@ def main(argv):
         reactor.on_event(on_event)
 
         chat_server.serve_with_router(router, verbs, guard,
-                                      lambda: active["backend"], config.CHAT_PORT,
+                                      lambda: brain.label, config.CHAT_PORT,
                                       reactor=reactor, mcp=debug_mcp, prompt_brain=prompt_brain)
         return 0
 

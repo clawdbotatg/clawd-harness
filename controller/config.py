@@ -1,14 +1,15 @@
-"""Controller configuration + the Bankr LLM client (stdlib HTTP).
+"""Controller configuration (stdlib only).
 
-Reuses the harness's gateway creds from `.clawd-harness.env` (the same file
-server.py loads for AI naming) so there's one source of truth for the key — the
-controller never hardcodes a secret. The brain model is separate from the naming
-model: naming is a cheap labeler (qwen3-coder); the PM brain reasons + uses tools,
-so it defaults to a stronger model (kimi-k2.6). Override via CONTROLLER_MODEL.
+Reuses the harness's `.clawd-harness.env` (the same file server.py loads) so
+there's one source of truth — the controller never hardcodes a secret.
+
+The PM brain is `claude -p` on your subscription (see agent.py), so there's no LLM
+gateway key to configure here anymore: the old Bankr-gateway brain + its model
+knobs were removed when the PM became a minimal claude-p-agent. The only model
+knob left is the optional CONTROLLER_MODEL, which picks the `claude --model` the
+PM runs as (empty → Claude Code's default).
 """
-import json
 import os
-import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -42,26 +43,11 @@ def cfg(key, default=""):
     return _ENV.get(key, default)
 
 
-# -- gateway creds (shared with the harness's naming) --------------------------
-BANKR_API_KEY = cfg("BANKR_API_KEY")
-BANKR_BASE_URL = cfg("BANKR_BASE_URL").rstrip("/")
-BANKR_API = (cfg("BANKR_API", "openai")).lower()
-
 # -- controller knobs ----------------------------------------------------------
-# The PM brain's model. Default claude-haiku-4.5: in the bench_controller.py
-# survey it was the best speed-for-reliability — 0 leaks, completed every run,
-# ~6× faster than the old kimi-k2.6 default (3.9s vs ~25s p50 per turn). Naming
-# stays qwen3-coder; this is a different job. Override via CONTROLLER_MODEL.
-BRAIN_MODEL = cfg("CONTROLLER_MODEL", "claude-haiku-4.5")
-# The selectable model menu surfaced in the chat UI — the leak-aware top of the
-# bench_controller.py ranking (the leaky kimi-k2.7-code is deliberately left out;
-# add it here if you want its speed). Re-derive by running `python3 bench_controller.py`.
-BRAIN_MODELS = [m.strip() for m in cfg("CONTROLLER_MODELS",
-    "claude-haiku-4.5,kimi-k2.6,deepseek-v3.2,qwen3.7-plus,claude-sonnet-4.6").split(",")
-    if m.strip()]
-# Persisted model choice (picked from the UI) so it survives a daemon restart —
-# same pattern as PROMPT_PATH. Absent → BRAIN_MODEL.
-MODEL_PATH = cfg("CONTROLLER_MODEL_FILE", os.path.join(ROOT, ".clawd-controller.model.txt"))
+# The `claude --model` the PM runs as. Empty → Claude Code's own default (the
+# right call: the PM is real Claude on your subscription, not a model menu). Set
+# CONTROLLER_MODEL to pin a specific one (e.g. claude-sonnet-4.6).
+AGENT_MODEL = cfg("CONTROLLER_MODEL", "")
 # Autonomy gate for write verbs: readonly (refuse) | confirm (dry-run unless
 # confirm=true) | auto (execute). Default confirm — safe but useful out of the box.
 AUTONOMY = cfg("CONTROLLER_AUTONOMY", "confirm").lower()
@@ -150,40 +136,3 @@ def public_ui_base():
         if fr:
             return _ws_to_http(fr)
     return harness_http_base()
-
-
-def llm_chat(messages, model=None, max_tokens=1024, temperature=0.4, timeout=60):
-    """One chat-completion round against the Bankr gateway. `messages` is a list
-    of {role, content}. Returns the assistant's text (str), or raises on failure
-    — the brain loop catches and surfaces errors rather than silently degrading.
-    Model-agnostic: we drive tools via a JSON action protocol (see brain.py), so
-    no native function-calling support is required from the gateway."""
-    if not (BANKR_API_KEY and BANKR_BASE_URL):
-        raise RuntimeError("LLM gateway not configured (BANKR_API_KEY / BANKR_BASE_URL)")
-    model = model or BRAIN_MODEL
-    if BANKR_API == "anthropic":
-        url = f"{BANKR_BASE_URL}/v1/messages"
-        sys_msgs = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
-        body = {"model": model, "max_tokens": max_tokens,
-                "messages": [m for m in messages if m["role"] != "system"]}
-        if sys_msgs:
-            body["system"] = sys_msgs
-        headers = {"x-api-key": BANKR_API_KEY, "anthropic-version": "2023-06-01",
-                   "content-type": "application/json"}
-    else:
-        url = f"{BANKR_BASE_URL}/chat/completions"
-        body = {"model": model, "max_tokens": max_tokens,
-                "temperature": temperature, "messages": messages}
-        if BANKR_API == "bankr":
-            headers = {"X-API-Key": BANKR_API_KEY, "content-type": "application/json"}
-        else:
-            headers = {"Authorization": f"Bearer {BANKR_API_KEY}",
-                       "content-type": "application/json"}
-    req = urllib.request.Request(url, data=json.dumps(body).encode(),
-                                 headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        payload = json.loads(resp.read().decode())
-    if BANKR_API == "anthropic":
-        return "".join(b.get("text", "") for b in (payload.get("content") or [])
-                       if isinstance(b, dict))
-    return (((payload.get("choices") or [{}])[0]).get("message") or {}).get("content", "")

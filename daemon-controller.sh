@@ -11,7 +11,8 @@
 #   ./daemon-controller.sh logs
 #
 # Env knobs (override before install): CHAT_PORT, CONTROLLER_AUTONOMY
-# (readonly|confirm|auto), CONTROLLER_BRAIN (bankr|claude-code), CONTROLLER_MODEL.
+# (readonly|confirm|auto), CONTROLLER_MODEL (pin the PM's `claude --model`; empty
+# → Claude Code's default).
 set -euo pipefail
 
 LABEL="com.clawd.controller"
@@ -19,10 +20,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$HOME/Library/Logs/clawd-controller.log"
 PY="$(command -v python3)"
-CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude)}"   # for the claude-code brain backend
+CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude)}"   # the PM runs `claude -p`
 CHAT_PORT="${CHAT_PORT:-8799}"
 AUTONOMY="${CONTROLLER_AUTONOMY:-confirm}"          # safe-but-useful default
-BRAIN="${CONTROLLER_BRAIN:-bankr}"
+MODEL="${CONTROLLER_MODEL:-}"                       # empty → Claude Code's default
 DOMAIN="gui/$(id -u)"
 
 cmd="${1:-}"
@@ -49,7 +50,7 @@ case "$cmd" in
   <dict>
     <key>CONTROLLER_CHAT_PORT</key><string>$CHAT_PORT</string>
     <key>CONTROLLER_AUTONOMY</key><string>$AUTONOMY</string>
-    <key>CONTROLLER_BRAIN</key><string>$BRAIN</string>
+    <key>CONTROLLER_MODEL</key><string>$MODEL</string>
     <key>CLAUDE_BIN</key><string>$CLAUDE_BIN</string>
     <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
@@ -63,7 +64,7 @@ PLISTEOF
     launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
     launchctl bootstrap "$DOMAIN" "$PLIST"
     launchctl enable "$DOMAIN/$LABEL" 2>/dev/null || true
-    echo "installed + loaded. chat UI → http://127.0.0.1:$CHAT_PORT  (autonomy=$AUTONOMY, brain=$BRAIN)"
+    echo "installed + loaded. chat UI → http://127.0.0.1:$CHAT_PORT  (autonomy=$AUTONOMY, model=${MODEL:-default})"
     echo "log=$LOG"
     sleep 2; tail -3 "$LOG" 2>/dev/null || true
     ;;

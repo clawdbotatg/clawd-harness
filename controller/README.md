@@ -29,33 +29,39 @@ python3 -m controller mcp
 ## Debug / inspector page — `http://127.0.0.1:8799/debug`
 
 (Also the 🛠 button in the PM drawer / chat header.) Three tabs:
-- **Prompt** — the exact system prompt the Bankr/Kimi brain gets each turn. Edit +
-  Save to override it live (persisted to `.clawd-controller.prompt.txt`, survives
-  restarts); Reset returns to the built-in. The Claude Code backend uses its own.
+- **Prompt** — the PM brain's persona (`prompts/private.md`, appended to
+  `claude -p` each turn). Edit + Save to override it live (persisted to
+  `.clawd-controller.prompt.txt`, survives restarts); Reset returns to the file.
 - **Tools** — every tool the PM can call, with its schema, and a form to **run any
   of them yourself** and see the raw result. Writes still pass the autonomy gate
   (tick `confirm`).
 - **What the PM sees** — the raw `world` / `attention` / `tasks` / `notifications`
   JSON the brain reads.
 
-## The two brains (switchable live in the UI header)
+## The brain — a minimal claude-p-agent
 
-Both drive the **same tools** and share the **same task ledger** file, so you can
-switch mid-conversation:
+The PM is **real Claude on your subscription**, not a cheap gateway model. It's a
+minimal [claude-p-agent](https://github.com/clawdbotatg/claude-p-agent): each turn
+shells out to `claude -p` (env scrubbed → subscription, not metered) in the repo
+root, with the controller's **MCP server attached** so Claude drives the fleet
+through the exact same verbs. Multi-turn continuity rides on `--resume`. See
+[`agent.py`](agent.py) — that's the whole engine.
 
-- **`bankr`** (default) — Kimi K2.6 via the Bankr gateway, in-process. A JSON
-  action loop (model-agnostic, no native function-calling needed). Fast, cheap.
-- **`claude-code`** — shells out to `claude -p` with the controller's MCP server
-  attached, so Claude Code itself is the agent. Heavier, but full Claude.
+The persona lives in **[`prompts/`](prompts/)**, picked by trust level:
+- **`private.md`** — the trusted operator persona (chat UI + Telegram are *you*).
+  Full, write-capable tools, gated by the autonomy guard.
+- **`public.md`** — a locked-down read-only persona for any future untrusted
+  adapter: it may only *read* fleet state, never act.
 
-Set the startup default with `CONTROLLER_BRAIN=bankr|claude-code`.
+Pin a specific model with `CONTROLLER_MODEL` (e.g. `claude-sonnet-4.6`); empty →
+Claude Code's own default.
 
 ## Conversation threads (the chat analog of per-project sessions)
 
 The chat header has a **thread bar** — the PM equivalent of the harness's N
 sessions per project. Run several PM conversations at once and switch between
-them; each thread keeps its **own history** (per brain backend, so a Kimi↔Claude
-switch inside a thread keeps continuity) plus its display transcript.
+them; each thread keeps its **own history** (and its own `--resume` id, so
+continuity is preserved) plus its display transcript.
 
 - **＋ new** — spawn a fresh thread (new context).
 - **click a tab** — switch to that thread; its transcript reloads.
@@ -64,8 +70,8 @@ switch inside a thread keeps continuity) plus its display transcript.
 - **🧹 clear** (header) — wipe the current thread's context but keep the slot.
 
 Threads persist to `.clawd-controller.threads.json` (gitignored), so they — and
-the brain history inside them — survive a daemon restart; `claude-code` threads
-carry their `--resume` id across too. API: `GET /api/threads`,
+the brain history + `--resume` id inside them — survive a daemon restart. API:
+`GET /api/threads`,
 `GET /api/thread/messages?id=`, `POST /api/thread/{new,select,clear,archive}`.
 Telegram shares the **current** thread.
 
@@ -142,8 +148,7 @@ triage entry point — each item names the `suggested_action` to clear it.
 | `CONTROLLER_HARNESS_WS` | `ws://127.0.0.1:8787` | harness to drive |
 | `CONTROLLER_HARNESS_TOKEN` | `.clawd-harness.token` | WS token |
 | `CONTROLLER_HARNESS_HTTP` | (derived from WS url) | UI origin for deep links |
-| `CONTROLLER_MODEL` | `kimi-k2.6` | bankr brain model |
-| `CONTROLLER_BRAIN` | `bankr` | startup backend |
+| `CONTROLLER_MODEL` | (Claude Code default) | pin the PM's `claude --model` |
 | `CONTROLLER_AUTONOMY` | `confirm` | write gate |
 | `CONTROLLER_CHAT_PORT` | `8799` | chat UI port |
 | `CONTROLLER_LEDGER` | `../.clawd-controller.tasks.jsonl` | task log |
@@ -163,8 +168,8 @@ python3 -m controller.test_threads      # PM conversation threads (store + persi
 
 `harness_client.py` (WS client + state) · `world.py` (snapshot + attention) ·
 `ledger.py` (event-sourced task log) · `verbs.py` (intent verbs + guard) ·
-`mcp.py` (MCP stdio server) · `brain.py` (Kimi brain) · `claude_brain.py`
-(Claude Code `-p` brain) · `events.py` (Reactor: hooks → higher-level events) ·
-`telegram.py` (Telegram bridge) · `chat_server.py` + `chat.html` (chat UI) ·
-`threads.py` (PM conversation threads) · `mock_harness.py` (test double) ·
-`__main__.py` (entry).
+`mcp.py` (MCP stdio server) · `agent.py` (the PM brain: a minimal claude-p-agent,
+`claude -p` + fleet tools) · `prompts/` (the persona, by trust level) ·
+`events.py` (Reactor: hooks → higher-level events) · `telegram.py` (Telegram
+bridge) · `chat_server.py` + `chat.html` (chat UI) · `threads.py` (PM conversation
+threads) · `mock_harness.py` (test double) · `__main__.py` (entry).

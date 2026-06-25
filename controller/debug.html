@@ -53,9 +53,9 @@
 <main>
   <section id="s-prompt" class="on">
     <h2>System prompt <span id="pstate" class="tag"></span></h2>
-    <p class="muted">This is the exact system prompt the <b>Bankr (Kimi)</b> brain receives each turn
-       (the Claude Code backend uses its own). Edit + Save to override it live; it persists across
-       restarts. Reset returns to the built-in prompt.</p>
+    <p class="muted">This is the PM brain's <b>persona</b> — the trusted <code>prompts/private.md</code>
+       appended to <code>claude -p</code> each turn. Edit + Save to override it live; it persists across
+       restarts. Reset returns to the built-in persona file.</p>
     <textarea id="prompt" spellcheck="false"></textarea>
     <div class="row">
       <button class="act" id="save">Save override</button>

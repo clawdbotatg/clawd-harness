@@ -3,14 +3,15 @@
 > Status: **built end-to-end** (Phases 0–2, plus the chat product). The reading
 > phase lives in `server.py`; everything else lives in **`controller/`** (a
 > harness client, never imports `server.py`). You can chat with the PM bot today
-> at `http://127.0.0.1:8799` (`python3 -m controller serve`), on either of two
-> brain backends (Kimi K2.6 / Claude Code `-p`), reading and writing the fleet
-> through one MCP tool surface. See **`controller/README.md`** to run it.
+> at `http://127.0.0.1:8799` (`python3 -m controller serve`). The PM brain is a
+> minimal [claude-p-agent](https://github.com/clawdbotatg/claude-p-agent) — real
+> Claude (`claude -p`, on your subscription) driving the fleet through one MCP
+> tool surface. See **`controller/README.md`** to run it.
 >
 > As-built map: `controller/harness_client.py` (WS client), `world.py`
 > (snapshot + attention), `ledger.py` (event-sourced task log), `verbs.py`
 > (intent verbs + autonomy/rate/audit guard), `mcp.py` (MCP stdio server),
-> `brain.py` + `claude_brain.py` (the two brains), `chat_server.py` + `chat.html`
+> `agent.py` + `prompts/` (the PM brain + its persona), `chat_server.py` + `chat.html`
 > (the chat UI), `mock_harness.py` + `test_*.py` (tests). UI: session cards in
 > `index.html` now show `status`/`digest`/`blocked_on`; project cards show a
 > "needs you" badge from `waitingCount`.
@@ -260,8 +261,9 @@ whole stack is proud of being pure stdlib, disk-as-source-of-truth. So:
   materializes the world; `world.py` derives the ranked "needs you" queue. Read
   via `python3 -m controller world|attention`.
 - **Phase 2 — conversational controller** ✅. `verbs.py` (intent verbs, gated by
-  autonomy/rate/audit) behind both an MCP server (`mcp.py`) and a chat brain
-  (`brain.py` Kimi / `claude_brain.py` Claude Code). Confirm-gated by default.
+  autonomy/rate/audit) behind both an MCP server (`mcp.py`) and the PM brain
+  (`agent.py` — a minimal claude-p-agent, `claude -p` + those tools).
+  Confirm-gated by default.
 - **Phase 3 — bounded autonomy** ◑. Autonomy gate + task ledger + an
   event-driven **Reactor** (`events.py`): fleet hooks (`Stop`/`Notification`)
   become higher-level events (`blocked`/`turn_done`/`ended`), pushed to handlers

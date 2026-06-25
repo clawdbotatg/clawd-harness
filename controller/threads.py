@@ -3,15 +3,15 @@
 The harness keeps N independent `claude` sessions per project so you can run
 several lines of work at once, switch between them, and drop the ones you're done
 with. This is the same idea for the *PM chat*: each **thread** is an isolated
-dialog with its own history (kept per brain backend, so switching Kimi↔Claude
-inside a thread preserves continuity) plus a display transcript for the UI. You
+dialog with its own brain state (history + the `--resume` session id, so
+continuity is preserved across turns) plus a display transcript for the UI. You
 spawn threads, switch between them, **clear** one (wipe its context but keep the
 slot) or **archive** one (hide it; restorable). This is how you keep a long PM
 session's context from bleeding across unrelated topics.
 
 Persisted to a JSON file (like `.clawd-harness.sessions.json`) so threads — and
-the brain history riding inside them — survive a daemon restart. claude-code
-threads also carry their `--resume` session_id across the restart.
+the brain state riding inside them — survive a daemon restart, carrying each
+thread's `--resume` id across too.
 
 Storage is intentionally dumb: one process, all chats serialized by the chat
 server's lock, so no concurrency guard is needed here.
