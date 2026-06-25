@@ -2296,8 +2296,14 @@ function fleetBootstrap() {
       // you're viewing → unlock LAZILY, only when you actually open it (attachMachine /
       // hsendTo / hsend do that on demand). A machine with real content still unlocks
       // up front so its projects populate the rung.
-      const empty = m.stats && !m.stats.projects && !m.stats.sessions;
-      if (empty && m.id !== currentMachine) continue;
+      // EMERGENCY STOP (passkey storm): do NOT eagerly unlock machines at boot. The
+      // auto-unlock-every-machine path was firing a Face ID per machine per reconnect,
+      // and the iOS passkey sheet itself causes reconnects → an unbreakable storm.
+      // Only the machine you are ACTUALLY viewing unlocks; every other machine unlocks
+      // LAZILY the moment you open it (attachMachine / hsendTo). A bare reload now costs
+      // ZERO passkeys. (Trade-off: other machines' projects don't pre-populate the
+      // unified rung until you open them — fine vs. an unusable storm.)
+      if (m.id !== currentMachine) continue;
       e2eEnsure(m.id, { auto: true }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
     }
   } finally { bootstrapping = false; }
