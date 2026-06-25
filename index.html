@@ -1347,6 +1347,16 @@ const E2E = (() => {
 // bound to the channel keys, so the worker (and optionally the relay) verifies a
 // human authorized THIS channel — independent of the relay's edge gate.
 const e2eChans = {};   // machine -> { status, session, queue, sendChain, recvChain, dSH, dSD, ready, fp }
+// Storm guard (the "nine passkeys on one reload" bug). fleetBootstrap() re-runs on
+// every socket reconnect, and a flapping mobile socket can reconnect several times
+// while the serial bootstrap is still mid-unlock — each pass re-firing a fresh
+// passkey for any channel that isn't `open` yet. So after a handshake FAILS we
+// stamp a short cooldown and refuse to auto-retry that machine (opts.auto) until it
+// lapses. This is purely client-side bookkeeping: a genuine new channel still needs
+// the passkey, an explicit user gesture (no opts.auto) retries instantly, and the
+// crypto handshake is unchanged — so it costs nothing in security.
+const e2eFailUntil = {};            // machine -> epoch ms; suppresses BACKGROUND passkey retries after a failure
+const E2E_FAIL_COOLDOWN_MS = 30000;
 function e2eDeferred() { let r, j; const p = new Promise((res, rej) => { r = res; j = rej; }); p.resolve = r; p.reject = j; return p; }
 function e2ePin(m) { try { return localStorage.getItem('cc_e2e_pin_' + m); } catch { return null; } }
 function e2eSetPin(m, b) { try { localStorage.setItem('cc_e2e_pin_' + m, b); } catch {} }
@@ -1393,10 +1403,14 @@ function e2eGetAssertion(machine, challengeBytes) {
   });
 }
 
-async function e2eEnsure(machine) {
+async function e2eEnsure(machine, opts = {}) {
   const cur = e2eChans[machine];
   if (cur && cur.status === 'open') return cur;
   if (cur && cur.status === 'handshaking') return cur.ready;
+  // A background trigger (reconnect/bootstrap) does NOT re-fire a passkey for a
+  // machine that just failed — that's the reload storm. Only an explicit user
+  // gesture (no opts.auto) retries before the cooldown lapses. See e2eFailUntil.
+  if (opts.auto && (e2eFailUntil[machine] || 0) > Date.now()) return Promise.reject(new Error('cooldown'));
   const ch = e2eChans[machine] = { status: 'handshaking', session: null, queue: [],
     sendChain: Promise.resolve(), recvChain: Promise.resolve(),
     dSH: e2eDeferred(), dSD: e2eDeferred(), dRes: e2eDeferred() };
@@ -1411,7 +1425,7 @@ async function e2eEnsure(machine) {
         const master = b64uDec(rs.master), rn = b64uDec(r.rn);
         if (!E2E._eq(await E2E.resumeConfirm(master, rn), b64uDec(r.cf))) throw new Error('resume-cf');
         ch.session = await E2E.resumeSession(master, rn);
-        ch.status = 'open'; meta.textContent = '';
+        ch.status = 'open'; delete e2eFailUntil[machine]; meta.textContent = '';
         const q = ch.queue; ch.queue = [];
         for (const fr of q) e2eSendFrame(machine, fr);
         return ch;
@@ -1434,13 +1448,14 @@ async function e2eEnsure(machine) {
     ch.session = await cli.done(sd);
     ch.fp = await cli.fingerprint();
     e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);  // no-passkey reloads
-    ch.status = 'open';
+    ch.status = 'open'; delete e2eFailUntil[machine];
     meta.textContent = ch.firstPin ? ('🔒 pinned · ' + ch.fp) : '';
     const q = ch.queue; ch.queue = [];
     for (const fr of q) e2eSendFrame(machine, fr);
     return ch;
   })().catch((e) => {
     ch.status = 'failed';
+    e2eFailUntil[machine] = Date.now() + E2E_FAIL_COOLDOWN_MS;   // no auto-retry storm; user gesture still retries
     if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
     else { meta.textContent = 'secure channel failed: ' + ((e && e.message) || e); console.error('[e2e] handshake failed for', machine, e); }
     throw e;
@@ -2203,7 +2218,7 @@ async function fleetBootstrap() {
       // element, so those must go one at a time) — and even then it's time-boxed
       // so an unreachable box can't stall the queue waiting on a reply that never
       // comes.
-      const go = e2eEnsure(m.id).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
+      const go = e2eEnsure(m.id, { auto: true }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
       if (!e2eLoadResume(m.id)) { try { await Promise.race([go, e2eTimeout(20000)]); } catch {} }
     }
   } finally { bootstrapping = false; }
