@@ -31,6 +31,7 @@ Then open http://127.0.0.1:8787
 """
 
 import base64
+import calendar
 import fcntl
 import glob
 import hashlib
@@ -229,6 +230,48 @@ def lan_ip():
 def _transcript_exists(session_id):
     return bool(glob.glob(os.path.expanduser(
         f"~/.claude/projects/*/{session_id}.jsonl")))
+
+
+def _parse_iso_ts(ts):
+    """Claude's ISO-8601 'Z' timestamp -> epoch seconds (UTC). 0.0 on failure."""
+    try:
+        base, _, frac = ts.partition(".")
+        t = calendar.timegm(time.strptime(base.rstrip("Z"), "%Y-%m-%dT%H:%M:%S"))
+        return float(t) + (float("0." + frac.rstrip("Z")) if frac else 0.0)
+    except Exception:
+        return 0.0
+
+
+def _transcript_last_activity(session_id):
+    """Epoch of a session's last *real* activity, read from its transcript's last
+    timestamped entry. This — not the file mtime — is the warmth source of truth on
+    boot: a `--resume` touches/rewrites the file (so mtime looks fresh on every
+    restart), but the last JSONL `timestamp` survives that. Reads only the tail so
+    it stays cheap even for multi-MB transcripts. 0.0 if none found."""
+    if not session_id:
+        return 0.0
+    latest = 0.0
+    for p in glob.glob(os.path.expanduser(f"~/.claude/projects/*/{session_id}.jsonl")):
+        try:
+            with open(p, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 65536))
+                tail = f.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        for line in reversed(tail.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ts = json.loads(line).get("timestamp")
+            except Exception:
+                continue  # partial first line from the seek, or a non-JSON line
+            if ts:
+                latest = max(latest, _parse_iso_ts(ts))
+                break  # last timestamped line in this file wins
+    return latest
 
 
 def _safe_name(name):
@@ -448,7 +491,13 @@ class ClaudeSession:
         """Handle one hook callback (from claude via /hook) → update state, fan a
         slim event out to every client (menu badges), and trigger AI naming."""
         ev = obj.get("hook_event_name", "?")
-        self.last_active = time.time()
+        # `last_active` drives the project warmth sort, so it must mean *genuine
+        # user activity* — a prompt, a tool, a turn ending. SessionStart/SessionEnd
+        # fire on every harness restart (all sessions are `--resume`d at once), so
+        # counting them would stamp every session with the restart time, flatten
+        # the recency order, and float stale projects to the top. Exclude them.
+        if ev not in ("SessionStart", "SessionEnd"):
+            self.last_active = time.time()
         # Claude rotates its transcript file on compaction/resume. Main-session
         # lifecycle hooks report the live transcript_path + session_id, so follow
         # them — otherwise the tail strands on the pre-rotation file and the
@@ -487,6 +536,10 @@ class ClaudeSession:
             # re-name at the 1/3/6/9/… milestones to sharpen as it grows.
             if (not self.title) or name_at_prompt(self.prompt_count):
                 threading.Thread(target=self._regenerate_name, daemon=True).start()
+            # Persist the freshly-bumped last_active so warmth survives a restart.
+            # Without this it's only saved on prompts/naming milestones, so a turn's
+            # recency could be lost on the next resume (reverting the sort order).
+            self.manager.save_registry()
             # The digest is volatile — refresh it every turn (not just at the
             # naming milestones) so live session state stays current for the
             # controller / dashboard. Cheap, async, in-memory only.
@@ -946,6 +999,14 @@ class SessionManager:
                 # transcript gone (e.g. cleared history) — start it fresh instead
                 # of resuming into nothing.
                 sid = str(uuid.uuid4())
+            # Warmth source of truth on boot is the transcript's last real entry,
+            # not the persisted last_active: a pre-fix registry has every session
+            # stamped with a restart time (SessionStart used to bump last_active),
+            # which flattens the project sort. The transcript timestamp self-heals
+            # that. Fall back to the persisted value, then creation time.
+            last_active = (_transcript_last_activity(sid)
+                           or e.get("last_active", 0.0)
+                           or e.get("created", 0.0))
             s = ClaudeSession(
                 self, cid=e.get("cid") or str(uuid.uuid4()), pid=pid,
                 session_id=sid or str(uuid.uuid4()), resuming=resuming,
@@ -953,7 +1014,7 @@ class SessionManager:
                 prompt_count=e.get("prompt_count", 0),
                 first_prompt=e.get("first_prompt", ""),
                 created=e.get("created", 0.0),
-                last_active=e.get("last_active", 0.0))
+                last_active=last_active)
             self.sessions[s.cid] = s
             s.start()
         # No auto-created session: with zero projects there are legitimately zero
