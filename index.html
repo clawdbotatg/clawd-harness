@@ -1502,19 +1502,31 @@ async function e2eEnsure(machine, opts = {}) {
         authFrame = await build(assertion, batch);
       }
       hidePasskey();
+      // Stash resume material the instant ClientAuth goes out — BEFORE awaiting
+      // ServerDone. On iOS the passkey sheet backgrounds Safari, which drops the WS
+      // mid-handshake; the worker stores its half the moment it accepts ClientAuth
+      // (keyed by resume_id, kept across the reconnect), but if the mobile waited for
+      // ServerDone it would miss it and re-handshake → another Face ID. Saving here
+      // lets the reconnect resume SILENTLY instead. Safe: if the worker rejected the
+      // auth it never stored its half, so our resume just fails → clean re-handshake.
+      // And resume verifies resume_confirm (worker proves it holds the master), so a
+      // resumed channel still implies the worker validated the passkey — no security
+      // loss from skipping this run's ServerDone key-confirmation.
+      e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);
       e2eSendCtl(machine, authFrame);                     // ClientAuth
       try {
         const sd = await ch.dSD;                          // ServerDone (key confirmation)
         ch.session = await cli.done(sd);
         ch.fp = await cli.fingerprint();
-        e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);  // no-passkey reloads
         break;                                            // channel open
       } catch (e) {
         // A worker that didn't accept the batched assertion (likely pre-batch code):
         // reset the handshake and retry this one machine the legacy way. 'server-confirm'
         // means the worker DID accept but key confirmation failed — a real integrity
-        // problem, so don't paper over it.
-        if (legacy || (e && e.message) === 'server-confirm') throw e;
+        // problem, so don't paper over it. On a real failure, drop the resume material
+        // we optimistically stashed above so it can't linger (a legacy retry overwrites
+        // it on success, so only clear when we're actually giving up).
+        if (legacy || (e && e.message) === 'server-confirm') { e2eClearResume(machine); throw e; }
         legacy = true;
         ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred(); ch.dRes = e2eDeferred();
       }
@@ -2296,14 +2308,17 @@ function fleetBootstrap() {
       // you're viewing → unlock LAZILY, only when you actually open it (attachMachine /
       // hsendTo / hsend do that on demand). A machine with real content still unlocks
       // up front so its projects populate the rung.
-      // EMERGENCY STOP (passkey storm): do NOT eagerly unlock machines at boot. The
-      // auto-unlock-every-machine path was firing a Face ID per machine per reconnect,
-      // and the iOS passkey sheet itself causes reconnects → an unbreakable storm.
-      // Only the machine you are ACTUALLY viewing unlocks; every other machine unlocks
-      // LAZILY the moment you open it (attachMachine / hsendTo). A bare reload now costs
-      // ZERO passkeys. (Trade-off: other machines' projects don't pre-populate the
-      // unified rung until you open them — fine vs. an unusable storm.)
-      if (m.id !== currentMachine) continue;
+      //
+      // Why eager-unlock is safe again (was briefly EMERGENCY-STOPPED to no eager
+      // unlock at all): the storm wasn't eager-unlock per se — multiple fresh machines
+      // collapse into ONE batched Face ID (e2eRequestAssertion's 450ms barrier). The
+      // storm was the iOS passkey sheet dropping the WS mid-handshake → reconnect →
+      // re-handshake → another Face ID, looping. That loop is closed by saving resume
+      // material the instant ClientAuth goes out (see e2eEnsure), so the sheet-induced
+      // reconnect resumes SILENTLY instead of re-prompting. With that in place,
+      // eager-unlocking non-empty machines costs one Face ID and repopulates the rung.
+      const empty = m.stats && !m.stats.projects && !m.stats.sessions;
+      if (empty && m.id !== currentMachine) continue;
       e2eEnsure(m.id, { auto: true }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
     }
   } finally { bootstrapping = false; }
