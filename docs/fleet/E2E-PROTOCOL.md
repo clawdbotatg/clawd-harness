@@ -155,6 +155,35 @@ M verifies `cf_w`. On success the channel is **open**; both discard the
 ephemeral private keys (forward secrecy) and keep only the derived record keys
 and the session deadline.
 
+### 4.1 Batched unlock (one Face ID, several channels)
+
+A cold reload opens a channel to every fleet machine at once, which would mean
+one passkey gesture per machine. Instead the mobile runs all the fresh handshakes
+concurrently up to the point each has derived its transcript hash `Th`, then asks
+for **one** assertion over a challenge that commits to the whole set:
+
+```
+batch_challenge = SHA-256( "fleet-e2e/1 webauthn-batch" ‖ LP( sorted(Th_1, …, Th_n) ) )
+```
+
+The mobile sends the *same* assertion to every worker, each ClientAuth carrying
+the full `batch` list (`[base64url(Th_i)]`, any order — the worker sorts). A
+worker in batch mode (ClientAuth has a `batch` field) checks, additionally to the
+§4 list:
+- **its own `Th` is in the set** (`batch-membership`), then
+- `clientDataJSON.challenge == base64url(batch_challenge(set))`.
+
+Anti-replay keys on `Th` (unique per handshake) instead of the challenge, since
+one challenge legitimately covers `n` channels. **Security is identical to the
+single-channel case:** the assertion commits to the exact set, so a hostile relay
+can neither drop/add a channel (any edit changes `batch_challenge` → the assertion
+no longer verifies) nor steer the human's gesture onto a channel they never saw
+(that channel's `Th` isn't in the committed set → `batch-membership` fails). A
+worker that predates this (no `batch` field handling) simply rejects the shared
+assertion; the mobile then retries that one machine with a legacy single-channel
+assertion (§4) — one extra gesture, never a failure. Backward compatible:
+`finish()` with no `batch` field is the unchanged §4 path.
+
 ### Why a malicious relay cannot win
 - **Impersonate W to M:** needs `IK_w` private key to forge `sig_w` over a
   transcript containing the relay's own `epk`. It does not have it. M aborts.
@@ -185,6 +214,9 @@ iv_w2m    = Expand( "fleet-e2e/1 iv w2m" ‖ Th )[:4]
 kc_m      = Expand( "fleet-e2e/1 confirm-m" ‖ Th )  # M's key-confirmation key
 kc_w      = Expand( "fleet-e2e/1 confirm-w" ‖ Th )
 webauthn_challenge = SHA-256( "fleet-e2e/1 webauthn-challenge" ‖ Th )   # 32B
+
+# batched unlock (§4.1) — NOT a key-schedule output; a hash over a set of Th's:
+batch_challenge = SHA-256( "fleet-e2e/1 webauthn-batch" ‖ LP( sorted(Th_1..Th_n) ) )
 
 (All HKDF info labels use single ASCII spaces exactly as written; `Expand` is
 HKDF-Expand(PRK, info, 32). These byte strings MUST be identical in the Python
