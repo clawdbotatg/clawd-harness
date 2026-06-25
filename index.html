@@ -1377,6 +1377,24 @@ function e2eLoadResume(m) { try { const s = JSON.parse(localStorage.getItem('cc_
 function e2eSaveResume(m, id, master) { try { localStorage.setItem('cc_e2e_rs_' + m, JSON.stringify({ id, master, exp: Date.now() + RESUME_TTL_MS })); } catch {} }
 function e2eClearResume(m) { try { localStorage.removeItem('cc_e2e_rs_' + m); } catch {} }
 
+// Persistent passkey circuit-breaker — the real storm fix. The iOS passkey sheet
+// backgrounds Safari, which (a) drops the WS and (b) often evicts+RELOADS the page
+// on return. The reload wipes all in-memory guards (e2eFailUntil, the handshake
+// state) — only localStorage survives. And because the drop lands BEFORE ClientAuth
+// reaches the worker, the worker never stores resume material, so the reconnect
+// can't resume silently → eager-unlock re-prompts → another sheet → another reload …
+// an unbreakable loop. So we stamp the wall-clock of every passkey SHEET in
+// localStorage and refuse to raise a *fresh* sheet from a BACKGROUND/eager trigger
+// (opts.auto) within PASSKEY_COOLDOWN of it. Silent resume raises no sheet → never
+// gated. An explicit user TAP (no opts.auto) is never gated — the user is right
+// there asking for it. Net: a cold load prompts ONCE, repopulates via that one
+// batched Face ID, and any sheet-induced reload rides the stamp instead of
+// re-prompting. After the window lapses with still no resume, it may prompt once
+// more — bounded, never a storm.
+const PASSKEY_COOLDOWN_MS = 90 * 1000;
+function e2ePasskeyStamp() { try { localStorage.setItem('cc_e2e_pk_last', String(Date.now())); } catch {} }
+function e2ePasskeyCoolingDown() { try { const t = +(localStorage.getItem('cc_e2e_pk_last') || 0); return t > 0 && (Date.now() - t) < PASSKEY_COOLDOWN_MS; } catch { return false; } }
+
 // Reveal the gnome first, then prompt for the passkey. We let the modal paint for
 // REVEAL_MS so you actually SEE "what's the safe word?" before the OS sheet, then
 // auto-fire (works on desktop / while the tap activation is fresh). If the browser
@@ -1386,6 +1404,10 @@ const REVEAL_MS = 350;
 // `subtitle`. Used for both a single channel and a BATCH of them (the batch challenge
 // commits to every channel's Th, so one Face ID covers them all — see fireBatch).
 function e2eAssertionPrompt(subtitle, challengeBytes) {
+  // Stamp the persistent passkey cooldown the instant we're about to raise a sheet.
+  // This is what an iOS evict+reload reads back to know "we just prompted — don't
+  // auto-prompt again", breaking the storm even though all in-memory state was wiped.
+  e2ePasskeyStamp();
   const req = lastAuthReq || {};
   const get = () => navigator.credentials.get({ publicKey: {
     challenge: challengeBytes, rpId: req.rpId || location.hostname,
@@ -1456,6 +1478,12 @@ async function e2eEnsure(machine, opts = {}) {
   // machine that just failed — that's the reload storm. Only an explicit user
   // gesture (no opts.auto) retries before the cooldown lapses. See e2eFailUntil.
   if (opts.auto && (e2eFailUntil[machine] || 0) > Date.now()) return Promise.reject(new Error('cooldown'));
+  // Persistent passkey cooldown: a background/eager unlock with no resume material to
+  // ride must not raise a fresh sheet while we're inside the window (the storm). Bail
+  // BEFORE creating the channel so there's no scary meta message — mirrors the
+  // e2eFailUntil gate above. A machine that DOES have resume material falls through:
+  // resume is silent, so it's safe to attempt even while cooling down.
+  if (opts.auto && e2ePasskeyCoolingDown() && !e2eLoadResume(machine)) return Promise.reject(new Error('pk-cooldown'));
   const ch = e2eChans[machine] = { status: 'handshaking', session: null, queue: [],
     sendChain: Promise.resolve(), recvChain: Promise.resolve(),
     dSH: e2eDeferred(), dSD: e2eDeferred(), dRes: e2eDeferred() };
@@ -1478,6 +1506,10 @@ async function e2eEnsure(machine, opts = {}) {
         e2eClearResume(machine); ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred();
       }
     }
+    // A background trigger whose resume just failed must still respect the persistent
+    // passkey cooldown — otherwise a machine that lost its resume material would re-prompt
+    // on every reload and re-open the storm. (Quietly handled in the catch below.)
+    if (opts.auto && e2ePasskeyCoolingDown()) throw new Error('pk-cooldown');
     // 2) Full handshake. Try the BATCHED ceremony first (one Face ID unlocks every
     //    fresh machine at once). If a worker rejects the batch assertion — an old or
     //    asleep worker that predates batch support — fall back to a single LEGACY
@@ -1539,7 +1571,10 @@ async function e2eEnsure(machine, opts = {}) {
   })().catch((e) => {
     ch.status = 'failed';
     e2eFailUntil[machine] = Date.now() + E2E_FAIL_COOLDOWN_MS;   // no auto-retry storm; user gesture still retries
-    if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
+    // pk-cooldown is a deliberate, quiet skip (the persistent passkey breaker), not a
+    // failure — don't paint a scary banner or log it. A later user tap unlocks instantly.
+    if ((e && e.message) === 'pk-cooldown') { /* silent */ }
+    else if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
     else { meta.textContent = 'secure channel failed: ' + ((e && e.message) || e); console.error('[e2e] handshake failed for', machine, e); }
     throw e;
   });
@@ -2308,16 +2343,18 @@ function fleetBootstrap() {
       // you're viewing → unlock LAZILY, only when you actually open it (attachMachine /
       // hsendTo / hsend do that on demand). A machine with real content still unlocks
       // up front so its projects populate the rung.
-      // EMERGENCY STOP (re-instated): do NOT eagerly unlock machines at boot. We tried
-      // restoring eager-unlock paired with resume-before-ServerDone, but the storm came
-      // straight back — so the iOS drop is happening BEFORE ClientAuth reaches the
-      // worker (sheet backgrounds Safari → socket dies while the OS sheet is up → the
-      // page is evicted+reloaded on return → fresh bootstrap → another prompt), which
-      // means the worker never stored its resume half and the saved material can't
-      // resume. Until the resume path survives that (worker-side + a localStorage-backed
-      // passkey cooldown that outlives the reload), only the machine you're actively
-      // viewing unlocks; others unlock lazily on open. A bare reload costs ZERO passkeys.
-      if (m.id !== currentMachine) continue;
+      // Eager-unlock non-empty machines so their projects populate the unified rung.
+      // This was EMERGENCY-STOPPED twice because it re-opened the passkey storm: the
+      // iOS sheet drops the socket BEFORE ClientAuth reaches the worker, so the worker
+      // never stores resume material, the page is evicted+reloaded on return, and the
+      // fresh bootstrap re-prompts → loop. It's safe NOW because of the persistent
+      // passkey cooldown (e2ePasskeyCoolingDown, stamped in localStorage on every
+      // sheet): the first cold load raises ONE batched Face ID and repopulates; any
+      // sheet-induced reload lands inside the cooldown, so e2eEnsure skips the prompt
+      // silently instead of storming. Empty machines still unlock lazily (nothing to
+      // show). Silent resume and explicit taps are never gated.
+      const empty = m.stats && !m.stats.projects && !m.stats.sessions;
+      if (empty && m.id !== currentMachine) continue;
       e2eEnsure(m.id, { auto: true }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
     }
   } finally { bootstrapping = false; }
