@@ -2284,6 +2284,20 @@ function fleetBootstrap() {
     for (const m of live) {
       const ch = e2eChans[m.id];
       if (ch && ch.status === 'open') { e2eSendFrame(m.id, { type: 'list' }); continue; }
+      // Don't burn a passkey eagerly unlocking a machine the roster already tells us
+      // is EMPTY (0 projects · 0 sessions) and that you haven't opened. The relay
+      // sends those counts in plaintext (m.stats), so we can tell an idle box from a
+      // busy one WITHOUT its E2E channel — and an empty box has nothing to show on the
+      // unified projects rung anyway. This is the core of the "seven passkeys on one
+      // reload" storm: a session-less box (e.g. clawd-antenna — whose worker predates
+      // the batch ceremony, so it can't join the one-Face-ID batch AND never saves
+      // resume material, so it re-prompts on EVERY socket flap) demanded its own Face
+      // ID over and over even though you never touched it. Empty + not the machine
+      // you're viewing → unlock LAZILY, only when you actually open it (attachMachine /
+      // hsendTo / hsend do that on demand). A machine with real content still unlocks
+      // up front so its projects populate the rung.
+      const empty = m.stats && !m.stats.projects && !m.stats.sessions;
+      if (empty && m.id !== currentMachine) continue;
       e2eEnsure(m.id, { auto: true }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
     }
   } finally { bootstrapping = false; }
