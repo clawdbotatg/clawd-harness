@@ -2308,17 +2308,16 @@ function fleetBootstrap() {
       // you're viewing → unlock LAZILY, only when you actually open it (attachMachine /
       // hsendTo / hsend do that on demand). A machine with real content still unlocks
       // up front so its projects populate the rung.
-      //
-      // Why eager-unlock is safe again (was briefly EMERGENCY-STOPPED to no eager
-      // unlock at all): the storm wasn't eager-unlock per se — multiple fresh machines
-      // collapse into ONE batched Face ID (e2eRequestAssertion's 450ms barrier). The
-      // storm was the iOS passkey sheet dropping the WS mid-handshake → reconnect →
-      // re-handshake → another Face ID, looping. That loop is closed by saving resume
-      // material the instant ClientAuth goes out (see e2eEnsure), so the sheet-induced
-      // reconnect resumes SILENTLY instead of re-prompting. With that in place,
-      // eager-unlocking non-empty machines costs one Face ID and repopulates the rung.
-      const empty = m.stats && !m.stats.projects && !m.stats.sessions;
-      if (empty && m.id !== currentMachine) continue;
+      // EMERGENCY STOP (re-instated): do NOT eagerly unlock machines at boot. We tried
+      // restoring eager-unlock paired with resume-before-ServerDone, but the storm came
+      // straight back — so the iOS drop is happening BEFORE ClientAuth reaches the
+      // worker (sheet backgrounds Safari → socket dies while the OS sheet is up → the
+      // page is evicted+reloaded on return → fresh bootstrap → another prompt), which
+      // means the worker never stored its resume half and the saved material can't
+      // resume. Until the resume path survives that (worker-side + a localStorage-backed
+      // passkey cooldown that outlives the reload), only the machine you're actively
+      // viewing unlocks; others unlock lazily on open. A bare reload costs ZERO passkeys.
+      if (m.id !== currentMachine) continue;
       e2eEnsure(m.id, { auto: true }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
     }
   } finally { bootstrapping = false; }
