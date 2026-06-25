@@ -764,6 +764,7 @@ let projectList = [];           // latest project metadata for the resolved mach
 let perMachine = {};            // machineId -> { projectList, sessionList, gotProjects, gotSessions }
 let unifiedProjects = new Map();// projectKey -> { key, name, repoUrl, pinned, machines:[{machineId,pid,online,sessionCount,busyCount,waitingCount,status}] }
 let currentProjectKey = null;   // identity key of the open project (fleet); direct mode leaves this null
+let newSessionMachine = null;   // fleet: which of the open project's machines a new session spawns on (the ＋ selector)
 let projectFilter = '';         // live filter text in the projects add/search box
 let gotSessions = false;        // have we received the first sessions snapshot?
 let pendingNav = null;          // nav state parsed from the URL, awaiting server data
@@ -1534,6 +1535,12 @@ function handleMachineJson(machine, m) {
       renderSessions();
       refreshBreadcrumb();
       resolvePendingNav();               // …or a session
+    } else if (machineHostsOpenProject(machine)) {
+      // The open project's sessions rung now spans every host. A non-attached
+      // machine's update (a session there started/finished/renamed) must still
+      // repaint the merged list + tab strip.
+      renderSessions();
+      refreshBreadcrumb();
     }
     renderNeedsBar();                    // any machine's blocked sessions → the needs-you bar
     return;
@@ -2061,7 +2068,7 @@ function renderSessionBar(view) {
   const wasHidden = bar.hidden;
   view = view || currentView();
   if (view === 'pm') { renderPmBar(bar, wasHidden); return; }   // PM threads ride the same strip
-  const list = sessionList.filter(s => s.pid === currentPid);
+  const list = projectSessions();                              // every host's sessions for this project
   if (view === 'projects' || !currentPid || !list.length) {
     bar.hidden = true; bar.innerHTML = '';
     if (!wasHidden) refitTTY();
@@ -2248,22 +2255,11 @@ function resolveProject(key) {
   const entry = pickMachineEntry(g);
   if (!entry) { setView('projects'); return; }
   currentProjectKey = key;
+  newSessionMachine = null;            // ＋ selector re-defaults to this project's default
   attachMachine(entry.machineId);
   currentPid = entry.pid;
   renderSessions();
   setView('sessions');
-}
-
-// Header machine-select: re-point the open project at another of its machines.
-function switchProjectMachine(machineId) {
-  const g = unifiedProjects.get(currentProjectKey);
-  const entry = g && g.machines.find(m => m.machineId === machineId);
-  if (!entry) return;
-  attachMachine(machineId);
-  currentPid = entry.pid;
-  renderSessions();
-  refreshBreadcrumb();
-  syncUrl();
 }
 
 function selectProject(id) {
@@ -2495,7 +2491,54 @@ function subscribe(cid) {
   syncUrl();
 }
 
+// Friendly machine label — drop the `clawd-` prefix the boxes share (matches the
+// needs-you bar's styling).
+function shortMachine(id) { return (id || '').replace(/^clawd-/, ''); }
+
+// Every session for the OPEN project, gathered across all the machines that host
+// it (fleet) — each entry tagged with `_machine` so a card can badge it and
+// open/close/new can target the right host. Direct mode is just the local list.
+function projectSessions() {
+  if (!FLEET) return sessionList.filter(s => s.pid === currentPid).map(s => Object.assign({ _machine: null }, s));
+  const g = currentProjectKey && unifiedProjects.get(currentProjectKey);
+  if (!g) return [];
+  const out = [];
+  for (const me of g.machines) {
+    const sl = (perMachine[me.machineId] || {}).sessionList || [];
+    for (const s of sl) if (s.pid === me.pid) out.push(Object.assign({ _machine: me.machineId }, s));
+  }
+  return out;
+}
+// Does `machine` host the project we currently have open? (fleet — drives whether
+// its session updates should repaint the merged sessions rung.)
+function machineHostsOpenProject(machine) {
+  if (!FLEET || !currentProjectKey) return false;
+  const g = unifiedProjects.get(currentProjectKey);
+  return !!(g && g.machines.some(m => m.machineId === machine));
+}
+// Which machine hosts a given cid in the open project (fleet). Falls back to the
+// machine we're currently attached to.
+function machineForCid(cid) {
+  if (!FLEET) return null;
+  const g = currentProjectKey && unifiedProjects.get(currentProjectKey);
+  if (g) for (const me of g.machines)
+    if (((perMachine[me.machineId] || {}).sessionList || []).some(s => s.cid === cid)) return me.machineId;
+  return currentMachine;
+}
+
 function openSession(cid) {
+  if (FLEET) {
+    // The session may live on a different host than the one we're attached to
+    // (the list now spans every machine). Re-point at its machine first so the
+    // subscribe + PTY stream go to the right box.
+    const mid = machineForCid(cid);
+    if (mid && mid !== currentMachine) {
+      const g = unifiedProjects.get(currentProjectKey);
+      const me = g && g.machines.find(m => m.machineId === mid);
+      attachMachine(mid);
+      if (me) currentPid = me.pid;
+    }
+  }
   const s = sessionList.find(s => s.cid === cid);
   if (s && s.pid) currentPid = s.pid;       // keep the breadcrumb/`new` in this project
   subscribe(cid);
@@ -2503,7 +2546,21 @@ function openSession(cid) {
   if (!isTouch) box.focus();                // desktop: ready to type immediately (skip on touch — don't pop the keyboard)
 }
 
-function newSession() {
+// Spawn a session in the open project. In fleet mode it lands on `targetMachine`
+// (the ＋ selector's pick → the project's default machine), so we re-point at that
+// host before issuing the `new` — the frame is routed by which machine's channel
+// it goes out on (the harness `new` only reads `pid`).
+function newSession(targetMachine) {
+  if (FLEET) {
+    const g = currentProjectKey && unifiedProjects.get(currentProjectKey);
+    if (!g || !g.machines.length) { setView('projects'); return; }
+    const mid = targetMachine || newSessionMachine || defaultMachineFor(currentProjectKey)
+              || currentMachine || (pickMachineEntry(g) || {}).machineId;
+    const me = g.machines.find(m => m.machineId === mid) || pickMachineEntry(g);
+    if (!me) { setView('projects'); return; }
+    attachMachine(me.machineId);
+    currentPid = me.pid;
+  }
   if (!currentPid) { setView('projects'); return; }   // need a project to host it
   pendingNewFocus = true;          // the focus that comes back should switch us into it
   // We're still subscribed to the session we're leaving (the server only swaps the
@@ -2520,7 +2577,9 @@ function newSession() {
 
 function closeSession(cid, ev) {
   if (ev) ev.stopPropagation();
-  hsend({ type: 'close', cid });
+  const mid = FLEET ? machineForCid(cid) : null;
+  if (mid) hsendTo(mid, { type: 'close', cid });   // close on the host that owns it
+  else hsend({ type: 'close', cid });
 }
 
 // -- keyboard session-hopping (Ctrl+Shift+↑/↓ cycle, Ctrl+Shift+W close) ------
@@ -2566,7 +2625,11 @@ function highlightCard(cid) {
 }
 
 function renderSessions() {
-  const list = sessionList.filter(s => s.pid === currentPid);
+  // Sessions for this project across EVERY machine that hosts it, each tagged with
+  // its `_machine` — no more "pick one machine to view". A multi-machine project
+  // now shows one merged list; each card badges the host it's on.
+  const list = projectSessions();
+  const multi = FLEET && (() => { const g = unifiedProjects.get(currentProjectKey); return g && g.machines.length > 1; })();
   sessionsEl.innerHTML = '';
   const label = document.createElement('div');
   label.className = 'menutitle';
@@ -2574,40 +2637,42 @@ function renderSessions() {
   label.textContent = (pn ? pn + ' · ' : '') + `sessions · ${list.length}`;
   sessionsEl.appendChild(label);
 
-  // Machine select: shown only when this project lives on more than one machine.
-  // Switching re-points the sessions list at that machine; ★ pins it as the default
-  // so opening the project lands there next time. A single-machine project shows
-  // nothing — the machine stays invisible, as intended.
-  if (FLEET && currentProjectKey) {
+  // ＋ new session — with a machine picker when the project spans more than one
+  // host, so you choose WHERE it spawns (defaults to the project's default
+  // machine; ★ pins the current pick as that default). Single-machine / direct
+  // mode: just the button, host stays invisible.
+  if (multi) {
     const g = unifiedProjects.get(currentProjectKey);
-    if (g && g.machines.length > 1) {
-      const mrow = document.createElement('div'); mrow.className = 'machinepick';
-      const lbl = document.createElement('span'); lbl.className = 'mplabel'; lbl.textContent = 'machine';
-      const sel = document.createElement('select');
-      g.machines.forEach(me => {
-        const opt = document.createElement('option');
-        opt.value = me.machineId;
-        opt.textContent = me.machineId + (me.online ? '' : ' · offline') + ` · ${me.sessionCount || 0} sess`;
-        opt.disabled = !me.online;
-        if (me.machineId === currentMachine) opt.selected = true;
-        sel.appendChild(opt);
-      });
-      sel.onchange = () => switchProjectMachine(sel.value);
-      const star = document.createElement('button');
-      star.className = 'setdefault';
-      const isDef = defaultMachineFor(currentProjectKey) === currentMachine;
-      star.textContent = isDef ? '★ default' : '☆ set default';
-      star.title = 'make this the default machine for this project';
-      star.onclick = () => { setDefaultMachine(currentProjectKey, currentMachine); renderSessions(); };
-      mrow.append(lbl, sel, star);
-      sessionsEl.appendChild(mrow);
-    }
+    if (!newSessionMachine || !g.machines.some(m => m.machineId === newSessionMachine && m.online))
+      newSessionMachine = defaultMachineFor(currentProjectKey) || currentMachine
+                       || (pickMachineEntry(g) || {}).machineId;
+    const mrow = document.createElement('div'); mrow.className = 'machinepick';
+    const add = document.createElement('button');
+    add.id = 'newSession'; add.textContent = '＋  new session on';
+    add.onclick = () => newSession(sel.value);
+    const sel = document.createElement('select');
+    g.machines.forEach(me => {
+      const opt = document.createElement('option');
+      opt.value = me.machineId;
+      opt.textContent = shortMachine(me.machineId) + (me.online ? '' : ' · offline') + ` · ${me.sessionCount || 0} sess`;
+      opt.disabled = !me.online;
+      if (me.machineId === newSessionMachine) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.onchange = () => { newSessionMachine = sel.value; renderSessions(); };
+    const star = document.createElement('button');
+    star.className = 'setdefault';
+    star.textContent = defaultMachineFor(currentProjectKey) === newSessionMachine ? '★ default' : '☆ set default';
+    star.title = 'make this the default machine for new sessions in this project';
+    star.onclick = () => { setDefaultMachine(currentProjectKey, newSessionMachine); renderSessions(); };
+    mrow.append(add, sel, star);
+    sessionsEl.appendChild(mrow);
+  } else {
+    const add = document.createElement('button');
+    add.id = 'newSession'; add.textContent = '＋  new session';
+    add.onclick = () => newSession();
+    sessionsEl.appendChild(add);
   }
-
-  const add = document.createElement('button');
-  add.id = 'newSession'; add.textContent = '＋  new session';
-  add.onclick = newSession;
-  sessionsEl.appendChild(add);
 
   list.forEach(s => {
     const card = document.createElement('div');
@@ -2621,6 +2686,12 @@ function renderSessions() {
     const title = document.createElement('span');
     title.className = 'stitle'; title.textContent = s.title || 'new session';
     row.appendChild(sdot); row.appendChild(title);
+    if (multi && s._machine) {                  // which host this session lives on
+      const mt = document.createElement('span');
+      mt.className = 'scount smach'; mt.textContent = '🖥️ ' + shortMachine(s._machine);
+      mt.title = 'running on ' + s._machine;
+      row.appendChild(mt);
+    }
     card.appendChild(row);
 
     if (s.desc) {
