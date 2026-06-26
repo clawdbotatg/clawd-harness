@@ -3315,7 +3315,11 @@ box.addEventListener('paste', (e) => {
 }));
 sendBtn.onclick = sendMessage;
 box.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  if (e.key !== 'Enter' || e.shiftKey) return;  // Shift+Enter → browser's default newline (desktop / any hardware keyboard)
+  if (isTouch) return;                           // touch: a soft keyboard has no Shift, so plain Enter inserts a newline too
+                                                 // (the 📤 send button is the only sender on touch — otherwise a phone can
+                                                 //  never compose a multi-line message). Desktop: plain Enter sends.
+  e.preventDefault(); sendMessage();
 });
 // Raw passthrough when the user types directly in the terminal (desktop only;
 // the terminal is read-only on touch, so onData won't fire there).
