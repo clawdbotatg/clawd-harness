@@ -765,6 +765,48 @@ let perMachine = {};            // machineId -> { projectList, sessionList, gotP
 let unifiedProjects = new Map();// projectKey -> { key, name, repoUrl, pinned, machines:[{machineId,pid,online,sessionCount,busyCount,waitingCount,status}] }
 let currentProjectKey = null;   // identity key of the open project (fleet); direct mode leaves this null
 let newSessionMachine = null;   // fleet: which of the open project's machines a new session spawns on (the ＋ selector)
+
+// -- roster/projects cache: survive a reload so the app NEVER shows "projects · 0" ----
+// The fleet roster + per-machine project/session metadata are rebuilt from the e2e
+// handshake on every page load. The mobile socket flaps constantly (iOS suspends the
+// PWA's WS ~every 80s); a flap that doesn't reconnect fast ends in location.reload()
+// (the armResumeReload backstop, or a daemon BOOT_ID bump), which WIPES this in-memory
+// cache to empty — so the fresh page sits at "projects · 0" until every machine
+// re-handshakes, and a stale resume there is exactly when the passkey sheet fires. The
+// in-memory cache (perMachine) already survives a bare flap; it's the RELOAD that nukes
+// it. So we persist the roster + perMachine metadata and hydrate it on boot: the page
+// paints last-known machines/projects INSTANTLY, the handshake then refreshes live data
+// in the background (prompting for a passkey only when it legitimately must). This
+// decouples the nav UX from the fragile handshake — accept the flap, don't fight it.
+const FLEET_CACHE_KEY = 'cc_fleet_roster_v1';
+const FLEET_CACHE_TTL = 24 * 60 * 60 * 1000;   // match RESUME_TTL_MS — beyond it, don't show ghosts
+let _fleetCacheTimer = null;
+function saveFleetCache() {
+  if (!FLEET || _fleetCacheTimer) return;      // coalesce the ~1s roster heartbeat into one write
+  _fleetCacheTimer = setTimeout(() => {
+    _fleetCacheTimer = null;
+    try {
+      const pm = {};                            // keep only what the roster + project rung render
+      for (const [mid, v] of Object.entries(perMachine)) {
+        pm[mid] = { projectList: v.projectList || [], sessionList: v.sessionList || [],
+                    gotProjects: !!v.gotProjects, gotSessions: !!v.gotSessions };
+      }
+      localStorage.setItem(FLEET_CACHE_KEY, JSON.stringify({ t: Date.now(), machineList, perMachine: pm }));
+    } catch {}
+  }, 400);
+}
+function hydrateFleetCache() {
+  if (!FLEET) return;
+  let snap; try { snap = JSON.parse(localStorage.getItem(FLEET_CACHE_KEY) || 'null'); } catch {}
+  if (!snap || !snap.machineList || (Date.now() - (snap.t || 0)) > FLEET_CACHE_TTL) return;
+  // Paint cached machines as OFFLINE (honest grey cards) until the live roster — which
+  // arrives within ~1s of connect — confirms them and replaces all of this.
+  machineList = (snap.machineList || []).map(m => ({ ...m, online: false }));
+  perMachine = snap.perMachine || {};
+  mergeProjects();
+  renderMachines(machineList);
+  renderProjectRung();
+}
 let projectFilter = '';         // live filter text in the projects add/search box
 let gotSessions = false;        // have we received the first sessions snapshot?
 let pendingNav = null;          // nav state parsed from the URL, awaiting server data
@@ -1665,6 +1707,7 @@ function handleMachineJson(machine, m) {
     pm.projectList = m.projects || [];
     pm.gotProjects = true;
     mergeProjects();
+    saveFleetCache();
     if (machine === currentMachine) {
       projectList = pm.projectList;
       if (currentPid && !projectList.some(p => p.pid === currentPid)) currentPid = null;
@@ -1678,6 +1721,7 @@ function handleMachineJson(machine, m) {
     const pm = perMachine[machine] || (perMachine[machine] = {});
     pm.sessionList = m.sessions || [];
     pm.gotSessions = true;
+    saveFleetCache();
     if (machine === currentMachine) {
       sessionList = pm.sessionList; gotSessions = true;
       renderSessions();
@@ -2048,6 +2092,7 @@ function renderMachineAdd(machineId) {
 
 function renderMachines(list) {
   machineList = list;
+  saveFleetCache();
   machinesEl.innerHTML = '';
   const online = list.filter(m => m.online).length;
   const label = document.createElement('div');
@@ -4193,6 +4238,7 @@ setInterval(() => {
 }, 5000);
 if (parseHash().view === 'pm') openPM();   // deep-linked straight to the PM
 
+hydrateFleetCache();   // paint last-known machines/projects instantly so a reload never shows "projects · 0"
 connect();   // fleet: the passkey gate is the door. direct: the loopback harness needs no token, so always
              // connect; only a non-loopback (BIND=0.0.0.0) server that actually rejects surfaces a login
              // lazily via the authFails path in ws.onclose.
