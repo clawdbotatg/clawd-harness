@@ -318,7 +318,7 @@ class Project:
     ClaudeSessions launch in. `status` tracks an async clone/create."""
 
     def __init__(self, pid, name, path, repo_url="", status="ready",
-                 error="", created=0.0, pinned=False):
+                 error="", created=0.0, pinned=False, seen_on_disk=False):
         self.pid = pid
         self.name = name
         self.path = path                         # abs path to the repo
@@ -327,6 +327,12 @@ class Project:
         self.error = error
         self.created = created or time.time()
         self.pinned = pinned                     # the harness-itself project: top of list, not removable
+        # True once we've actually observed this project's folder on disk. Gates
+        # removal: reconcile only drops a project whose folder it *saw and then
+        # lost* — so deleting the folder clears even an `error` project, while an
+        # `error` that never had a folder (e.g. a `gh auth` create failure) stays
+        # visible so its message can be read.
+        self.seen_on_disk = seen_on_disk
 
     def to_registry(self):
         return {"pid": self.pid, "name": self.name, "path": self.path,
@@ -983,7 +989,8 @@ class SessionManager:
                         name=e.get("name") or os.path.basename(e["path"]),
                         path=e["path"], repo_url=e.get("repo_url", ""),
                         status=e.get("status", "ready") if e.get("status") != "cloning" else "ready",
-                        created=e.get("created", 0.0))
+                        created=e.get("created", 0.0),
+                        seen_on_disk=True)       # path was just isdir-checked above
             self.projects[p.pid] = p
         self._discover_projects()                # adopt repos dropped into projects/ by hand
         self._ensure_self_project()              # always offer the harness itself, pinned
@@ -1037,7 +1044,8 @@ class SessionManager:
             if path in known_paths or not os.path.isdir(os.path.join(path, ".git")):
                 continue
             p = Project(pid=str(uuid.uuid4()), name=name, path=path,
-                        repo_url=_git_remote_url(path), status="ready")
+                        repo_url=_git_remote_url(path), status="ready",
+                        seen_on_disk=True)       # adopted straight from an on-disk repo
             with self.lock:
                 self.projects[p.pid] = p
             added += 1
@@ -1045,10 +1053,12 @@ class SessionManager:
 
     def reconcile_projects(self):
         """Disk is the source of truth for the project list (there is no
-        in-app "remove" — you delete a repo's folder yourself). Drop any ready
-        project under PROJECTS_DIR whose folder has vanished (killing its now
-        cwd-less sessions), then adopt any new repo dir. The pinned self-project
-        and in-flight clones/errors (transient, in-memory only) are left alone.
+        in-app "remove" — you delete a repo's folder yourself). Drop any
+        non-pinned project under PROJECTS_DIR we've seen on disk whose folder has
+        vanished (killing its now cwd-less sessions) — `ready` or `error` alike,
+        so a stuck failed create clears the moment you delete its folder — then
+        adopt any new repo dir. The pinned self-project and in-flight clones are
+        left alone (a `cloning` folder legitimately doesn't exist yet).
         Returns True if the set of projects changed. Cheap; runs on the watch
         loop so the list follows disk within ~1s for every open browser."""
         base = str(PROJECTS_DIR) + os.sep
@@ -1057,8 +1067,19 @@ class SessionManager:
         except OSError:
             on_disk = set()
         with self.lock:
+            # Observe: any project whose folder is present right now has been
+            # "seen" — that's what later licenses dropping it once the folder
+            # vanishes.
+            for p in self.projects.values():
+                if p.path in on_disk:
+                    p.seen_on_disk = True
+            # Drop any non-pinned project we've seen on disk whose folder is now
+            # gone. `cloning` is excluded — its folder legitimately doesn't exist
+            # yet mid-clone — so an in-flight clone is never raced away. This
+            # covers `error` too: delete the folder and the stuck project clears
+            # live, no restart needed.
             gone = [pid for pid, p in self.projects.items()
-                    if not p.pinned and p.status == "ready"
+                    if not p.pinned and p.status != "cloning" and p.seen_on_disk
                     and p.path.startswith(base) and p.path not in on_disk]
         changed = False
         for pid in gone:
@@ -1126,7 +1147,7 @@ class SessionManager:
         is_git = os.path.isdir(os.path.join(path, ".git"))
         p = Project(pid=str(uuid.uuid4()), name=base, path=path,
                     repo_url=_git_remote_url(path) if is_git else "",
-                    status="ready", created=time.time())
+                    status="ready", created=time.time(), seen_on_disk=True)
         with self.lock:
             self.projects[p.pid] = p
         self.save_registry()
@@ -1214,6 +1235,7 @@ class SessionManager:
             if ok:
                 project.status = "ready"
                 project.error = ""
+                project.seen_on_disk = True       # clone/create just wrote the folder
                 if not project.repo_url:
                     project.repo_url = _git_remote_url(project.path)
                 print(f"[project {project.name}] {kind} ok", flush=True)
