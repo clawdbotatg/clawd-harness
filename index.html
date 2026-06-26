@@ -2536,6 +2536,20 @@ function renderProjects(list) {
 
 // Render the project rung from normalized rows (unified across machines in fleet
 // mode, 1:1 with the local harness in direct mode).
+//
+// Explicit user gesture to break the "projects · 0" deadlock. The passkey circuit-
+// breaker only gates BACKGROUND (opts.auto) handshakes, so when it has the auto
+// project-load suppressed (no resume material + inside the 90s cooldown) the rung
+// can sit empty with NO way out — machine cards are read-only and there's no project
+// to tap. This forces a NON-auto handshake to every online machine (exactly what
+// opening a project does), bypassing the breaker, raising ONE batched Face ID, and
+// repopulating. A single gesture, no retry loop → it can't re-open the storm.
+function fleetForceUnlock() {
+  for (const m of machineList) {
+    if (m.kind === 'relay' || !m.online) continue;
+    e2eEnsure(m.id).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
+  }
+}
 function renderProjectRung() {
   const rows = projectRows();
   const selId = selectedProjectId();
@@ -2573,6 +2587,21 @@ function renderProjectRung() {
   arow.appendChild(createBtn); arow.appendChild(cloneBtn);
   add.appendChild(inp); add.appendChild(arow);
   projectsEl.appendChild(add);
+
+  // Stuck empty in fleet mode (commonly the passkey breaker suppressing the auto-load)?
+  // Offer the one-tap manual unlock — the only user gesture that bypasses the breaker.
+  if (FLEET && rows.length === 0 && machineList.some(m => m.online && m.kind !== 'relay')) {
+    const unlock = document.createElement('button');
+    unlock.className = 'maddtoggle';
+    unlock.style.marginTop = '8px';
+    unlock.textContent = '🔓 load projects';
+    unlock.onclick = () => { unlock.textContent = '🔓 unlocking…'; fleetForceUnlock(); };
+    projectsEl.appendChild(unlock);
+    const hint = document.createElement('div');
+    hint.className = 'ahint';
+    hint.textContent = 'rung empty — tap to unlock with one Face ID (machines are connected)';
+    projectsEl.appendChild(hint);
+  }
 
   rows.forEach(p => {
     const busyP = p.status === 'cloning', errP = p.status === 'error';
