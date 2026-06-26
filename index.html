@@ -1113,6 +1113,16 @@ function connect() {
   ws.onclose = () => {
     dot.classList.remove('up');
     for (const k of Object.keys(e2eChans)) delete e2eChans[k];   // sessions die with the connection → re-handshake
+    // Abort any in-flight batched passkey ceremony — every parked handshake belongs
+    // to THIS now-dead socket. If we let the batch fire after the reconnect, its
+    // assertion is built with the dead connection's handshake keys and sent over the
+    // NEW socket, landing on the worker's FRESH ServerHello → cf_m mismatch ("confirm",
+    // e2e.py) → the worker rejects, the client double-prompts (legacy), and the
+    // machine's resume material gets cleared → a permanent full-handshake-confirm-fail
+    // storm (observed on heart while head/leftclaw resumed fine). Rejecting the parked
+    // promises makes each e2eEnsure bail cleanly BEFORE it can send a poisoned
+    // ClientAuth; the fresh socket re-parks and prompts once, correctly.
+    e2eAbortBatch('socket-closed');
     // A close *before* we ever opened usually means auth: the browser hides the 403
     // behind code 1006, so we infer a bad/expired token from repeated pre-open
     // closes and surface the paste-a-new-token screen (also how a weekly rotation
@@ -1451,6 +1461,15 @@ function e2eRequestAssertion(machine, ThBytes) {
     if (!b.hard) b.hard = setTimeout(() => e2eFireBatch(b), E2E_BATCH_HARD_MS);
   });
 }
+// Tear down the pending batch and reject every parked handshake. Called on socket
+// close so a ceremony can never straddle two connections (the confirm-storm race).
+function e2eAbortBatch(why) {
+  const b = e2ePendingBatch;
+  if (!b) return;
+  e2ePendingBatch = null;
+  clearTimeout(b.quiet); clearTimeout(b.hard);
+  for (const p of b.parts) p.reject(new Error(why || 'batch-aborted'));
+}
 async function e2eFireBatch(b) {
   if (e2ePendingBatch !== b) return;     // already fired (quiet/hard race)
   e2ePendingBatch = null;
@@ -1552,13 +1571,19 @@ async function e2eEnsure(machine, opts = {}) {
         ch.fp = await cli.fingerprint();
         break;                                            // channel open
       } catch (e) {
-        // A worker that didn't accept the batched assertion (likely pre-batch code):
-        // reset the handshake and retry this one machine the legacy way. 'server-confirm'
-        // means the worker DID accept but key confirmation failed — a real integrity
-        // problem, so don't paper over it. On a real failure, drop the resume material
-        // we optimistically stashed above so it can't linger (a legacy retry overwrites
-        // it on success, so only clear when we're actually giving up).
-        if (legacy || (e && e.message) === 'server-confirm') { e2eClearResume(machine); throw e; }
+        // When does a SECOND (legacy) passkey actually help? Only a PRE-BATCH worker —
+        // which collapses every rejection to the generic "auth" — might accept a single
+        // assertion where it refused the batch. A CURRENT worker reports the SPECIFIC
+        // reason ('confirm' = stale keys from a flapped socket; 'replay'/'order' =
+        // races; 'passkey'/'batch-membership' = a mismatch a retry can't fix), and a
+        // second sheet on any of those just multiplies into the storm — so we fail
+        // cleanly instead. 'server-confirm' is the client catching the worker's own key
+        // confirmation mismatch — a real integrity problem, never retry. On giving up,
+        // drop the resume material we optimistically stashed (the worker never stored
+        // its half on a rejected auth, so a later resume would just fail and re-prompt).
+        const wmsg = (e && e.message) || '';
+        const canLegacy = !legacy && wmsg === 'auth';      // pre-batch worker only
+        if (!canLegacy) { e2eClearResume(machine); throw e; }
         legacy = true;
         ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred(); ch.dRes = e2eDeferred();
       }
@@ -1570,12 +1595,18 @@ async function e2eEnsure(machine, opts = {}) {
     return ch;
   })().catch((e) => {
     ch.status = 'failed';
+    const msg = (e && e.message) || '';
+    // A socket-close abort is connection churn, NOT a handshake failure: the parked
+    // ceremony was cancelled because its socket died (see e2eAbortBatch). Don't stamp
+    // the 30s fail-cooldown (it would lock the machine out on the FRESH socket) and
+    // don't paint a banner — the reconnect re-handshakes immediately.
+    if (msg === 'socket-closed' || msg === 'batch-aborted') return;
     e2eFailUntil[machine] = Date.now() + E2E_FAIL_COOLDOWN_MS;   // no auto-retry storm; user gesture still retries
     // pk-cooldown is a deliberate, quiet skip (the persistent passkey breaker), not a
     // failure — don't paint a scary banner or log it. A later user tap unlocks instantly.
-    if ((e && e.message) === 'pk-cooldown') { /* silent */ }
-    else if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
-    else { meta.textContent = 'secure channel failed: ' + ((e && e.message) || e); console.error('[e2e] handshake failed for', machine, e); }
+    if (msg === 'pk-cooldown') { /* silent */ }
+    else if (msg === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
+    else { meta.textContent = 'secure channel failed: ' + (msg || e); console.error('[e2e] handshake failed for', machine, e); }
     throw e;
   });
   return ch.ready;

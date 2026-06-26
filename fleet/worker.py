@@ -565,7 +565,14 @@ class Worker:
             done, sess = hs.finish(msg)
         except Exception as e:
             print(f"[worker {self.machine}] E2E auth failed for {frm}: {e}", flush=True)
-            return self.reply(frm, {"t": "e2e.err", "error": "auth"})
+            # Forward the SPECIFIC reason so the client can tell a transient race
+            # ('confirm' — stale keys from a flapped socket; 'replay'/'order') apart
+            # from a genuine wrong/pre-batch passkey. Only the latter justifies the
+            # client re-prompting (legacy fallback); a transient one must fail quietly
+            # so it doesn't multiply into a passkey storm. Fall back to "auth" for any
+            # non-handshake exception.
+            reason = str(e) if isinstance(e, e2emod.E2EError) else "auth"
+            return self.reply(frm, {"t": "e2e.err", "error": reason})
         with self.e2e_lock:
             self.e2e_sessions[frm] = sess
             self.e2e_resume[e2emod.b64u(hs.keys["resume_id"])] = {
