@@ -662,6 +662,27 @@ class ClaudeSession:
         if had:
             self._apply_max_winsize()
 
+    def _force_redraw(self):
+        """Nudge the PTY winsize (off-by-one, then back) so the kernel sends SIGWINCH
+        and claude's full-screen TUI repaints its ENTIRE screen — the only way a fresh
+        subscriber (reload / open-existing) gets the alt-screen UI, which the ring replay
+        can't reconstruct. Runs in a thread (brief sleep between the two sets) so it never
+        blocks the subscribe handler. Ends at the correct max size, so it self-corrects."""
+        if self.master_fd is None:
+            return
+        def go():
+            with self.clients_lock:
+                sizes = list(self.client_sizes.values())
+            cols = max([c for c, _ in sizes], default=COLS)
+            rows = max([r for _, r in sizes], default=ROWS)
+            try:
+                self._set_winsize(self.master_fd, max(1, rows - 1), cols)
+                time.sleep(0.08)
+                self._set_winsize(self.master_fd, rows, cols)
+            except OSError:
+                pass
+        threading.Thread(target=go, daemon=True).start()
+
     def _apply_max_winsize(self):
         with self.clients_lock:
             sizes = list(self.client_sizes.values())
@@ -858,6 +879,16 @@ class ClaudeSession:
                           "busy": self.busy, "waiting": self.waiting, "tool": self.last_tool,
                           "cols": COLS, "rows": ROWS})
         self._replay_history(client)
+        # Force claude to repaint its WHOLE screen for this fresh subscriber. claude's
+        # full-screen TUI lives in the terminal's alternate-screen buffer and draws with
+        # absolute positioning + incremental diffs, so the raw ring replay above CANNOT
+        # reconstruct it on its own — a reload/open-existing lands on a blank terminal.
+        # (A brand-new session looks fine only because you watch it stream live.) A
+        # SIGWINCH makes any TUI redraw everything, so we nudge the PTY winsize. The old
+        # last-write-wins sizing did this for free on every subscribe; per-client
+        # 'biggest wins' stopped resizing when the max was unchanged (a plain reload),
+        # which is exactly what silently broke reloads. Restore it explicitly.
+        self._force_redraw()
 
     def _replay_history(self, client, limit=150):
         """Send recent transcript events so a fresh subscriber's structured view
