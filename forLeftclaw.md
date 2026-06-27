@@ -29,13 +29,37 @@ Short handoff from the claude-p-agent refactor work. **This laptop (`random-agen
 
 ---
 
+## ⚠️ Controller crash fix (`ModuleNotFoundError: agent`)
+
+Commit `6ee01ed` made the PM import `agent.run_turn` from a **separate** claude-p-agent clone. If `projects/claude-p-agent/` doesn't exist on the box, the old code **crash-looped at import** (launchd KeepAlive).
+
+**Fixed in harness tip after this doc:** lazy import — controller **starts** even without the brain clone; PM chat returns a clear error until the clone exists.
+
+**Before PM chat or video works**, ensure the brain clone exists:
+
+```bash
+test -f ~/clawd/clawd-harness/projects/claude-p-agent/agent.py || \
+  git clone https://github.com/clawdbotatg/claude-p-agent \
+    ~/clawd/clawd-harness/projects/claude-p-agent
+cd ~/clawd/clawd-harness/projects/claude-p-agent && git pull
+# copy CLAUDE.md.example → CLAUDE.md and customize (leftclaw's persona, not Austin's random-agent)
+```
+
+Then re-install controller so launchd gets `CLAUDE_P_AGENT_HOME`:
+
+```bash
+cd ~/clawd/clawd-harness && ./daemon-controller.sh install   # or restart if plist already has the env var
+```
+
+---
+
 ## What leftclaw needs to do
 
 You (Claude Code on leftclaw) already know the deploy drill. Roughly:
 
 ```bash
 cd ~/clawd/clawd-harness && git pull
-cd ~/clawd/clawd-harness/projects/claude-p-agent && git pull
+cd ~/clawd/clawd-harness/projects/claude-p-agent && git pull   # after clone exists
 cd ~/clawd/clawd-harness/projects/clawd-video-chat && git pull
 ```
 

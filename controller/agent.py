@@ -20,9 +20,35 @@ AGENT_HOME = os.path.abspath(os.environ.get(
     "CLAUDE_P_AGENT_HOME",
     os.path.expanduser("~/clawd/clawd-harness/projects/claude-p-agent"),
 ))
-if AGENT_HOME not in sys.path:
-    sys.path.insert(0, AGENT_HOME)
-from agent import run_turn  # noqa: E402
+
+_run_turn = None
+
+
+def _engine_agent_py():
+    return os.path.join(AGENT_HOME, "agent.py")
+
+
+def _missing_engine_msg():
+    return (
+        f"⚠️ claude-p-agent engine not found at `{AGENT_HOME}` "
+        f"(need agent.py). Clone github.com/clawdbotatg/claude-p-agent there, "
+        f"or set CLAUDE_P_AGENT_HOME."
+    )
+
+
+def _get_run_turn():
+    """Lazy import — missing engine must not crash the controller at import time."""
+    global _run_turn
+    if _run_turn is not None:
+        return _run_turn
+    if not os.path.isfile(_engine_agent_py()):
+        return None
+    if AGENT_HOME not in sys.path:
+        sys.path.insert(0, AGENT_HOME)
+    from agent import run_turn as _rt  # noqa: E402
+    _run_turn = _rt
+    return _run_turn
+
 
 ALLOWED_TOOLS = ",".join(f"mcp__fleet__{n}" for n, _d, _s in TOOLS)
 VALID_TRUST = ("private", "public")
@@ -118,6 +144,9 @@ class AgentBrain:
 
     def chat(self, user_text):
         """One user turn → {reply, trace}."""
+        run_turn = _get_run_turn()
+        if run_turn is None:
+            return self._finish(_missing_engine_msg(), [])
         self.history.append({"role": "user", "content": user_text})
         sys_prompt = self.current_prompt()
         os.environ["CONTROLLER_AUTONOMY"] = self.guard.autonomy

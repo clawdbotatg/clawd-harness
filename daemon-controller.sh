@@ -24,6 +24,7 @@ CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude)}"   # the PM runs `claude -p`
 CHAT_PORT="${CHAT_PORT:-8799}"
 AUTONOMY="${CONTROLLER_AUTONOMY:-confirm}"          # safe-but-useful default
 MODEL="${CONTROLLER_MODEL:-}"                       # empty → Claude Code's default
+AGENT_HOME="${CLAUDE_P_AGENT_HOME:-$HERE/projects/claude-p-agent}"
 DOMAIN="gui/$(id -u)"
 
 cmd="${1:-}"
@@ -52,6 +53,7 @@ case "$cmd" in
     <key>CONTROLLER_AUTONOMY</key><string>$AUTONOMY</string>
     <key>CONTROLLER_MODEL</key><string>$MODEL</string>
     <key>CLAUDE_BIN</key><string>$CLAUDE_BIN</string>
+    <key>CLAUDE_P_AGENT_HOME</key><string>$AGENT_HOME</string>
     <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key><true/>
