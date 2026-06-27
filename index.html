@@ -669,13 +669,10 @@ function refitTTY() {
 // now-visible element, then fit.fit() recomputes rows/cols with the correct
 // cell size. This is the behaviour you get when you nudge the window, done
 // deliberately on landing.
-// Returns true only if it actually re-measured a VISIBLE terminal; false if it
-// bailed (wrong view / hidden / zero-size). Callers use that to decide whether the
-// "first replay must repaint" guarantee was really satisfied (see scheduleHardRepaint).
 function hardRepaint() {
-  if (currentView() !== 'tty') return false;
+  if (currentView() !== 'tty') return;
   const el = document.getElementById('term');
-  if (!el || !el.clientHeight) return false;   // still hidden / zero-size → measuring now would re-cache garbage; wait for a later pass
+  if (!el || !el.clientHeight) return;     // still hidden / zero-size → measuring now would re-cache garbage; wait for a later pass
   const fs = term.options.fontSize || 13;
   term.options.fontSize = fs - 1;          // each assignment fires xterm's re-measure + full re-render…
   term.options.fontSize = fs;              // …ending back at the right size, now measured while visible
@@ -683,7 +680,6 @@ function hardRepaint() {
   sendResize();
   term.scrollToBottom();
   bottomJustifyTTY();
-  return true;
 }
 
 // Showing the terminal un-hides #term from display:none. While hidden xterm
@@ -709,78 +705,16 @@ function showTTY() {
 // the screen sits blank until a manual reload (the bug). Re-arming across the whole
 // window means any burst inside it still forces the re-measure. The window is only
 // set right after a (re)subscribe, so steady live streaming never re-triggers it.
-let hardRepaintTimer = null, repaintArmedUntil = 0, needFirstPaint = false;
+let hardRepaintTimer = null, repaintArmedUntil = 0;
 function armHardRepaint() {
   repaintArmedUntil = Date.now() + 2500;
-  needFirstPaint = true;   // the FIRST PTY burst after this (re)subscribe MUST re-measure, however late — over the fleet the e2e resume+subscribe replay routinely lands well past the 2500ms window, which is the blank-on-reload bug
   scheduleHardRepaint();
   setTimeout(hardRepaint, 600);  // re-measure even if no burst arrives; on an empty/already-correct buffer it's a harmless no-op
 }
 function scheduleHardRepaint() {
-  if (currentView() !== 'tty') return;
-  const inWindow = Date.now() <= repaintArmedUntil;
-  if (!inWindow && !needFirstPaint) return;   // window lapsed AND the first post-window burst already re-measured → steady live streaming, don't re-measure
+  if (currentView() !== 'tty' || Date.now() > repaintArmedUntil) return;
   clearTimeout(hardRepaintTimer);
-  hardRepaintTimer = setTimeout(() => {
-    const painted = hardRepaint();
-    // Consume the "first replay must repaint" guarantee ONLY when a burst that landed
-    // PAST the window actually re-measured a visible terminal. The old code cleared it
-    // whenever the timer fired past the window — even if hardRepaint() bailed because
-    // #term was momentarily hidden during the reload's view transition — so the guarantee
-    // was wasted and the now-filled buffer never got re-measured → permanently black.
-    if (painted && Date.now() > repaintArmedUntil) needFirstPaint = false;
-  }, 80);
-}
-// Fleet deep-link fix: on a /tty deep-link the e2e handshake (and its passkey) can
-// take longer than armHardRepaint's 2500ms window, so the subscribe — queued until
-// the channel opens — only sends, and the screen only replays, AFTER the window has
-// lapsed. Then scheduleHardRepaint() early-returns and the buffer fills but never
-// re-measures → the blank-terminal-on-open bug. Re-arm the window the moment the
-// channel opens (the queued subscribe is going out right now, the replay is imminent)
-// so those late bursts still force the visible re-measure. Only matters for the session
-// we're actually viewing on the tty; otherwise it's a harmless no-op.
-function onE2EChannelOpen(machine) {
-  if (machine === currentMachine && currentCid && currentView() === 'tty') armHardRepaint();
-}
-
-// Does the viewed terminal actually have any drawn content? A live claude always
-// paints its full-screen TUI, so an all-blank buffer means the subscribe replay
-// never landed — not an idle session.
-function termHasContent() {
-  const b = term.buffer && term.buffer.active;
-  if (!b) return false;
-  for (let i = 0; i < term.rows; i++) {
-    const l = b.getLine(b.viewportY + i);
-    if (l && l.translateToString(true).trim()) return true;
-  }
-  return false;
-}
-// Self-heal a LOST subscribe replay — the "black terminal on fleet reload" bug. The
-// harness replays the screen (ring snapshot + a one-shot force-redraw burst) exactly
-// once per subscribe; over the fleet that replay can be lost to a transient (a PTY
-// record arriving as the resumed e2e channel was still settling, or a paint attempt
-// while #term was briefly hidden during the reload's view transition). Because it's
-// one-shot, a lost replay leaves a permanently black terminal until a manual reload.
-// So: a beat after subscribing, if the viewed terminal is still empty, re-request the
-// screen (just another subscribe — idempotent; the alt-screen redraw is absolute, so a
-// re-draw is clean). Bounded to 2 retries so a genuinely unreachable session can't loop.
-let replayWatchTimer = null;
-function armReplayWatchdog(cid) {
-  clearTimeout(replayWatchTimer);
-  let tries = 0;
-  const tick = () => {
-    if (currentCid !== cid || currentView() !== 'tty') return;   // navigated away
-    if (termHasContent()) return;                                 // screen arrived → healthy
-    if (tries++ >= 2) return;                                     // bounded — don't loop forever
-    term.reset(); feed.innerHTML = '';                           // clear so the re-replayed history doesn't duplicate
-    hsend({ type: 'subscribe', cid });
-    armHardRepaint();
-    replayWatchTimer = setTimeout(tick, 2000);
-  };
-  // First check sits PAST the 2500ms repaint window, so a merely slow (but arriving)
-  // fleet replay lands on its own and we don't re-subscribe needlessly; only a truly
-  // lost replay (still empty by then) gets re-requested.
-  replayWatchTimer = setTimeout(tick, 2800);
+  hardRepaintTimer = setTimeout(hardRepaint, 80);
 }
 
 // The composer (footer) grows whenever an image chip is attached, a pending
@@ -831,48 +765,6 @@ let perMachine = {};            // machineId -> { projectList, sessionList, gotP
 let unifiedProjects = new Map();// projectKey -> { key, name, repoUrl, pinned, machines:[{machineId,pid,online,sessionCount,busyCount,waitingCount,status}] }
 let currentProjectKey = null;   // identity key of the open project (fleet); direct mode leaves this null
 let newSessionMachine = null;   // fleet: which of the open project's machines a new session spawns on (the ＋ selector)
-
-// -- roster/projects cache: survive a reload so the app NEVER shows "projects · 0" ----
-// The fleet roster + per-machine project/session metadata are rebuilt from the e2e
-// handshake on every page load. The mobile socket flaps constantly (iOS suspends the
-// PWA's WS ~every 80s); a flap that doesn't reconnect fast ends in location.reload()
-// (the armResumeReload backstop, or a daemon BOOT_ID bump), which WIPES this in-memory
-// cache to empty — so the fresh page sits at "projects · 0" until every machine
-// re-handshakes, and a stale resume there is exactly when the passkey sheet fires. The
-// in-memory cache (perMachine) already survives a bare flap; it's the RELOAD that nukes
-// it. So we persist the roster + perMachine metadata and hydrate it on boot: the page
-// paints last-known machines/projects INSTANTLY, the handshake then refreshes live data
-// in the background (prompting for a passkey only when it legitimately must). This
-// decouples the nav UX from the fragile handshake — accept the flap, don't fight it.
-const FLEET_CACHE_KEY = 'cc_fleet_roster_v1';
-const FLEET_CACHE_TTL = 24 * 60 * 60 * 1000;   // match RESUME_TTL_MS — beyond it, don't show ghosts
-let _fleetCacheTimer = null;
-function saveFleetCache() {
-  if (!FLEET || _fleetCacheTimer) return;      // coalesce the ~1s roster heartbeat into one write
-  _fleetCacheTimer = setTimeout(() => {
-    _fleetCacheTimer = null;
-    try {
-      const pm = {};                            // keep only what the roster + project rung render
-      for (const [mid, v] of Object.entries(perMachine)) {
-        pm[mid] = { projectList: v.projectList || [], sessionList: v.sessionList || [],
-                    gotProjects: !!v.gotProjects, gotSessions: !!v.gotSessions };
-      }
-      localStorage.setItem(FLEET_CACHE_KEY, JSON.stringify({ t: Date.now(), machineList, perMachine: pm }));
-    } catch {}
-  }, 400);
-}
-function hydrateFleetCache() {
-  if (!FLEET) return;
-  let snap; try { snap = JSON.parse(localStorage.getItem(FLEET_CACHE_KEY) || 'null'); } catch {}
-  if (!snap || !snap.machineList || (Date.now() - (snap.t || 0)) > FLEET_CACHE_TTL) return;
-  // Paint cached machines as OFFLINE (honest grey cards) until the live roster — which
-  // arrives within ~1s of connect — confirms them and replaces all of this.
-  machineList = (snap.machineList || []).map(m => ({ ...m, online: false }));
-  perMachine = snap.perMachine || {};
-  mergeProjects();
-  renderMachines(machineList);
-  renderProjectRung();
-}
 let projectFilter = '';         // live filter text in the projects add/search box
 let gotSessions = false;        // have we received the first sessions snapshot?
 let pendingNav = null;          // nav state parsed from the URL, awaiting server data
@@ -1366,12 +1258,6 @@ const E2E = (() => {
   async function resumeSession(master, rn) { return new Session(await resumeKeyset(master, rn)).init(); }
   const resumeConfirm = (master, rn) => hmac(master, concat(te.encode('fleet-e2e/1 resume-confirm'), rn));
 
-  // Batched passkey: one assertion authorizes several channels by committing to the
-  // sorted set of their transcript hashes. Mirrors batch_challenge in fleet/e2e.py —
-  // bytes must match (sorted ascending by raw Th, length-prefixed, then hashed).
-  const cmpBytes = (a, b) => { const n = Math.min(a.length, b.length); for (let i = 0; i < n; i++) { if (a[i] !== b[i]) return a[i] - b[i]; } return a.length - b.length; };
-  async function batchChallenge(thList) { return sha256(concat(te.encode('fleet-e2e/1 webauthn-batch'), lp(...thList.slice().sort(cmpBytes)))); }
-
   // An open channel: directional AES-GCM keys + monotonic sequence. seal/open are
   // serialized by the caller (sendChain/recvChain) so sequence order is preserved.
   class Session {
@@ -1431,8 +1317,8 @@ const E2E = (() => {
         keys = await keySchedule(Z, midB, epk_m, n_m, epk_w, n_w, ik_w);
         ikW = ik_w;
         return {
-          challenge: keys.challenge, Th: keys.Th, ikW: ik_w,
-          build: async (assertion, batch) => { const m = { t: 'e2e.auth', assertion, cf_m: b64uEnc(await hmac(keys.kc_m, te.encode('fleet-e2e/1 client-finished'))) }; if (batch) m.batch = batch; return m; },
+          challenge: keys.challenge, ikW: ik_w,
+          build: async (assertion) => ({ t: 'e2e.auth', assertion, cf_m: b64uEnc(await hmac(keys.kc_m, te.encode('fleet-e2e/1 client-finished'))) }),
         };
       },
       async done(sd) {
@@ -1451,8 +1337,8 @@ const E2E = (() => {
     return b32.match(/.{1,5}/g).join(' ');
   }
 
-  return { client, resumeSession, resumeConfirm, batchChallenge, KIND_JSON, KIND_BIN, _fp, _eq: eq,
-    _test: { keySchedule, Session, lp, sha256, hmac, hkdf, concat, u64, rd64, verifySig, resumeKeyset, batchChallenge } };
+  return { client, resumeSession, resumeConfirm, KIND_JSON, KIND_BIN, _fp, _eq: eq,
+    _test: { keySchedule, Session, lp, sha256, hmac, hkdf, concat, u64, rd64, verifySig, resumeKeyset } };
 })();
 // [e2e-core-end]
 
@@ -1484,36 +1370,17 @@ const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
 function e2eLoadResume(m) { try { const s = JSON.parse(localStorage.getItem('cc_e2e_rs_' + m) || 'null'); return (s && s.exp > Date.now()) ? s : null; } catch { return null; } }
 function e2eSaveResume(m, id, master) { try { localStorage.setItem('cc_e2e_rs_' + m, JSON.stringify({ id, master, exp: Date.now() + RESUME_TTL_MS })); } catch {} }
 function e2eClearResume(m) { try { localStorage.removeItem('cc_e2e_rs_' + m); } catch {} }
-
-// Persistent passkey circuit-breaker — PER MACHINE. The iOS passkey sheet
-// backgrounds Safari, which (a) drops the WS and (b) often evicts+RELOADS the page
-// on return. The reload wipes all in-memory guards (e2eFailUntil, the handshake
-// state) — only localStorage survives. And because the drop lands BEFORE ClientAuth
-// reaches the worker, the worker never stores resume material, so the reconnect
-// can't resume silently → eager-unlock re-prompts → another sheet → another reload …
-// an unbreakable loop. So we stamp the wall-clock of each machine's passkey SHEET in
-// localStorage and refuse to raise a *fresh* sheet for THAT machine from a
-// BACKGROUND/eager trigger (opts.auto) within PASSKEY_COOLDOWN of it. Silent resume
-// raises no sheet → never gated. An explicit user TAP (no opts.auto) is never gated.
-// The stamp is per-machine on purpose: a GLOBAL stamp (the old batched design) made
-// the FIRST machine's sheet suppress every OTHER machine's sheet for the whole
-// window — which is exactly the "one passkey, wait, then two" behavior. Per-machine,
-// a cold load prompts once for EACH attached machine in quick succession (the flow
-// that worked), while a sheet-induced reload still rides each machine's own stamp so
-// a dropped handshake can't loop.
-const PASSKEY_COOLDOWN_MS = 90 * 1000;
-function e2ePasskeyStamp(m) { try { localStorage.setItem('cc_e2e_pk_last_' + m, String(Date.now())); } catch {} }
-function e2ePasskeyCoolingDown(m) { try { const t = +(localStorage.getItem('cc_e2e_pk_last_' + m) || 0); return t > 0 && (Date.now() - t) < PASSKEY_COOLDOWN_MS; } catch { return false; } }
+// Reject after ms — races a handshake so an unreachable machine can't block the
+// serialized fresh-passkey leg of fleetBootstrap forever (the handshake itself
+// keeps running in the background and merges its projects in if it ever lands).
+function e2eTimeout(ms) { return new Promise((_, rej) => setTimeout(() => rej(new Error('e2e-timeout')), ms)); }
 
 // Reveal the gnome first, then prompt for the passkey. We let the modal paint for
 // REVEAL_MS so you actually SEE "what's the safe word?" before the OS sheet, then
 // auto-fire (works on desktop / while the tap activation is fresh). If the browser
 // needs an explicit gesture (iOS), the modal stays and the tap fires it.
 const REVEAL_MS = 350;
-// One passkey assertion over `challengeBytes` for a single channel, shown behind the
-// gnome modal with `subtitle`. The caller stamps the per-machine cooldown before
-// raising the sheet (e2ePasskeyStamp(machine) in e2eEnsure).
-function e2eAssertionPrompt(subtitle, challengeBytes) {
+function e2eGetAssertion(machine, challengeBytes) {
   const req = lastAuthReq || {};
   const get = () => navigator.credentials.get({ publicKey: {
     challenge: challengeBytes, rpId: req.rpId || location.hostname,
@@ -1523,7 +1390,7 @@ function e2eAssertionPrompt(subtitle, challengeBytes) {
     authenticatorData: b64uEnc(a.response.authenticatorData), signature: b64uEnc(a.response.signature) }));
   return new Promise((resolve) => {
     const el = document.getElementById('passkey');
-    document.getElementById('passkeysub').textContent = subtitle;
+    document.getElementById('passkeysub').textContent = 'unlock ' + machine + ' — whisper the safe word';
     const btn = document.getElementById('passkeybtn');
     btn.textContent = 'whisper the safe word 🔒';
     let firing = false;
@@ -1545,12 +1412,6 @@ async function e2eEnsure(machine, opts = {}) {
   // machine that just failed — that's the reload storm. Only an explicit user
   // gesture (no opts.auto) retries before the cooldown lapses. See e2eFailUntil.
   if (opts.auto && (e2eFailUntil[machine] || 0) > Date.now()) return Promise.reject(new Error('cooldown'));
-  // Persistent passkey cooldown: a background/eager unlock with no resume material to
-  // ride must not raise a fresh sheet while we're inside the window (the storm). Bail
-  // BEFORE creating the channel so there's no scary meta message — mirrors the
-  // e2eFailUntil gate above. A machine that DOES have resume material falls through:
-  // resume is silent, so it's safe to attempt even while cooling down.
-  if (opts.auto && e2ePasskeyCoolingDown(machine) && !e2eLoadResume(machine)) return Promise.reject(new Error('pk-cooldown'));
   const ch = e2eChans[machine] = { status: 'handshaking', session: null, queue: [],
     sendChain: Promise.resolve(), recvChain: Promise.resolve(),
     dSH: e2eDeferred(), dSD: e2eDeferred(), dRes: e2eDeferred() };
@@ -1568,74 +1429,36 @@ async function e2eEnsure(machine, opts = {}) {
         ch.status = 'open'; delete e2eFailUntil[machine]; meta.textContent = '';
         const q = ch.queue; ch.queue = [];
         for (const fr of q) e2eSendFrame(machine, fr);
-        onE2EChannelOpen(machine);   // channel live → the queued subscribe replay is imminent; re-arm the repaint window
         return ch;
       } catch (e) {                                               // expired/dropped → re-handshake
         e2eClearResume(machine); ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred();
       }
     }
-    // A background trigger whose resume just failed must still respect the persistent
-    // passkey cooldown — otherwise a machine that lost its resume material would re-prompt
-    // on every reload and re-open the storm. (Quietly handled in the catch below.)
-    if (opts.auto && e2ePasskeyCoolingDown(machine)) throw new Error('pk-cooldown');
-    // 2) Full handshake — ONE passkey for THIS machine (per-machine flow). The
-    //    "batched" ceremony (one Face ID for every machine at once) was removed: it
-    //    raced the iOS socket-flap and produced the "one passkey, wait, then two"
-    //    storm. One sheet per attached machine is the flow that worked reliably; the
-    //    worker's per-channel auth path verifies a channel-bound require-UV passkey
-    //    just the same. Silent resume (above) keeps reconnects/flaps quiet, so this
-    //    only fires on a genuine cold channel.
+    // 2) Full handshake (passkey via the gnome modal).
     const pinB64 = e2ePin(machine);
     const cli = E2E.client(machine, pinB64 ? b64uDec(pinB64) : null);
     meta.textContent = 'securing ' + machine + '…';
     e2eSendCtl(machine, await cli.hello());
     const sh = await ch.dSH;                              // ServerHello (worker-signed)
-    const { challenge, ikW, build } = await cli.auth(sh);   // verify sig + pin, derive keys
+    const { challenge, ikW, build } = await cli.auth(sh); // verify sig + pin, derive keys
     if (!pinB64) { e2eSetPin(machine, b64uEnc(ikW)); ch.firstPin = true; }   // TOFU
-    e2ePasskeyStamp(machine);                             // stamp BEFORE the sheet → survives an iOS evict+reload
-    const authFrame = await build(await e2eAssertionPrompt('unlock ' + machine + ' — whisper the safe word', challenge));
+    const assertion = await e2eGetAssertion(machine, challenge);      // Face ID, channel-bound
     hidePasskey();
-    // Stash resume material the instant ClientAuth goes out — BEFORE awaiting
-    // ServerDone. On iOS the passkey sheet backgrounds Safari, which drops the WS
-    // mid-handshake; the worker stores its half the moment it accepts ClientAuth
-    // (keyed by resume_id, kept across the reconnect), but if the mobile waited for
-    // ServerDone it would miss it and re-handshake → another Face ID. Saving here
-    // lets the reconnect resume SILENTLY instead. Safe: if the worker rejected the
-    // auth it never stored its half, so our resume just fails → clean re-handshake.
-    // And resume verifies resume_confirm (worker proves it holds the master), so a
-    // resumed channel still implies the worker validated the passkey — no security
-    // loss from skipping this run's ServerDone key-confirmation.
-    e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);
-    e2eSendCtl(machine, authFrame);                       // ClientAuth
-    try {
-      const sd = await ch.dSD;                            // ServerDone (key confirmation)
-      ch.session = await cli.done(sd);
-      ch.fp = await cli.fingerprint();
-    } catch (e) {
-      // The worker stored nothing on a rejected auth, so the resume we optimistically
-      // stashed would just fail and re-prompt — drop it and surface the failure.
-      e2eClearResume(machine); throw e;
-    }
+    e2eSendCtl(machine, await build(assertion));          // ClientAuth
+    const sd = await ch.dSD;                              // ServerDone (key confirmation)
+    ch.session = await cli.done(sd);
+    ch.fp = await cli.fingerprint();
+    e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);  // no-passkey reloads
     ch.status = 'open'; delete e2eFailUntil[machine];
     meta.textContent = ch.firstPin ? ('🔒 pinned · ' + ch.fp) : '';
     const q = ch.queue; ch.queue = [];
     for (const fr of q) e2eSendFrame(machine, fr);
-    onE2EChannelOpen(machine);   // channel live → the queued subscribe replay is imminent; re-arm the repaint window
     return ch;
   })().catch((e) => {
     ch.status = 'failed';
-    const msg = (e && e.message) || '';
-    // A handshake interrupted by the socket dying is connection churn, NOT a real
-    // failure: don't stamp the 30s fail-cooldown (it would lock the machine out on
-    // the FRESH socket) and don't paint a banner — the reconnect re-handshakes (or
-    // resumes silently) immediately.
-    if (msg === 'socket-closed') return;
     e2eFailUntil[machine] = Date.now() + E2E_FAIL_COOLDOWN_MS;   // no auto-retry storm; user gesture still retries
-    // pk-cooldown is a deliberate, quiet skip (the persistent passkey breaker), not a
-    // failure — don't paint a scary banner or log it. A later user tap unlocks instantly.
-    if (msg === 'pk-cooldown') { /* silent */ }
-    else if (msg === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
-    else { meta.textContent = 'secure channel failed: ' + (msg || e); console.error('[e2e] handshake failed for', machine, e); }
+    if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
+    else { meta.textContent = 'secure channel failed: ' + ((e && e.message) || e); console.error('[e2e] handshake failed for', machine, e); }
     throw e;
   });
   return ch.ready;
@@ -1694,7 +1517,6 @@ function handleMachineJson(machine, m) {
     pm.projectList = m.projects || [];
     pm.gotProjects = true;
     mergeProjects();
-    saveFleetCache();
     if (machine === currentMachine) {
       projectList = pm.projectList;
       if (currentPid && !projectList.some(p => p.pid === currentPid)) currentPid = null;
@@ -1708,7 +1530,6 @@ function handleMachineJson(machine, m) {
     const pm = perMachine[machine] || (perMachine[machine] = {});
     pm.sessionList = m.sessions || [];
     pm.gotSessions = true;
-    saveFleetCache();
     if (machine === currentMachine) {
       sessionList = pm.sessionList; gotSessions = true;
       renderSessions();
@@ -2079,7 +1900,6 @@ function renderMachineAdd(machineId) {
 
 function renderMachines(list) {
   machineList = list;
-  saveFleetCache();
   machinesEl.innerHTML = '';
   const online = list.filter(m => m.online).length;
   const label = document.createElement('div');
@@ -2380,43 +2200,33 @@ function projectRows() {
 function selectedProjectId() { return FLEET ? currentProjectKey : currentPid; }
 
 // Open every machine's E2E channel and ask each for its project list, so the
-// unified rung can merge. Every channel is kicked CONCURRENTLY: resumable machines
-// re-attach silently (no sheet), and each fresh-passkey machine raises its OWN Face
-// ID — one per attached machine, the flow that worked reliably. A single
-// asleep/unreachable box can't wedge the others.
+// unified rung can merge. Serialized: the passkey modal is a single shared element,
+// so concurrent handshakes would fight over it — silent resumes are fast, fresh
+// passkeys go one machine at a time.
 let bootstrapping = false;
-function fleetBootstrap() {
+async function fleetBootstrap() {
   if (!FLEET || bootstrapping) return;
   bootstrapping = true;
   try {
     const live = machineList.filter(m => m.online && m.kind !== 'relay');
-    for (const m of live) {
+    // Resumable machines first: they re-attach with no passkey, so the common case
+    // (everything seen within the resume TTL) loads instantly and silently. Machines
+    // needing a fresh safe-word come last and one at a time, so a pending prompt
+    // never hides the projects of machines that were ready to load.
+    const order = live.slice().sort((a, b) => (e2eLoadResume(b.id) ? 1 : 0) - (e2eLoadResume(a.id) ? 1 : 0));
+    for (const m of order) {
       const ch = e2eChans[m.id];
       if (ch && ch.status === 'open') { e2eSendFrame(m.id, { type: 'list' }); continue; }
-      // Don't burn a passkey eagerly unlocking a machine the roster already tells us
-      // is EMPTY (0 projects · 0 sessions) and that you haven't opened. The relay
-      // sends those counts in plaintext (m.stats), so we can tell an idle box from a
-      // busy one WITHOUT its E2E channel — and an empty box has nothing to show on the
-      // unified projects rung anyway. This is the core of the "seven passkeys on one
-      // reload" storm: a session-less box (e.g. clawd-antenna — whose old worker never
-      // saves resume material, so it re-prompts on EVERY socket flap) demanded its own
-      // Face ID over and over even though you never touched it. Empty + not the machine
-      // you're viewing → unlock LAZILY, only when you actually open it (attachMachine /
-      // hsendTo / hsend do that on demand). A machine with real content still unlocks
-      // up front so its projects populate the rung.
-      // Eager-unlock non-empty machines so their projects populate the unified rung.
-      // This was EMERGENCY-STOPPED twice because it re-opened the passkey storm: the
-      // iOS sheet drops the socket BEFORE ClientAuth reaches the worker, so the worker
-      // never stores resume material, the page is evicted+reloaded on return, and the
-      // fresh bootstrap re-prompts → loop. It's safe NOW because of the per-machine
-      // passkey cooldown (e2ePasskeyCoolingDown(machine), stamped in localStorage the
-      // instant each machine raises its sheet): a sheet-induced reload lands inside
-      // that machine's cooldown, so e2eEnsure skips re-prompting IT (other machines
-      // still prompt). Empty machines unlock lazily. Silent resume and explicit taps
-      // are never gated.
-      const empty = m.stats && !m.stats.projects && !m.stats.sessions;
-      if (empty && m.id !== currentMachine) continue;
-      e2eEnsure(m.id, { auto: true }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
+      // Kick the handshake + list. Resumable machines re-attach SILENTLY (no
+      // passkey modal), so we do NOT await them — they run concurrently and a
+      // single asleep/unreachable box can no longer wedge this loop and blank
+      // every other machine's projects (the "0 projects when one machine sleeps"
+      // bug). Only a FRESH-passkey machine is awaited (the modal is one shared
+      // element, so those must go one at a time) — and even then it's time-boxed
+      // so an unreachable box can't stall the queue waiting on a reply that never
+      // comes.
+      const go = e2eEnsure(m.id, { auto: true }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
+      if (!e2eLoadResume(m.id)) { try { await Promise.race([go, e2eTimeout(20000)]); } catch {} }
     }
   } finally { bootstrapping = false; }
 }
@@ -2521,20 +2331,6 @@ function renderProjects(list) {
 
 // Render the project rung from normalized rows (unified across machines in fleet
 // mode, 1:1 with the local harness in direct mode).
-//
-// Explicit user gesture to break the "projects · 0" deadlock. The passkey circuit-
-// breaker only gates BACKGROUND (opts.auto) handshakes, so when it has the auto
-// project-load suppressed (no resume material + inside the 90s cooldown) the rung
-// can sit empty with NO way out — machine cards are read-only and there's no project
-// to tap. This forces a NON-auto handshake to every online machine (exactly what
-// opening a project does), bypassing the breaker, raising one Face ID per machine
-// that still needs one, and repopulating. A single gesture, no retry loop.
-function fleetForceUnlock() {
-  for (const m of machineList) {
-    if (m.kind === 'relay' || !m.online) continue;
-    e2eEnsure(m.id).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
-  }
-}
 function renderProjectRung() {
   const rows = projectRows();
   const selId = selectedProjectId();
@@ -2573,21 +2369,6 @@ function renderProjectRung() {
   add.appendChild(inp); add.appendChild(arow);
   projectsEl.appendChild(add);
 
-  // Stuck empty in fleet mode (commonly the passkey breaker suppressing the auto-load)?
-  // Offer the one-tap manual unlock — the only user gesture that bypasses the breaker.
-  if (FLEET && rows.length === 0 && machineList.some(m => m.online && m.kind !== 'relay')) {
-    const unlock = document.createElement('button');
-    unlock.className = 'maddtoggle';
-    unlock.style.marginTop = '8px';
-    unlock.textContent = '🔓 load projects';
-    unlock.onclick = () => { unlock.textContent = '🔓 unlocking…'; fleetForceUnlock(); };
-    projectsEl.appendChild(unlock);
-    const hint = document.createElement('div');
-    hint.className = 'ahint';
-    hint.textContent = 'rung empty — tap to unlock with one Face ID (machines are connected)';
-    projectsEl.appendChild(hint);
-  }
-
   rows.forEach(p => {
     const busyP = p.status === 'cloning', errP = p.status === 'error';
     const offline = FLEET && !p.online;         // every machine hosting this project is offline
@@ -2613,12 +2394,6 @@ function renderProjectRung() {
       mt.className = 'scount smach';
       mt.textContent = `🖥️ ${p.machineCount}`;
       mt.title = `installed on ${p.machineCount} machines (default: ${p.machineName})`;
-      row.appendChild(mt);
-    } else if (FLEET && p.machineName && !p.pinned) {   // single-machine project: name the box it lives on
-      const mt = document.createElement('span');
-      mt.className = 'scount smach';
-      mt.textContent = `🖥️ ${p.machineName.replace(/^clawd-/, '')}`;
-      mt.title = `only on ${p.machineName}`;
       row.appendChild(mt);
     }
     if (p.waitingCount > 0) {
@@ -2713,7 +2488,6 @@ function subscribe(cid) {
   syncComposer();              // load this session's own draft (bring back text from before a reload)
   hsend({ type: 'subscribe', cid });
   armHardRepaint();            // the replayed screen lands as async PTY bursts — force one full repaint once it settles
-  armReplayWatchdog(cid);      // …and if that replay is lost (fleet transient), re-request the screen instead of sitting black
   syncUrl();
 }
 
@@ -3412,11 +3186,7 @@ box.addEventListener('paste', (e) => {
 }));
 sendBtn.onclick = sendMessage;
 box.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter' || e.shiftKey) return;  // Shift+Enter → browser's default newline (desktop / any hardware keyboard)
-  if (isTouch) return;                           // touch: a soft keyboard has no Shift, so plain Enter inserts a newline too
-                                                 // (the 📤 send button is the only sender on touch — otherwise a phone can
-                                                 //  never compose a multi-line message). Desktop: plain Enter sends.
-  e.preventDefault(); sendMessage();
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 });
 // Raw passthrough when the user types directly in the terminal (desktop only;
 // the terminal is read-only on touch, so onData won't fire there).
@@ -4253,7 +4023,6 @@ setInterval(() => {
 }, 5000);
 if (parseHash().view === 'pm') openPM();   // deep-linked straight to the PM
 
-hydrateFleetCache();   // paint last-known machines/projects instantly so a reload never shows "projects · 0"
 connect();   // fleet: the passkey gate is the door. direct: the loopback harness needs no token, so always
              // connect; only a non-loopback (BIND=0.0.0.0) server that actually rejects surfaces a login
              // lazily via the authFails path in ws.onclose.

@@ -31,7 +31,6 @@ Then open http://127.0.0.1:8787
 """
 
 import base64
-import calendar
 import fcntl
 import glob
 import hashlib
@@ -232,48 +231,6 @@ def _transcript_exists(session_id):
         f"~/.claude/projects/*/{session_id}.jsonl")))
 
 
-def _parse_iso_ts(ts):
-    """Claude's ISO-8601 'Z' timestamp -> epoch seconds (UTC). 0.0 on failure."""
-    try:
-        base, _, frac = ts.partition(".")
-        t = calendar.timegm(time.strptime(base.rstrip("Z"), "%Y-%m-%dT%H:%M:%S"))
-        return float(t) + (float("0." + frac.rstrip("Z")) if frac else 0.0)
-    except Exception:
-        return 0.0
-
-
-def _transcript_last_activity(session_id):
-    """Epoch of a session's last *real* activity, read from its transcript's last
-    timestamped entry. This — not the file mtime — is the warmth source of truth on
-    boot: a `--resume` touches/rewrites the file (so mtime looks fresh on every
-    restart), but the last JSONL `timestamp` survives that. Reads only the tail so
-    it stays cheap even for multi-MB transcripts. 0.0 if none found."""
-    if not session_id:
-        return 0.0
-    latest = 0.0
-    for p in glob.glob(os.path.expanduser(f"~/.claude/projects/*/{session_id}.jsonl")):
-        try:
-            with open(p, "rb") as f:
-                f.seek(0, os.SEEK_END)
-                size = f.tell()
-                f.seek(max(0, size - 65536))
-                tail = f.read().decode("utf-8", "replace")
-        except OSError:
-            continue
-        for line in reversed(tail.splitlines()):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ts = json.loads(line).get("timestamp")
-            except Exception:
-                continue  # partial first line from the seek, or a non-JSON line
-            if ts:
-                latest = max(latest, _parse_iso_ts(ts))
-                break  # last timestamped line in this file wins
-    return latest
-
-
 def _safe_name(name):
     """A filesystem/repo-safe slug from a free-text project name."""
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "").strip()).strip("-._")
@@ -318,7 +275,7 @@ class Project:
     ClaudeSessions launch in. `status` tracks an async clone/create."""
 
     def __init__(self, pid, name, path, repo_url="", status="ready",
-                 error="", created=0.0, pinned=False, seen_on_disk=False):
+                 error="", created=0.0, pinned=False):
         self.pid = pid
         self.name = name
         self.path = path                         # abs path to the repo
@@ -327,12 +284,6 @@ class Project:
         self.error = error
         self.created = created or time.time()
         self.pinned = pinned                     # the harness-itself project: top of list, not removable
-        # True once we've actually observed this project's folder on disk. Gates
-        # removal: reconcile only drops a project whose folder it *saw and then
-        # lost* — so deleting the folder clears even an `error` project, while an
-        # `error` that never had a folder (e.g. a `gh auth` create failure) stays
-        # visible so its message can be read.
-        self.seen_on_disk = seen_on_disk
 
     def to_registry(self):
         return {"pid": self.pid, "name": self.name, "path": self.path,
@@ -379,7 +330,6 @@ class ClaudeSession:
 
         self.clients = set()                     # _Clients currently viewing this session
         self.clients_lock = threading.Lock()
-        self.client_sizes = {}                   # client -> (cols, rows); PTY follows the LARGEST
 
         self.transcript_path = None
         self._live_transcript = None             # live path from hooks; may rotate on compaction
@@ -497,13 +447,7 @@ class ClaudeSession:
         """Handle one hook callback (from claude via /hook) → update state, fan a
         slim event out to every client (menu badges), and trigger AI naming."""
         ev = obj.get("hook_event_name", "?")
-        # `last_active` drives the project warmth sort, so it must mean *genuine
-        # user activity* — a prompt, a tool, a turn ending. SessionStart/SessionEnd
-        # fire on every harness restart (all sessions are `--resume`d at once), so
-        # counting them would stamp every session with the restart time, flatten
-        # the recency order, and float stale projects to the top. Exclude them.
-        if ev not in ("SessionStart", "SessionEnd"):
-            self.last_active = time.time()
+        self.last_active = time.time()
         # Claude rotates its transcript file on compaction/resume. Main-session
         # lifecycle hooks report the live transcript_path + session_id, so follow
         # them — otherwise the tail strands on the pre-rotation file and the
@@ -542,10 +486,6 @@ class ClaudeSession:
             # re-name at the 1/3/6/9/… milestones to sharpen as it grows.
             if (not self.title) or name_at_prompt(self.prompt_count):
                 threading.Thread(target=self._regenerate_name, daemon=True).start()
-            # Persist the freshly-bumped last_active so warmth survives a restart.
-            # Without this it's only saved on prompts/naming milestones, so a turn's
-            # recency could be lost on the next resume (reverting the sort order).
-            self.manager.save_registry()
             # The digest is volatile — refresh it every turn (not just at the
             # naming milestones) so live session state stays current for the
             # controller / dashboard. Cheap, async, in-memory only.
@@ -643,57 +583,12 @@ class ClaudeSession:
         tail = cap - head - 3                        # 3 for the "\n…\n" elision marker
         return text[:head] + "\n…\n" + text[-tail:]
 
-    def set_client_size(self, client, cols, rows):
-        """Record one client's viewport and drive the PTY to the LARGEST size
-        any subscribed client wants. There's a single shared PTY, so we can't
-        give each client its own grid — but "biggest wins" means a phone joining
-        never shrinks a desktop's terminal (the old last-write-wins did exactly
-        that: the smallest viewport clobbered everyone), while a lone phone still
-        fits because it's the only — hence largest — client."""
-        if not (cols and rows):
-            return
-        with self.clients_lock:
-            self.client_sizes[client] = (int(cols), int(rows))
-        self._apply_max_winsize()
-
-    def _forget_client_size(self, client):
-        with self.clients_lock:
-            had = self.client_sizes.pop(client, None)
-        if had:
-            self._apply_max_winsize()
-
-    def _force_redraw(self):
-        """Nudge the PTY winsize (off-by-one, then back) so the kernel sends SIGWINCH
-        and claude's full-screen TUI repaints its ENTIRE screen — the only way a fresh
-        subscriber (reload / open-existing) gets the alt-screen UI, which the ring replay
-        can't reconstruct. Runs in a thread (brief sleep between the two sets) so it never
-        blocks the subscribe handler. Ends at the correct max size, so it self-corrects."""
-        if self.master_fd is None:
-            return
-        def go():
-            with self.clients_lock:
-                sizes = list(self.client_sizes.values())
-            cols = max([c for c, _ in sizes], default=COLS)
-            rows = max([r for _, r in sizes], default=ROWS)
+    def resize(self, cols, rows):
+        if self.master_fd is not None and cols and rows:
             try:
-                self._set_winsize(self.master_fd, max(1, rows - 1), cols)
-                time.sleep(0.08)
-                self._set_winsize(self.master_fd, rows, cols)
+                self._set_winsize(self.master_fd, int(rows), int(cols))
             except OSError:
                 pass
-        threading.Thread(target=go, daemon=True).start()
-
-    def _apply_max_winsize(self):
-        with self.clients_lock:
-            sizes = list(self.client_sizes.values())
-        if not sizes or self.master_fd is None:
-            return
-        cols = max(c for c, _ in sizes)
-        rows = max(r for _, r in sizes)
-        try:
-            self._set_winsize(self.master_fd, rows, cols)
-        except OSError:
-            pass
 
     # -- write channel ---------------------------------------------------------
     def write(self, data: bytes):
@@ -879,16 +774,6 @@ class ClaudeSession:
                           "busy": self.busy, "waiting": self.waiting, "tool": self.last_tool,
                           "cols": COLS, "rows": ROWS})
         self._replay_history(client)
-        # Force claude to repaint its WHOLE screen for this fresh subscriber. claude's
-        # full-screen TUI lives in the terminal's alternate-screen buffer and draws with
-        # absolute positioning + incremental diffs, so the raw ring replay above CANNOT
-        # reconstruct it on its own — a reload/open-existing lands on a blank terminal.
-        # (A brand-new session looks fine only because you watch it stream live.) A
-        # SIGWINCH makes any TUI redraw everything, so we nudge the PTY winsize. The old
-        # last-write-wins sizing did this for free on every subscribe; per-client
-        # 'biggest wins' stopped resizing when the max was unchanged (a plain reload),
-        # which is exactly what silently broke reloads. Restore it explicitly.
-        self._force_redraw()
 
     def _replay_history(self, client, limit=150):
         """Send recent transcript events so a fresh subscriber's structured view
@@ -908,7 +793,6 @@ class ClaudeSession:
     def unsubscribe(self, client):
         with self.clients_lock:
             self.clients.discard(client)
-        self._forget_client_size(client)   # recompute max so a leaving desktop releases its size
 
     def _to_subscribers_bytes(self, data: bytes):
         with self.clients_lock:
@@ -1020,8 +904,7 @@ class SessionManager:
                         name=e.get("name") or os.path.basename(e["path"]),
                         path=e["path"], repo_url=e.get("repo_url", ""),
                         status=e.get("status", "ready") if e.get("status") != "cloning" else "ready",
-                        created=e.get("created", 0.0),
-                        seen_on_disk=True)       # path was just isdir-checked above
+                        created=e.get("created", 0.0))
             self.projects[p.pid] = p
         self._discover_projects()                # adopt repos dropped into projects/ by hand
         self._ensure_self_project()              # always offer the harness itself, pinned
@@ -1037,14 +920,6 @@ class SessionManager:
                 # transcript gone (e.g. cleared history) — start it fresh instead
                 # of resuming into nothing.
                 sid = str(uuid.uuid4())
-            # Warmth source of truth on boot is the transcript's last real entry,
-            # not the persisted last_active: a pre-fix registry has every session
-            # stamped with a restart time (SessionStart used to bump last_active),
-            # which flattens the project sort. The transcript timestamp self-heals
-            # that. Fall back to the persisted value, then creation time.
-            last_active = (_transcript_last_activity(sid)
-                           or e.get("last_active", 0.0)
-                           or e.get("created", 0.0))
             s = ClaudeSession(
                 self, cid=e.get("cid") or str(uuid.uuid4()), pid=pid,
                 session_id=sid or str(uuid.uuid4()), resuming=resuming,
@@ -1052,7 +927,7 @@ class SessionManager:
                 prompt_count=e.get("prompt_count", 0),
                 first_prompt=e.get("first_prompt", ""),
                 created=e.get("created", 0.0),
-                last_active=last_active)
+                last_active=e.get("last_active", 0.0))
             self.sessions[s.cid] = s
             s.start()
         # No auto-created session: with zero projects there are legitimately zero
@@ -1075,8 +950,7 @@ class SessionManager:
             if path in known_paths or not os.path.isdir(os.path.join(path, ".git")):
                 continue
             p = Project(pid=str(uuid.uuid4()), name=name, path=path,
-                        repo_url=_git_remote_url(path), status="ready",
-                        seen_on_disk=True)       # adopted straight from an on-disk repo
+                        repo_url=_git_remote_url(path), status="ready")
             with self.lock:
                 self.projects[p.pid] = p
             added += 1
@@ -1084,12 +958,10 @@ class SessionManager:
 
     def reconcile_projects(self):
         """Disk is the source of truth for the project list (there is no
-        in-app "remove" — you delete a repo's folder yourself). Drop any
-        non-pinned project under PROJECTS_DIR we've seen on disk whose folder has
-        vanished (killing its now cwd-less sessions) — `ready` or `error` alike,
-        so a stuck failed create clears the moment you delete its folder — then
-        adopt any new repo dir. The pinned self-project and in-flight clones are
-        left alone (a `cloning` folder legitimately doesn't exist yet).
+        in-app "remove" — you delete a repo's folder yourself). Drop any ready
+        project under PROJECTS_DIR whose folder has vanished (killing its now
+        cwd-less sessions), then adopt any new repo dir. The pinned self-project
+        and in-flight clones/errors (transient, in-memory only) are left alone.
         Returns True if the set of projects changed. Cheap; runs on the watch
         loop so the list follows disk within ~1s for every open browser."""
         base = str(PROJECTS_DIR) + os.sep
@@ -1098,19 +970,8 @@ class SessionManager:
         except OSError:
             on_disk = set()
         with self.lock:
-            # Observe: any project whose folder is present right now has been
-            # "seen" — that's what later licenses dropping it once the folder
-            # vanishes.
-            for p in self.projects.values():
-                if p.path in on_disk:
-                    p.seen_on_disk = True
-            # Drop any non-pinned project we've seen on disk whose folder is now
-            # gone. `cloning` is excluded — its folder legitimately doesn't exist
-            # yet mid-clone — so an in-flight clone is never raced away. This
-            # covers `error` too: delete the folder and the stuck project clears
-            # live, no restart needed.
             gone = [pid for pid, p in self.projects.items()
-                    if not p.pinned and p.status != "cloning" and p.seen_on_disk
+                    if not p.pinned and p.status == "ready"
                     and p.path.startswith(base) and p.path not in on_disk]
         changed = False
         for pid in gone:
@@ -1178,7 +1039,7 @@ class SessionManager:
         is_git = os.path.isdir(os.path.join(path, ".git"))
         p = Project(pid=str(uuid.uuid4()), name=base, path=path,
                     repo_url=_git_remote_url(path) if is_git else "",
-                    status="ready", created=time.time(), seen_on_disk=True)
+                    status="ready", created=time.time())
         with self.lock:
             self.projects[p.pid] = p
         self.save_registry()
@@ -1266,7 +1127,6 @@ class SessionManager:
             if ok:
                 project.status = "ready"
                 project.error = ""
-                project.seen_on_disk = True       # clone/create just wrote the folder
                 if not project.repo_url:
                     project.repo_url = _git_remote_url(project.path)
                 print(f"[project {project.name}] {kind} ok", flush=True)
@@ -1973,7 +1833,7 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"[ws {s.cid[:8]}] send: {txt[:60]!r}", flush=True)
                 s.send_message(txt)
             elif t == "resize":
-                s.set_client_size(client, frame.get("cols"), frame.get("rows"))
+                s.resize(frame.get("cols"), frame.get("rows"))
 
 
 class ThreadingHTTPServer(ThreadingMixIn, TCPServer):
