@@ -1172,16 +1172,6 @@ function connect() {
   ws.onclose = () => {
     dot.classList.remove('up');
     for (const k of Object.keys(e2eChans)) delete e2eChans[k];   // sessions die with the connection → re-handshake
-    // Abort any in-flight batched passkey ceremony — every parked handshake belongs
-    // to THIS now-dead socket. If we let the batch fire after the reconnect, its
-    // assertion is built with the dead connection's handshake keys and sent over the
-    // NEW socket, landing on the worker's FRESH ServerHello → cf_m mismatch ("confirm",
-    // e2e.py) → the worker rejects, the client double-prompts (legacy), and the
-    // machine's resume material gets cleared → a permanent full-handshake-confirm-fail
-    // storm (observed on heart while head/leftclaw resumed fine). Rejecting the parked
-    // promises makes each e2eEnsure bail cleanly BEFORE it can send a poisoned
-    // ClientAuth; the fresh socket re-parks and prompts once, correctly.
-    e2eAbortBatch('socket-closed');
     // A close *before* we ever opened usually means auth: the browser hides the 403
     // behind code 1006, so we infer a bad/expired token from repeated pre-open
     // closes and surface the paste-a-new-token screen (also how a weekly rotation
@@ -1446,37 +1436,35 @@ function e2eLoadResume(m) { try { const s = JSON.parse(localStorage.getItem('cc_
 function e2eSaveResume(m, id, master) { try { localStorage.setItem('cc_e2e_rs_' + m, JSON.stringify({ id, master, exp: Date.now() + RESUME_TTL_MS })); } catch {} }
 function e2eClearResume(m) { try { localStorage.removeItem('cc_e2e_rs_' + m); } catch {} }
 
-// Persistent passkey circuit-breaker — the real storm fix. The iOS passkey sheet
+// Persistent passkey circuit-breaker — PER MACHINE. The iOS passkey sheet
 // backgrounds Safari, which (a) drops the WS and (b) often evicts+RELOADS the page
 // on return. The reload wipes all in-memory guards (e2eFailUntil, the handshake
 // state) — only localStorage survives. And because the drop lands BEFORE ClientAuth
 // reaches the worker, the worker never stores resume material, so the reconnect
 // can't resume silently → eager-unlock re-prompts → another sheet → another reload …
-// an unbreakable loop. So we stamp the wall-clock of every passkey SHEET in
-// localStorage and refuse to raise a *fresh* sheet from a BACKGROUND/eager trigger
-// (opts.auto) within PASSKEY_COOLDOWN of it. Silent resume raises no sheet → never
-// gated. An explicit user TAP (no opts.auto) is never gated — the user is right
-// there asking for it. Net: a cold load prompts ONCE, repopulates via that one
-// batched Face ID, and any sheet-induced reload rides the stamp instead of
-// re-prompting. After the window lapses with still no resume, it may prompt once
-// more — bounded, never a storm.
+// an unbreakable loop. So we stamp the wall-clock of each machine's passkey SHEET in
+// localStorage and refuse to raise a *fresh* sheet for THAT machine from a
+// BACKGROUND/eager trigger (opts.auto) within PASSKEY_COOLDOWN of it. Silent resume
+// raises no sheet → never gated. An explicit user TAP (no opts.auto) is never gated.
+// The stamp is per-machine on purpose: a GLOBAL stamp (the old batched design) made
+// the FIRST machine's sheet suppress every OTHER machine's sheet for the whole
+// window — which is exactly the "one passkey, wait, then two" behavior. Per-machine,
+// a cold load prompts once for EACH attached machine in quick succession (the flow
+// that worked), while a sheet-induced reload still rides each machine's own stamp so
+// a dropped handshake can't loop.
 const PASSKEY_COOLDOWN_MS = 90 * 1000;
-function e2ePasskeyStamp() { try { localStorage.setItem('cc_e2e_pk_last', String(Date.now())); } catch {} }
-function e2ePasskeyCoolingDown() { try { const t = +(localStorage.getItem('cc_e2e_pk_last') || 0); return t > 0 && (Date.now() - t) < PASSKEY_COOLDOWN_MS; } catch { return false; } }
+function e2ePasskeyStamp(m) { try { localStorage.setItem('cc_e2e_pk_last_' + m, String(Date.now())); } catch {} }
+function e2ePasskeyCoolingDown(m) { try { const t = +(localStorage.getItem('cc_e2e_pk_last_' + m) || 0); return t > 0 && (Date.now() - t) < PASSKEY_COOLDOWN_MS; } catch { return false; } }
 
 // Reveal the gnome first, then prompt for the passkey. We let the modal paint for
 // REVEAL_MS so you actually SEE "what's the safe word?" before the OS sheet, then
 // auto-fire (works on desktop / while the tap activation is fresh). If the browser
 // needs an explicit gesture (iOS), the modal stays and the tap fires it.
 const REVEAL_MS = 350;
-// One passkey assertion over `challengeBytes`, shown behind the gnome modal with
-// `subtitle`. Used for both a single channel and a BATCH of them (the batch challenge
-// commits to every channel's Th, so one Face ID covers them all — see fireBatch).
+// One passkey assertion over `challengeBytes` for a single channel, shown behind the
+// gnome modal with `subtitle`. The caller stamps the per-machine cooldown before
+// raising the sheet (e2ePasskeyStamp(machine) in e2eEnsure).
 function e2eAssertionPrompt(subtitle, challengeBytes) {
-  // Stamp the persistent passkey cooldown the instant we're about to raise a sheet.
-  // This is what an iOS evict+reload reads back to know "we just prompted — don't
-  // auto-prompt again", breaking the storm even though all in-memory state was wiped.
-  e2ePasskeyStamp();
   const req = lastAuthReq || {};
   const get = () => navigator.credentials.get({ publicKey: {
     challenge: challengeBytes, rpId: req.rpId || location.hostname,
@@ -1500,54 +1488,6 @@ function e2eAssertionPrompt(subtitle, challengeBytes) {
   });
 }
 
-// Batch coordinator: when several machines need a fresh handshake at once (the cold
-// reload that used to throw one Face ID per machine), each parks here after deriving
-// its transcript hash Th. A short debounce lets the others arrive, then we compute
-// ONE batch challenge over all the Th's, prompt ONCE, and hand the same assertion to
-// every participant. The worker accepts it only if its own Th is in the committed set
-// — so it's one gesture with identical per-channel security. A machine that arrives
-// after the window just forms its own (next) batch. Quiet window resets on each
-// arrival; a hard ceiling stops a slow joiner from delaying the prompt forever.
-const E2E_BATCH_QUIET_MS = 450, E2E_BATCH_HARD_MS = 1500;
-let e2ePendingBatch = null;   // { parts:[{machine, Th, resolve, reject}], quiet, hard }
-function e2eRequestAssertion(machine, ThBytes) {
-  return new Promise((resolve, reject) => {
-    if (!e2ePendingBatch) e2ePendingBatch = { parts: [], quiet: null, hard: null };
-    const b = e2ePendingBatch;
-    b.parts.push({ machine, Th: ThBytes, resolve, reject });
-    if (b.quiet) clearTimeout(b.quiet);
-    b.quiet = setTimeout(() => e2eFireBatch(b), E2E_BATCH_QUIET_MS);
-    if (!b.hard) b.hard = setTimeout(() => e2eFireBatch(b), E2E_BATCH_HARD_MS);
-  });
-}
-// Tear down the pending batch and reject every parked handshake. Called on socket
-// close so a ceremony can never straddle two connections (the confirm-storm race).
-function e2eAbortBatch(why) {
-  const b = e2ePendingBatch;
-  if (!b) return;
-  e2ePendingBatch = null;
-  clearTimeout(b.quiet); clearTimeout(b.hard);
-  for (const p of b.parts) p.reject(new Error(why || 'batch-aborted'));
-}
-async function e2eFireBatch(b) {
-  if (e2ePendingBatch !== b) return;     // already fired (quiet/hard race)
-  e2ePendingBatch = null;
-  clearTimeout(b.quiet); clearTimeout(b.hard);
-  const parts = b.parts, thList = parts.map(p => p.Th);
-  try {
-    const challenge = await E2E.batchChallenge(thList);
-    const names = parts.map(p => p.machine).join(', ');
-    const subtitle = parts.length > 1
-      ? ('unlock ' + parts.length + ' machines (' + names + ') — whisper the safe word')
-      : ('unlock ' + names + ' — whisper the safe word');
-    const assertion = await e2eAssertionPrompt(subtitle, challenge);
-    const batch = thList.map(b64uEnc);   // worker sorts internally; order here doesn't matter
-    for (const p of parts) p.resolve({ assertion, batch });
-  } catch (e) {
-    for (const p of parts) p.reject(e);
-  }
-}
-
 async function e2eEnsure(machine, opts = {}) {
   const cur = e2eChans[machine];
   if (cur && cur.status === 'open') return cur;
@@ -1561,7 +1501,7 @@ async function e2eEnsure(machine, opts = {}) {
   // BEFORE creating the channel so there's no scary meta message — mirrors the
   // e2eFailUntil gate above. A machine that DOES have resume material falls through:
   // resume is silent, so it's safe to attempt even while cooling down.
-  if (opts.auto && e2ePasskeyCoolingDown() && !e2eLoadResume(machine)) return Promise.reject(new Error('pk-cooldown'));
+  if (opts.auto && e2ePasskeyCoolingDown(machine) && !e2eLoadResume(machine)) return Promise.reject(new Error('pk-cooldown'));
   const ch = e2eChans[machine] = { status: 'handshaking', session: null, queue: [],
     sendChain: Promise.resolve(), recvChain: Promise.resolve(),
     dSH: e2eDeferred(), dSD: e2eDeferred(), dRes: e2eDeferred() };
@@ -1588,65 +1528,44 @@ async function e2eEnsure(machine, opts = {}) {
     // A background trigger whose resume just failed must still respect the persistent
     // passkey cooldown — otherwise a machine that lost its resume material would re-prompt
     // on every reload and re-open the storm. (Quietly handled in the catch below.)
-    if (opts.auto && e2ePasskeyCoolingDown()) throw new Error('pk-cooldown');
-    // 2) Full handshake. Try the BATCHED ceremony first (one Face ID unlocks every
-    //    fresh machine at once). If a worker rejects the batch assertion — an old or
-    //    asleep worker that predates batch support — fall back to a single LEGACY
-    //    assertion for just this machine: one extra Face ID, identical per-channel
-    //    security (the worker still verifies a channel-bound require-UV passkey), and
-    //    it self-heals the moment that worker is updated. So a stale box degrades to
-    //    one prompt, it never breaks. Worst case 2 iterations (batch → legacy).
-    let legacy = false;
-    for (;;) {
-      const pinB64 = e2ePin(machine);
-      const cli = E2E.client(machine, pinB64 ? b64uDec(pinB64) : null);
-      meta.textContent = 'securing ' + machine + '…';
-      e2eSendCtl(machine, await cli.hello());
-      const sh = await ch.dSH;                            // ServerHello (worker-signed)
-      const { Th, challenge, ikW, build } = await cli.auth(sh);   // verify sig + pin, derive keys
-      if (!pinB64) { e2eSetPin(machine, b64uEnc(ikW)); ch.firstPin = true; }   // TOFU
-      let authFrame;
-      if (legacy) {                                       // just this machine, its own challenge
-        authFrame = await build(await e2eAssertionPrompt('unlock ' + machine + ' — whisper the safe word', challenge));
-      } else {                                            // batched: one Face ID, many machines
-        const { assertion, batch } = await e2eRequestAssertion(machine, Th);
-        authFrame = await build(assertion, batch);
-      }
-      hidePasskey();
-      // Stash resume material the instant ClientAuth goes out — BEFORE awaiting
-      // ServerDone. On iOS the passkey sheet backgrounds Safari, which drops the WS
-      // mid-handshake; the worker stores its half the moment it accepts ClientAuth
-      // (keyed by resume_id, kept across the reconnect), but if the mobile waited for
-      // ServerDone it would miss it and re-handshake → another Face ID. Saving here
-      // lets the reconnect resume SILENTLY instead. Safe: if the worker rejected the
-      // auth it never stored its half, so our resume just fails → clean re-handshake.
-      // And resume verifies resume_confirm (worker proves it holds the master), so a
-      // resumed channel still implies the worker validated the passkey — no security
-      // loss from skipping this run's ServerDone key-confirmation.
-      e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);
-      e2eSendCtl(machine, authFrame);                     // ClientAuth
-      try {
-        const sd = await ch.dSD;                          // ServerDone (key confirmation)
-        ch.session = await cli.done(sd);
-        ch.fp = await cli.fingerprint();
-        break;                                            // channel open
-      } catch (e) {
-        // When does a SECOND (legacy) passkey actually help? Only a PRE-BATCH worker —
-        // which collapses every rejection to the generic "auth" — might accept a single
-        // assertion where it refused the batch. A CURRENT worker reports the SPECIFIC
-        // reason ('confirm' = stale keys from a flapped socket; 'replay'/'order' =
-        // races; 'passkey'/'batch-membership' = a mismatch a retry can't fix), and a
-        // second sheet on any of those just multiplies into the storm — so we fail
-        // cleanly instead. 'server-confirm' is the client catching the worker's own key
-        // confirmation mismatch — a real integrity problem, never retry. On giving up,
-        // drop the resume material we optimistically stashed (the worker never stored
-        // its half on a rejected auth, so a later resume would just fail and re-prompt).
-        const wmsg = (e && e.message) || '';
-        const canLegacy = !legacy && wmsg === 'auth';      // pre-batch worker only
-        if (!canLegacy) { e2eClearResume(machine); throw e; }
-        legacy = true;
-        ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred(); ch.dRes = e2eDeferred();
-      }
+    if (opts.auto && e2ePasskeyCoolingDown(machine)) throw new Error('pk-cooldown');
+    // 2) Full handshake — ONE passkey for THIS machine (per-machine flow). The
+    //    "batched" ceremony (one Face ID for every machine at once) was removed: it
+    //    raced the iOS socket-flap and produced the "one passkey, wait, then two"
+    //    storm. One sheet per attached machine is the flow that worked reliably; the
+    //    worker's per-channel auth path verifies a channel-bound require-UV passkey
+    //    just the same. Silent resume (above) keeps reconnects/flaps quiet, so this
+    //    only fires on a genuine cold channel.
+    const pinB64 = e2ePin(machine);
+    const cli = E2E.client(machine, pinB64 ? b64uDec(pinB64) : null);
+    meta.textContent = 'securing ' + machine + '…';
+    e2eSendCtl(machine, await cli.hello());
+    const sh = await ch.dSH;                              // ServerHello (worker-signed)
+    const { challenge, ikW, build } = await cli.auth(sh);   // verify sig + pin, derive keys
+    if (!pinB64) { e2eSetPin(machine, b64uEnc(ikW)); ch.firstPin = true; }   // TOFU
+    e2ePasskeyStamp(machine);                             // stamp BEFORE the sheet → survives an iOS evict+reload
+    const authFrame = await build(await e2eAssertionPrompt('unlock ' + machine + ' — whisper the safe word', challenge));
+    hidePasskey();
+    // Stash resume material the instant ClientAuth goes out — BEFORE awaiting
+    // ServerDone. On iOS the passkey sheet backgrounds Safari, which drops the WS
+    // mid-handshake; the worker stores its half the moment it accepts ClientAuth
+    // (keyed by resume_id, kept across the reconnect), but if the mobile waited for
+    // ServerDone it would miss it and re-handshake → another Face ID. Saving here
+    // lets the reconnect resume SILENTLY instead. Safe: if the worker rejected the
+    // auth it never stored its half, so our resume just fails → clean re-handshake.
+    // And resume verifies resume_confirm (worker proves it holds the master), so a
+    // resumed channel still implies the worker validated the passkey — no security
+    // loss from skipping this run's ServerDone key-confirmation.
+    e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);
+    e2eSendCtl(machine, authFrame);                       // ClientAuth
+    try {
+      const sd = await ch.dSD;                            // ServerDone (key confirmation)
+      ch.session = await cli.done(sd);
+      ch.fp = await cli.fingerprint();
+    } catch (e) {
+      // The worker stored nothing on a rejected auth, so the resume we optimistically
+      // stashed would just fail and re-prompt — drop it and surface the failure.
+      e2eClearResume(machine); throw e;
     }
     ch.status = 'open'; delete e2eFailUntil[machine];
     meta.textContent = ch.firstPin ? ('🔒 pinned · ' + ch.fp) : '';
@@ -1657,11 +1576,11 @@ async function e2eEnsure(machine, opts = {}) {
   })().catch((e) => {
     ch.status = 'failed';
     const msg = (e && e.message) || '';
-    // A socket-close abort is connection churn, NOT a handshake failure: the parked
-    // ceremony was cancelled because its socket died (see e2eAbortBatch). Don't stamp
-    // the 30s fail-cooldown (it would lock the machine out on the FRESH socket) and
-    // don't paint a banner — the reconnect re-handshakes immediately.
-    if (msg === 'socket-closed' || msg === 'batch-aborted') return;
+    // A handshake interrupted by the socket dying is connection churn, NOT a real
+    // failure: don't stamp the 30s fail-cooldown (it would lock the machine out on
+    // the FRESH socket) and don't paint a banner — the reconnect re-handshakes (or
+    // resumes silently) immediately.
+    if (msg === 'socket-closed') return;
     e2eFailUntil[machine] = Date.now() + E2E_FAIL_COOLDOWN_MS;   // no auto-retry storm; user gesture still retries
     // pk-cooldown is a deliberate, quiet skip (the persistent passkey breaker), not a
     // failure — don't paint a scary banner or log it. A later user tap unlocks instantly.
@@ -2412,11 +2331,10 @@ function projectRows() {
 function selectedProjectId() { return FLEET ? currentProjectKey : currentPid; }
 
 // Open every machine's E2E channel and ask each for its project list, so the
-// unified rung can merge. Every channel is kicked CONCURRENTLY now: resumable
-// machines re-attach silently, and fresh-passkey machines rendezvous at the batch
-// barrier (e2eRequestAssertion) so ONE Face ID unlocks them all. No more
-// one-modal-at-a-time serialization — that was the source of the per-machine
-// passkey stack. A single asleep/unreachable box can't wedge the others.
+// unified rung can merge. Every channel is kicked CONCURRENTLY: resumable machines
+// re-attach silently (no sheet), and each fresh-passkey machine raises its OWN Face
+// ID — one per attached machine, the flow that worked reliably. A single
+// asleep/unreachable box can't wedge the others.
 let bootstrapping = false;
 function fleetBootstrap() {
   if (!FLEET || bootstrapping) return;
@@ -2431,10 +2349,9 @@ function fleetBootstrap() {
       // sends those counts in plaintext (m.stats), so we can tell an idle box from a
       // busy one WITHOUT its E2E channel — and an empty box has nothing to show on the
       // unified projects rung anyway. This is the core of the "seven passkeys on one
-      // reload" storm: a session-less box (e.g. clawd-antenna — whose worker predates
-      // the batch ceremony, so it can't join the one-Face-ID batch AND never saves
-      // resume material, so it re-prompts on EVERY socket flap) demanded its own Face
-      // ID over and over even though you never touched it. Empty + not the machine
+      // reload" storm: a session-less box (e.g. clawd-antenna — whose old worker never
+      // saves resume material, so it re-prompts on EVERY socket flap) demanded its own
+      // Face ID over and over even though you never touched it. Empty + not the machine
       // you're viewing → unlock LAZILY, only when you actually open it (attachMachine /
       // hsendTo / hsend do that on demand). A machine with real content still unlocks
       // up front so its projects populate the rung.
@@ -2442,12 +2359,12 @@ function fleetBootstrap() {
       // This was EMERGENCY-STOPPED twice because it re-opened the passkey storm: the
       // iOS sheet drops the socket BEFORE ClientAuth reaches the worker, so the worker
       // never stores resume material, the page is evicted+reloaded on return, and the
-      // fresh bootstrap re-prompts → loop. It's safe NOW because of the persistent
-      // passkey cooldown (e2ePasskeyCoolingDown, stamped in localStorage on every
-      // sheet): the first cold load raises ONE batched Face ID and repopulates; any
-      // sheet-induced reload lands inside the cooldown, so e2eEnsure skips the prompt
-      // silently instead of storming. Empty machines still unlock lazily (nothing to
-      // show). Silent resume and explicit taps are never gated.
+      // fresh bootstrap re-prompts → loop. It's safe NOW because of the per-machine
+      // passkey cooldown (e2ePasskeyCoolingDown(machine), stamped in localStorage the
+      // instant each machine raises its sheet): a sheet-induced reload lands inside
+      // that machine's cooldown, so e2eEnsure skips re-prompting IT (other machines
+      // still prompt). Empty machines unlock lazily. Silent resume and explicit taps
+      // are never gated.
       const empty = m.stats && !m.stats.projects && !m.stats.sessions;
       if (empty && m.id !== currentMachine) continue;
       e2eEnsure(m.id, { auto: true }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
@@ -2561,8 +2478,8 @@ function renderProjects(list) {
 // project-load suppressed (no resume material + inside the 90s cooldown) the rung
 // can sit empty with NO way out — machine cards are read-only and there's no project
 // to tap. This forces a NON-auto handshake to every online machine (exactly what
-// opening a project does), bypassing the breaker, raising ONE batched Face ID, and
-// repopulating. A single gesture, no retry loop → it can't re-open the storm.
+// opening a project does), bypassing the breaker, raising one Face ID per machine
+// that still needs one, and repopulating. A single gesture, no retry loop.
 function fleetForceUnlock() {
   for (const m of machineList) {
     if (m.kind === 'relay' || !m.online) continue;
