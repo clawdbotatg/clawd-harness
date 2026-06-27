@@ -1,34 +1,12 @@
-"""agent.py — the PM brain, as a minimal claude-p-agent.
+"""agent.py — the fleet PM brain (adapter over claude-p-agent).
 
-This is the whole engine, ported from `clawdbotatg/claude-p-agent` and pointed at
-the fleet. The thesis of that repo: **an agent is `claude -p` run in a directory,
-fed a message tagged by trust level, with tools.** There is no orchestration
-framework, no JSON-action protocol to babysit a weak model — **Claude Code is the
-loop.** We just hand it the fleet tools (the controller's MCP server) and a
-persona, and read back what it said.
-
-Why this replaced the old two-brain setup (Bankr gateway + a separate claude_brain):
-  • The Bankr brain ran a cheap metered model (haiku-4.5) over a hand-rolled
-    one-JSON-object-per-step protocol — the "crappy LLM" the PM felt like.
-  • Real Claude with native tool-calling is strictly better at the PM job, and a
-    clean top-level `claude -p` (env scrubbed) runs on the **subscription**, not
-    metered API credits — the same trick server.py uses for sessions.
-
-A turn:
-  1. pick a system prompt by trust level     (prompts/private.md | prompts/public.md)
-  2. scrub the environment                    (so the child runs on YOUR subscription)
-  3. spawn `claude -p` in the repo root with the fleet MCP server attached
-  4. hand back {reply, trace}, and remember the session id for --resume continuity
-
-Trust: the chat UI / Telegram are YOU, so they run `private` (full, write-capable
-tools, gated by the autonomy guard). `public` is the locked-down persona for any
-future untrusted adapter — read-only, never acts. The real boundary lives in the
-verbs' autonomy gate + the per-trust prompt, not just here.
+AgentBrain is what the chat server talks to. Each turn calls `run_turn()` from
+claude-p-agent (imported via CLAUDE_P_AGENT_HOME) with this adapter's MCP tools
+and prompts in controller/prompts/.
 """
 import json
 import os
-import shutil
-import subprocess
+import sys
 
 from . import config
 from .mcp import TOOLS
@@ -38,18 +16,15 @@ ROOT = os.path.dirname(HERE)
 PROMPTS_DIR = os.path.join(HERE, "prompts")
 MCP_CONFIG = os.path.join(HERE, ".mcp-config.json")
 
-# The fleet tools, namespaced as Claude Code exposes MCP tools. We allowlist
-# exactly these so the PM can drive the fleet but nothing else by default.
+AGENT_HOME = os.path.abspath(os.environ.get(
+    "CLAUDE_P_AGENT_HOME",
+    os.path.expanduser("~/clawd/clawd-harness/projects/claude-p-agent"),
+))
+if AGENT_HOME not in sys.path:
+    sys.path.insert(0, AGENT_HOME)
+from agent import run_turn  # noqa: E402
+
 ALLOWED_TOOLS = ",".join(f"mcp__fleet__{n}" for n, _d, _s in TOOLS)
-
-# ── the one non-obvious thing (same as server.py SCRUB_ENV / claude-p-agent) ──
-# A `claude` shelled from inside an environment that already has these set
-# detects it's "embedded", switches to metered API billing, and writes no
-# transcript. Scrubbing them makes the child a clean, top-level run on your
-# Claude subscription. Do not remove this.
-SCRUB_PREFIXES = ("CLAUDECODE", "CLAUDE_CODE_")
-SCRUB_EXACT = {"ANTHROPIC_API_KEY", "AI_AGENT"}
-
 VALID_TRUST = ("private", "public")
 
 
@@ -65,7 +40,6 @@ def write_mcp_config():
             "CONTROLLER_MACHINE": config.MACHINE_ID,
             "CONTROLLER_AUTONOMY": config.AUTONOMY,
             "CONTROLLER_LEDGER": config.LEDGER_PATH,
-            # box/fleet mode passes through so the MCP child drives the relay too
             "CONTROLLER_RELAY": config.RELAY_URL,
             "CONTROLLER_RELAY_TOKEN": config.RELAY_TOKEN,
         }}}}
@@ -74,44 +48,36 @@ def write_mcp_config():
     return MCP_CONFIG
 
 
-def _prompt_path(trust):
-    return os.path.join(PROMPTS_DIR, f"{trust}.md")
-
-
 def _read_prompt(trust):
     try:
-        with open(_prompt_path(trust), encoding="utf-8") as f:
+        with open(os.path.join(PROMPTS_DIR, f"{trust}.md"), encoding="utf-8") as f:
             return f.read().strip()
     except OSError:
         return ""
 
 
-def scrubbed_env(autonomy):
-    env = dict(os.environ)
-    for k in list(env):
-        if k in SCRUB_EXACT or any(k.startswith(p) for p in SCRUB_PREFIXES):
-            env.pop(k, None)
-    # the MCP subprocess must see the *current* autonomy mode (it gates writes)
-    env["CONTROLLER_AUTONOMY"] = autonomy
-    return env
+def _extra_args(model):
+    args = ["--mcp-config", MCP_CONFIG, "--allowedTools", ALLOWED_TOOLS,
+            "--output-format", "json"]
+    if model:
+        args += ["--model", model]
+    return args
 
 
 class AgentBrain:
-    """The PM brain. Same interface the chat-server Router expects from a brain
-    (chat / reset / history / import_state / export_state) plus the prompt-editor
-    hooks (current_prompt / default_prompt / set_prompt) the debug page uses."""
+    """PM brain — same interface the chat-server Router expects."""
 
     label = "claude"
 
     def __init__(self, guard, trust="private", model=None, claude_bin=None):
-        self.guard = guard                  # shared autonomy gate (MCP child reads its mode via env)
+        self.guard = guard
         self.trust = trust if trust in VALID_TRUST else "private"
-        self.model = model or (config.AGENT_MODEL or None)  # None → Claude Code's default
-        self.bin = claude_bin or shutil.which("claude") or "claude"
-        self.session_id = None              # claude's id, captured for --resume
-        self.history = []                   # display history (chat-server reset() parity)
-        # editable persona override (debug page): when set it replaces the
-        # private.md persona for this turn, persisted so it survives a restart.
+        self.model = model or (config.AGENT_MODEL or None)
+        self.bin = claude_bin or "claude"
+        if self.bin != "claude":
+            os.environ.setdefault("CLAUDE_BIN", self.bin)
+        self.session_id = None
+        self.history = []
         self.prompt_override = None
         try:
             with open(config.PROMPT_PATH, encoding="utf-8") as f:
@@ -120,7 +86,6 @@ class AgentBrain:
             pass
         write_mcp_config()
 
-    # -- conversation lifecycle ------------------------------------------------
     def reset(self):
         self.session_id = None
         self.history = []
@@ -133,7 +98,6 @@ class AgentBrain:
         self.history = list(state.get("history") or [])
         self.session_id = state.get("session_id")
 
-    # -- the editable persona (debug page /api/prompt) -------------------------
     def default_prompt(self):
         return _read_prompt(self.trust)
 
@@ -141,8 +105,6 @@ class AgentBrain:
         return self.prompt_override or self.default_prompt()
 
     def set_prompt(self, text):
-        """Override the persona for the active trust (or clear with empty text).
-        Persisted to config.PROMPT_PATH so an edit survives a daemon restart."""
         text = (text or "").strip()
         self.prompt_override = text or None
         try:
@@ -154,36 +116,27 @@ class AgentBrain:
         except OSError:
             pass
 
-    # -- a turn ----------------------------------------------------------------
     def chat(self, user_text):
-        """One user turn → {reply, trace}. Drives `claude -p` with the fleet MCP
-        tools; multi-turn continuity rides on --resume. Mutates self.history."""
+        """One user turn → {reply, trace}."""
         self.history.append({"role": "user", "content": user_text})
-        cmd = [self.bin, "-p", user_text,
-               "--mcp-config", MCP_CONFIG,
-               "--allowedTools", ALLOWED_TOOLS,
-               "--output-format", "json"]
         sys_prompt = self.current_prompt()
-        if sys_prompt:
-            cmd += ["--append-system-prompt", sys_prompt]
-        if self.model:
-            cmd += ["--model", self.model]
-        if self.session_id:
-            cmd += ["--resume", self.session_id]
+        os.environ["CONTROLLER_AUTONOMY"] = self.guard.autonomy
         try:
-            proc = subprocess.run(cmd, cwd=ROOT, env=scrubbed_env(self.guard.autonomy),
-                                  capture_output=True, text=True, timeout=240)
-        except subprocess.TimeoutExpired:
-            return self._finish("⚠️ Claude timed out (240s).", [])
+            out = run_turn(
+                user_text,
+                append_system_prompt=sys_prompt or None,
+                session_id=self.session_id,
+                cwd=ROOT,
+                extra_args=_extra_args(self.model),
+                timeout=240,
+            )
         except FileNotFoundError:
             return self._finish(f"⚠️ `{self.bin}` not found — is the Claude CLI installed?", [])
-        if proc.returncode != 0:
-            err = (proc.stderr or proc.stdout or "").strip()[-600:]
-            return self._finish(f"⚠️ Claude exited {proc.returncode}: {err}", [])
-        out = proc.stdout.strip()
+        except RuntimeError as e:
+            return self._finish(f"⚠️ {e}", [])
         try:
             data = json.loads(out)
-        except Exception:
+        except json.JSONDecodeError:
             return self._finish(out or "(no output)", [])
         if data.get("session_id"):
             self.session_id = data["session_id"]

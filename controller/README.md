@@ -38,14 +38,13 @@ python3 -m controller mcp
 - **What the PM sees** — the raw `world` / `attention` / `tasks` / `notifications`
   JSON the brain reads.
 
-## The brain — a minimal claude-p-agent
+## The brain — claude-p-agent
 
-The PM is **real Claude on your subscription**, not a cheap gateway model. It's a
-minimal [claude-p-agent](https://github.com/clawdbotatg/claude-p-agent): each turn
-shells out to `claude -p` (env scrubbed → subscription, not metered) in the repo
-root, with the controller's **MCP server attached** so Claude drives the fleet
-through the exact same verbs. Multi-turn continuity rides on `--resume`. See
-[`agent.py`](agent.py) — that's the whole engine.
+Each turn shells out via **`run_turn()`** imported from claude-p-agent
+(`CLAUDE_P_AGENT_HOME`). This adapter attaches the fleet **MCP server** and loads
+persona from **`controller/prompts/`** (private for chat/Telegram, public for
+untrusted adapters). Multi-turn continuity rides on `--resume`. See
+[`agent.py`](agent.py).
 
 The persona lives in **[`prompts/`](prompts/)**, picked by trust level:
 - **`private.md`** — the trusted operator persona (chat UI + Telegram are *you*).
