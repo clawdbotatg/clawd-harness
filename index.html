@@ -669,10 +669,13 @@ function refitTTY() {
 // now-visible element, then fit.fit() recomputes rows/cols with the correct
 // cell size. This is the behaviour you get when you nudge the window, done
 // deliberately on landing.
+// Returns true only if it actually re-measured a VISIBLE terminal; false if it
+// bailed (wrong view / hidden / zero-size). Callers use that to decide whether the
+// "first replay must repaint" guarantee was really satisfied (see scheduleHardRepaint).
 function hardRepaint() {
-  if (currentView() !== 'tty') return;
+  if (currentView() !== 'tty') return false;
   const el = document.getElementById('term');
-  if (!el || !el.clientHeight) return;     // still hidden / zero-size → measuring now would re-cache garbage; wait for a later pass
+  if (!el || !el.clientHeight) return false;   // still hidden / zero-size → measuring now would re-cache garbage; wait for a later pass
   const fs = term.options.fontSize || 13;
   term.options.fontSize = fs - 1;          // each assignment fires xterm's re-measure + full re-render…
   term.options.fontSize = fs;              // …ending back at the right size, now measured while visible
@@ -680,6 +683,7 @@ function hardRepaint() {
   sendResize();
   term.scrollToBottom();
   bottomJustifyTTY();
+  return true;
 }
 
 // Showing the terminal un-hides #term from display:none. While hidden xterm
@@ -718,8 +722,13 @@ function scheduleHardRepaint() {
   if (!inWindow && !needFirstPaint) return;   // window lapsed AND the first post-window burst already re-measured → steady live streaming, don't re-measure
   clearTimeout(hardRepaintTimer);
   hardRepaintTimer = setTimeout(() => {
-    if (Date.now() > repaintArmedUntil) needFirstPaint = false;   // consume the guarantee only when a burst actually lands PAST the window (the slow-fleet replay); paints inside the window leave it armed
-    hardRepaint();
+    const painted = hardRepaint();
+    // Consume the "first replay must repaint" guarantee ONLY when a burst that landed
+    // PAST the window actually re-measured a visible terminal. The old code cleared it
+    // whenever the timer fired past the window — even if hardRepaint() bailed because
+    // #term was momentarily hidden during the reload's view transition — so the guarantee
+    // was wasted and the now-filled buffer never got re-measured → permanently black.
+    if (painted && Date.now() > repaintArmedUntil) needFirstPaint = false;
   }, 80);
 }
 // Fleet deep-link fix: on a /tty deep-link the e2e handshake (and its passkey) can
@@ -732,6 +741,46 @@ function scheduleHardRepaint() {
 // we're actually viewing on the tty; otherwise it's a harmless no-op.
 function onE2EChannelOpen(machine) {
   if (machine === currentMachine && currentCid && currentView() === 'tty') armHardRepaint();
+}
+
+// Does the viewed terminal actually have any drawn content? A live claude always
+// paints its full-screen TUI, so an all-blank buffer means the subscribe replay
+// never landed — not an idle session.
+function termHasContent() {
+  const b = term.buffer && term.buffer.active;
+  if (!b) return false;
+  for (let i = 0; i < term.rows; i++) {
+    const l = b.getLine(b.viewportY + i);
+    if (l && l.translateToString(true).trim()) return true;
+  }
+  return false;
+}
+// Self-heal a LOST subscribe replay — the "black terminal on fleet reload" bug. The
+// harness replays the screen (ring snapshot + a one-shot force-redraw burst) exactly
+// once per subscribe; over the fleet that replay can be lost to a transient (a PTY
+// record arriving as the resumed e2e channel was still settling, or a paint attempt
+// while #term was briefly hidden during the reload's view transition). Because it's
+// one-shot, a lost replay leaves a permanently black terminal until a manual reload.
+// So: a beat after subscribing, if the viewed terminal is still empty, re-request the
+// screen (just another subscribe — idempotent; the alt-screen redraw is absolute, so a
+// re-draw is clean). Bounded to 2 retries so a genuinely unreachable session can't loop.
+let replayWatchTimer = null;
+function armReplayWatchdog(cid) {
+  clearTimeout(replayWatchTimer);
+  let tries = 0;
+  const tick = () => {
+    if (currentCid !== cid || currentView() !== 'tty') return;   // navigated away
+    if (termHasContent()) return;                                 // screen arrived → healthy
+    if (tries++ >= 2) return;                                     // bounded — don't loop forever
+    term.reset(); feed.innerHTML = '';                           // clear so the re-replayed history doesn't duplicate
+    hsend({ type: 'subscribe', cid });
+    armHardRepaint();
+    replayWatchTimer = setTimeout(tick, 2000);
+  };
+  // First check sits PAST the 2500ms repaint window, so a merely slow (but arriving)
+  // fleet replay lands on its own and we don't re-subscribe needlessly; only a truly
+  // lost replay (still empty by then) gets re-requested.
+  replayWatchTimer = setTimeout(tick, 2800);
 }
 
 // The composer (footer) grows whenever an image chip is attached, a pending
@@ -2664,6 +2713,7 @@ function subscribe(cid) {
   syncComposer();              // load this session's own draft (bring back text from before a reload)
   hsend({ type: 'subscribe', cid });
   armHardRepaint();            // the replayed screen lands as async PTY bursts — force one full repaint once it settles
+  armReplayWatchdog(cid);      // …and if that replay is lost (fleet transient), re-request the screen instead of sitting black
   syncUrl();
 }
 
