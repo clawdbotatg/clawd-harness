@@ -66,6 +66,13 @@ TOOLS = [
         _S({"machine": _STR, "name": _STR, "confirm": _BOOL}, ["machine", "name"])),
     ("clone_project", "Clone a repo and adopt it as a project. WRITE.",
         _S({"machine": _STR, "repo_url": _STR, "confirm": _BOOL}, ["machine", "repo_url"])),
+    ("spawn", "Start a NEW session in a project (`pid`) on a machine, with no task "
+        "attached. Returns its cid so you can `ask` it next. For task-bound work use "
+        "`assign`. WRITE — needs confirm=true under autonomy=confirm.",
+        _S({"machine": _STR, "pid": _STR, "confirm": _BOOL}, ["machine", "pid"])),
+    ("close", "Close/kill a session: its claude is terminated and dropped from the "
+        "harness (the project stays). Irreversible — check session_digest first. WRITE.",
+        _S({"machine": _STR, "cid": _STR, "confirm": _BOOL}, ["machine", "cid"])),
 ]
 
 RESOURCES = [
@@ -117,6 +124,10 @@ class MCPServer:
             return v.create_project(a["machine"], a["name"], a.get("confirm", False))
         if name == "clone_project":
             return v.clone_project(a["machine"], a["repo_url"], a.get("confirm", False))
+        if name == "spawn":
+            return v.spawn(a["machine"], a["pid"], a.get("confirm", False))
+        if name == "close":
+            return v.close(a["machine"], a["cid"], a.get("confirm", False))
         raise ValueError(f"unknown tool: {name}")
 
     def read_resource(self, uri):

@@ -14,7 +14,7 @@ import time
 import urllib.parse
 
 WRITE_VERBS = {"assign", "ask", "answer_prompt", "interrupt",
-               "create_project", "clone_project"}
+               "create_project", "clone_project", "spawn", "close"}
 
 
 class Guard:
@@ -226,6 +226,31 @@ class Verbs:
             return {"ok": c.add_project(repo_url), "machine": machine, "repo": repo_url}
         return self._gate("clone_project", {"machine": machine, "repo_url": repo_url,
                                             "confirm": confirm}, do)
+
+    def spawn(self, machine, pid, confirm=False):
+        """Start a NEW session in a project (a pid) with no task attached. Returns its
+        cid so you can `ask` it next. For task-bound spawning use `assign` instead."""
+        def do():
+            c = self.clients.get(machine)
+            if not c:
+                return {"ok": False, "error": f"no such machine: {machine}"}
+            cid = c.new_session(pid)
+            if not cid:
+                return {"ok": False, "error": "failed to spawn a session (timeout)"}
+            return {"ok": True, "machine": machine, "pid": pid, "cid": cid}
+        return self._gate("spawn", {"machine": machine, "pid": pid,
+                                    "confirm": confirm}, do)
+
+    def close(self, machine, cid, confirm=False):
+        """Close a session: its `claude` is terminated and dropped from the harness.
+        Irreversible — inspect session_digest first. Frees the slot; the project stays."""
+        def do():
+            c = self.clients.get(machine)
+            if not c:
+                return {"ok": False, "error": f"no such machine: {machine}"}
+            return {"ok": c.close_session(cid), "machine": machine, "cid": cid}
+        return self._gate("close", {"machine": machine, "cid": cid,
+                                    "confirm": confirm}, do)
 
 
 def _clean(args):
