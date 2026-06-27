@@ -97,6 +97,12 @@ RP_ID = os.environ.get("FLEET_RP_ID", "h.atg.link")
 ORIGIN = os.environ.get("FLEET_ORIGIN", "https://" + RP_ID)
 PASSKEYS_FILE = Path(os.environ.get("FLEET_PASSKEY_FILE") or (HERE / ".clawd-fleet.passkeys.json"))
 WORKER_ID_FILE = HERE / ".fleet.worker_id.json"
+# E2E resume material (resume_id -> {master, hard}) persisted to disk so a worker
+# RESTART/crash doesn't wipe it — otherwise every reconnect after a restart forces a
+# fresh full passkey, and when that churns the channel dies (can't render/send/close).
+# Same on-disk-secret posture as WORKER_ID_FILE above; bounded by each entry's 24h hard
+# deadline. Gitignored.
+RESUME_FILE = HERE / ".fleet.e2e_resume.json"
 # Shared fleet VAPID keypair for Web Push notifications (same file the relay
 # reads for the public half). This worker signs + sends the bodyless "a session
 # needs you" tickle straight to the phone's push service. Guarded import: no
@@ -313,7 +319,7 @@ class Worker:
         self.e2e_sessions = {}     # mobile_id -> e2e.Session (open channel)
         self.e2e_hs = {}           # mobile_id -> e2e.WorkerHandshake (in progress)
         self.e2e_seen = set()      # used challenges — cross-handshake replay defense
-        self.e2e_resume = {}       # resume_id -> {master, hard} (no-passkey re-attach within TTL)
+        self.e2e_resume = self._load_e2e_resume()   # resume_id -> {master, hard}; survives restart (disk)
         self.e2e_lock = threading.Lock()
         self.identity = None
         self.passkey_verify = None
@@ -542,6 +548,41 @@ class Worker:
             pass
 
     # ── E2E channel (per remote viewer) ──────────────────────────────────────
+    def _load_e2e_resume(self):
+        """Load persisted resume material on boot, dropping anything past its 24h hard
+        deadline. Lets a worker restart/crash resume silently instead of re-prompting."""
+        try:
+            raw = json.loads(RESUME_FILE.read_text())
+        except Exception:
+            return {}
+        now = time.time()
+        out = {}
+        for rid, ent in (raw or {}).items():
+            try:
+                hard = float(ent["hard"])
+                if hard > now:
+                    out[rid] = {"master": bytes.fromhex(ent["master"]), "hard": hard}
+            except Exception:
+                continue
+        if out:
+            print(f"[worker {self.machine}] loaded {len(out)} persisted e2e resume entr"
+                  f"{'y' if len(out)==1 else 'ies'}", flush=True)
+        return out
+
+    def _persist_resume(self):
+        """Write resume material to disk (atomic). Snapshots under the lock, writes
+        outside it — callers may hold e2e_lock (threading.Lock is not re-entrant)."""
+        with self.e2e_lock:
+            now = time.time()
+            data = {rid: {"master": ent["master"].hex(), "hard": ent["hard"]}
+                    for rid, ent in self.e2e_resume.items() if ent["hard"] > now}
+        try:
+            tmp = RESUME_FILE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data))
+            os.replace(str(tmp), str(RESUME_FILE))
+        except Exception as e:
+            print(f"[worker {self.machine}] e2e resume save failed: {e}", flush=True)
+
     def _e2e_hello(self, frm, msg):
         if not (HAVE_E2E and self.identity):
             return self.reply(frm, {"t": "e2e.err", "error": "e2e unavailable"})
@@ -577,6 +618,7 @@ class Worker:
             self.e2e_sessions[frm] = sess
             self.e2e_resume[e2emod.b64u(hs.keys["resume_id"])] = {
                 "master": hs.keys["resume_master"], "hard": sess.hard_deadline}
+        self._persist_resume()   # survive a worker restart → silent resume, no fresh passkey
         print(f"[worker {self.machine}] E2E channel open for {frm}", flush=True)
         self.reply(frm, dict(done, t="e2e.done"))
 
