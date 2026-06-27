@@ -2406,6 +2406,12 @@ function renderProjectRung() {
       mt.textContent = `🖥️ ${p.machineCount}`;
       mt.title = `installed on ${p.machineCount} machines (default: ${p.machineName})`;
       row.appendChild(mt);
+    } else if (FLEET && p.machineName && !p.pinned) {   // single-machine project: name the box it lives on
+      const mt = document.createElement('span');
+      mt.className = 'scount smach';
+      mt.textContent = `🖥️ ${p.machineName.replace(/^clawd-/, '')}`;
+      mt.title = `only on ${p.machineName}`;
+      row.appendChild(mt);
     }
     if (p.waitingCount > 0) {
       const need = document.createElement('span');
