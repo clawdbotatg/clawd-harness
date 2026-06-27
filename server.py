@@ -86,6 +86,15 @@ BIND       = os.environ.get("BIND", "127.0.0.1")  # localhost-only by default.
 # on the LAN, *below* that whole stack — only the token guards it. Opt in with
 # BIND=0.0.0.0 (and accept that the token alone gates bypass-permissions claude).
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
+# Claude ≥2.1 defaults to a FULL-SCREEN TUI that switches the terminal into the
+# alternate-screen buffer (ESC[?1049h) and draws with absolute cursor positioning.
+# The harness can't reconstruct that on `subscribe` (it replays a slice of the PTY
+# ring buffer, not a full alt-screen redraw), so a new session paints BLANK and
+# looks dead even though claude is running. `--ax-screen-reader` makes claude emit
+# FLAT scrolling text (no alt-screen, no absolute positioning) — which the ring
+# replay + xterm.js render perfectly. On by default for exactly this reason; set
+# HARNESS_AX_READER=0 to opt back into the (currently unrenderable) full-screen UI.
+AX_SCREEN_READER = os.environ.get("HARNESS_AX_READER", "1") != "0"
 WORKDIR    = os.path.abspath(os.environ.get("WORKDIR", os.getcwd()))
 COLS       = int(os.environ.get("COLS", "120"))
 ROWS       = int(os.environ.get("ROWS", "34"))
@@ -445,6 +454,8 @@ class ClaudeSession:
         cmd = [CLAUDE_BIN,
                ("--resume" if self.resuming else "--session-id"), self.session_id,
                "--settings", self.settings_path]
+        if AX_SCREEN_READER:                      # flat text, no alt-screen → harness can render+replay it
+            cmd.insert(1, "--ax-screen-reader")
 
         def _preexec():
             os.setsid()
