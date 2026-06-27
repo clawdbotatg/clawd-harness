@@ -716,6 +716,17 @@ function scheduleHardRepaint() {
   clearTimeout(hardRepaintTimer);
   hardRepaintTimer = setTimeout(hardRepaint, 80);
 }
+// Fleet deep-link fix: on a /tty deep-link the e2e handshake (and its passkey) can
+// take longer than armHardRepaint's 2500ms window, so the subscribe — queued until
+// the channel opens — only sends, and the screen only replays, AFTER the window has
+// lapsed. Then scheduleHardRepaint() early-returns and the buffer fills but never
+// re-measures → the blank-terminal-on-open bug. Re-arm the window the moment the
+// channel opens (the queued subscribe is going out right now, the replay is imminent)
+// so those late bursts still force the visible re-measure. Only matters for the session
+// we're actually viewing on the tty; otherwise it's a harmless no-op.
+function onE2EChannelOpen(machine) {
+  if (machine === currentMachine && currentCid && currentView() === 'tty') armHardRepaint();
+}
 
 // The composer (footer) grows whenever an image chip is attached, a pending
 // message is queued, the key bar appears, or the textarea wraps — each shrinks
