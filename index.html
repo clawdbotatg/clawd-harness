@@ -705,16 +705,22 @@ function showTTY() {
 // the screen sits blank until a manual reload (the bug). Re-arming across the whole
 // window means any burst inside it still forces the re-measure. The window is only
 // set right after a (re)subscribe, so steady live streaming never re-triggers it.
-let hardRepaintTimer = null, repaintArmedUntil = 0;
+let hardRepaintTimer = null, repaintArmedUntil = 0, needFirstPaint = false;
 function armHardRepaint() {
   repaintArmedUntil = Date.now() + 2500;
+  needFirstPaint = true;   // the FIRST PTY burst after this (re)subscribe MUST re-measure, however late — over the fleet the e2e resume+subscribe replay routinely lands well past the 2500ms window, which is the blank-on-reload bug
   scheduleHardRepaint();
   setTimeout(hardRepaint, 600);  // re-measure even if no burst arrives; on an empty/already-correct buffer it's a harmless no-op
 }
 function scheduleHardRepaint() {
-  if (currentView() !== 'tty' || Date.now() > repaintArmedUntil) return;
+  if (currentView() !== 'tty') return;
+  const inWindow = Date.now() <= repaintArmedUntil;
+  if (!inWindow && !needFirstPaint) return;   // window lapsed AND the first post-window burst already re-measured → steady live streaming, don't re-measure
   clearTimeout(hardRepaintTimer);
-  hardRepaintTimer = setTimeout(hardRepaint, 80);
+  hardRepaintTimer = setTimeout(() => {
+    if (Date.now() > repaintArmedUntil) needFirstPaint = false;   // consume the guarantee only when a burst actually lands PAST the window (the slow-fleet replay); paints inside the window leave it armed
+    hardRepaint();
+  }, 80);
 }
 // Fleet deep-link fix: on a /tty deep-link the e2e handshake (and its passkey) can
 // take longer than armHardRepaint's 2500ms window, so the subscribe — queued until
@@ -1573,6 +1579,7 @@ async function e2eEnsure(machine, opts = {}) {
         ch.status = 'open'; delete e2eFailUntil[machine]; meta.textContent = '';
         const q = ch.queue; ch.queue = [];
         for (const fr of q) e2eSendFrame(machine, fr);
+        onE2EChannelOpen(machine);   // channel live → the queued subscribe replay is imminent; re-arm the repaint window
         return ch;
       } catch (e) {                                               // expired/dropped → re-handshake
         e2eClearResume(machine); ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred();
@@ -1645,6 +1652,7 @@ async function e2eEnsure(machine, opts = {}) {
     meta.textContent = ch.firstPin ? ('🔒 pinned · ' + ch.fp) : '';
     const q = ch.queue; ch.queue = [];
     for (const fr of q) e2eSendFrame(machine, fr);
+    onE2EChannelOpen(machine);   // channel live → the queued subscribe replay is imminent; re-arm the repaint window
     return ch;
   })().catch((e) => {
     ch.status = 'failed';
