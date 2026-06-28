@@ -102,11 +102,25 @@ class TelegramBridge:
             self.router.reset()
             self._send(chat, "Conversation reset.")
             return
+        # Stream the PM's work live (tool calls + narration) rather than one final
+        # dump. emit() is throttled to stay under Telegram's per-chat rate limit.
+        import time
+        last = [0.0]
+
+        def emit(kind, body):
+            if not body:
+                return
+            gap = 0.5 - (time.time() - last[0])
+            if gap > 0:
+                time.sleep(gap)
+            last[0] = time.time()
+            self._send(chat, ("🔧 " + body) if kind == "tool" else body)
+
         try:
-            out = self.router.chat(text)
+            if hasattr(self.router, "chat_stream"):
+                self.router.chat_stream(text, emit)     # streams; emits the final answer itself
+            else:
+                out = self.router.chat(text)            # fallback (non-streaming router)
+                self._send(chat, out.get("reply", "(no reply)"))
         except Exception as e:
-            out = {"reply": f"error: {e}", "trace": []}
-        reply = out.get("reply", "(no reply)")
-        if out.get("trace"):
-            reply += "\n\ndid: " + ", ".join(t["tool"] for t in out["trace"])
-        self._send(chat, reply)
+            self._send(chat, f"error: {e}")

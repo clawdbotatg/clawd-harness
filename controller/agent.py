@@ -180,6 +180,67 @@ class AgentBrain:
         trace = [{"tool": "claude", "args": meta, "result": {"ok": True}}] if meta else []
         return self._finish(reply, trace)
 
+    def chat_stream(self, user_text, emit):
+        """Like chat(), but fires emit(kind, text) per claude event AS the turn runs
+        — kind 'tool' (a tool call), 'text' (interim narration), or 'final' (the answer
+        if it wasn't already streamed) — then returns the same {reply, trace} as chat().
+        Used by the Telegram front-end so it shows work in progress, not one final dump."""
+        run_turn = _get_run_turn()
+        if run_turn is None:
+            return self._finish(_missing_engine_msg(), [])
+        self.history.append({"role": "user", "content": user_text})
+        sys_prompt = self.current_prompt()
+        os.environ["CONTROLLER_AUTONOMY"] = self.guard.autonomy
+        seen = {"text": ""}
+
+        def _ev(event):
+            # Only act on complete assistant messages; ignore partial token deltas
+            # (stream_event), system init, and tool-result (user) events.
+            if event.get("type") != "assistant":
+                return
+            for b in (event.get("message") or {}).get("content") or []:
+                bt = b.get("type")
+                if bt == "text":
+                    txt = (b.get("text") or "").strip()
+                    if txt:
+                        seen["text"] = txt
+                        emit("text", txt)
+                elif bt == "tool_use":
+                    name = (b.get("name") or "tool").replace("mcp__fleet__", "")
+                    inp = b.get("input") or {}
+                    arg = ""
+                    if inp:
+                        try:
+                            arg = json.dumps(inp, separators=(",", ":"))
+                        except Exception:
+                            arg = str(inp)
+                        if len(arg) > 200:
+                            arg = arg[:197] + "…"
+                    emit("tool", (name + " " + arg).strip())
+
+        # Streaming drops the blocking `--output-format json`; run_turn adds stream-json
+        # because on_event is set.
+        xargs = ["--mcp-config", MCP_CONFIG, "--allowedTools", ALLOWED_TOOLS]
+        if self.model:
+            xargs += ["--model", self.model]
+        try:
+            meta = run_turn(
+                user_text, append_system_prompt=sys_prompt or None,
+                session_id=self.session_id, cwd=ROOT, extra_args=xargs,
+                on_event=_ev, return_meta=True,
+            )
+        except FileNotFoundError:
+            return self._finish(f"⚠️ `{self.bin}` not found — is the Claude CLI installed?", [])
+        except RuntimeError as e:
+            return self._finish(f"⚠️ {e}", [])
+        sid = meta.get("session_id") if isinstance(meta, dict) else None
+        if sid:
+            self.session_id = sid
+        reply = ((meta.get("text") if isinstance(meta, dict) else meta) or "").strip() or "(no result)"
+        if reply != seen["text"]:          # answer wasn't already streamed as the last text block
+            emit("final", reply)
+        return self._finish(reply, [])
+
     def _finish(self, reply, trace):
         self.history.append({"role": "assistant", "content": reply})
         return {"reply": reply, "trace": trace}

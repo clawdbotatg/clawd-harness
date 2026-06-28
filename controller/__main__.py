@@ -116,6 +116,17 @@ def main(argv):
                 threads.persist()
                 return out
 
+            def chat_stream(self, text, emit):
+                """Streaming variant — same bookkeeping as chat(), but the brain fires
+                emit(kind, text) per event so a front-end (Telegram) shows live progress."""
+                brain.import_state(threads.state_for(STATE_KEY))
+                out = brain.chat_stream(text, emit)
+                threads.save_state(STATE_KEY, brain.export_state())
+                threads.record("me", text)
+                threads.record("bot", out.get("reply", ""), out.get("trace"))
+                threads.persist()
+                return out
+
             # -- thread management (driven by the chat server endpoints) --------
             def list_threads(self):
                 return threads.summary()
