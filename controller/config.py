@@ -32,10 +32,10 @@ def _load_env_file(path):
     return out
 
 
-# Creds/config come from .clawd-harness.env (laptop) or controller.env (the box
+# Creds/config come from .clawd-harness.env (laptop) or .env.controller (the box
 # deploy, which has no harness env), then the real environment wins over both.
 _ENV = {**_load_env_file(os.path.join(ROOT, ".clawd-harness.env")),
-        **_load_env_file(os.path.join(ROOT, "controller.env")),
+        **_load_env_file(os.path.join(ROOT, ".env.controller")),
         **os.environ}
 
 

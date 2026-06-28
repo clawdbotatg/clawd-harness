@@ -45,7 +45,7 @@ Verify the JS first: extract the `<script>` and `node --check` it.
   the shared UI at `~/clawd-harness/index.html` (`_serve_file` checks `HERE/` then
   `HERE.parent/`). The controller runs `python3 -m controller serve` with cwd
   `~/clawd-harness`. Gitignored runtime/secret files sit next to the code that reads them:
-  `fleet.env` + `.clawd-fleet.{token,passkeys.json,machine}` in `fleet/`; `controller.env`
+  `fleet.env` + `.clawd-fleet.{token,passkeys.json,machine}` in `fleet/`; `.env.controller`
   + `.clawd-controller.tasks.jsonl` at the repo root.
 - `fleet.env` on the box (gitignored) holds: `FLEET_MOBILE_TOKEN`, `FLEET_WORKER_TOKEN`,
   `FLEET_WORKER_ALLOW`, `FLEET_RP_ID=h.atg.link`, `FLEET_ORIGIN=https://h.atg.link`,

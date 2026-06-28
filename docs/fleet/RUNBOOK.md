@@ -156,7 +156,7 @@ ssh zkllmapi 'cd ~/clawd-harness && git pull && \
 UI-only `index.html` edits need **no restart** — the relay serves it fresh per
 request, so just `git pull` on the box. Gitignored runtime/secret files live next
 to the code that reads them (not in git): `fleet.env` + `.clawd-fleet.{token,passkeys.json,machine}`
-in `fleet/`; `controller.env` + `.clawd-controller.tasks.jsonl` at the repo root.
+in `fleet/`; `.env.controller` + `.clawd-controller.tasks.jsonl` at the repo root.
 Then verify with `journalctl -u clawd-fleet-relay -n 20` and the browser/loop
 checks above. (Migrated off scp in 2026-06; the prior flat scp dir is kept as
 `~/clawd-fleet.pre-git-backup` — safe to delete once the checkout is trusted.)
