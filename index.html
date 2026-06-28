@@ -80,6 +80,7 @@
   #sessionbar .stab.active { border-color:var(--accent); color:var(--accent); background:var(--accent-bg); }
   #sessionbar .stab .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }   /* square LED, matches sessions page */
   #sessionbar .stab .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
+  #sessionbar .stab .sdot.blocked { background:var(--err); animation:pulse 1.1s ease-in-out infinite; }   /* needs-you: turn ended asking the human */
   #sessionbar .stab .sdot.dead { background:var(--err); }
   #sessionbar .stab .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #status { font-size:11px; padding:3px 9px; border:1px solid var(--edge); text-transform:uppercase;
@@ -101,8 +102,18 @@
                     text-shadow:0 0 6px var(--accent); }
   .thinking .lbl { animation:pulse 1.1s ease-in-out infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
-  main { flex:1; display:flex; min-height:0;
+  main { flex:1; display:flex; min-height:0; position:relative;
          touch-action:pan-y; }   /* we own horizontal swipes (page nav); leave vertical scroll to the browser */
+  /* "I'm done with this job" — a deliberately big close target in the top-right of
+     the session pane. Closes the focused session; the rail then lands you on a
+     neighbour (closeCurrentSession). Only shown in a session view (tty/transcript). */
+  #closeBtn { position:absolute; top:6px; right:8px; z-index:20; display:none;
+              width:30px; height:30px; line-height:28px; text-align:center; padding:0;
+              font-size:18px; font-weight:700; cursor:pointer; border-radius:6px;
+              background:var(--bg); color:var(--dim); border:1px solid var(--edge);
+              opacity:.55; transition:opacity .12s, color .12s, border-color .12s; }
+  #closeBtn:hover { opacity:1; color:var(--err); border-color:var(--err); }
+  #closeBtn.show { display:block; }
   .col { display:flex; flex-direction:column; min-width:0; min-height:0; }
   #left  { flex:1; }
   #right { flex:1; background:var(--bg); }
@@ -482,6 +493,7 @@
     </div>
   </div>
   <main>
+    <button id="closeBtn" title="Close this session (done with this job)">✕</button>
     <section class="col hidden" id="projects">
       <div id="projectlist"></div>
     </section>
@@ -2079,22 +2091,20 @@ function renderSessionBar(view) {
   const wasHidden = bar.hidden;
   view = view || currentView();
   if (view === 'pm') { renderPmBar(bar, wasHidden); return; }   // PM threads ride the same strip
-  const list = projectSessions();                              // every host's sessions for this project
-  if (view === 'projects' || !currentPid || !list.length) {
+  const sorted = sortedSessions();                             // unified roster, importance-ordered (needs-you → working → idle → dead)
+  if (view === 'projects' || !sorted.length) {
     bar.hidden = true; bar.innerHTML = '';
     if (!wasHidden) refitTTY();
     return;
   }
-  const rank = s => !s.alive ? 2 : s.busy ? 0 : 1;   // busy first, idle next, dead last
-  const sorted = list.slice().sort((a, b) => rank(a) - rank(b));
   bar.innerHTML = '';
   sorted.forEach(s => {
     const tab = document.createElement('button');
     tab.className = 'stab' + (s.cid === currentCid ? ' active' : '');
     tab.title = s.title || 'new session';
-    tab.onclick = () => { pendingSendText = null; openSession(s.cid); };  // manual open cancels a queued new-session send
+    tab.onclick = () => focusSession(s);   // may cross project/machine; cancels any queued new-session send
     const dot = document.createElement('span');
-    dot.className = 'sdot' + (!s.alive ? ' dead' : s.busy ? ' busy' : '');
+    dot.className = 'sdot' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : '');
     const lbl = document.createElement('span');
     lbl.className = 'lbl'; lbl.textContent = s.title || 'new session';
     tab.appendChild(dot); tab.appendChild(lbl);
@@ -2155,6 +2165,14 @@ function allMachinesReplied() {
   const online = machineList.filter(m => m.online && m.kind !== 'relay');
   if (!online.length) return true;
   return online.every(m => perMachine[m.id] && perMachine[m.id].gotProjects);
+}
+// Same, for session lists — the boot default-landing needs every machine's roster
+// before it can pick the most-important session across the whole fleet.
+function allMachinesSessions() {
+  if (!machineList.length) return false;
+  const online = machineList.filter(m => m.online && m.kind !== 'relay');
+  if (!online.length) return true;
+  return online.every(m => perMachine[m.id] && perMachine[m.id].gotSessions);
 }
 
 // Per-project default machine (localStorage), and the auto-pick when none is set:
@@ -2526,6 +2544,56 @@ function projectSessions() {
   }
   return out;
 }
+// Project identity key for a session living on `machine` with pid `pid` (fleet) —
+// resolved from that machine's cached project list, so a session in the all-sessions
+// rail can re-point currentProjectKey when you focus it across projects.
+function projectKeyForSession(machineId, pid) {
+  const pm = perMachine[machineId];
+  if (!pm) return null;
+  const p = (pm.projectList || []).find(p => p.pid === pid);
+  return p ? projectKey(p) : null;
+}
+
+// EVERY alive-or-dead session the UI knows about, across all projects (and, in
+// fleet, all machines) — the unified roster the session rail flips through. Each
+// entry is tagged with `_machine`/`_pkey` so focusSession() can re-point the
+// attached machine + open project when you jump to one in another project.
+function allSessions() {
+  if (!FLEET) return sessionList.map(s => Object.assign({ _machine: null, _pkey: null }, s));
+  const out = [];
+  for (const mid of Object.keys(perMachine)) {
+    for (const s of ((perMachine[mid] || {}).sessionList || []))
+      out.push(Object.assign({ _machine: mid, _pkey: projectKeyForSession(mid, s.pid) }, s));
+  }
+  return out;
+}
+
+// The unified roster in rail order — importance bucket (needs-you → working →
+// idle → dead), then recency. Shared by the rail, session-cycling, and the boot
+// default-landing so all three agree on "first = most important".
+function sortedSessions() {
+  const rank = s => !s.alive ? 3 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : 2;
+  return allSessions().slice().sort((a, b) => rank(a) - rank(b) || (b.lastActive || 0) - (a.lastActive || 0));
+}
+
+// Focus a session from the all-sessions rail — it may live in a different project
+// (and, in fleet, a different machine) than the one currently open, so re-point
+// machine + project + pid before subscribing. Superset of openSession(), which
+// resolves the machine via the *open* project and so can't cross projects. Lands
+// on the terminal, but keeps you in the transcript if that's where you were
+// (cycling shouldn't yank you between views).
+function focusSession(s) {
+  pendingSendText = null;          // manual open cancels a queued new-session send
+  if (FLEET) {
+    if (s._machine && s._machine !== currentMachine) attachMachine(s._machine);
+    if (s._pkey) currentProjectKey = s._pkey;
+  }
+  if (s.pid) currentPid = s.pid;   // keep the breadcrumb/`new` in this session's project
+  subscribe(s.cid);
+  setView(currentView() === 'transcript' ? 'transcript' : DEEP_VIEW);
+  if (!isTouch) box.focus();
+}
+
 // Does `machine` host the project we currently have open? (fleet — drives whether
 // its session updates should repaint the merged sessions rung.)
 function machineHostsOpenProject(machine) {
@@ -2599,41 +2667,31 @@ function closeSession(cid, ev) {
   else hsend({ type: 'close', cid });
 }
 
-// -- keyboard session-hopping (Ctrl+Shift+↑/↓ cycle, Ctrl+Shift+W close) ------
-// Up/down cycle through EVERY session across all projects (currentPid follows
-// the session into its project, so the breadcrumb switches too) — a fast "where
-// are we" sweep. We stay at the current depth: cycling inside the tty swaps the
-// terminal, inside the transcript swaps the bubbles, on a list just moves the
-// highlight. Left/right (Ctrl+Shift) drive the abstraction nav instead — see the
-// capture-phase handler below, which works even from inside the terminal.
+// -- session-hopping (Ctrl+Shift+←/→ + swipe cycle, Ctrl+Shift+W close) -------
+// Cycle through EVERY session across all projects (and machines, in fleet) in the
+// rail's importance order — the unified roster is the thing you flip through, so
+// left/right (and the horizontal swipe) move between sessions, not abstraction
+// levels. focusSession() re-points the project/machine and keeps your view.
 function cycleSession(dir) {
-  if (!sessionList.length) return;
-  const idx = sessionList.findIndex(s => s.cid === currentCid);
-  const next = idx < 0 ? (dir > 0 ? 0 : sessionList.length - 1)
-                       : (idx + dir + sessionList.length) % sessionList.length;
-  const s = sessionList[next];
-  if (s.pid) currentPid = s.pid;     // follow the session into its project
-  subscribe(s.cid);                  // swap content; subscribe() never changes depth
-  if (!isTouch) box.focus();
+  const list = sortedSessions();
+  if (!list.length) return;
+  const idx = list.findIndex(s => s.cid === currentCid);
+  const next = idx < 0 ? (dir > 0 ? 0 : list.length - 1)
+                       : (idx + dir + list.length) % list.length;
+  focusSession(list[next]);
 }
 
+// Close the focused session and land on its rail neighbour — across the whole
+// unified roster now, not just the same project (the rail spans everything). If
+// nothing's left to land on, fall back to the projects rung.
 function closeCurrentSession() {
   if (!currentCid) return;
-  // Stay within the current project: pick a neighbour from THIS project only,
-  // and if there are none left, fall back to its session list — never hop to a
-  // session in another project.
-  const mine = sessionList.filter(s => s.pid === currentPid);
-  const idx = mine.findIndex(s => s.cid === currentCid);
-  const rest = mine.filter(s => s.cid !== currentCid);
-  console.log('[TRACE close] currentPid=', currentPid, 'currentCid=', currentCid,
-    'mine=', mine.map(s=>s.cid.slice(0,6)+'@'+String(s.pid).slice(0,6)),
-    'rest=', rest.length);
+  const roster = sortedSessions();
+  const idx = roster.findIndex(s => s.cid === currentCid);
+  const rest = roster.filter(s => s.cid !== currentCid);
   closeSession(currentCid);
-  if (!rest.length) { console.log('[TRACE close] -> navTo sessions'); navTo('sessions'); return; }   // closed the last one in this project — fall back to the list
-  const nb = rest[Math.min(idx, rest.length - 1)] || rest[0];
-  console.log('[TRACE close] -> subscribe sibling', nb.cid.slice(0,6), 'pid=', String(nb.pid).slice(0,6));
-  subscribe(nb.cid);                 // land on a neighbour in the same project, keeping the current depth
-  if (!isTouch) box.focus();
+  if (!rest.length) { setView('projects'); return; }
+  focusSession(rest[Math.min(Math.max(idx, 0), rest.length - 1)] || rest[0]);
 }
 
 function highlightCard(cid) {
@@ -3449,6 +3507,8 @@ const pmPanel = document.getElementById('pm');
 const pmfeed = document.getElementById('pmfeed');
 const menuBtn = document.getElementById('menuBtn');
 const projectsBtn = document.getElementById('projectsBtn');
+const closeBtn = document.getElementById('closeBtn');
+closeBtn.onclick = () => closeCurrentSession();
 function setView(view) {
   const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects',
         pm = view === 'pm';
@@ -3458,6 +3518,7 @@ function setView(view) {
   rightPanel.classList.toggle('hidden', !(view === 'transcript'));
   pmPanel.classList.toggle('hidden', !pm);
   document.getElementById('keys').style.display = (tty && isTouch) ? '' : 'none';  // key bar only for touch (the desktop terminal takes these keys natively)
+  closeBtn.classList.toggle('show', (tty || view === 'transcript') && !!currentCid);  // big close-✕ only when a session is open
   // Composer is hidden on the projects rung (nothing to talk to). On the sessions
   // list it stays, but a message there starts a new session rather than going to a
   // session you're not viewing — say so in the placeholder. The PM view keeps the
@@ -3492,6 +3553,9 @@ document.getElementById('brand').onclick = () => navTo('projects');
 if (!FLEET) machinesBtn.style.display = 'none';   // no machines rung when talking to a harness directly
 pendingNav = parseHash();        // restore project / session / depth from the URL…
 setView(pendingNav.view);        // …optimistically; resolvePendingNav refines once data lands
+// Safety net: if the rosters never fully arrive, don't hang on a blank projects
+// rung — force the home landing (best-effort) after a few seconds.
+setTimeout(() => { if (bootLanding && pendingNav && isHomeRoute(pendingNav)) landHome(); }, 4500);
 
 // Auto-surface the TUI when claude asks something interactive (AskUserQuestion,
 // plan approval, permission prompt) — those render only in the terminal, so the
@@ -3547,6 +3611,19 @@ function syncUrl() {
   }
   if (h !== location.hash) { lastWrittenHash = h; location.hash = h; }
 }
+// First load drops you onto the most-important open session (the rail's first),
+// not the projects list — the harness is a place to glance across jobs in flight.
+// Consumed once: a later nav to #/ (the Projects button) genuinely shows projects.
+let bootLanding = true;
+function landHome() {
+  bootLanding = false; pendingNav = null;
+  const top = sortedSessions()[0];
+  if (top) focusSession(top); else setView('projects');   // empty fleet → the projects list
+}
+// Bare #/ on boot — the home route. True only for the default landing, not a deep
+// link (which carries a project/session) nor an explicit projects nav.
+function isHomeRoute(nav) { return bootLanding && nav.view === 'projects' && !nav.key && !nav.cid; }
+
 // Re-apply pendingNav as server data arrives. Returns early — leaving pendingNav
 // set — until the data it names shows up; it's re-driven on every projects/sessions
 // frame and on each roster change.
@@ -3555,6 +3632,7 @@ function resolvePendingNav() {
   if (!nav) return;
   if (nav.view === 'pm') { pendingNav = null; openPM(); return; }   // PM is harness-data-independent
   if (FLEET) { resolvePendingNavFleet(nav); return; }
+  if (isHomeRoute(nav)) { if (gotSessions) landHome(); return; }    // wait for the roster, then land on the warmest session
   // -- direct mode: key is the local pid --------------------------------------
   if (nav.key) {
     if (!projectList.length) return;                         // projects not in yet
@@ -3580,6 +3658,10 @@ function resolvePendingNav() {
 // roster + enough machines to reply, tell "still loading" apart from "gone", and
 // re-point the machine when the named session lives off the default.
 function resolvePendingNavFleet(nav) {
+  if (isHomeRoute(nav)) {                                    // boot default-landing: warmest session across the fleet
+    if (machineList.length && allMachinesSessions()) landHome();
+    return;                                                 // else keep waiting for the rosters
+  }
   if (!nav.key) { pendingNav = null; setView('projects'); return; }
   if (!machineList.length) return;                           // roster not in yet
   const g = unifiedProjects.get(nav.key);
@@ -3671,13 +3753,22 @@ function stepLevel(dir) {
   }
   if (next !== currentView()) { viewBeforeQuestion = null; setView(next); }  // manual nav cancels auto-return
 }
-const goDeeper    = () => stepLevel(+1);   // swipe left / arrow right — dive in
-const goShallower = () => stepLevel(-1);   // swipe right / arrow left — climb out
+const goDeeper    = () => stepLevel(+1);   // dive in
+const goShallower = () => stepLevel(-1);   // climb out
 
-// Keyboard mirror of the swipe gesture: ← climbs out, → dives in. Skipped while
-// a text field owns focus — the message box (so arrows edit your draft) and the
-// terminal's own hidden textarea (so arrows reach claude's TUI) — and when a
-// modifier is held (Cmd/Alt+← etc. stay as browser/word-nav shortcuts).
+// The session plane = the terminal or the transcript. There, horizontal motion
+// flips through the unified session roster (the rail); everywhere else (the
+// projects/sessions lists, PM) it still walks abstraction levels so back-nav
+// works. navFwd/navBack are the single source of truth shared by swipe + both
+// keyboard handlers, so all three stay in lock-step.
+function inSessionView() { const v = currentView(); return v === 'tty' || v === 'transcript'; }
+function navFwd()  { if (inSessionView()) cycleSession(+1); else goDeeper(); }     // swipe left / →
+function navBack() { if (inSessionView()) cycleSession(-1); else goShallower(); }  // swipe right / ←
+const gotoProjects = () => navTo('projects');   // the new "up and out" — the rail owns left/right now (same as the header projects button)
+
+// Plain-arrow mirror of the swipe gesture. Skipped while a text field owns focus —
+// the message box (so arrows edit your draft) and the terminal's own hidden
+// textarea (so arrows reach claude's TUI) — and when a modifier is held.
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -3686,31 +3777,31 @@ window.addEventListener('keydown', (e) => {
   if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT' ||
       (el && el.isContentEditable)) return;
   e.preventDefault();
-  if (e.key === 'ArrowRight') goDeeper(); else goShallower();
+  if (e.key === 'ArrowRight') navFwd(); else navBack();
 });
 
-// Ctrl+Shift navigation, mirroring the swipe/plain-arrow model but usable from
-// inside the live terminal too: ←/→ move through the abstraction levels
-// (projects ↔ sessions ↔ tty ↔ transcript), ↑/↓ cycle sessions at the current
-// depth, W closes the current session, N spawns a new one (focusing the box on
-// desktop, via openSession). Capture phase + stopPropagation so the
-// keys never reach xterm's textarea (it would otherwise send them to the PTY).
-// On macOS Ctrl+Shift+W is free (the browser's close-window shortcut is
-// Cmd+Shift+W), so we don't fight it.
+// Ctrl+Shift navigation, usable from inside the live terminal too: ←/→ flip
+// through sessions (the rail roster) when you're in one, else walk levels; ↑/↓
+// explicitly climb/dive the abstraction stack; P jumps to the projects rung; W
+// closes the focused session, N spawns a new one. Capture phase + stopPropagation
+// so the keys never reach xterm's textarea (it would send them to the PTY).
+// On macOS Ctrl+Shift+W is free (browser close-window is Cmd+Shift+W).
 window.addEventListener('keydown', (e) => {
   if (!e.ctrlKey || !e.shiftKey || e.metaKey || e.altKey) return;
   let handled = true;
-  if (e.key === 'ArrowRight') goDeeper();
-  else if (e.key === 'ArrowLeft') goShallower();
-  else if (e.key === 'ArrowDown') cycleSession(+1);
-  else if (e.key === 'ArrowUp') cycleSession(-1);
+  if (e.key === 'ArrowRight') navFwd();
+  else if (e.key === 'ArrowLeft') navBack();
+  else if (e.key === 'ArrowDown') goDeeper();
+  else if (e.key === 'ArrowUp') goShallower();
+  else if (e.code === 'KeyP') gotoProjects();
   else if (e.code === 'KeyW') closeCurrentSession();
   else if (e.code === 'KeyN') newSession();   // spawn a session + focus the box to start typing
   else handled = false;
   if (handled) { e.preventDefault(); e.stopPropagation(); }
 }, true);
 
-// Horizontal swipe switches depth. Listen in the capture phase so xterm (which
+// Horizontal swipe flips through the session rail (in a session) or changes depth
+// (on a list) — see navFwd/navBack. Listen in the capture phase so xterm (which
 // handles its own touches on the tty view) can't swallow it. Vertical motion is
 // left untouched so the transcript scrolls natively.
 //
@@ -3757,7 +3848,7 @@ stage.addEventListener('touchend', (e) => {
   const dx = t.clientX - swX, dy = t.clientY - swY;
   if (Date.now() - swT > 800) return;                       // too slow for a flick
   if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.8) return;  // not a clean horizontal swipe
-  if (dx < 0) goDeeper(); else goShallower();
+  if (dx < 0) navFwd(); else navBack();   // in a session: flip the rail; on a list: change depth
 }, { capture: true, passive: true });
 
 window.addEventListener('resize', () => { fit.fit(); sendResize(); term.scrollToBottom(); bottomJustifyTTY(); });
