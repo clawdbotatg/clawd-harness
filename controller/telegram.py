@@ -135,9 +135,9 @@ class TelegramBridge:
             return
         if text in ("/start", "/help"):
             self._send(chat, "🛰️ Fleet PM online. Ask what needs you, or tell me to "
-                             "start work on a project. /reset clears the conversation.")
+                             "start work on a project. /reset (or /new, /clear) wipes the conversation.")
             return
-        if text == "/reset":
+        if text in ("/reset", "/new", "/clear"):
             self.router.reset()
             self._send(chat, "Conversation reset.")
             return
