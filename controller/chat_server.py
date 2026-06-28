@@ -147,8 +147,8 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
                     router.reset()
                 return self._send(200, {"ok": True})
             # -- PM threads (multiple conversations) --------------------------
-            # serialized with chat so a switch can't land mid-turn and clobber
-            # the brain history being swapped in/out.
+            # serialized with chat so a thread switch can't land mid-turn and point
+            # the brain's conversation key at the wrong thread.
             if path == "/api/thread/new":
                 with chat_lock:
                     return self._send(200, router.new_thread(data.get("title")))

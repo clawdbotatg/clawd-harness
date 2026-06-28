@@ -90,27 +90,26 @@ def main(argv):
         from .threads import Threads
         threads = Threads(config.THREADS_PATH)
 
-        # a thin façade the chat server drives. One PM brain (a minimal
-        # claude-p-agent), but multiple conversation threads (the chat analog of
-        # per-project sessions): each thread keeps its own brain state, swapped
-        # in/out of the shared brain around every (serialized) turn.
-        STATE_KEY = brain.label
+        # a thin façade the chat server drives. One PM brain (a minimal claude-p-agent),
+        # but multiple conversation threads (the chat analog of per-project sessions). A
+        # thread's memory IS its key: before each (serialized) turn we point the brain at
+        # `pm-<tid>`, and claude-p-agent's engine loads/resumes/saves that conversation's
+        # session. The threads file keeps only the display transcript; the engine owns
+        # the session. Clearing/resetting a thread forgets its engine memory.
+        def _key(tid=None):
+            return f"pm-{tid or threads.current}"
 
         class Router:
             label = "router"
 
-            @property
-            def history(self):
-                return brain.history
-
             def reset(self):                 # back-compat: clear the current thread
+                k = _key()
                 threads.clear()
-                brain.reset()
+                brain.forget_conversation(k)
 
             def chat(self, text):
-                brain.import_state(threads.state_for(STATE_KEY))
+                brain.conversation_key = _key()
                 out = brain.chat(text)
-                threads.save_state(STATE_KEY, brain.export_state())
                 threads.record("me", text)
                 threads.record("bot", out.get("reply", ""), out.get("trace"))
                 threads.persist()
@@ -119,9 +118,8 @@ def main(argv):
             def chat_stream(self, text, emit):
                 """Streaming variant — same bookkeeping as chat(), but the brain fires
                 emit(kind, text) per event so a front-end (Telegram) shows live progress."""
-                brain.import_state(threads.state_for(STATE_KEY))
+                brain.conversation_key = _key()
                 out = brain.chat_stream(text, emit)
-                threads.save_state(STATE_KEY, brain.export_state())
                 threads.record("me", text)
                 threads.record("bot", out.get("reply", ""), out.get("trace"))
                 threads.persist()
@@ -143,8 +141,9 @@ def main(argv):
                 return {"ok": ok, **threads.summary()}
 
             def clear_thread(self, tid=None):
+                k = _key(tid)
                 threads.clear(tid)
-                brain.reset()
+                brain.forget_conversation(k)
                 return threads.summary()
 
             def archive_thread(self, tid=None):

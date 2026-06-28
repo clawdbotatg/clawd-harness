@@ -70,6 +70,14 @@ def _get_run_turn():
     return _run_turn
 
 
+def _get_forget():
+    """Lazy import of the engine's forget() (clears a conversation's memory)."""
+    if _get_run_turn() is None:
+        return None
+    from agent import forget  # noqa: E402
+    return forget
+
+
 # The PM gets the fleet MCP verbs PLUS read/investigation built-ins, so it can
 # inspect repos directly (gh/git via Bash, fetch docs, read files) instead of driving
 # sessions blind. Headless `claude -p` DENIES any tool not in --allowedTools, which is
@@ -128,8 +136,10 @@ class AgentBrain:
         self.bin = claude_bin or "claude"
         if self.bin != "claude":
             os.environ.setdefault("CLAUDE_BIN", self.bin)
-        self.session_id = None
-        self.history = []
+        # Memory uses claude-p-agent's one system: a conversation key → an engine-owned
+        # session, auto-resumed. The Router sets this to the current thread's key before
+        # each turn; the engine loads/resumes/saves. No session juggling lives here.
+        self.conversation_key = None
         self.prompt_override = None
         try:
             with open(config.PROMPT_PATH, encoding="utf-8") as f:
@@ -138,17 +148,14 @@ class AgentBrain:
             pass
         write_mcp_config()
 
+    def forget_conversation(self, key):
+        """Clear one conversation's engine memory (used on thread clear/reset)."""
+        f = _get_forget()
+        if f and key:
+            f(key)
+
     def reset(self):
-        self.session_id = None
-        self.history = []
-
-    def export_state(self):
-        return {"history": list(self.history), "session_id": self.session_id}
-
-    def import_state(self, state):
-        state = state or {}
-        self.history = list(state.get("history") or [])
-        self.session_id = state.get("session_id")
+        self.forget_conversation(self.conversation_key)
 
     def default_prompt(self):
         return _read_prompt(self.trust)
@@ -173,30 +180,25 @@ class AgentBrain:
         run_turn = _get_run_turn()
         if run_turn is None:
             return self._finish(_missing_engine_msg(), [])
-        self.history.append({"role": "user", "content": user_text})
         sys_prompt = (self.current_prompt() or "") + _autonomy_note(self.guard.autonomy)
         os.environ["CONTROLLER_AUTONOMY"] = self.guard.autonomy
         try:
-            out = run_turn(
+            r = run_turn(
                 user_text,
                 append_system_prompt=sys_prompt or None,
-                session_id=self.session_id,
+                remember=self.conversation_key,
                 cwd=ROOT,
                 extra_args=_extra_args(self.model),
+                return_meta=True,
                 timeout=240,
             )
         except FileNotFoundError:
             return self._finish(f"⚠️ `{self.bin}` not found — is the Claude CLI installed?", [])
         except RuntimeError as e:
             return self._finish(f"⚠️ {e}", [])
-        try:
-            data = json.loads(out)
-        except json.JSONDecodeError:
-            return self._finish(out or "(no output)", [])
-        if data.get("session_id"):
-            self.session_id = data["session_id"]
-        reply = data.get("result") or data.get("text") or "(no result)"
-        meta = {k: data.get(k) for k in ("num_turns", "duration_ms") if k in data}
+        reply = (r.get("text") if isinstance(r, dict) else r) or "(no result)"
+        meta = {k: r.get(k) for k in ("num_turns", "duration_ms")
+                if isinstance(r, dict) and r.get(k) is not None}
         trace = [{"tool": "claude", "args": meta, "result": {"ok": True}}] if meta else []
         return self._finish(reply, trace)
 
@@ -208,7 +210,6 @@ class AgentBrain:
         run_turn = _get_run_turn()
         if run_turn is None:
             return self._finish(_missing_engine_msg(), [])
-        self.history.append({"role": "user", "content": user_text})
         sys_prompt = (self.current_prompt() or "") + _autonomy_note(self.guard.autonomy)
         os.environ["CONTROLLER_AUTONOMY"] = self.guard.autonomy
         seen = {"text": ""}
@@ -246,21 +247,17 @@ class AgentBrain:
         try:
             meta = run_turn(
                 user_text, append_system_prompt=sys_prompt or None,
-                session_id=self.session_id, cwd=ROOT, extra_args=xargs,
+                remember=self.conversation_key, cwd=ROOT, extra_args=xargs,
                 on_event=_ev, return_meta=True,
             )
         except FileNotFoundError:
             return self._finish(f"⚠️ `{self.bin}` not found — is the Claude CLI installed?", [])
         except RuntimeError as e:
             return self._finish(f"⚠️ {e}", [])
-        sid = meta.get("session_id") if isinstance(meta, dict) else None
-        if sid:
-            self.session_id = sid
         reply = ((meta.get("text") if isinstance(meta, dict) else meta) or "").strip() or "(no result)"
         if reply != seen["text"]:          # answer wasn't already streamed as the last text block
             emit("final", reply)
         return self._finish(reply, [])
 
     def _finish(self, reply, trace):
-        self.history.append({"role": "assistant", "content": reply})
         return {"reply": reply, "trace": trace}
