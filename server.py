@@ -967,12 +967,29 @@ class SessionManager:
         base = str(PROJECTS_DIR) + os.sep
         try:
             on_disk = {str(PROJECTS_DIR / n) for n in os.listdir(PROJECTS_DIR)}
-        except OSError:
+            scan_ok = True
+        except OSError as e:
             on_disk = set()
+            scan_ok = False
+            print(f"[reconcile] PROJECTS_DIR scan failed ({e}); "
+                  "skipping drop pass this cycle", flush=True)
         with self.lock:
-            gone = [pid for pid, p in self.projects.items()
-                    if not p.pinned and p.status == "ready"
-                    and p.path.startswith(base) and p.path not in on_disk]
+            ready = [(pid, p) for pid, p in self.projects.items()
+                     if not p.pinned and p.status == "ready"
+                     and p.path.startswith(base)]
+            # A failed scan — or an *empty* listing while we still track ready
+            # projects — is almost always a transient FS blip (a single bad
+            # os.listdir once nuked every project here and killed all their
+            # sessions). You never delete a dozen repos atomically between two
+            # ~1s ticks, so refuse to drop EVERYTHING on one read: skip the drop
+            # pass and let the next good scan reconcile. Discovery still runs.
+            safe_to_drop = scan_ok and (on_disk or not ready)
+            if ready and not safe_to_drop:
+                print(f"[reconcile] on-disk scan empty but {len(ready)} ready "
+                      "project(s) tracked → skipping drop pass (transient?)",
+                      flush=True)
+            gone = ([pid for pid, p in ready if p.path not in on_disk]
+                    if safe_to_drop else [])
         changed = False
         for pid in gone:
             with self.lock:
