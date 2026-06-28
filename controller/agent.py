@@ -50,7 +50,13 @@ def _get_run_turn():
     return _run_turn
 
 
-ALLOWED_TOOLS = ",".join(f"mcp__fleet__{n}" for n, _d, _s in TOOLS)
+# The PM gets the fleet MCP verbs PLUS read/investigation built-ins, so it can
+# inspect repos directly (gh/git via Bash, fetch docs, read files) instead of driving
+# sessions blind. Headless `claude -p` DENIES any tool not in --allowedTools, which is
+# why these must be enumerated. Write/Edit are deliberately withheld: the PM delegates
+# actual code changes to the coding sessions it spawns/assigns.
+_BUILTIN_TOOLS = ["Read", "Grep", "Glob", "LS", "Bash", "WebFetch", "WebSearch"]
+ALLOWED_TOOLS = ",".join([*(f"mcp__fleet__{n}" for n, _d, _s in TOOLS), *_BUILTIN_TOOLS])
 VALID_TRUST = ("private", "public")
 
 
