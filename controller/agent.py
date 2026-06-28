@@ -36,6 +36,26 @@ def _missing_engine_msg():
     )
 
 
+def _autonomy_note(mode):
+    """The persona lists all autonomy modes but the model is otherwise NOT told which
+    one is live — so it defaults to the persona's 'confirm' behavior (propose-and-wait)
+    even when the operator set 'auto'. Append this each turn so the model acts on the
+    REAL mode. Read fresh per turn, so changing the mode takes effect immediately."""
+    mode = (mode or "confirm").lower()
+    if mode == "auto":
+        return ("\n\n# ACTIVE AUTONOMY MODE: auto\n"
+                "You are in AUTO right now. Write tools execute immediately. When the operator "
+                "asks for something, DO it — call the write tool with confirm=true straight away. "
+                "Do NOT propose-and-wait and do NOT ask for permission you already have. "
+                "After acting, report what you did (cids / task ids).")
+    if mode == "readonly":
+        return ("\n\n# ACTIVE AUTONOMY MODE: readonly\n"
+                "Writes are refused right now. Read and propose only; never claim work was done.")
+    return ("\n\n# ACTIVE AUTONOMY MODE: confirm\n"
+            "You are in CONFIRM right now. Make each write call WITHOUT confirm, relay the "
+            "proposal, and STOP until the operator says yes.")
+
+
 def _get_run_turn():
     """Lazy import — missing engine must not crash the controller at import time."""
     global _run_turn
@@ -154,7 +174,7 @@ class AgentBrain:
         if run_turn is None:
             return self._finish(_missing_engine_msg(), [])
         self.history.append({"role": "user", "content": user_text})
-        sys_prompt = self.current_prompt()
+        sys_prompt = (self.current_prompt() or "") + _autonomy_note(self.guard.autonomy)
         os.environ["CONTROLLER_AUTONOMY"] = self.guard.autonomy
         try:
             out = run_turn(
@@ -189,7 +209,7 @@ class AgentBrain:
         if run_turn is None:
             return self._finish(_missing_engine_msg(), [])
         self.history.append({"role": "user", "content": user_text})
-        sys_prompt = self.current_prompt()
+        sys_prompt = (self.current_prompt() or "") + _autonomy_note(self.guard.autonomy)
         os.environ["CONTROLLER_AUTONOMY"] = self.guard.autonomy
         seen = {"text": ""}
 
