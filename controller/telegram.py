@@ -10,12 +10,43 @@ configured token is already polled elsewhere, Telegram returns 409 — we detect
 that, log it, and stop (rather than spin or disrupt the other consumer). Point
 CONTROLLER_TELEGRAM_TOKEN at a bot that isn't otherwise in use.
 """
+import html
 import json
+import re
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+
+def _md_to_html(text):
+    """Convert the PM's GitHub-flavored markdown into Telegram's small HTML subset
+    (b/i/code/pre/a). Code is stashed first so its contents aren't mangled, the rest
+    is HTML-escaped, then inline/line markdown is mapped. If the output is ever
+    malformed Telegram rejects parse_mode=HTML and _send falls back to plain text."""
+    text = text or ""
+    stash = []
+
+    def keep(s):
+        stash.append(s)
+        return f"\x00{len(stash) - 1}\x00"
+
+    text = re.sub(r"```[A-Za-z0-9_+-]*\n?(.*?)```",
+                  lambda m: keep("<pre>" + html.escape(m.group(1).rstrip("\n")) + "</pre>"),
+                  text, flags=re.S)
+    text = re.sub(r"`([^`\n]+)`",
+                  lambda m: keep("<code>" + html.escape(m.group(1)) + "</code>"), text)
+    text = html.escape(text)
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s+(.*)$", r"<b>\1</b>", text)          # headers → bold
+    text = re.sub(r"(?m)^(\s*)[-*+]\s+", r"\1• ", text)                       # bullets → •
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
+    text = re.sub(r"(?<![\*\w])\*(?!\s)([^*\n]+?)\*(?![\*\w])", r"<i>\1</i>", text)
+    text = re.sub(r"(?<![_\w])_(?!\s)([^_\n]+?)_(?![_\w])", r"<i>\1</i>", text)
+    text = re.sub(r"\x00(\d+)\x00", lambda m: stash[int(m.group(1))], text)   # restore code
+    return text
 
 
 class TelegramBridge:
@@ -39,7 +70,15 @@ class TelegramBridge:
         return self._api("getMe", timeout=10)
 
     def _send(self, chat_id, text):
-        try:
+        text = (text or "")[:3800]                       # headroom for added tags
+        try:                                             # formatted first…
+            r = self._api("sendMessage", {"chat_id": chat_id, "text": _md_to_html(text),
+                                          "parse_mode": "HTML", "disable_web_page_preview": "true"})
+            if isinstance(r, dict) and r.get("ok"):
+                return
+        except Exception:
+            pass
+        try:                                             # …plain fallback so it never drops
             self._api("sendMessage", {"chat_id": chat_id, "text": text[:4000]})
         except Exception as e:
             print(f"[telegram] send failed: {e}", flush=True)
