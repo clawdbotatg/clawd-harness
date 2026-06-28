@@ -4051,12 +4051,22 @@ function renderPmBar(bar, wasHidden) {
 }
 function pmApplyThreads(s) {           // s = {threads, current, archived_count}
   if (!s || !s.threads) return;
+  const switched = pmCurrent != null && s.current !== pmCurrent;
   pmThreads = s.threads; pmCurrent = s.current; pmLoaded = true;
   if (currentView() === 'pm') renderSessionBar('pm');
+  // If the current thread changed out from under us (another tab, a restart that
+  // restored a different `current`), resync the feed — otherwise the bar highlights
+  // one thread while the feed shows another's messages.
+  if (switched && currentView() === 'pm') pmLoadMessages();
 }
 async function pmLoadMessages() {
-  try { const r = await pmApi('/api/thread/messages'); pmMessages = r.messages || []; }
-  catch (e) { pmMessages = []; }
+  let r;
+  // Keep the last-known conversation on a transient fetch failure (controller
+  // restarting/offline). Blanking pmMessages here was the "came back and a chunk of
+  // the convo was gone" bug — the thread is intact server-side, only the fetch blipped.
+  try { r = await pmApi('/api/thread/messages'); }
+  catch (e) { return; }
+  pmMessages = r.messages || [];
   if (currentView() === 'pm') renderPmFeed();
 }
 async function openPM() {
