@@ -51,6 +51,12 @@ HERE = Path(__file__).resolve().parent
 # How often to sample + push CPU/RAM/disk/GPU to the relay for the roster cards.
 SYSSTATS_INTERVAL = float(os.environ.get("FLEET_SYSSTATS_INTERVAL", "10"))
 
+# Relay-link read timeout. The relay pings every 20s and reaps a worker after
+# ~60s of silence; we set our own recv timeout just above that so a half-open
+# link (relay restart, NAT/Wi-Fi drop, sleep) breaks cleanly and reconnects
+# instead of blocking forever in recv(). Must stay > the relay's ping interval.
+RELAY_READ_TIMEOUT = float(os.environ.get("FLEET_RELAY_READ_TIMEOUT", "70"))
+
 
 def _load_env_file():
     """Load KEY=VALUE lines from fleet.env (gitignored) into the env *before* the
@@ -835,11 +841,28 @@ class Worker:
     def serve_once(self):
         sock, rfile, wfile = fleet_ws.client_connect(self.url())
         self.wfile = wfile
+        # Guard against a HALF-OPEN relay link. The relay pings every 20s and
+        # reaps us after ~60s silent; but client_connect leaves the socket in
+        # blocking mode, so if the link dies without a FIN/RST reaching us
+        # (relay restart, NAT/Wi-Fi drop, laptop sleep) recv() blocks forever —
+        # we never error, never reach the reconnect loop in run(), and sit as a
+        # zombie the relay has already dropped (observed: a worker silently gone
+        # for ~2 days). A read timeout a hair above the relay's own staleness
+        # window turns that into a clean break → reconnect. On a healthy link the
+        # 20s pings mean we're never idle long enough for it to fire.
+        sock.settimeout(RELAY_READ_TIMEOUT)
         print(f"[worker {self.machine}] connected to {self.relay}", flush=True)
         self.report_stats()   # seed the fresh roster entry with our last counts
         try:
             while True:
-                msg = fleet_ws.ws_read_message(rfile)
+                try:
+                    msg = fleet_ws.ws_read_message(rfile)
+                except (socket.timeout, TimeoutError):
+                    # No frame (not even a relay ping) for RELAY_READ_TIMEOUT →
+                    # the link is half-open. Bail so run() reconnects.
+                    print(f"[worker {self.machine}] relay link silent "
+                          f"{RELAY_READ_TIMEOUT:.0f}s — reconnecting", flush=True)
+                    break
                 if msg is None:
                     break
                 kind, data = msg
