@@ -900,9 +900,14 @@ class SessionManager:
         for e in reg.get("projects", []):
             if not e.get("path") or not os.path.isdir(e["path"]):
                 continue                         # repo dir gone — drop the entry
+            # Backfill the origin URL when the registry stored an empty one (legacy
+            # entries adopted before this backfill existed). Every machine reporting
+            # its canonical repo URL is what lets the fleet view merge the same repo
+            # across boxes into one card instead of splitting name-only vs. URL keys.
+            repo_url = e.get("repo_url", "") or _git_remote_url(e["path"])
             p = Project(pid=e.get("pid") or str(uuid.uuid4()),
                         name=e.get("name") or os.path.basename(e["path"]),
-                        path=e["path"], repo_url=e.get("repo_url", ""),
+                        path=e["path"], repo_url=repo_url,
                         status=e.get("status", "ready") if e.get("status") != "cloning" else "ready",
                         created=e.get("created", 0.0))
             self.projects[p.pid] = p

@@ -2155,6 +2155,27 @@ function mergeProjects() {
         waitingCount: p.waitingCount || 0, status: p.status });
     }
   }
+  // Fold name-only groups into a URL group for the same repo. A machine that
+  // can't report an origin URL (legacy registry, mid-clone, non-git dir) keys a
+  // project by `name:<name>`, while a machine that knows the URL keys it by the
+  // normalized repo path — the SAME repo then splits into two cards. Match the
+  // name against each URL group's repo basename and merge the strays in so the
+  // fleet shows one card per repo.
+  const byBasename = new Map();
+  for (const g of map.values()) {
+    if (!g.repoUrl) continue;
+    const base = normRepo(g.repoUrl).split('/').pop();
+    if (base && !byBasename.has(base)) byBasename.set(base, g);   // first URL group wins ties
+  }
+  for (const [key, g] of [...map]) {
+    if (!key.startsWith('name:')) continue;
+    const target = byBasename.get((g.name || '').toLowerCase());
+    if (!target) continue;
+    for (const m of g.machines) target.machines.push(m);
+    if (g.pinned) target.pinned = true;
+    if ((g.lastTouched || 0) > target.lastTouched) target.lastTouched = g.lastTouched;
+    map.delete(key);
+  }
   unifiedProjects = map;
 }
 
