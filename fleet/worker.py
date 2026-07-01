@@ -39,6 +39,7 @@ import socket
 import subprocess
 import threading
 import time
+import traceback
 import urllib.request
 from pathlib import Path
 from urllib.parse import quote
@@ -603,7 +604,11 @@ class Worker:
         if sess is None:
             return self.reply(frm, {"t": "e2e.err", "error": "no session"})
         try:
-            kind, payload = sess.open(e2emod.b64u_dec(msg.get("r", "")))
+            # `msg.get("r") or ""` (not `.get("r","")`): a JSON-null value yields
+            # None, which would crash b64u_dec(len(None)) and — if it escaped —
+            # tear down the whole relay link. Coerce to "" so a bad record simply
+            # fails the length check below as an E2EError we already drop.
+            kind, payload = sess.open(e2emod.b64u_dec(msg.get("r") or ""))
         except e2emod.E2EError:
             if sess.expired():
                 with self.e2e_lock:
@@ -611,6 +616,8 @@ class Worker:
                 self.drop_mobile(frm)
                 self.reply(frm, {"t": "e2e.err", "error": "expired"})
             return                                  # drop bad/replayed frame silently
+        except Exception:
+            return                                  # malformed record → drop, keep link up
         if kind == e2emod.KIND_JSON:
             try:
                 frame = json.loads(payload.decode("utf-8"))
@@ -878,23 +885,40 @@ class Worker:
                 except Exception:
                     continue
                 t = frame.get("type")
-                if t == "task":
-                    self.handle_task(frame.get("from"), frame.get("msg") or {})
-                elif t == "mobileGone":
-                    self.drop_mobile(frame.get("mobile"))
-                elif t == "upload":
-                    self.handle_upload(frame)
-                elif t == "pushSubs":          # full set on (re)connect
-                    self.cache_push_subs(frame.get("subs") or [], replace=True)
-                elif t == "pushSub":           # one new subscription
-                    self.cache_push_subs([frame.get("sub") or {}])
+                # A single malformed frame (or a handler bug) must NEVER tear down
+                # the relay link — that drops the machine off the roster for every
+                # viewer until we reconnect. Contain it: log, drop the frame, keep
+                # the link alive. (This is the fix for a `b64u_dec(None)` /
+                # unexpected-exception crash-loop that flapped machines offline.)
+                try:
+                    if t == "task":
+                        self.handle_task(frame.get("from"), frame.get("msg") or {})
+                    elif t == "mobileGone":
+                        self.drop_mobile(frame.get("mobile"))
+                    elif t == "upload":
+                        self.handle_upload(frame)
+                    elif t == "pushSubs":          # full set on (re)connect
+                        self.cache_push_subs(frame.get("subs") or [], replace=True)
+                    elif t == "pushSub":           # one new subscription
+                        self.cache_push_subs([frame.get("sub") or {}])
+                except Exception as e:
+                    print(f"[worker {self.machine}] frame handler error "
+                          f"(type={t!r}, dropped): {e}", flush=True)
+                    traceback.print_exc()
         finally:
-            self.wfile = None
+            # Close under wlock so we never yank the fd out from under a background
+            # writer (sysstats / notify / E2E reply) mid-ws_send — a concurrent
+            # write+close on the shared TLS socket corrupts the stream
+            # (`ssl.SSLError: BAD_LENGTH`) and takes the link down. Nulling wfile
+            # first means any writer that wakes after us no-ops instead of touching
+            # a dead socket.
+            with self.wlock:
+                self.wfile = None
+                try:
+                    sock.close()
+                except Exception:
+                    pass
             self._drop_all_links()
-            try:
-                sock.close()
-            except Exception:
-                pass
 
     def run(self):
         # A relay node has no harness behind it, so there are no stats to poll —
@@ -909,6 +933,7 @@ class Worker:
                 backoff = 1.0  # clean disconnect → reset
             except Exception as e:
                 print(f"[worker {self.machine}] link error: {e}", flush=True)
+                traceback.print_exc()
             print(f"[worker {self.machine}] reconnecting in {backoff:.0f}s…", flush=True)
             time.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
