@@ -4029,7 +4029,7 @@ function renderPmFeed() {
   pmfeed.scrollTop = pmfeed.scrollHeight;
 }
 // PM threads in the #sessionbar: same .stab look as session tabs (dot + title),
-// a subtle ✕ to archive, then trailing controls (new / clear / show-archived / debug).
+// a subtle ✕ to archive, then trailing controls (new / debug).
 function renderPmBar(bar, wasHidden) {
   bar.innerHTML = '';
   pmThreads.forEach(t => {
@@ -4049,10 +4049,6 @@ function renderPmBar(bar, wasHidden) {
   });
   const ctl = (txt, title, fn) => { const b = document.createElement('button'); b.className = 'pmctl'; b.textContent = txt; b.title = title; b.onclick = fn; bar.appendChild(b); };
   ctl('＋ new', 'New PM thread', pmNew);
-  ctl('🧹 clear', "Clear this thread's context (keeps the thread)", pmClear);
-  const archN = pmThreads.filter(t => t.archived).length;
-  if (archN) ctl(pmArchOpen ? 'hide archived' : '🗄 ' + archN, 'Show / hide archived threads',
-                 () => { pmArchOpen = !pmArchOpen; renderPmBar(bar, false); });
   ctl('🛠', 'PM debug (prompt, tools, raw data)', () => window.open(PM_BASE + '/debug', '_blank'));
   // model picker — only meaningful for the bankr backend (claude-code -p drives
   // its own model). Fed from the cached /api/state (pmRefreshBadge keeps it warm).
