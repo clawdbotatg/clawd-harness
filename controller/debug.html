@@ -19,6 +19,7 @@
   section{display:none} section.on{display:block}
   h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin:4px 0 12px}
   textarea,input,button,select{font:inherit}
+  select{background:#0d1320;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
   #prompt{width:100%;min-height:48vh;background:#0d1320;color:var(--txt);border:1px solid var(--line);border-radius:9px;padding:12px;font:12.5px/1.55 var(--mono);resize:vertical}
   .row{display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap}
   button.act{background:var(--accent);color:#001628;border:none;border-radius:8px;padding:8px 16px;font-weight:600;cursor:pointer}
@@ -46,6 +47,7 @@
   <a href="/">← chat</a>
   <div class="tabs">
     <button data-t="prompt" class="on">Prompt</button>
+    <button data-t="config">Config</button>
     <button data-t="tools">Tools</button>
     <button data-t="data">What the PM sees</button>
   </div>
@@ -62,6 +64,19 @@
       <button class="ghost" id="reset">Reset to default</button>
       <button class="ghost" id="viewdef">View built-in default</button>
       <span id="psaved" class="muted"></span>
+    </div>
+  </section>
+
+  <section id="s-config">
+    <h2>Model <span id="mstate" class="tag"></span></h2>
+    <p class="muted">The <code>claude --model</code> the PM brain runs as. Applies from the
+       <b>next message</b> (each turn is a fresh <code>claude -p</code>) and persists across
+       restarts. <b>default</b> = whatever Claude Code itself defaults to on this box.</p>
+    <div class="row">
+      <select id="model"></select>
+      <input type="text" id="modelcustom" placeholder="custom model id…" style="display:none;background:#0d1320;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:6px 8px">
+      <button class="act" id="msave">Apply</button>
+      <span id="msaved" class="muted"></span>
     </div>
   </section>
 
@@ -112,6 +127,34 @@ $('#save').onclick = async () => {
 $('#reset').onclick = async () => { await jpost('api/prompt', {reset:true}); $('#psaved').textContent='✓ reset to built-in'; loadPrompt(); };
 $('#viewdef').onclick = () => { $('#prompt').value = DEFAULT_PROMPT; $('#psaved').textContent='(showing built-in default — Save to adopt it)'; };
 
+// ---- config: model picker ----
+const CUSTOM = '__custom';
+async function loadModel(){
+  const s = await jget('api/state');
+  const cur = s.model_id || '';
+  const models = s.models || [];
+  const sel = $('#model'); sel.innerHTML = '';
+  const opts = [['', 'default (Claude Code)'], ...models.map(m => [m, m])];
+  if (cur && !models.includes(cur)) opts.push([cur, cur + ' (current)']);
+  opts.push([CUSTOM, 'custom…']);
+  for (const [v, t] of opts){
+    const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
+  }
+  sel.value = cur;
+  $('#modelcustom').style.display = 'none';
+  $('#mstate').textContent = s.model || '';
+}
+$('#model').onchange = () => {
+  $('#modelcustom').style.display = $('#model').value === CUSTOM ? '' : 'none';
+};
+$('#msave').onclick = async () => {
+  let v = $('#model').value;
+  if (v === CUSTOM) v = $('#modelcustom').value.trim();
+  const r = await jpost('api/model', {model: v});
+  $('#msaved').textContent = r.ok ? '✓ saved — applies to the next message' : ('error: ' + (r.error || ''));
+  loadModel();
+};
+
 // ---- tools ----
 async function loadTools(){
   const {tools} = await jget('api/tools');
@@ -155,7 +198,7 @@ document.querySelectorAll('[data-r]').forEach(b => b.onclick = async () => {
   catch(e){ out.textContent = String(e); out.className='err'; }
 });
 
-loadPrompt(); loadTools();
+loadPrompt(); loadModel(); loadTools();
 </script>
 </body>
 </html>

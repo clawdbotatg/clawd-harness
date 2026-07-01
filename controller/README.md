@@ -147,7 +147,7 @@ triage entry point — each item names the `suggested_action` to clear it.
 | `CONTROLLER_HARNESS_WS` | `ws://127.0.0.1:8787` | harness to drive |
 | `CONTROLLER_HARNESS_TOKEN` | `.clawd-harness.token` | WS token |
 | `CONTROLLER_HARNESS_HTTP` | (derived from WS url) | UI origin for deep links |
-| `CONTROLLER_MODEL` | (Claude Code default) | pin the PM's `claude --model` |
+| `CONTROLLER_MODEL` | (Claude Code default) | pin the PM's `claude --model` (the debug page's **Config** tab overrides this live; override persists in `.clawd-controller.model.txt`) |
 | `CONTROLLER_AUTONOMY` | `confirm` | write gate |
 | `CONTROLLER_CHAT_PORT` | `8799` | chat UI port |
 | `CONTROLLER_LEDGER` | `../.clawd-controller.tasks.jsonl` | task log |

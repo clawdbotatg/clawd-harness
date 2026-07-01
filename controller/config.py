@@ -68,6 +68,9 @@ CHAT_PORT = int(cfg("CONTROLLER_CHAT_PORT", "8799") or 8799)
 LEDGER_PATH = cfg("CONTROLLER_LEDGER", os.path.join(ROOT, ".clawd-controller.tasks.jsonl"))
 # Persisted system-prompt override (edited from the debug page). Absent → built-in.
 PROMPT_PATH = cfg("CONTROLLER_PROMPT", os.path.join(ROOT, ".clawd-controller.prompt.txt"))
+# Persisted model override (picked on the debug page's Config tab). Absent →
+# CONTROLLER_MODEL, which absent → Claude Code's own default.
+MODEL_PATH = cfg("CONTROLLER_MODEL_PATH", os.path.join(ROOT, ".clawd-controller.model.txt"))
 # Persisted PM chat threads (multiple concurrent conversations + their history),
 # so they survive a daemon restart. Mirrors .clawd-harness.sessions.json.
 THREADS_PATH = cfg("CONTROLLER_THREADS", os.path.join(ROOT, ".clawd-controller.threads.json"))

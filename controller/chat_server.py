@@ -30,10 +30,18 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
     from . import config
     from .mcp import TOOLS
 
+    def current_model():
+        # Live brain model (runtime override or env pin); empty → Claude Code's default.
+        return getattr(prompt_brain, "model", None) or config.AGENT_MODEL or ""
+
     def model_label():
         # The PM is a minimal claude-p-agent: real Claude on the subscription.
-        # CONTROLLER_MODEL can pin a specific model; empty → Claude Code's default.
-        return f"claude · {config.AGENT_MODEL}" if config.AGENT_MODEL else "claude (subscription)"
+        m = current_model()
+        return f"claude · {m}" if m else "claude (subscription)"
+
+    # Choices offered on the debug page's Config tab (a custom id is also accepted).
+    KNOWN_MODELS = ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5",
+                    "claude-haiku-4-5-20251001"]
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -113,7 +121,8 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
                 hparsed = _u.urlparse(hbase)
                 return self._send(200, {
                     "autonomy": guard.autonomy, "backend": backend_getter(),
-                    "model": model_label(), "models": [],
+                    "model": model_label(), "model_id": current_model(),
+                    "models": KNOWN_MODELS,
                     "harness": {"base": hbase, "token": config.harness_token(),
                                 "port": hparsed.port or (443 if hparsed.scheme == "https" else 80)},
                     "machines": [{"id": m["id"], "connected": m["connected"],
@@ -136,6 +145,17 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
                 with chat_lock:
                     out = router.chat(msg)
                 return self._send(200, out)
+            if path == "/api/model":         # pick the PM's claude --model (debug page)
+                if not prompt_brain or not hasattr(prompt_brain, "set_model"):
+                    return self._send(400, {"error": "active backend has no model knob"})
+                model = (data.get("model") or "").strip()
+                # ids are passed straight to `claude --model` (argv, no shell) — just
+                # keep them sane-looking; empty clears the override.
+                if model and not all(c.isalnum() or c in "._:-" for c in model):
+                    return self._send(400, {"error": "bad model id"})
+                prompt_brain.set_model(model)
+                return self._send(200, {"ok": True, "model_id": current_model(),
+                                        "model": model_label()})
             if path == "/api/autonomy":
                 mode = (data.get("autonomy") or "").lower()
                 if mode in ("readonly", "confirm", "auto"):

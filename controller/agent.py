@@ -133,6 +133,15 @@ class AgentBrain:
         self.guard = guard
         self.trust = trust if trust in VALID_TRUST else "private"
         self.model = model or (config.AGENT_MODEL or None)
+        # Runtime model override (debug page Config tab) wins over the env pin,
+        # mirroring the prompt override: a small persisted file, absent = default.
+        try:
+            with open(config.MODEL_PATH, encoding="utf-8") as f:
+                override = f.read().strip()
+            if override:
+                self.model = override
+        except OSError:
+            pass
         self.bin = claude_bin or "claude"
         if self.bin != "claude":
             os.environ.setdefault("CLAUDE_BIN", self.bin)
@@ -156,6 +165,21 @@ class AgentBrain:
 
     def reset(self):
         self.forget_conversation(self.conversation_key)
+
+    def set_model(self, model):
+        """Set the `claude --model` the PM runs as, from the next turn on. Empty →
+        back to the CONTROLLER_MODEL env pin (or Claude Code's default). Persists
+        across restarts via MODEL_PATH."""
+        model = (model or "").strip()
+        self.model = model or (config.AGENT_MODEL or None)
+        try:
+            if model:
+                with open(config.MODEL_PATH, "w", encoding="utf-8") as f:
+                    f.write(model)
+            elif os.path.exists(config.MODEL_PATH):
+                os.remove(config.MODEL_PATH)
+        except OSError:
+            pass
 
     def default_prompt(self):
         return _read_prompt(self.trust)
