@@ -1387,8 +1387,10 @@ function e2eSetPin(m, b) { try { localStorage.setItem('cc_e2e_pin_' + m, b); } c
 // Resumption material (per machine): lets a reload re-attach with NO passkey,
 // within the worker's hard TTL. The master is key material on disk for ≤ this
 // window — the convenience/secrecy trade (a malicious relay still can't read it).
-// Keep in sync with FLEET_E2E_MAX_TTL on the worker (fleet/fleet.env): the
-// shorter of the two wins, so a mismatch silently forces an early re-passkey.
+// Keep in sync with FLEET_E2E_MAX_TTL on the worker (default 86400 in e2e.py,
+// overridable in fleet/fleet.env): the shorter of the two wins, so a mismatch
+// silently forces an early re-passkey. 24h everywhere = one passkey per machine
+// per day.
 const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
 function e2eLoadResume(m) { try { const s = JSON.parse(localStorage.getItem('cc_e2e_rs_' + m) || 'null'); return (s && s.exp > Date.now()) ? s : null; } catch { return null; } }
 function e2eSaveResume(m, id, master) { try { localStorage.setItem('cc_e2e_rs_' + m, JSON.stringify({ id, master, exp: Date.now() + RESUME_TTL_MS })); } catch {} }
@@ -1403,7 +1405,20 @@ function e2eTimeout(ms) { return new Promise((_, rej) => setTimeout(() => rej(ne
 // auto-fire (works on desktop / while the tap activation is fresh). If the browser
 // needs an explicit gesture (iOS), the modal stays and the tap fires it.
 const REVEAL_MS = 350;
+// One passkey prompt at a time — a strict FIFO queue, NOT a batch (the batched
+// ceremony was tried and rolled back; the flow stays one-passkey-per-machine).
+// Without this, several machines whose silent resumes fail at once (worker
+// restarted / TTL lapsed) fall through to full handshakes CONCURRENTLY and
+// clobber the one shared modal: overlapping credentials.get() calls reject,
+// the loser trips the 30s cooldown, and the user pays extra prompts for the
+// retries. Queued, each machine gets the modal (and the OS sheet) alone.
+let e2eAssertTurn = Promise.resolve();
 function e2eGetAssertion(machine, challengeBytes) {
+  const turn = e2eAssertTurn.then(() => e2eGetAssertionNow(machine, challengeBytes));
+  e2eAssertTurn = turn.then(() => {}, () => {});
+  return turn;
+}
+function e2eGetAssertionNow(machine, challengeBytes) {
   const req = lastAuthReq || {};
   const get = () => navigator.credentials.get({ publicKey: {
     challenge: challengeBytes, rpId: req.rpId || location.hostname,

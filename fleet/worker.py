@@ -586,6 +586,7 @@ class Worker:
         try:
             tmp = RESUME_FILE.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(data))
+            os.chmod(tmp, 0o600)   # key material — owner-only, like the identity file
             os.replace(str(tmp), str(RESUME_FILE))
         except Exception as e:
             print(f"[worker {self.machine}] e2e resume save failed: {e}", flush=True)

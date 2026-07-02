@@ -23,6 +23,10 @@ fleet/.clawd-fleet.vapid.json
 fleet/.clawd-fleet.push-subs.json
 fleet/.fleet.worker_id.json
 fleet/.fleet.e2e_resume.json
+fleet/.fleet.e2e_resume.json.tmp
+# relay edge-session tokens (bearer secrets, 24h TTL) — survive relay restarts
+fleet/.clawd-fleet.sessions.json
+fleet/.clawd-fleet.sessions.json.tmp
 fleet/fleet.env
 fleet/*.log
 

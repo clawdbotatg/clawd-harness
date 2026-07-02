@@ -41,6 +41,9 @@ ENV = {
     "FLEET_RP_ID": "h.atg.link",
     "FLEET_ORIGIN": "https://h.atg.link",
     "FLEET_PASSKEY_FILE": str(STORE),
+    # Same isolation for the persisted edge-session table (relay writes it on
+    # every passkey success) — never the live fleet/.clawd-fleet.sessions.json.
+    "FLEET_SESSIONS_FILE": str(Path(tempfile.gettempdir()) / "clawd-fleet-test.sessions.json"),
 }
 
 
