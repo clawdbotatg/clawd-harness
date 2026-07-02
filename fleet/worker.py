@@ -957,6 +957,14 @@ class Worker:
             # a dead socket.
             with self.wlock:
                 self.wfile = None
+                # Close the buffered writer FIRST (marks it closed even if the
+                # final flush fails) — otherwise bytes stranded by a failed
+                # ws_send get re-flushed at gc onto the dead TLS socket
+                # ("Exception ignored … SSL: BAD_LENGTH" noise in the log).
+                try:
+                    wfile.close()
+                except Exception:
+                    pass
                 try:
                     sock.close()
                 except Exception:
@@ -971,12 +979,20 @@ class Worker:
             threading.Thread(target=self.sysstats_loop, daemon=True).start()
         backoff = 1.0
         while True:
+            up0 = time.monotonic()
             try:
                 self.serve_once()
-                backoff = 1.0  # clean disconnect → reset
             except Exception as e:
                 print(f"[worker {self.machine}] link error: {e}", flush=True)
                 traceback.print_exc()
+            # Backoff exists to pace RAPID connect failures (relay down, bad
+            # token). A link that stayed up a while was healthy — its death is
+            # a fresh incident, so reconnect immediately. Without this, a link
+            # error after an hour online still paid the full accumulated 30s
+            # ("machine offline" on every phone) because backoff only reset on
+            # a clean EOF, and real link deaths are almost never clean.
+            if time.monotonic() - up0 > 60.0:
+                backoff = 1.0
             print(f"[worker {self.machine}] reconnecting in {backoff:.0f}s…", flush=True)
             time.sleep(backoff)
             backoff = min(backoff * 2, 30.0)

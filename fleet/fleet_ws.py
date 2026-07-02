@@ -47,14 +47,27 @@ def ws_send(wfile, lock, data, opcode=0x1, mask=False):
         wfile.flush()
 
 
+def _read_exact(rfile, n):
+    """Read exactly n bytes, or return None on EOF/short read. A buffered
+    socket read can also return None (not just b"") when the fd dies under
+    us — e.g. the TLS link breaking mid-read surfaces as an EAGAIN that the
+    io layer converts to None. Both mean the same thing here: link's gone."""
+    if not n:
+        return b""
+    buf = rfile.read(n)
+    if buf is None or len(buf) < n:
+        return None
+    return buf
+
+
 def ws_read_message(rfile):
     """Read one full message (reassembling fragments). Returns (kind, bytes) where
     kind is a text/binary opcode int, or "close"/"ping"/"pong"; None on EOF."""
     payload = b""
     msg_opcode = None
     while True:
-        hdr = rfile.read(2)
-        if len(hdr) < 2:
+        hdr = _read_exact(rfile, 2)
+        if hdr is None:
             return None
         b0, b1 = hdr[0], hdr[1]
         fin = b0 & 0x80
@@ -62,17 +75,19 @@ def ws_read_message(rfile):
         masked = b1 & 0x80
         length = b1 & 0x7F
         if length == 126:
-            ext = rfile.read(2)
-            if len(ext) < 2:
+            ext = _read_exact(rfile, 2)
+            if ext is None:
                 return None
             length = struct.unpack(">H", ext)[0]
         elif length == 127:
-            ext = rfile.read(8)
-            if len(ext) < 8:
+            ext = _read_exact(rfile, 8)
+            if ext is None:
                 return None
             length = struct.unpack(">Q", ext)[0]
-        mask = rfile.read(4) if masked else b""
-        chunk = rfile.read(length) if length else b""
+        mask = _read_exact(rfile, 4) if masked else b""
+        chunk = _read_exact(rfile, length)
+        if mask is None or chunk is None:
+            return None
         if masked and chunk:
             chunk = bytes(chunk[i] ^ mask[i % 4] for i in range(len(chunk)))
         if opcode == 0x8:
