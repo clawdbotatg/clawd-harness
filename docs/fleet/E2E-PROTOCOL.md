@@ -242,7 +242,9 @@ The relay logic is unchanged except for routing the new control types — see
   and the keys never leave the endpoints.
 - **TTL:** slide-on-activity. `idle_deadline = now + IDLE_TTL` (default 10 min),
   refreshed on each *successfully authenticated* inbound record. A hard ceiling
-  `hard_deadline = established + MAX_TTL` (default 60 min) is never extended.
+  `hard_deadline = established + MAX_TTL` (default 24 h — the passkey cadence:
+  one fresh assertion per machine per day, matching the relay edge session and
+  the browser's resume-material window) is never extended.
 - On expiry the worker zeroizes the keys and refuses further records; the mobile
   must run a fresh handshake (one new Face ID). The harness link for that viewer
   is torn down.
@@ -267,11 +269,17 @@ TTL**:
   The mobile verifies `cf` (proving the worker holds the same master), derives the
   same keys, and the channel is live — **no passkey**.
 - The resumed session inherits the **original `hard_deadline`** (resume never
-  extends the 1 h ceiling); idle still slides. After the hard deadline the resume
-  entry is dropped → next connect falls back to a full handshake (passkey).
+  extends the `MAX_TTL` ceiling); idle still slides. After the hard deadline the
+  resume entry is dropped → next connect falls back to a full handshake (passkey).
+- The worker **persists** its `resume_id → {resume_master, hard_deadline}` table
+  to a gitignored, owner-only file (`.fleet.e2e_resume.json`, atomic writes,
+  expired entries pruned) so a worker restart/crash/deploy doesn't wipe it — a
+  wipe forced a fresh passkey per machine on the next open, which is exactly the
+  passkey-storm regression.
 - **Tradeoff:** `resume_master` is key material at rest (browser localStorage,
-  worker memory) for ≤ `MAX_TTL` — the convenience/secrecy trade a TLS session
-  ticket makes. A malicious relay still can't read it or derive keys (it only sees
+  worker disk — same posture as the worker's long-term identity key in
+  `.fleet.worker_id.json`) for ≤ `MAX_TTL` — the convenience/secrecy trade a TLS
+  session ticket makes. A malicious relay still can't read it or derive keys (it only sees
   `resume_id`/`rn`); replaying a captured `resume_id` yields a session it has no
   keys for → DoS only, and forces the real mobile to re-auth.
 
@@ -280,7 +288,7 @@ TTL**:
 | Name | Default | Meaning |
 |------|---------|---------|
 | `FLEET_E2E_IDLE_TTL` | 600 s | idle timeout (slide) |
-| `FLEET_E2E_MAX_TTL` | 3600 s | hard session ceiling |
+| `FLEET_E2E_MAX_TTL` | 86400 s | hard session ceiling (= per-machine passkey cadence) |
 | `FLEET_E2E_REQUIRE` | 1 | refuse un-E2E'd traffic (set 0 only for the stdlib smokes) |
 | `FLEET_RP_ID` | h.atg.link | WebAuthn rpId checked by relay + worker |
 | `FLEET_ORIGIN` | https://h.atg.link | WebAuthn origin checked by relay + worker |

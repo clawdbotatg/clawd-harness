@@ -210,8 +210,34 @@ def new_challenge():
 
 # Sessions: a successful passkey assertion mints a bearer token good for
 # SESSION_TTL, so reconnects within the window don't re-prompt Face ID.
-SESSIONS = {}  # token -> expiry epoch
+# Persisted to disk (0600, gitignored) so a relay restart/deploy doesn't burn
+# every phone's daily edge auth — before this, each `systemctl restart
+# clawd-fleet-relay` invalidated all sessions and re-prompted a passkey.
+SESSIONS_FILE = Path(os.environ.get("FLEET_SESSIONS_FILE") or (HERE / ".clawd-fleet.sessions.json"))
 _sessions_lock = threading.Lock()
+
+
+def _load_sessions():
+    try:
+        raw = json.loads(SESSIONS_FILE.read_text())
+        now = time.time()
+        return {k: float(v) for k, v in raw.items() if float(v) > now}
+    except Exception:
+        return {}
+
+
+SESSIONS = _load_sessions()  # token -> expiry epoch
+
+
+def _save_sessions_locked():
+    """Write the session table (atomic, owner-only). Caller holds _sessions_lock."""
+    try:
+        tmp = SESSIONS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(SESSIONS))
+        os.chmod(tmp, 0o600)
+        os.replace(str(tmp), str(SESSIONS_FILE))
+    except Exception:
+        pass
 
 
 def new_session(ttl):
@@ -221,6 +247,7 @@ def new_session(ttl):
         SESSIONS[tok] = exp
         for k in [k for k, v in SESSIONS.items() if v < time.time()]:
             SESSIONS.pop(k, None)
+        _save_sessions_locked()
     return tok, exp
 
 

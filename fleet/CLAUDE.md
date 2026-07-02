@@ -24,7 +24,12 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     worker independently verifies a channel-bound passkey (require-UV) over its
 >     pinned long-term identity, and **all** harness traffic is AES-GCM end-to-end.
 >     The relay routes only ciphertext → a compromised relay is reduced to DoS.
->     Worker session slides 10 min idle / 1 h hard. Spec: **`../docs/fleet/E2E-PROTOCOL.md`**.
+>     Worker session slides 10 min idle / **24 h hard** (`FLEET_E2E_MAX_TTL`
+>     default 86400 — the per-machine passkey cadence; silent resume covers
+>     everything inside it, and the worker persists resume material to
+>     `.fleet.e2e_resume.json` so restarts don't force re-auth. The relay likewise
+>     persists edge-session tokens to `.clawd-fleet.sessions.json`). Target: **one
+>     passkey per machine per day**, no storms. Spec: **`../docs/fleet/E2E-PROTOCOL.md`**.
 >     The relay needs **no** crypto for this (blind passthrough); `cryptography`
 >     is a **worker-only** dep. Tests: `test_e2e.py`, `test_e2e_mitm.py`,
 >     `test_e2e_interop.py` (Python↔browser byte-for-byte via `node`).

@@ -41,6 +41,7 @@ under `fleet/`) or from the operator. You need **both**:
 |---|---|---|
 | **Worker token** | `FLEET_WORKER_TOKEN` | The box's `~/clawd-harness/fleet/fleet.env` (`grep WORKER_TOKEN`), or an existing machine's worker config (e.g. the laptop's launchd plist). Use the **worker** token, *not* the mobile/URL token. |
 | **Passkey file** | `fleet/.clawd-fleet.passkeys.json` | The canonical copy lives on the box: `scp zkllmapi:~/clawd-harness/fleet/.clawd-fleet.passkeys.json` (or copy from any existing machine's `fleet/` dir). It holds only **public** keys, is the **same on every machine**, and is what lets this worker verify *you* over the end-to-end channel. See [`DEPLOY.md`](DEPLOY.md) → "Provisioning the passkey". |
+| **E2E session TTL** | `FLEET_E2E_MAX_TTL` (optional) | Leave unset — the default (86400 = 24 h) is the per-machine passkey cadence, and silent resume covers everything inside it. Do **not** set it lower "to be safe": the old 3600 default is what made every app-open cost a passkey per machine. |
 
 You also need, for **step 4**, the ability to edit the relay's allowlist on the
 box (`ssh zkllmapi`) — or ask whoever has it to add this machine's id.

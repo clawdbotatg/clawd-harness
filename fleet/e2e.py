@@ -21,7 +21,12 @@ PROTO = b"fleet-e2e/1"
 CURVE = ec.SECP256R1()
 
 IDLE_TTL = int(os.environ.get("FLEET_E2E_IDLE_TTL", "600"))   # slide-on-activity
-MAX_TTL  = int(os.environ.get("FLEET_E2E_MAX_TTL",  "3600"))  # hard ceiling
+# Hard ceiling = the passkey cadence: resume (silent, no passkey) works until this
+# lapses, then the next open needs a fresh assertion. 24h matches the relay edge
+# session (FLEET_SESSION_TTL) and the browser's resume-material window
+# (RESUME_TTL_MS in index.html) — one passkey per machine per day, by design.
+# The old 3600 default made every box that didn't override it re-prompt hourly.
+MAX_TTL  = int(os.environ.get("FLEET_E2E_MAX_TTL",  "86400"))  # hard ceiling
 
 DIR_M2W = 0x4D  # 'M' — mobile→worker
 DIR_W2M = 0x57  # 'W' — worker→mobile
