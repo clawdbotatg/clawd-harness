@@ -988,8 +988,17 @@ function flushRelayOutbox() {
 // driven from the `machines` handler so it always runs against a fresh roster.
 function setRelayAuthed() {
   if (relayAuthed) { flushRelayOutbox(); return; }
+  const flushed = new Set(relayOutbox);   // frames the flush below delivers — don't double-send those
   relayAuthed = true;
   flushRelayOutbox();
+  // Handshakes stranded by a socket flap (preserved by onclose): their last ctl
+  // frame — hello / resume / ClientAuth — or the worker's reply died with the old
+  // socket. Re-deliver the unanswered frame exactly once on this authed socket;
+  // the worker treats duplicates idempotently, so the already-paid Face ID lands
+  // instead of a fresh handshake prompting a second one.
+  for (const [m, c] of Object.entries(e2eChans)) {
+    if (c && c.status === 'handshaking' && c.pendingCtl && !flushed.has(c.pendingCtl)) relaySend(c.pendingCtl);
+  }
 }
 // Re-sync everything now that the relay link is authed: re-list every machine for
 // the unified roster, and re-subscribe the session we're viewing through the full
@@ -1099,9 +1108,10 @@ function connect() {
   if (ws && ws.readyState !== WebSocket.CLOSED) return;   // already connecting/open/closing — don't stack a second socket
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   // A new socket starts unauthed: reset the relay auth gate so nothing leaks out
-  // before authOk, and drop any frames buffered against the previous (dead) socket
-  // — they reference e2e channels that onclose tore down, so re-sending them is
-  // meaningless; the fresh handshake re-buffers what it needs.
+  // before authOk, and drop any frames buffered against the previous (dead) socket.
+  // Torn-down channels re-buffer what they need on re-handshake; a PRESERVED
+  // mid-handshake channel's unanswered ctl frame is re-sent by setRelayAuthed()
+  // (it lives in ch.pendingCtl, not only here — this reset never strands it).
   relayAuthed = false; resyncedThisSocket = false; relayOutbox = [];
   // Fleet mode dials the RELAY as a mobile client; direct mode dials the harness.
   ws = new WebSocket(`${proto}://${location.host}/ws?${FLEET ? 'role=mobile' : 't=' + encodeURIComponent(token)}`);
@@ -1135,7 +1145,18 @@ function connect() {
   };
   ws.onclose = () => {
     dot.classList.remove('up');
-    for (const k of Object.keys(e2eChans)) delete e2eChans[k];   // sessions die with the connection → re-handshake
+    // Open sessions die with the connection and re-attach via SILENT resume — but
+    // a channel mid-handshake is preserved: on iOS the Face ID sheet itself drops
+    // the socket, and deleting the in-flight handshake here is what turned every
+    // prompt into two (the paid assertion came back to a dead channel, so a fresh
+    // handshake re-prompted). Its unanswered ctl frame is re-sent once the next
+    // socket auths (setRelayAuthed) and the worker completes the SAME handshake.
+    // A handshake stuck >90s is dead weight — let it be torn down and replaced.
+    for (const k of Object.keys(e2eChans)) {
+      const c = e2eChans[k];
+      if (c && c.status === 'handshaking' && Date.now() - (c.started || 0) < 90000) continue;
+      delete e2eChans[k];
+    }
     // A close *before* we ever opened usually means auth: the browser hides the 403
     // behind code 1006, so we infer a bad/expired token from repeated pre-open
     // closes and surface the paste-a-new-token screen (also how a weekly rotation
@@ -1445,12 +1466,16 @@ function e2eGetAssertionNow(machine, challengeBytes) {
 async function e2eEnsure(machine, opts = {}) {
   const cur = e2eChans[machine];
   if (cur && cur.status === 'open') return cur;
-  if (cur && cur.status === 'handshaking') return cur.ready;
+  if (cur && cur.status === 'handshaking') {
+    if (Date.now() - (cur.started || 0) < 90000) return cur.ready;
+    delete e2eChans[machine];   // stale (survived a flap but never completed) — replace
+  }
   // A background trigger (reconnect/bootstrap) does NOT re-fire a passkey for a
   // machine that just failed — that's the reload storm. Only an explicit user
   // gesture (no opts.auto) retries before the cooldown lapses. See e2eFailUntil.
   if (opts.auto && (e2eFailUntil[machine] || 0) > Date.now()) return Promise.reject(new Error('cooldown'));
-  const ch = e2eChans[machine] = { status: 'handshaking', session: null, queue: [],
+  const ch = e2eChans[machine] = { status: 'handshaking', started: Date.now(),
+    session: null, queue: [], pendingCtl: null,
     sendChain: Promise.resolve(), recvChain: Promise.resolve(),
     dSH: e2eDeferred(), dSD: e2eDeferred(), dRes: e2eDeferred() };
   ch.ready = (async () => {
@@ -1459,8 +1484,9 @@ async function e2eEnsure(machine, opts = {}) {
     if (rs) {
       try {
         meta.textContent = 'resuming ' + machine + '…';
-        e2eSendCtl(machine, { t: 'e2e.resume', id: rs.id });
+        e2eSendCtlTracked(ch, machine, { t: 'e2e.resume', id: rs.id });
         const r = await ch.dRes;                                  // {rn, cf}
+        ch.pendingCtl = null;
         const master = b64uDec(rs.master), rn = b64uDec(r.rn);
         if (!E2E._eq(await E2E.resumeConfirm(master, rn), b64uDec(r.cf))) throw new Error('resume-cf');
         ch.session = await E2E.resumeSession(master, rn);
@@ -1469,21 +1495,23 @@ async function e2eEnsure(machine, opts = {}) {
         for (const fr of q) e2eSendFrame(machine, fr);
         return ch;
       } catch (e) {                                               // expired/dropped → re-handshake
-        e2eClearResume(machine); ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred();
+        e2eClearResume(machine); ch.pendingCtl = null; ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred();
       }
     }
     // 2) Full handshake (passkey via the gnome modal).
     const pinB64 = e2ePin(machine);
     const cli = E2E.client(machine, pinB64 ? b64uDec(pinB64) : null);
     meta.textContent = 'securing ' + machine + '…';
-    e2eSendCtl(machine, await cli.hello());
+    e2eSendCtlTracked(ch, machine, await cli.hello());
     const sh = await ch.dSH;                              // ServerHello (worker-signed)
+    ch.pendingCtl = null;
     const { challenge, ikW, build } = await cli.auth(sh); // verify sig + pin, derive keys
     if (!pinB64) { e2eSetPin(machine, b64uEnc(ikW)); ch.firstPin = true; }   // TOFU
     const assertion = await e2eGetAssertion(machine, challenge);      // Face ID, channel-bound
     hidePasskey();
-    e2eSendCtl(machine, await build(assertion));          // ClientAuth
+    e2eSendCtlTracked(ch, machine, await build(assertion));          // ClientAuth
     const sd = await ch.dSD;                              // ServerDone (key confirmation)
+    ch.pendingCtl = null;
     ch.session = await cli.done(sd);
     ch.fp = await cli.fingerprint();
     e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);  // no-passkey reloads
@@ -1493,7 +1521,7 @@ async function e2eEnsure(machine, opts = {}) {
     for (const fr of q) e2eSendFrame(machine, fr);
     return ch;
   })().catch((e) => {
-    ch.status = 'failed';
+    ch.status = 'failed'; ch.pendingCtl = null;
     e2eFailUntil[machine] = Date.now() + E2E_FAIL_COOLDOWN_MS;   // no auto-retry storm; user gesture still retries
     if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
     else { meta.textContent = 'secure channel failed: ' + ((e && e.message) || e); console.error('[e2e] handshake failed for', machine, e); }
@@ -1503,6 +1531,16 @@ async function e2eEnsure(machine, opts = {}) {
 }
 
 function e2eSendCtl(machine, msg) { relaySend({ type: 'toMachine', machine, msg }); }   // buffered until the relay auth gate is passed
+// Handshake ctl frames are TRACKED on the channel until answered: if the socket
+// dies while one is in flight (the iOS Face-ID-sheet drop), setRelayAuthed()
+// re-sends it on the next authed socket and the worker completes the SAME
+// handshake (it matches by the channel-bound challenge / replies idempotently) —
+// no second passkey.
+function e2eSendCtlTracked(ch, machine, msg) {
+  const frame = { type: 'toMachine', machine, msg };
+  ch.pendingCtl = frame;
+  relaySend(frame);
+}
 
 function e2eSendFrame(machine, frame) {
   const ch = e2eChans[machine];
@@ -1613,11 +1651,22 @@ function showPasskey(msg) {
 }
 function hidePasskey() { const el = document.getElementById('passkey'); if (el) el.hidden = true; }
 
+// A signed edge assertion whose ws.send may have died with the socket (iOS drops
+// it while the Face ID sheet is up). The relay accepts any challenge it issued in
+// the last ~2 min (single-use), so replaying this on the reconnect lands the
+// already-paid Face ID instead of prompting a second one. One try only — on a
+// reject the relay re-challenges and the normal prompt takes over.
+let lastEdgeAuth = null;   // {frame, ts}
 function onAuthRequired(m) {
   lastAuthReq = m;
   if (m.reason === 'expired') clearSession();
   const sess = loadSession();
   if (sess) { setPmCookie(sess); ws.send(JSON.stringify({ type: 'auth', session: sess })); return; }
+  if (lastEdgeAuth && Date.now() - lastEdgeAuth.ts < 100000) {
+    const f = lastEdgeAuth.frame; lastEdgeAuth = null;
+    ws.send(JSON.stringify(f));
+    return;
+  }
   // No web enrollment: if no passkey is provisioned, an admin must add one.
   if (!m.enrolled || !(m.credentialIds || []).length) {
     showPasskey('no passkey set up for this relay — an admin must provision one (see DEPLOY.md)');
@@ -1640,8 +1689,10 @@ async function doAssertion(m) {
       userVerification: 'preferred', timeout: 60000,
     } });
     const r = a.response;
-    ws.send(JSON.stringify({ type: 'auth', id: b64uEnc(a.rawId),
-      clientDataJSON: b64uEnc(r.clientDataJSON), authenticatorData: b64uEnc(r.authenticatorData), signature: b64uEnc(r.signature) }));
+    const frame = { type: 'auth', id: b64uEnc(a.rawId),
+      clientDataJSON: b64uEnc(r.clientDataJSON), authenticatorData: b64uEnc(r.authenticatorData), signature: b64uEnc(r.signature) };
+    lastEdgeAuth = { frame, ts: Date.now() };   // replayable if this send dies with the socket
+    ws.send(JSON.stringify(frame));
   } catch (e) {
     meta.textContent = '';
     showPasskey('the gnome awaits — whisper the safe word to enter');

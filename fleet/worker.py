@@ -327,6 +327,12 @@ class Worker:
         self.e2e_hs = {}           # mobile_id -> e2e.WorkerHandshake (in progress)
         self.e2e_seen = set()      # used challenges — cross-handshake replay defense
         self.e2e_resume = self._load_e2e_resume()   # resume_id -> {master, hard}; survives restart (disk)
+        # Completed-handshake replies, keyed by the (single-use) WebAuthn challenge.
+        # iOS drops the socket while the Face ID sheet is up, so our e2e.done can be
+        # sent to a mobile id that no longer exists; the client re-sends its
+        # ClientAuth from its NEW id and we answer from this cache instead of
+        # failing with "no handshake" and burning a second Face ID.
+        self.e2e_done_cache = {}   # challenge (b64u) -> {done, sess, exp}
         self.e2e_lock = threading.Lock()
         self.identity = None
         self.passkey_verify = None
@@ -591,6 +597,16 @@ class Worker:
         except Exception as e:
             print(f"[worker {self.machine}] e2e resume save failed: {e}", flush=True)
 
+    @staticmethod
+    def _assertion_challenge(msg):
+        """The b64u challenge the authenticator actually signed, from the
+        ClientAuth's clientDataJSON. '' if absent/malformed."""
+        try:
+            cdj = json.loads(e2emod.b64u_dec(msg["assertion"]["clientDataJSON"]))
+            return cdj.get("challenge") or ""
+        except Exception:
+            return ""
+
     def _e2e_hello(self, frm, msg):
         if not (HAVE_E2E and self.identity):
             return self.reply(frm, {"t": "e2e.err", "error": "e2e unavailable"})
@@ -601,14 +617,48 @@ class Worker:
         except Exception as e:
             print(f"[worker {self.machine}] E2E hello failed for {frm}: {e}", flush=True)
             return self.reply(frm, {"t": "e2e.err", "error": "hello"})
+        hs.created = time.time()
         with self.e2e_lock:
+            # prune handshakes abandoned by a socket flap (their mobile id is gone)
+            stale = [k for k, h in self.e2e_hs.items()
+                     if time.time() - getattr(h, "created", 0) > 300]
+            for k in stale:
+                self.e2e_hs.pop(k, None)
             self.e2e_hs[frm] = hs
         self.reply(frm, dict(sh, t="e2e.shello"))
 
     def _e2e_auth(self, frm, msg):
+        chal = self._assertion_challenge(msg)
+        cached = None
         with self.e2e_lock:
             hs = self.e2e_hs.pop(frm, None)
+            if hs is None and chal:
+                # iOS drops the relay socket while the Face ID sheet is up, so the
+                # assertion often arrives from a NEW mobile id while the handshake
+                # it completes is filed under the OLD one. The assertion is
+                # channel-bound — signed over THIS handshake's transcript challenge
+                # — so matching by challenge hands the handshake its own completion;
+                # the mobile id is just relay routing, never a security property.
+                old = next((k for k, h in self.e2e_hs.items() if h.keys and
+                            e2emod.b64u(h.keys["webauthn_challenge"]) == chal), None)
+                if old is not None:
+                    hs = self.e2e_hs.pop(old)
+                    print(f"[worker {self.machine}] E2E auth from {frm} completes "
+                          f"handshake started as {old} (socket flap mid-passkey)", flush=True)
+            if hs is None and chal:
+                # Duplicate ClientAuth: we already finished this handshake but our
+                # e2e.done went to a mobile id that died mid-flap. Nothing is
+                # re-verified (it already was, and the challenge is burned in
+                # e2e_seen) — re-attach the session to the new id and re-reply.
+                ent = self.e2e_done_cache.get(chal)
+                if ent and ent["exp"] > time.time():
+                    self.e2e_sessions[frm] = ent["sess"]
+                    cached = ent["done"]
         if hs is None:
+            if cached is not None:
+                print(f"[worker {self.machine}] E2E done re-sent to {frm} "
+                      f"(reply to the pre-flap id was lost)", flush=True)
+                return self.reply(frm, dict(cached, t="e2e.done"))
             return self.reply(frm, {"t": "e2e.err", "error": "no handshake"})
         try:
             done, sess = hs.finish(msg)
@@ -619,6 +669,11 @@ class Worker:
             self.e2e_sessions[frm] = sess
             self.e2e_resume[e2emod.b64u(hs.keys["resume_id"])] = {
                 "master": hs.keys["resume_master"], "hard": sess.hard_deadline}
+            if chal:
+                now = time.time()
+                self.e2e_done_cache[chal] = {"done": done, "sess": sess, "exp": now + 180}
+                for k in [k for k, v in self.e2e_done_cache.items() if v["exp"] <= now]:
+                    self.e2e_done_cache.pop(k, None)
         self._persist_resume()   # survive a worker restart → silent resume, no fresh passkey
         print(f"[worker {self.machine}] E2E channel open for {frm}", flush=True)
         self.reply(frm, dict(done, t="e2e.done"))

@@ -208,6 +208,44 @@ def new_challenge():
     return webauthn.b64u_encode(secrets.token_bytes(32))
 
 
+# iOS drops the WebSocket while the Face ID sheet is up, so the assertion often
+# comes back on a NEW connection — whose conn.challenge is a fresh one that the
+# user never signed. Accepting any challenge WE minted in the last couple of
+# minutes (single-use, popped on first try win-or-lose) lets that already-paid
+# Face ID land instead of re-prompting. Freshness + single-use + our-issuance
+# are all still enforced; the only thing relaxed is which TCP connection the
+# answer arrives on — which was never a security property (the session token
+# it mints is connection-independent anyway).
+RECENT_CHALLENGES = {}  # challenge (b64u) -> expiry epoch
+CHALLENGE_TTL = 120.0
+_chal_lock = threading.Lock()
+
+
+def remember_challenge(ch):
+    now = time.time()
+    with _chal_lock:
+        RECENT_CHALLENGES[ch] = now + CHALLENGE_TTL
+        for k in [k for k, v in RECENT_CHALLENGES.items() if v <= now]:
+            RECENT_CHALLENGES.pop(k, None)
+
+
+def take_challenge(claimed):
+    """True iff `claimed` is an unexpired challenge we issued; consumes it."""
+    if not claimed:
+        return False
+    with _chal_lock:
+        exp = RECENT_CHALLENGES.pop(claimed, None)
+    return bool(exp and exp > time.time())
+
+
+def assertion_challenge(client_data_json_b64u):
+    """The challenge the authenticator actually signed, from clientDataJSON."""
+    try:
+        return json.loads(webauthn.b64u_decode(client_data_json_b64u)).get("challenge") or ""
+    except Exception:
+        return ""
+
+
 # Sessions: a successful passkey assertion mints a bearer token good for
 # SESSION_TTL, so reconnects within the window don't re-prompt Face ID.
 # Persisted to disk (0600, gitignored) so a relay restart/deploy doesn't burn
@@ -408,6 +446,7 @@ class Relay:
         """Mint a single-use passkey challenge for this connection and describe
         what the browser needs (rpId + enrolled credential ids)."""
         conn.challenge = new_challenge()
+        remember_challenge(conn.challenge)   # survives a socket flap mid-Face-ID
         creds = load_passkeys()
         msg = {"type": "authRequired", "method": "passkey", "challenge": conn.challenge,
                "rpId": RP_ID, "credentialIds": [c["id"] for c in creds], "enrolled": bool(creds)}
@@ -458,15 +497,22 @@ class Relay:
                 else:
                     mobile.send_json(self._auth_challenge(mobile, reason="expired"))
                 return
-            # Passkey assertion path.
+            # Passkey assertion path. The signed challenge may belong to a PRIOR
+            # connection (iOS kills the socket while the Face ID sheet is up and
+            # the answer arrives on the reconnect), so accept any challenge we
+            # issued within CHALLENGE_TTL — single-use, consumed win or lose.
             cred = find_passkey(frame.get("id") or "")
-            if not cred or not mobile.challenge:
+            claimed = assertion_challenge(frame.get("clientDataJSON") or "")
+            if not cred or not take_challenge(claimed):
                 mobile.send_json({"type": "error", "error": "auth: unknown credential"})
+                # re-challenge so the client falls back to a normal prompt instead
+                # of hanging unauthed (e.g. a replayed frame whose challenge aged out)
+                mobile.send_json(self._auth_challenge(mobile, reason="retry"))
                 return
             pubkey = (int(cred["x"], 16), int(cred["y"], 16))
             ok, reason = webauthn.verify_assertion(
                 pubkey, frame.get("clientDataJSON") or "", frame.get("authenticatorData") or "",
-                frame.get("signature") or "", mobile.challenge, RP_ID, ORIGIN)
+                frame.get("signature") or "", claimed, RP_ID, ORIGIN)
             mobile.challenge = ""  # single-use, win or lose
             if ok:
                 mobile.mfa_ok = True
@@ -478,6 +524,7 @@ class Relay:
             else:
                 print(f"[relay] mobile auth rejected ({reason}): {mobile.ident}", flush=True)
                 mobile.send_json({"type": "error", "error": f"auth: {reason}"})
+                mobile.send_json(self._auth_challenge(mobile, reason="retry"))
             return
 
         # Everything else requires a satisfied (and unexpired) wallet factor.

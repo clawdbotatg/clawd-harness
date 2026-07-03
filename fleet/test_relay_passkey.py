@@ -152,10 +152,90 @@ def main():
             if got:
                 break
             time.sleep(0.05)
-        check("replayed assertion (stale challenge) rejected",
-              got and "challenge mismatch" in got.get("error", ""))
+        # Rejection now happens at the issued-challenge check (take_challenge):
+        # the fixture's baked-in challenge was never minted by this relay, so it
+        # dies as "unknown credential" before signature verification.
+        check("replayed assertion (never-issued challenge) rejected",
+              got and ("unknown credential" in got.get("error", "")
+                       or "challenge mismatch" in got.get("error", "")))
         sock2.close()
         sock.close()
+
+        # 5. the iOS flap path: a challenge issued on one connection is answerable
+        #    on the NEXT one (single-use, within CHALLENGE_TTL) — the Face ID sheet
+        #    drops the socket, and the already-paid assertion must still land.
+        #    Needs cryptography (live signing); skipped silently without it.
+        try:
+            from test_e2e import FakePasskey
+            have_crypto = True
+        except Exception:
+            have_crypto = False
+        if have_crypto:
+            pk = FakePasskey()
+            STORE.write_text(json.dumps([{"id": CRED_ID, "x": format(PX, "064x"),
+                                          "y": format(PY, "064x"), "sign_count": 0},
+                                         pk.record()]))
+            import base64
+
+            def b64u_dec(s):
+                return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+            def dial():
+                s, rf, wf = fleet_ws.client_connect(f"{RELAY}/ws?role=mobile&t={quote(TOKEN)}")
+                lk, ib = threading.Lock(), []
+
+                def rd():
+                    while True:
+                        m = fleet_ws.ws_read_message(rf)
+                        if m is None:
+                            return
+                        k, d = m
+                        if k == "ping":
+                            fleet_ws.ws_send(wf, lk, d, opcode=0xA, mask=True)
+                            continue
+                        if k in ("pong", "close"):
+                            continue
+                        try:
+                            ib.append(json.loads(d.decode()))
+                        except Exception:
+                            pass
+                threading.Thread(target=rd, daemon=True).start()
+                return s, wf, lk, ib
+
+            def wait_in(ib, pred, secs=4):
+                end = time.time() + secs
+                while time.time() < end:
+                    for f in list(ib):
+                        if pred(f):
+                            return f
+                    time.sleep(0.05)
+                return None
+
+            s3, wf3, lk3, ib3 = dial()
+            req = wait_in(ib3, lambda f: f.get("type") == "authRequired")
+            check("flap: challenge issued on conn A", bool(req and req.get("challenge")))
+            s3.close()                                   # the Face ID sheet killed the socket
+            a = pk.assertion(b64u_dec(req["challenge"]))
+            s4, wf4, lk4, ib4 = dial()
+            time.sleep(0.3)
+            fleet_ws.ws_send(wf4, lk4, json.dumps(
+                {"type": "auth", "id": a["credentialId"], "clientDataJSON": a["clientDataJSON"],
+                 "authenticatorData": a["authenticatorData"], "signature": a["signature"]}),
+                opcode=0x1, mask=True)
+            okf = wait_in(ib4, lambda f: f.get("type") == "authOk")
+            check("flap: conn A's assertion lands on conn B (authOk + session)",
+                  bool(okf and okf.get("session")))
+            # single-use: the same assertion again must be rejected
+            s5, wf5, lk5, ib5 = dial()
+            time.sleep(0.3)
+            fleet_ws.ws_send(wf5, lk5, json.dumps(
+                {"type": "auth", "id": a["credentialId"], "clientDataJSON": a["clientDataJSON"],
+                 "authenticatorData": a["authenticatorData"], "signature": a["signature"]}),
+                opcode=0x1, mask=True)
+            rej2 = wait_in(ib5, lambda f: f.get("type") == "error")
+            check("flap: replaying the CONSUMED assertion rejected",
+                  bool(rej2 and "unknown credential" in rej2.get("error", "")))
+            s4.close(); s5.close()
     finally:
         proc.terminate()
         try:
