@@ -32,6 +32,7 @@ Env:  HARNESS_WS (default ws://127.0.0.1:8787), HARNESS_TOKEN (auto-discovered).
 """
 import argparse
 import base64
+import hmac
 import json
 import os
 import re
@@ -591,8 +592,11 @@ class Worker:
                     for rid, ent in self.e2e_resume.items() if ent["hard"] > now}
         try:
             tmp = RESUME_FILE.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(data))
-            os.chmod(tmp, 0o600)   # key material — owner-only, like the identity file
+            # key material — CREATED owner-only (no umask window), like the identity file
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(data))
+            os.chmod(tmp, 0o600)   # belt-and-braces if a stale tmp survived a crash
             os.replace(str(tmp), str(RESUME_FILE))
         except Exception as e:
             print(f"[worker {self.machine}] e2e resume save failed: {e}", flush=True)
@@ -647,11 +651,14 @@ class Worker:
                           f"handshake started as {old} (socket flap mid-passkey)", flush=True)
             if hs is None and chal:
                 # Duplicate ClientAuth: we already finished this handshake but our
-                # e2e.done went to a mobile id that died mid-flap. Nothing is
-                # re-verified (it already was, and the challenge is burned in
-                # e2e_seen) — re-attach the session to the new id and re-reply.
+                # e2e.done went to a mobile id that died mid-flap. Only the EXACT
+                # original frame re-triggers: the challenge alone is public (the
+                # relay routed the original clientDataJSON in plaintext), so we
+                # also require the frame's cf_m to match byte-for-byte before any
+                # state is touched — a fabricated challenge-only frame is refused.
                 ent = self.e2e_done_cache.get(chal)
-                if ent and ent["exp"] > time.time():
+                if (ent and ent["exp"] > time.time()
+                        and hmac.compare_digest(ent.get("cf_m") or "", msg.get("cf_m") or "")):
                     self.e2e_sessions[frm] = ent["sess"]
                     cached = ent["done"]
         if hs is None:
@@ -671,7 +678,8 @@ class Worker:
                 "master": hs.keys["resume_master"], "hard": sess.hard_deadline}
             if chal:
                 now = time.time()
-                self.e2e_done_cache[chal] = {"done": done, "sess": sess, "exp": now + 180}
+                self.e2e_done_cache[chal] = {"done": done, "sess": sess,
+                                             "cf_m": msg.get("cf_m") or "", "exp": now + 180}
                 for k in [k for k, v in self.e2e_done_cache.items() if v["exp"] <= now]:
                     self.e2e_done_cache.pop(k, None)
         self._persist_resume()   # survive a worker restart → silent resume, no fresh passkey

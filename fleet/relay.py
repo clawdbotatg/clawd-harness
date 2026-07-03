@@ -227,6 +227,11 @@ def remember_challenge(ch):
         RECENT_CHALLENGES[ch] = now + CHALLENGE_TTL
         for k in [k for k, v in RECENT_CHALLENGES.items() if v <= now]:
             RECENT_CHALLENGES.pop(k, None)
+        # hard cap: an unauthed flooder can mint challenges at message rate; keep
+        # the newest and let the oldest die early rather than grow unbounded
+        if len(RECENT_CHALLENGES) > 4096:
+            for k in sorted(RECENT_CHALLENGES, key=RECENT_CHALLENGES.get)[:len(RECENT_CHALLENGES) - 4096]:
+                RECENT_CHALLENGES.pop(k, None)
 
 
 def take_challenge(claimed):
@@ -271,8 +276,11 @@ def _save_sessions_locked():
     """Write the session table (atomic, owner-only). Caller holds _sessions_lock."""
     try:
         tmp = SESSIONS_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(SESSIONS))
-        os.chmod(tmp, 0o600)
+        # bearer tokens — CREATED owner-only (no umask window; shared box)
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(SESSIONS))
+        os.chmod(tmp, 0o600)   # belt-and-braces if a stale tmp survived a crash
         os.replace(str(tmp), str(SESSIONS_FILE))
     except Exception:
         pass
