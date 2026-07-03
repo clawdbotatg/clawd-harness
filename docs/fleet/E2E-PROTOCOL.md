@@ -283,6 +283,28 @@ TTL**:
   `resume_id`/`rn`); replaying a captured `resume_id` yields a session it has no
   keys for → DoS only, and forces the real mobile to re-auth.
 
+### 7.2 Socket-flap resilience (the iOS Face-ID drop)
+
+iOS drops the WebSocket while the Face ID sheet is up, so a handshake's frames
+routinely straddle two relay connections (= two mobile ids). Both ends recover
+without a second passkey; the mobile id is routing, never a security property:
+
+- **Worker:** a `ClientAuth` from an unknown mobile id is matched to its pending
+  handshake **by the channel-bound WebAuthn challenge** inside the assertion
+  (the assertion is signed over that handshake's transcript, so this hands the
+  handshake its own completion). Completed `e2e.done` replies are cached ~3 min
+  keyed by challenge: a duplicate `ClientAuth` (our reply died with the old id)
+  is re-answered from the cache and the session re-attached — nothing is
+  re-verified, and the challenge stays burned in the replay set. Pending
+  handshakes are pruned after 5 min. Test: `test_worker_flap.py`.
+- **Mobile:** channels mid-handshake are *preserved* across a socket close
+  (open sessions still die and silently resume); the last unanswered ctl frame
+  (`hello` / `resume` / `ClientAuth`) is re-sent once on the next authed socket.
+- **Relay edge:** an assertion is accepted for any challenge the relay issued in
+  the last 120 s — single-use, consumed win or lose — rather than only the one
+  bound to the current connection. Freshness, single-use, and our-issuance all
+  still hold. Tests: the `flap:` checks in `test_relay_passkey.py`.
+
 ## 8. Parameters
 
 | Name | Default | Meaning |
