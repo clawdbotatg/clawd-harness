@@ -83,6 +83,13 @@ def main():
     check("session re-attached to the newest id", w.e2e_sessions.get("mC") is w.e2e_sessions.get("mB"))
 
     print("still fail-closed:")
+    # A relay saw the original clientDataJSON in plaintext, so the challenge alone
+    # is public. A fabricated frame carrying the right challenge but not the exact
+    # original cf_m must NOT touch the done-cache (no aliasing, no re-reply).
+    forged = {"assertion": ca["assertion"], "cf_m": e2e.b64u(b"\xff" * 32)}
+    to, err0 = deliver_auth(w, "mX", forged)
+    check("challenge-only forgery (wrong cf_m) rejected", err0.get("t") == "e2e.err")
+    check("forgery did not alias the session", "mX" not in w.e2e_sessions)
     ca2, _ = client_auth_for(w, mid, "mD")
     bogus = json.loads(json.dumps(ca2))
     cdj = json.loads(e2e.b64u_dec(bogus["assertion"]["clientDataJSON"]))
