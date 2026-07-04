@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""test_confirm_livelock.py — the `confirm` passkey livelock (RED until fixed).
+"""test_confirm_livelock.py — the `confirm` passkey livelock regression gate.
 
 The 2026-07-04 storm: 11 consecutive `E2E auth failed for m62: confirm` in the
 worker log — the user paid a passkey per attempt and every one was rejected.
@@ -12,14 +12,16 @@ rescue only runs when the slot is EMPTY). The client immediately starts a new
 attempt whose hello re-clobbers, sustaining a one-passkey-per-lap livelock
 until the socket rotates.
 
-What the fix must make true (and what this test asserts):
+What the fix (challenge-keyed handshake store in worker._e2e_hello/_e2e_auth)
+makes true, and what this test asserts:
   1. a ClientAuth completes the handshake its assertion is challenge-bound to,
      even when a newer hello from the same mobile id has since arrived;
   2. that newer handshake SURVIVES and its own ClientAuth also completes —
      neither paid passkey is wasted.
 
-This test FAILS on the current code by design — it is the regression gate for
-the challenge-first lookup fix (stage 2). Exits non-zero while the bug lives.
+Was RED against the mobile-id-keyed store (it reproduced the storm exactly:
+`confirm`, then `no handshake` — both passkeys wasted); guards the fix now.
+Exits non-zero if the livelock ever comes back.
 """
 import json
 import sys

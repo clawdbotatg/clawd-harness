@@ -289,14 +289,18 @@ iOS drops the WebSocket while the Face ID sheet is up, so a handshake's frames
 routinely straddle two relay connections (= two mobile ids). Both ends recover
 without a second passkey; the mobile id is routing, never a security property:
 
-- **Worker:** a `ClientAuth` from an unknown mobile id is matched to its pending
-  handshake **by the channel-bound WebAuthn challenge** inside the assertion
-  (the assertion is signed over that handshake's transcript, so this hands the
-  handshake its own completion). Completed `e2e.done` replies are cached ~3 min
-  keyed by challenge: a duplicate `ClientAuth` (our reply died with the old id)
-  is re-answered from the cache and the session re-attached — nothing is
-  re-verified, and the challenge stays burned in the replay set. Pending
-  handshakes are pruned after 5 min. Test: `test_worker_flap.py`.
+- **Worker:** pending handshakes are stored **keyed by the channel-bound
+  WebAuthn challenge**, so *every* `ClientAuth` — from a new mobile id (iOS
+  flap) or the same one (overlapping client attempts) — completes exactly the
+  handshake its assertion is signed over. (Keying by mobile id was the
+  `confirm` livelock of 2026-07-04: a second same-id hello clobbered the
+  in-flight handshake and every paid passkey died against the wrong instance;
+  regression gate: `test_confirm_livelock.py`.) Completed `e2e.done` replies
+  are cached ~3 min keyed by challenge: a duplicate `ClientAuth` (our reply
+  died with the old id) is re-answered from the cache and the session
+  re-attached — nothing is re-verified, and the challenge stays burned in the
+  replay set. Pending handshakes are pruned after 5 min and capped at 64
+  (oldest evicted). Test: `test_worker_flap.py`.
 - **Mobile:** channels mid-handshake are *preserved* across a socket close
   (open sessions still die and silently resume); the last unanswered ctl frame
   (`hello` / `resume` / `ClientAuth`) is re-sent once on the next authed socket.

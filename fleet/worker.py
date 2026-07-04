@@ -629,39 +629,44 @@ class Worker:
             print(f"{ts()} [worker {self.machine}] E2E hello failed for {frm}: {e}", flush=True)
             return self.reply(frm, {"t": "e2e.err", "error": "hello"})
         hs.created = time.time()
+        hs.origin_frm = frm   # routing origin, for the flap log line only — never identity
         with self.e2e_lock:
-            # prune handshakes abandoned by a socket flap (their mobile id is gone)
+            # prune handshakes abandoned mid-flight (their mobile flapped away / gave up)
+            now = time.time()
             stale = [k for k, h in self.e2e_hs.items()
-                     if time.time() - getattr(h, "created", 0) > 300]
+                     if now - getattr(h, "created", 0) > 300]
             for k in stale:
                 self.e2e_hs.pop(k, None)
-            if frm in self.e2e_hs:
-                # The confirm-livelock's seed: this slot held a live handshake and a
-                # second hello just clobbered it — any ClientAuth for the OLD one now
-                # fails `confirm` and wastes the passkey the user paid for it.
-                print(f"{ts()} [worker {self.machine}] ⚠ E2E hello from {frm} CLOBBERS "
-                      f"an in-flight handshake for the same id", flush=True)
-            self.e2e_hs[frm] = hs
+            if any(getattr(h, "origin_frm", None) == frm for h in self.e2e_hs.values()):
+                # Overlapping attempts from one client (the confirm-livelock's seed).
+                # Harmless now — challenge keying below lets BOTH complete — but worth
+                # a line: the client is retrying while an attempt is still in flight.
+                print(f"{ts()} [worker {self.machine}] E2E overlap: {frm} started a second "
+                      f"handshake while one is in flight (both kept)", flush=True)
+            # Keyed by the channel-bound WebAuthn challenge, NOT the mobile id: a
+            # ClientAuth then always completes the exact handshake its assertion is
+            # signed over. Keying by mobile id was the confirm-livelock — a second
+            # same-id hello silently clobbered the first, so every paid passkey landed
+            # on the wrong instance and died on `confirm` (11× in a row, 2026-07-04).
+            # Bounded: pruned at 5 min above, hard-capped here (evict oldest).
+            if len(self.e2e_hs) >= 64:
+                oldest = min(self.e2e_hs, key=lambda k: getattr(self.e2e_hs[k], "created", 0))
+                self.e2e_hs.pop(oldest, None)
+            self.e2e_hs[e2emod.b64u(hs.keys["webauthn_challenge"])] = hs
         self.reply(frm, dict(sh, t="e2e.shello"))
 
     def _e2e_auth(self, frm, msg):
         chal = self._assertion_challenge(msg)
         cached = None
         with self.e2e_lock:
-            hs = self.e2e_hs.pop(frm, None)
-            if hs is None and chal:
-                # iOS drops the relay socket while the Face ID sheet is up, so the
-                # assertion often arrives from a NEW mobile id while the handshake
-                # it completes is filed under the OLD one. The assertion is
-                # channel-bound — signed over THIS handshake's transcript challenge
-                # — so matching by challenge hands the handshake its own completion;
-                # the mobile id is just relay routing, never a security property.
-                old = next((k for k, h in self.e2e_hs.items() if h.keys and
-                            e2emod.b64u(h.keys["webauthn_challenge"]) == chal), None)
-                if old is not None:
-                    hs = self.e2e_hs.pop(old)
-                    print(f"{ts()} [worker {self.machine}] E2E auth from {frm} completes "
-                          f"handshake started as {old} (socket flap mid-passkey)", flush=True)
+            # The store is keyed by the channel-bound WebAuthn challenge, so this
+            # lookup IS the identity check: the assertion is signed over exactly one
+            # handshake's transcript and completes exactly that one. Which mobile id
+            # carries it is irrelevant (relay routing, never a security property) —
+            # this is what makes both the iOS mid-Face-ID socket flap (new id, old
+            # handshake) and overlapping same-id attempts (the confirm livelock)
+            # non-events: every paid passkey lands on the handshake it belongs to.
+            hs = self.e2e_hs.pop(chal, None) if chal else None
             if hs is None and chal:
                 # Duplicate ClientAuth: we already finished this handshake but our
                 # e2e.done went to a mobile id that died mid-flap. Only the EXACT
@@ -680,15 +685,16 @@ class Worker:
                       f"(reply to the pre-flap id was lost)", flush=True)
                 return self.reply(frm, dict(cached, t="e2e.done"))
             return self.reply(frm, {"t": "e2e.err", "error": "no handshake"})
+        if getattr(hs, "origin_frm", frm) != frm:
+            print(f"{ts()} [worker {self.machine}] E2E auth from {frm} completes "
+                  f"handshake started as {hs.origin_frm} (socket flap mid-passkey)", flush=True)
         try:
             done, sess = hs.finish(msg)
         except Exception as e:
-            # On a `confirm` failure, say WHICH handshake the assertion was actually
-            # bound to vs which one was filed under this id — the difference is the
-            # crossed-instance signature of the passkey livelock.
-            filed = e2emod.b64u(hs.keys["webauthn_challenge"])[:12] if getattr(hs, "keys", None) else "?"
-            print(f"{ts()} [worker {self.machine}] E2E auth failed for {frm}: {e} "
-                  f"(assertion challenge {chal[:12]}… vs filed {filed}…)", flush=True)
+            # Challenge keying means a found handshake always matches its assertion's
+            # transcript — a failure here is a bad passkey/replay/forgery, not the old
+            # crossed-instance `confirm` (that one is structurally gone).
+            print(f"{ts()} [worker {self.machine}] E2E auth failed for {frm}: {e}", flush=True)
             return self.reply(frm, {"t": "e2e.err", "error": "auth"})
         with self.e2e_lock:
             self.e2e_sessions[frm] = sess
