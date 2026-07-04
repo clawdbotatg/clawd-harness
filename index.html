@@ -114,6 +114,12 @@
               opacity:.55; transition:opacity .12s, color .12s, border-color .12s; }
   #closeBtn:hover { opacity:1; color:var(--err); border-color:var(--err); }
   #closeBtn.show { display:block; }
+  /* which fleet box this session lives on — quiet grey tag beside the close-✕
+     (fleet mode only; direct mode has just the one machine) */
+  #machineTag { position:absolute; top:6px; right:46px; z-index:20; display:none;
+                height:30px; line-height:30px; font-size:11px; color:var(--dim);
+                opacity:.7; pointer-events:none; user-select:none; }
+  #machineTag.show { display:block; }
   .col { display:flex; flex-direction:column; min-width:0; min-height:0; }
   #left  { flex:1; }
   #right { flex:1; background:var(--bg); }
@@ -493,6 +499,7 @@
     </div>
   </div>
   <main>
+    <span id="machineTag"></span>
     <button id="closeBtn" title="Close this session (done with this job)">✕</button>
     <section class="col hidden" id="projects">
       <div id="projectlist"></div>
@@ -3595,6 +3602,7 @@ const pmfeed = document.getElementById('pmfeed');
 const menuBtn = document.getElementById('menuBtn');
 const projectsBtn = document.getElementById('projectsBtn');
 const closeBtn = document.getElementById('closeBtn');
+const machineTag = document.getElementById('machineTag');
 closeBtn.onclick = () => closeCurrentSession();
 function setView(view) {
   const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects',
@@ -3605,7 +3613,12 @@ function setView(view) {
   rightPanel.classList.toggle('hidden', !(view === 'transcript'));
   pmPanel.classList.toggle('hidden', !pm);
   document.getElementById('keys').style.display = (tty && isTouch) ? '' : 'none';  // key bar only for touch (the desktop terminal takes these keys natively)
-  closeBtn.classList.toggle('show', (tty || view === 'transcript') && !!currentCid);  // big close-✕ only when a session is open
+  const inSession = (tty || view === 'transcript') && !!currentCid;
+  closeBtn.classList.toggle('show', inSession);  // big close-✕ only when a session is open
+  // Fleet: name the box this session lives on, right where you'd look to close it.
+  machineTag.textContent = (FLEET && currentMachine) ? shortMachine(currentMachine) : '';
+  machineTag.title = currentMachine || '';
+  machineTag.classList.toggle('show', inSession && !!machineTag.textContent);
   // Composer is hidden on the projects rung (nothing to talk to). On the sessions
   // list it stays, but a message there starts a new session rather than going to a
   // session you're not viewing — say so in the placeholder. The PM view keeps the
