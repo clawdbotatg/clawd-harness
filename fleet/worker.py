@@ -50,6 +50,13 @@ import sysstats
 
 HERE = Path(__file__).resolve().parent
 
+
+def ts():
+    """Log-line timestamp. The passkey-storm forensics died on an undatable log —
+    every worker print carries this so the next incident can be correlated with
+    the client's console breadcrumbs and the relay journal."""
+    return time.strftime("%m-%d %H:%M:%S")
+
 # How often to sample + push CPU/RAM/disk/GPU to the relay for the roster cards.
 SYSSTATS_INTERVAL = float(os.environ.get("FLEET_SYSSTATS_INTERVAL", "10"))
 
@@ -343,29 +350,29 @@ class Worker:
                 self.passkey_verify = make_passkey_verifier()
                 fp = e2emod.fingerprint(e2emod.pub_raw(self.identity.public_key()))
                 n = len(_load_passkeys())
-                print(f"[worker {machine}] E2E identity {fp} · {n} passkey(s) enrolled", flush=True)
+                print(f"{ts()} [worker {machine}] E2E identity {fp} · {n} passkey(s) enrolled", flush=True)
                 if n == 0 and E2E_REQUIRE:
-                    print(f"[worker {machine}] ⚠ no passkeys enrolled — the harness "
+                    print(f"{ts()} [worker {machine}] ⚠ no passkeys enrolled — the harness "
                           f"proxy will refuse every viewer until one is propagated "
                           f"(see docs/fleet/DEPLOY.md)", flush=True)
             except Exception as e:
-                print(f"[worker {machine}] E2E init failed: {e}", flush=True)
+                print(f"{ts()} [worker {machine}] E2E init failed: {e}", flush=True)
                 self.identity = None
         # Fail-closed startup banners: make a missing/disabled E2E impossible to miss.
         if not E2E_REQUIRE:
-            print(f"[worker {machine}] ⚠⚠ FLEET_E2E_REQUIRE=0 — end-to-end encryption "
+            print(f"{ts()} [worker {machine}] ⚠⚠ FLEET_E2E_REQUIRE=0 — end-to-end encryption "
                   f"is OFF; the relay can read and inject harness traffic. Use only "
                   f"for local transport smokes, NEVER in production.", flush=True)
         elif not (HAVE_E2E and self.identity):
-            print(f"[worker {machine}] ⚠ E2E required but unavailable "
+            print(f"{ts()} [worker {machine}] ⚠ E2E required but unavailable "
                   f"({'cryptography missing' if not HAVE_E2E else 'identity init failed'}) "
                   f"— the harness proxy is disabled (diagnostics still work).", flush=True)
         if self.vapid and self.vapid.can_send:
-            print(f"[worker {machine}] Web Push enabled (VAPID loaded) — will ring "
+            print(f"{ts()} [worker {machine}] Web Push enabled (VAPID loaded) — will ring "
                   f"the phone when a session needs you", flush=True)
         else:
             why = "no cryptography" if not HAVE_WEBPUSH else f"no/invalid {VAPID_FILE.name}"
-            print(f"[worker {machine}] Web Push off ({why}) — notifications disabled",
+            print(f"{ts()} [worker {machine}] Web Push off ({why}) — notifications disabled",
                   flush=True)
 
     # ── Web Push: ring the phone when a session needs the user ───────────────
@@ -501,7 +508,7 @@ class Worker:
                 self.sys = sysstats.collect()
                 self.report_stats()
             except Exception as e:
-                print(f"[worker {self.machine}] sysstats error: {e}", flush=True)
+                print(f"{ts()} [worker {self.machine}] sysstats error: {e}", flush=True)
             time.sleep(SYSSTATS_INTERVAL)
 
     def harness_http(self):
@@ -579,7 +586,7 @@ class Worker:
             except Exception:
                 continue
         if out:
-            print(f"[worker {self.machine}] loaded {len(out)} persisted e2e resume entr"
+            print(f"{ts()} [worker {self.machine}] loaded {len(out)} persisted e2e resume entr"
                   f"{'y' if len(out)==1 else 'ies'}", flush=True)
         return out
 
@@ -599,7 +606,7 @@ class Worker:
             os.chmod(tmp, 0o600)   # belt-and-braces if a stale tmp survived a crash
             os.replace(str(tmp), str(RESUME_FILE))
         except Exception as e:
-            print(f"[worker {self.machine}] e2e resume save failed: {e}", flush=True)
+            print(f"{ts()} [worker {self.machine}] e2e resume save failed: {e}", flush=True)
 
     @staticmethod
     def _assertion_challenge(msg):
@@ -619,7 +626,7 @@ class Worker:
                                         self.passkey_verify, self.e2e_seen)
             sh = hs.server_hello(msg)
         except Exception as e:
-            print(f"[worker {self.machine}] E2E hello failed for {frm}: {e}", flush=True)
+            print(f"{ts()} [worker {self.machine}] E2E hello failed for {frm}: {e}", flush=True)
             return self.reply(frm, {"t": "e2e.err", "error": "hello"})
         hs.created = time.time()
         with self.e2e_lock:
@@ -628,6 +635,12 @@ class Worker:
                      if time.time() - getattr(h, "created", 0) > 300]
             for k in stale:
                 self.e2e_hs.pop(k, None)
+            if frm in self.e2e_hs:
+                # The confirm-livelock's seed: this slot held a live handshake and a
+                # second hello just clobbered it — any ClientAuth for the OLD one now
+                # fails `confirm` and wastes the passkey the user paid for it.
+                print(f"{ts()} [worker {self.machine}] ⚠ E2E hello from {frm} CLOBBERS "
+                      f"an in-flight handshake for the same id", flush=True)
             self.e2e_hs[frm] = hs
         self.reply(frm, dict(sh, t="e2e.shello"))
 
@@ -647,7 +660,7 @@ class Worker:
                             e2emod.b64u(h.keys["webauthn_challenge"]) == chal), None)
                 if old is not None:
                     hs = self.e2e_hs.pop(old)
-                    print(f"[worker {self.machine}] E2E auth from {frm} completes "
+                    print(f"{ts()} [worker {self.machine}] E2E auth from {frm} completes "
                           f"handshake started as {old} (socket flap mid-passkey)", flush=True)
             if hs is None and chal:
                 # Duplicate ClientAuth: we already finished this handshake but our
@@ -663,14 +676,19 @@ class Worker:
                     cached = ent["done"]
         if hs is None:
             if cached is not None:
-                print(f"[worker {self.machine}] E2E done re-sent to {frm} "
+                print(f"{ts()} [worker {self.machine}] E2E done re-sent to {frm} "
                       f"(reply to the pre-flap id was lost)", flush=True)
                 return self.reply(frm, dict(cached, t="e2e.done"))
             return self.reply(frm, {"t": "e2e.err", "error": "no handshake"})
         try:
             done, sess = hs.finish(msg)
         except Exception as e:
-            print(f"[worker {self.machine}] E2E auth failed for {frm}: {e}", flush=True)
+            # On a `confirm` failure, say WHICH handshake the assertion was actually
+            # bound to vs which one was filed under this id — the difference is the
+            # crossed-instance signature of the passkey livelock.
+            filed = e2emod.b64u(hs.keys["webauthn_challenge"])[:12] if getattr(hs, "keys", None) else "?"
+            print(f"{ts()} [worker {self.machine}] E2E auth failed for {frm}: {e} "
+                  f"(assertion challenge {chal[:12]}… vs filed {filed}…)", flush=True)
             return self.reply(frm, {"t": "e2e.err", "error": "auth"})
         with self.e2e_lock:
             self.e2e_sessions[frm] = sess
@@ -683,7 +701,7 @@ class Worker:
                 for k in [k for k, v in self.e2e_done_cache.items() if v["exp"] <= now]:
                     self.e2e_done_cache.pop(k, None)
         self._persist_resume()   # survive a worker restart → silent resume, no fresh passkey
-        print(f"[worker {self.machine}] E2E channel open for {frm}", flush=True)
+        print(f"{ts()} [worker {self.machine}] E2E channel open for {frm}", flush=True)
         self.reply(frm, dict(done, t="e2e.done"))
 
     def _e2e_resume(self, frm, msg):
@@ -701,7 +719,7 @@ class Worker:
         sess.hard_deadline = ent["hard"]   # resume never extends the hard ceiling
         with self.e2e_lock:
             self.e2e_sessions[frm] = sess
-        print(f"[worker {self.machine}] E2E channel resumed for {frm}", flush=True)
+        print(f"{ts()} [worker {self.machine}] E2E channel resumed for {frm}", flush=True)
         self.reply(frm, {"t": "e2e.resumed", "rn": e2emod.b64u(rn),
                          "cf": e2emod.b64u(e2emod.resume_confirm(ent["master"], rn))})
 
@@ -879,7 +897,7 @@ class Worker:
                 self._poll_stats_once()
                 backoff = 1.0
             except Exception as e:
-                print(f"[worker {self.machine}] stats link error: {e}", flush=True)
+                print(f"{ts()} [worker {self.machine}] stats link error: {e}", flush=True)
             time.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
 
@@ -964,7 +982,7 @@ class Worker:
         # window turns that into a clean break → reconnect. On a healthy link the
         # 20s pings mean we're never idle long enough for it to fire.
         sock.settimeout(RELAY_READ_TIMEOUT)
-        print(f"[worker {self.machine}] connected to {self.relay}", flush=True)
+        print(f"{ts()} [worker {self.machine}] connected to {self.relay}", flush=True)
         self.report_stats()   # seed the fresh roster entry with our last counts
         try:
             while True:
@@ -973,7 +991,7 @@ class Worker:
                 except (socket.timeout, TimeoutError):
                     # No frame (not even a relay ping) for RELAY_READ_TIMEOUT →
                     # the link is half-open. Bail so run() reconnects.
-                    print(f"[worker {self.machine}] relay link silent "
+                    print(f"{ts()} [worker {self.machine}] relay link silent "
                           f"{RELAY_READ_TIMEOUT:.0f}s — reconnecting", flush=True)
                     break
                 if msg is None:
@@ -1008,7 +1026,7 @@ class Worker:
                     elif t == "pushSub":           # one new subscription
                         self.cache_push_subs([frame.get("sub") or {}])
                 except Exception as e:
-                    print(f"[worker {self.machine}] frame handler error "
+                    print(f"{ts()} [worker {self.machine}] frame handler error "
                           f"(type={t!r}, dropped): {e}", flush=True)
                     traceback.print_exc()
         finally:
@@ -1046,7 +1064,7 @@ class Worker:
             try:
                 self.serve_once()
             except Exception as e:
-                print(f"[worker {self.machine}] link error: {e}", flush=True)
+                print(f"{ts()} [worker {self.machine}] link error: {e}", flush=True)
                 traceback.print_exc()
             # Backoff exists to pace RAPID connect failures (relay down, bad
             # token). A link that stayed up a while was healthy — its death is
@@ -1056,7 +1074,7 @@ class Worker:
             # a clean EOF, and real link deaths are almost never clean.
             if time.monotonic() - up0 > 60.0:
                 backoff = 1.0
-            print(f"[worker {self.machine}] reconnecting in {backoff:.0f}s…", flush=True)
+            print(f"{ts()} [worker {self.machine}] reconnecting in {backoff:.0f}s…", flush=True)
             time.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
 
