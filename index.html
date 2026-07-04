@@ -1004,7 +1004,10 @@ function setRelayAuthed() {
   // the worker treats duplicates idempotently, so the already-paid Face ID lands
   // instead of a fresh handshake prompting a second one.
   for (const [m, c] of Object.entries(e2eChans)) {
-    if (c && c.status === 'handshaking' && c.pendingCtl && !flushed.has(c.pendingCtl)) relaySend(c.pendingCtl);
+    if (c && c.status === 'handshaking' && c.pendingCtl && !flushed.has(c.pendingCtl)) {
+      e2eLog(m, '#' + c.inst, 're-sending unanswered ' + ((c.pendingCtl.msg && c.pendingCtl.msg.t) || 'ctl') + ' on new socket');
+      relaySend(c.pendingCtl);
+    }
   }
 }
 // Re-sync everything now that the relay link is authed: re-list every machine for
@@ -1161,7 +1164,8 @@ function connect() {
     // A handshake stuck >90s is dead weight — let it be torn down and replaced.
     for (const k of Object.keys(e2eChans)) {
       const c = e2eChans[k];
-      if (c && c.status === 'handshaking' && Date.now() - (c.started || 0) < 90000) continue;
+      if (c && c.status === 'handshaking' && Date.now() - (c.started || 0) < 90000) { e2eLog(k, '#' + c.inst, 'socket died — mid-handshake channel preserved'); continue; }
+      if (c) e2eLog(k, '#' + c.inst, 'socket died — channel dropped (was ' + c.status + ')');
       delete e2eChans[k];
     }
     // A close *before* we ever opened usually means auth: the browser hides the 403
@@ -1204,7 +1208,7 @@ function hsend(frame) {
   if (!currentMachine) return false;
   const ch = e2eChans[currentMachine];
   if (ch && ch.status === 'open') { e2eSendFrame(currentMachine, frame); return true; }
-  e2eEnsure(currentMachine).catch(() => {});   // start the secure handshake if needed
+  e2eEnsure(currentMachine, { reason: 'hsend:' + frame.type }).catch(() => {});   // start the secure handshake if needed
   e2eChans[currentMachine].queue.push(frame);  // queued until the channel opens
   return true;                                 // queued → delivers when the secure channel opens
 }
@@ -1470,21 +1474,32 @@ function e2eGetAssertionNow(machine, challengeBytes) {
   });
 }
 
+// ---- e2e breadcrumbs (observe-only) ----------------------------------------
+// Every handshake attempt gets an instance id (#N); we log who triggered it and
+// how it died. Console-only, zero behavior change. Exists because the passkey
+// storms (repeated worker-side "confirm" rejections) could never be diagnosed
+// from the worker log alone — this is the client half of that story.
+let e2eInstSeq = 0;
+function e2eLog(...a) { try { console.log('[e2e ' + new Date().toISOString().slice(11, 23) + ']', ...a); } catch {} }
+function e2eWhy(opts) { return opts.reason || (opts.auto ? 'auto' : 'manual'); }
+
 async function e2eEnsure(machine, opts = {}) {
   const cur = e2eChans[machine];
   if (cur && cur.status === 'open') return cur;
   if (cur && cur.status === 'handshaking') {
-    if (Date.now() - (cur.started || 0) < 90000) return cur.ready;
+    if (Date.now() - (cur.started || 0) < 90000) { e2eLog(machine, '#' + cur.inst, 'join in-flight (' + e2eWhy(opts) + ')'); return cur.ready; }
+    e2eLog(machine, '#' + cur.inst, 'STALE >90s — replaced; old chain may still fire a ClientAuth (zombie)');
     delete e2eChans[machine];   // stale (survived a flap but never completed) — replace
   }
   // A background trigger (reconnect/bootstrap) does NOT re-fire a passkey for a
   // machine that just failed — that's the reload storm. Only an explicit user
   // gesture (no opts.auto) retries before the cooldown lapses. See e2eFailUntil.
-  if (opts.auto && (e2eFailUntil[machine] || 0) > Date.now()) return Promise.reject(new Error('cooldown'));
-  const ch = e2eChans[machine] = { status: 'handshaking', started: Date.now(),
+  if (opts.auto && (e2eFailUntil[machine] || 0) > Date.now()) { e2eLog(machine, 'cooldown blocks auto retry (' + e2eWhy(opts) + ')'); return Promise.reject(new Error('cooldown')); }
+  const ch = e2eChans[machine] = { status: 'handshaking', started: Date.now(), inst: ++e2eInstSeq,
     session: null, queue: [], pendingCtl: null,
     sendChain: Promise.resolve(), recvChain: Promise.resolve(),
     dSH: e2eDeferred(), dSD: e2eDeferred(), dRes: e2eDeferred() };
+  e2eLog(machine, '#' + ch.inst, 'start (' + e2eWhy(opts) + ')', cur ? 'prev=' + cur.status : 'fresh');
   ch.ready = (async () => {
     // 1) Silent resume (no passkey) if we have unexpired material.
     const rs = e2eLoadResume(machine);
@@ -1498,10 +1513,12 @@ async function e2eEnsure(machine, opts = {}) {
         if (!E2E._eq(await E2E.resumeConfirm(master, rn), b64uDec(r.cf))) throw new Error('resume-cf');
         ch.session = await E2E.resumeSession(master, rn);
         ch.status = 'open'; delete e2eFailUntil[machine]; meta.textContent = '';
+        e2eLog(machine, '#' + ch.inst, 'resumed silently');
         const q = ch.queue; ch.queue = [];
         for (const fr of q) e2eSendFrame(machine, fr);
         return ch;
       } catch (e) {                                               // expired/dropped → re-handshake
+        e2eLog(machine, '#' + ch.inst, 'resume failed (' + ((e && e.message) || e) + ') → full handshake');
         e2eClearResume(machine); ch.pendingCtl = null; ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred();
       }
     }
@@ -1514,20 +1531,24 @@ async function e2eEnsure(machine, opts = {}) {
     ch.pendingCtl = null;
     const { challenge, ikW, build } = await cli.auth(sh); // verify sig + pin, derive keys
     if (!pinB64) { e2eSetPin(machine, b64uEnc(ikW)); ch.firstPin = true; }   // TOFU
+    e2eLog(machine, '#' + ch.inst, 'passkey prompt (challenge ' + b64uEnc(challenge).slice(0, 12) + '…)');
     const assertion = await e2eGetAssertion(machine, challenge);      // Face ID, channel-bound
     hidePasskey();
     e2eSendCtlTracked(ch, machine, await build(assertion));          // ClientAuth
+    e2eLog(machine, '#' + ch.inst, 'ClientAuth sent (challenge ' + b64uEnc(challenge).slice(0, 12) + '…)');
     const sd = await ch.dSD;                              // ServerDone (key confirmation)
     ch.pendingCtl = null;
     ch.session = await cli.done(sd);
     ch.fp = await cli.fingerprint();
     e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);  // no-passkey reloads
     ch.status = 'open'; delete e2eFailUntil[machine];
+    e2eLog(machine, '#' + ch.inst, 'OPEN (full handshake)');
     meta.textContent = ch.firstPin ? ('🔒 pinned · ' + ch.fp) : '';
     const q = ch.queue; ch.queue = [];
     for (const fr of q) e2eSendFrame(machine, fr);
     return ch;
   })().catch((e) => {
+    e2eLog(machine, '#' + ch.inst, 'FAILED:', (e && e.message) || e);
     ch.status = 'failed'; ch.pendingCtl = null;
     e2eFailUntil[machine] = Date.now() + E2E_FAIL_COOLDOWN_MS;   // no auto-retry storm; user gesture still retries
     if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
@@ -1565,7 +1586,7 @@ function e2eOnCtl(machine, msg) {
   if (msg.t === 'e2e.shello') ch.dSH.resolve(msg);
   else if (msg.t === 'e2e.resumed') ch.dRes.resolve(msg);
   else if (msg.t === 'e2e.done') ch.dSD.resolve(msg);
-  else if (msg.t === 'e2e.err') { const e = new Error(msg.error || 'worker error'); ch.dRes.reject(e); ch.dSH.reject(e); ch.dSD.reject(e); if (ch.status !== 'open') ch.status = 'failed'; }
+  else if (msg.t === 'e2e.err') { e2eLog(machine, 'worker err "' + (msg.error || '?') + '" → #' + ch.inst + ' (status ' + ch.status + ')'); const e = new Error(msg.error || 'worker error'); ch.dRes.reject(e); ch.dSH.reject(e); ch.dSD.reject(e); if (ch.status !== 'open') ch.status = 'failed'; }
 }
 
 // Decrypt a record (from the JSON path or the binary PTY path) in seq order.
@@ -1668,9 +1689,11 @@ function onAuthRequired(m) {
   lastAuthReq = m;
   if (m.reason === 'expired') clearSession();
   const sess = loadSession();
+  e2eLog('edge', 'authRequired' + (m.reason ? ' (' + m.reason + ')' : ''), sess ? 'replying with stored session token' : 'no session token');
   if (sess) { setPmCookie(sess); ws.send(JSON.stringify({ type: 'auth', session: sess })); return; }
   if (lastEdgeAuth && Date.now() - lastEdgeAuth.ts < 100000) {
     const f = lastEdgeAuth.frame; lastEdgeAuth = null;
+    e2eLog('edge', 'replaying already-paid edge assertion');
     ws.send(JSON.stringify(f));
     return;
   }
@@ -1689,6 +1712,7 @@ async function doAssertion(m) {
   if (!m || doAssertion._busy) return;
   doAssertion._busy = true;
   meta.textContent = 'passkey…';
+  e2eLog('edge', 'passkey prompt');
   try {
     const a = await navigator.credentials.get({ publicKey: {
       challenge: b64uDec(m.challenge), rpId: m.rpId,
@@ -1700,7 +1724,9 @@ async function doAssertion(m) {
       clientDataJSON: b64uEnc(r.clientDataJSON), authenticatorData: b64uEnc(r.authenticatorData), signature: b64uEnc(r.signature) };
     lastEdgeAuth = { frame, ts: Date.now() };   // replayable if this send dies with the socket
     ws.send(JSON.stringify(frame));
+    e2eLog('edge', 'assertion sent');
   } catch (e) {
+    e2eLog('edge', 'assertion failed/cancelled:', (e && e.message) || e);
     meta.textContent = '';
     showPasskey('the gnome awaits — whisper the safe word to enter');
   } finally {
@@ -2348,7 +2374,7 @@ async function fleetBootstrap() {
       // element, so those must go one at a time) — and even then it's time-boxed
       // so an unreachable box can't stall the queue waiting on a reply that never
       // comes.
-      const go = e2eEnsure(m.id, { auto: true }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
+      const go = e2eEnsure(m.id, { auto: true, reason: 'bootstrap' }).then(() => e2eSendFrame(m.id, { type: 'list' })).catch(() => {});
       if (!e2eLoadResume(m.id)) { try { await Promise.race([go, e2eTimeout(20000)]); } catch {} }
     }
   } finally { bootstrapping = false; }
@@ -2364,7 +2390,7 @@ function attachMachine(machineId) {
     term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
     if (activeType) { activeType.finish(); activeType = null; }
   }
-  e2eEnsure(machineId).then(() => e2eSendFrame(machineId, { type: 'list' })).catch(() => {});
+  e2eEnsure(machineId, { reason: 'attach' }).then(() => e2eSendFrame(machineId, { type: 'list' })).catch(() => {});
   const pm = perMachine[machineId] || (perMachine[machineId] = {});
   projectList = pm.projectList || [];
   sessionList = pm.sessionList || [];
@@ -2401,12 +2427,12 @@ function ensureTargetMachine() {
   // An explicit clone default (set via the machine roster checkbox) wins outright —
   // that's the whole point of pinning one: deterministic host for new repos.
   const pref = cloneDefaultMachine();
-  if (pref && isMachineOnline(pref)) { currentMachine = pref; e2eEnsure(pref).catch(() => {}); return true; }
+  if (pref && isMachineOnline(pref)) { currentMachine = pref; e2eEnsure(pref, { reason: 'target' }).catch(() => {}); return true; }
   if (currentMachine && isMachineOnline(currentMachine)) return true;
   const on = machineList.find(m => m.online && m.kind !== 'relay');
   if (!on) { meta.textContent = 'no online machine to host a new project'; return false; }
   currentMachine = on.id;
-  e2eEnsure(on.id).catch(() => {});
+  e2eEnsure(on.id, { reason: 'target' }).catch(() => {});
   return true;
 }
 function createProject(name) {
@@ -2427,7 +2453,7 @@ function hsendTo(machineId, frame) {
   if (!FLEET) { ws.send(JSON.stringify(frame)); return true; }
   const ch = e2eChans[machineId];
   if (ch && ch.status === 'open') { e2eSendFrame(machineId, frame); return true; }
-  e2eEnsure(machineId).catch(() => {});       // start the secure handshake if needed
+  e2eEnsure(machineId, { reason: 'hsendTo:' + frame.type }).catch(() => {});   // start the secure handshake if needed
   e2eChans[machineId].queue.push(frame);      // queued until the channel opens
   return true;
 }
