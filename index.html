@@ -967,6 +967,7 @@ function clearToken() { try { localStorage.removeItem(TOKEN_KEY); } catch {} }
 let reconnectTimer = null;     // single pending reconnect (idempotent scheduling)
 let hiddenAt = 0;              // when the tab was last backgrounded (to gauge "away a while?")
 let outbound = [];            // sends issued while the link was down — delivered once we're back (this tab only)
+let lastRx = 0;               // when we last heard ANY frame from the server — the only honest liveness signal (readyState lies after sleep)
 
 // Fleet relay auth gate. A fresh relay socket is unauthed and the relay drops
 // every non-`auth` frame until the passkey factor is satisfied (relay.py
@@ -1034,13 +1035,35 @@ function scheduleReconnect(delay) {
 function flushOutbound() {
   if (!outbound.length || !ws || ws.readyState !== 1) return;
   const q = outbound; outbound = [];
-  for (const it of q) { if (!hsend({ type: 'send', text: it.full })) outbound.push(it); }
+  for (const it of q) {
+    // A send goes to the socket's *bound* session — deliver only what was typed
+    // for the session we're viewing NOW. Anything else is dropped from the wire:
+    // its text is already stashed in the per-cid outbox, so syncComposer puts it
+    // back in the composer when that session is next opened (no cross-session
+    // misfire, no stale command detonating hours later).
+    if (it.cid && it.cid !== currentCid) continue;
+    if (!hsend({ type: 'send', text: it.full })) outbound.push(it);
+  }
 }
 // Send now if the link is live; if it's down, queue + kick a reconnect so the
 // text is delivered the moment we're back (and kept in the outbox for a reload).
 function deliverSend(cid, full, recover) {
   stashOutbox(cid, recover);
-  if (!hsend({ type: 'send', text: full })) { outbound.push({ cid, full }); scheduleReconnect(0); }
+  if (!hsend({ type: 'send', text: full })) { outbound.push({ cid, full }); scheduleReconnect(0); return; }
+  // hsend "succeeded" — but a socket killed during sleep still reads OPEN and
+  // eats the bytes without an error. If the server has been silent a while,
+  // verify with a ping: no pong → assume the send died with the socket, requeue
+  // it and reconnect so flushOutbound() redelivers after the re-subscribe.
+  // (If only the pong was lost, the redelivery duplicates the message — visible
+  // in the transcript and far better than a silently swallowed command.)
+  // Fleet: only verify over an OPEN e2e channel — on a handshaking one hsend
+  // queues (send AND probe), and a slow Face ID would read as a dead link.
+  const pathReady = !FLEET || (e2eChans[currentMachine] && e2eChans[currentMachine].status === 'open');
+  if (pathReady && Date.now() - lastRx > 5000 && !liveProbe) {
+    probeLiveness((alive) => {
+      if (!alive) { outbound.push({ cid, full }); teardownAndReconnect(); }
+    }, 4000);
+  }
 }
 // Pull a fresh copy of what we're viewing: re-subscribe replays the live TTY
 // screen + recent transcript (and, in fleet, re-ensures the secure channel). The
@@ -1079,14 +1102,23 @@ function onPong(id) {
   clearTimeout(liveProbe.timer);
   const cb = liveProbe.cb; liveProbe = null; cb(true);
 }
-function probeLiveness(cb) {
+function probeLiveness(cb, timeoutMs = 1500) {
   if (!ws || ws.readyState !== 1) { cb(false); return; }
   const id = ++pingSeq;
   const timer = setTimeout(() => {
     if (liveProbe && liveProbe.id === id) { liveProbe = null; cb(false); }
-  }, 1500);
+  }, timeoutMs);
   liveProbe = { id, cb, timer };
   if (!hsend({ type: 'ping', id })) { clearTimeout(timer); liveProbe = null; cb(false); }
+}
+// The probe went unanswered — the socket is functionally dead even if readyState
+// says OPEN. Tear it down and dial fresh; onopen/fleetResync re-subscribe and
+// flushOutbound() redelivers anything queued against the corpse.
+function teardownAndReconnect() {
+  if (ws && ws.readyState <= 1) { try { ws.close(); } catch {} }
+  ws = null;                 // force connect() past its "already have a socket" guard
+  scheduleReconnect(0);
+  armResumeReload();         // …and reload if that reconnect never goes live
 }
 
 // The tab/window/network just came back to life — make sure we're showing current
@@ -1100,17 +1132,21 @@ function probeLiveness(cb) {
 // A pong proves the chain is live → just hardRepaint() the buffer we already kept
 // (no reset, no gap). Silence → it really is dead → tear down + reconnect, and
 // onopen re-subscribes over a provably-live link so the replay actually lands. A
-// quick glance (≤3s) can't have died — repaint and skip the probe.
+// quick glance (≤3s) can't have died — repaint and skip the probe. BUT the
+// "quick glance" shortcut only applies if we've also HEARD from the server
+// recently: hiddenAt is 0 when no visibility event ever fired (screen slept with
+// the window frontmost, second monitor, click-back into an always-visible tab),
+// which is exactly the case where the socket died invisibly — so rx-silence,
+// not hiddenAt, is the tiebreaker.
 function wake() {
   const awayMs = hiddenAt ? Date.now() - hiddenAt : 0;
   if (!ws || ws.readyState > 1) { scheduleReconnect(0); return; }
-  if (awayMs <= 3000) { if (currentView() === 'tty') hardRepaint(); return; }
+  const quietMs = lastRx ? Date.now() - lastRx : Infinity;
+  if (awayMs <= 3000 && quietMs <= 15000) { if (currentView() === 'tty') hardRepaint(); return; }
+  if (liveProbe) return;       // a probe is already in flight — its verdict covers this wake too
   probeLiveness((alive) => {
     if (alive) { if (currentView() === 'tty') hardRepaint(); flushOutbound(); return; }
-    if (ws && ws.readyState <= 1) { try { ws.close(); } catch {} }
-    ws = null;                 // force connect() past its "already have a socket" guard
-    scheduleReconnect(0);
-    armResumeReload();         // …and reload if that reconnect never goes live
+    teardownAndReconnect();
   });
 }
 
@@ -1130,6 +1166,7 @@ function connect() {
 
   ws.onopen = () => {
     opened = true; authFails = 0;   // a successful open proves the token is good
+    lastRx = Date.now();            // the open handshake itself is proof of life
     clearResumeReload();            // live again → no need for the resume backstop reload
     dot.classList.add('up');
     if (!FLEET) {
@@ -1192,6 +1229,7 @@ function connect() {
     scheduleReconnect(800);
   };
   ws.onmessage = (e) => {
+    lastRx = Date.now();
     if (typeof e.data === 'string') { FLEET ? handleRelay(JSON.parse(e.data)) : handleJson(JSON.parse(e.data)); }
     else if (FLEET) { handleBinary(e.data); }
     else if (pendingNewFocus) { /* awaiting a new session's focus — drop stragglers from the session we just left so they don't paint over the about-to-spawn blank one */ }
@@ -4275,7 +4313,23 @@ document.addEventListener('visibilitychange', () => {
   else { wake(); hiddenAt = 0; }
 });
 window.addEventListener('focus', wake);
-window.addEventListener('online', () => scheduleReconnect(0));
+window.addEventListener('online', wake);   // wake(), not bare reconnect: connect() no-ops on a dead-but-OPEN socket — only the probe can unmask it
+
+// Idle heartbeat — the case where NO event ever fires: the window stayed
+// frontmost and visible while the machine slept (or wifi flipped), the OS killed
+// the TCP connection, and readyState still reads OPEN. Nothing above runs, so
+// typing into the box writes into a corpse. Every 5s, if we're visible and
+// haven't heard a frame in 25s, probe; silence → tear down + reconnect, which
+// re-subscribes and redelivers any queued sends. One tiny ping per 25s of idle
+// visible time — nothing when hidden, backgrounded, or already reconnecting.
+setInterval(() => {
+  if (document.hidden || !ws || ws.readyState !== 1 || liveProbe || _updating) return;
+  // Fleet: the ping rides the e2e channel (hsend), so only probe when that path
+  // is authed + open — a handshaking channel queues the ping and would read dead.
+  if (FLEET && (!relayAuthed || !currentMachine || !(e2eChans[currentMachine] && e2eChans[currentMachine].status === 'open'))) return;
+  if (Date.now() - lastRx < 25000) return;
+  probeLiveness((alive) => { if (!alive) teardownAndReconnect(); }, 4000);
+}, 5000);
 </script>
 </body>
 </html>
