@@ -1021,7 +1021,7 @@ function fleetResync() {
   fleetBootstrap();
   syncPushSubscription();          // re-register notifications with the (possibly restarted) relay
   const v = currentView();
-  if (currentMachine && currentCid && (v === 'tty' || v === 'transcript')) { subscribe(currentCid); sendResize(); }
+  if (currentMachine && currentCid && (v === 'tty' || v === 'transcript')) { subscribe(currentCid); sendResize(); armReplayWatchdog(); }
   flushOutbound();
 }
 function scheduleReconnect(delay) {
@@ -1142,12 +1142,45 @@ function wake() {
   const awayMs = hiddenAt ? Date.now() - hiddenAt : 0;
   if (!ws || ws.readyState > 1) { scheduleReconnect(0); return; }
   const quietMs = lastRx ? Date.now() - lastRx : Infinity;
-  if (awayMs <= 3000 && quietMs <= 15000) { if (currentView() === 'tty') hardRepaint(); return; }
+  if (awayMs <= 3000 && quietMs <= 15000) { repairTTY(); return; }
   if (liveProbe) return;       // a probe is already in flight — its verdict covers this wake too
   probeLiveness((alive) => {
-    if (alive) { if (currentView() === 'tty') hardRepaint(); flushOutbound(); return; }
+    if (alive) { repairTTY(); flushOutbound(); return; }
     teardownAndReconnect();
   });
+}
+// Put the tty right over a link we believe is live. Usually the buffer is intact
+// and a hard repaint (re-measure + full redraw) fixes a stale/discarded frame.
+// But a buffer that is EMPTY while we're viewing a real session means the replay
+// never landed — subscribe() reset the terminal and its replay died with a socket
+// flap — and repainting nothing leaves the black screen a human "fixes" by
+// reloading. Only a re-subscribe (fresh full replay) can repair that.
+function repairTTY() {
+  if (currentView() !== 'tty') return;
+  if (currentCid && ttyBufferEmpty()) { subscribe(currentCid); armReplayWatchdog(); return; }
+  hardRepaint();
+}
+function ttyBufferEmpty() {
+  const b = term.buffer && term.buffer.active;
+  if (!b) return true;
+  const n = Math.min(b.length, 200);   // claude's TUI always paints a frame — any glyph anywhere means the replay landed
+  for (let i = 0; i < n; i++) {
+    const l = b.getLine(i);
+    if (l && l.translateToString(true).trim()) return false;
+  }
+  return true;
+}
+// Replay watchdog — armed after a RECOVERY re-subscribe (reconnect/wake), not by
+// subscribe() itself (that would loop). If the buffer is still empty once the
+// replay should long since have landed, the subscribe or its replay was lost in
+// flight: re-subscribe once for a fresh replay instead of leaving a black screen.
+let replayWatchdogTimer = null;
+function armReplayWatchdog() {
+  clearTimeout(replayWatchdogTimer);
+  replayWatchdogTimer = setTimeout(() => {
+    if (currentView() !== 'tty' || !currentCid || !ws || ws.readyState !== 1) return;
+    if (ttyBufferEmpty()) subscribe(currentCid);
+  }, 3500);
 }
 
 function connect() {
@@ -1174,7 +1207,7 @@ function connect() {
       // A fresh socket is unsubscribed server-side: re-bind the session so the PTY
       // stream resumes AND sends can resolve their target again. (First boot has no
       // currentCid yet — resolvePendingNav subscribes from the URL instead.)
-      if (currentCid) { subscribe(currentCid); flushOutbound(); }
+      if (currentCid) { subscribe(currentCid); flushOutbound(); armReplayWatchdog(); }
       else meta.textContent = '';
       return;
     }
@@ -4330,6 +4363,21 @@ setInterval(() => {
   if (Date.now() - lastRx < 25000) return;
   probeLiveness((alive) => { if (!alive) teardownAndReconnect(); }, 4000);
 }, 5000);
+
+// Sleep detector — the wake trigger that needs NO browser event. Timers can't
+// tick while the machine sleeps, so a gap in a steady interval IS the sleep (or
+// tab-freeze) signal. This is the Mac-mini-over-Screen-Sharing case: the window
+// never blurs and never hides, so visibilitychange/focus never fire — yet the
+// display slept, the frame may have been discarded, the socket may have died.
+// On a stalled tick, run the same wake() everything else uses (probe → repaint
+// or repair or reconnect). Hidden tabs skip it: their timers are throttled by
+// design and visibilitychange covers their return.
+let lastTick = Date.now();
+setInterval(() => {
+  const gap = Date.now() - lastTick;
+  lastTick = Date.now();
+  if (gap > 15000 && !document.hidden) wake();
+}, 3000);
 </script>
 </body>
 </html>
