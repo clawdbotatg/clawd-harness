@@ -84,6 +84,24 @@ def _get_forget():
 # why these must be enumerated. Write/Edit are deliberately withheld: the PM delegates
 # actual code changes to the coding sessions it spawns/assigns.
 _BUILTIN_TOOLS = ["Read", "Grep", "Glob", "LS", "Bash", "WebFetch", "WebSearch"]
+
+
+def _result_summary(block, limit=500):
+    """A short, feed-friendly summary of a tool_result block. Content may be a
+    plain string or a list of {type:"text"} parts; clip hard — the full result
+    already lives in the session, the feed just needs the gist."""
+    c = block.get("content")
+    if isinstance(c, list):
+        c = "\n".join(p.get("text", "") for p in c
+                      if isinstance(p, dict) and p.get("type") == "text")
+    if not isinstance(c, str):
+        c = "" if c is None else str(c)
+    c = c.strip()
+    if len(c) > limit:
+        c = c[:limit - 1] + "…"
+    if block.get("is_error") and c:
+        c = "⚠️ " + c
+    return c
 ALLOWED_TOOLS = ",".join([*(f"mcp__fleet__{n}" for n, _d, _s in TOOLS), *_BUILTIN_TOOLS])
 VALID_TRUST = ("private", "public")
 
@@ -228,9 +246,10 @@ class AgentBrain:
 
     def chat_stream(self, user_text, emit):
         """Like chat(), but fires emit(kind, text) per claude event AS the turn runs
-        — kind 'tool' (a tool call), 'text' (interim narration), or 'final' (the answer
-        if it wasn't already streamed) — then returns the same {reply, trace} as chat().
-        Used by the Telegram front-end so it shows work in progress, not one final dump."""
+        — kind 'tool' (a tool call), 'result' (that call's clipped output), 'text'
+        (interim narration), or 'final' (the answer if it wasn't already streamed) —
+        then returns the same {reply, trace} as chat(). Used by the chat feed and the
+        Telegram front-end so they show work in progress, not one final dump."""
         run_turn = _get_run_turn()
         if run_turn is None:
             return self._finish(_missing_engine_msg(), [])
@@ -239,8 +258,16 @@ class AgentBrain:
         seen = {"text": ""}
 
         def _ev(event):
-            # Only act on complete assistant messages; ignore partial token deltas
-            # (stream_event), system init, and tool-result (user) events.
+            # Act on complete messages only; ignore partial token deltas
+            # (stream_event) and system init.
+            if event.get("type") == "user":
+                # tool results ride back as user-role tool_result blocks
+                for b in (event.get("message") or {}).get("content") or []:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        s = _result_summary(b)
+                        if s:
+                            emit("result", s)
+                return
             if event.get("type") != "assistant":
                 return
             for b in (event.get("message") or {}).get("content") or []:

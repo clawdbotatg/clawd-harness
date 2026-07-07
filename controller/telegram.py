@@ -147,8 +147,8 @@ class TelegramBridge:
         last = [0.0]
 
         def emit(kind, body):
-            if not body:
-                return
+            if not body or kind == "result":
+                return       # tool results are noise on a phone; the web feed shows them
             gap = 0.5 - (time.time() - last[0])
             if gap > 0:
                 time.sleep(gap)

@@ -752,6 +752,32 @@ class Handler(BaseHTTPRequestHandler):
             if ct:
                 headers["Content-Type"] = ct
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        if sub == "/api/chat/stream":
+            # PM live-progress stream: pass NDJSON lines through as they arrive
+            # (read-until-EOF, Connection: close) instead of buffering the reply,
+            # mirroring the harness's own /pm proxy.
+            started = False
+            try:
+                with urllib.request.urlopen(req, timeout=600) as r:
+                    self.send_response(r.status)
+                    self.send_header("Content-Type",
+                                     r.headers.get("Content-Type", "application/x-ndjson"))
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.close_connection = True
+                    started = True
+                    while True:
+                        line = r.readline()
+                        if not line:
+                            break
+                        self.wfile.write(line)
+                        self.wfile.flush()
+            except Exception as e:
+                if not started:
+                    return self._send_json({"error": f"controller offline: {e}"}, 502)
+                # mid-stream failure: the connection just drops; client sees EOF
+            return
         try:
             with urllib.request.urlopen(req, timeout=300) as r:
                 data, ctype, code = r.read(), r.headers.get("Content-Type", "application/octet-stream"), r.status

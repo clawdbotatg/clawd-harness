@@ -3160,6 +3160,7 @@ function resultBubble(text, feedEl) {
   F.appendChild(d);
   (F === pmfeed ? pmBumpThinking : bumpThinking)();
   F.scrollTop = F.scrollHeight;
+  return d;
 }
 
 function renderEvent(ev, live) {
@@ -4173,6 +4174,23 @@ function pmRenderTrace(trace) {
       resultBubble(typeof t.result === 'string' ? t.result : JSON.stringify(t.result, null, 2), pmfeed);
   });
 }
+// One PM work event (streamed live, or a stored who:"work" message) → a feed
+// bubble in the session vocabulary: a tool call line, a collapsible result, or
+// interim narration. Returns the node so a live send can retract a duplicate.
+function pmWorkBubble(m) {
+  if (m.kind === 'tool') {
+    const d = bubble('tool', 'tool', '', false, pmfeed);
+    const body = d.lastChild;
+    const i = (m.text || '').indexOf(' ');
+    const nm = document.createElement('span'); nm.className = 'toolname';
+    nm.textContent = i > 0 ? m.text.slice(0, i) : (m.text || 'tool');
+    body.appendChild(nm);
+    if (i > 0) body.appendChild(document.createTextNode(' ' + m.text.slice(i + 1)));
+    return d;
+  }
+  if (m.kind === 'result') return resultBubble(m.text || '', pmfeed);
+  return bubble('assistant', 'pm', m.text || '', true, pmfeed);
+}
 // The PM's prose reply → an assistant bubble (typewriter when live), with any
 // "open ↗" deep-link button the PM produced appended to it.
 function pmReplyBubble(m, typing) {
@@ -4198,6 +4216,7 @@ function renderPmFeed() {
   } else {
     pmMessages.forEach(m => {
       if (m.who === 'me') bubble('user', 'you', m.text || '', true, pmfeed);
+      else if (m.who === 'work') pmWorkBubble(m);
       else { pmRenderTrace(m.trace); pmReplyBubble(m, false); }
     });
   }
@@ -4259,7 +4278,8 @@ async function pmLoadMessages() {
   // the convo was gone" bug — the thread is intact server-side, only the fetch blipped.
   try { r = await pmApi('/api/thread/messages'); }
   catch (e) { return; }
-  pmMessages = r.messages || [];
+  if (!r || !Array.isArray(r.messages)) return;   // error payload (controller down) — keep what we have
+  pmMessages = r.messages;
   if (currentView() === 'pm') renderPmFeed();
 }
 async function openPM() {
@@ -4290,6 +4310,38 @@ async function pmArchive(tid) {
   try { pmApplyThreads(await pmApi('/api/thread/archive', pmPost({ id: tid }))); } catch (e) {}
   if (wasCurrent) { await pmLoadMessages(); syncComposer(); }
 }
+// Stream one PM turn: NDJSON events over /api/chat/stream — every tool call,
+// result, and interim thought lands in the feed AS the PM works. Returns the
+// final {reply, trace}; throws if the stream endpoint is unavailable so the
+// caller can fall back to the blocking /api/chat.
+async function pmChatStream(text) {
+  const r = await fetch(PM_BASE + '/api/chat/stream', pmPost({ message: text }));
+  if (!r.ok || !r.body) throw new Error('stream unavailable (' + r.status + ')');
+  const ct = r.headers.get('Content-Type') || '';
+  if (ct.includes('application/json')) return r.json();   // older controller answered like /api/chat
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', out = null;
+  const handle = ev => {
+    if (ev.kind === 'done') { out = { reply: ev.reply || '', trace: ev.trace || [] }; return; }
+    if (ev.kind === 'final') return;             // the done frame carries the reply
+    const m = { who: 'work', kind: ev.kind, text: ev.text || '' };
+    pmMessages.push(m);
+    if (currentView() === 'pm') m.el = pmWorkBubble(m);
+  };
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+      if (line) { try { handle(JSON.parse(line)); } catch (e) {} }
+    }
+  }
+  if (!out) throw new Error('stream ended without a reply');
+  return out;
+}
 async function pmSend(text) {
   if (pmBusy || !text.trim()) return;
   pmBusy = true;
@@ -4297,9 +4349,22 @@ async function pmSend(text) {
   bubble('user', 'you', text, true, pmfeed);   // append the user turn (no full rebuild)
   pmShowThinking();                             // braille spinner + elapsed time, like a session
   let out;
-  try { out = await pmApi('/api/chat', pmPost({ message: text })); }
-  catch (e) { out = { reply: '⚠️ controller unreachable (/pm)', trace: [] }; }
+  try { out = await pmChatStream(text); }
+  catch (e) {
+    // stream endpoint missing/broken → one blocking call; surface a real error
+    // (a controller-down 502 resolves as {error} JSON — never fake "(no reply)")
+    try { out = await pmApi('/api/chat', pmPost({ message: text })); }
+    catch (e2) { out = null; }
+    if (!out || out.error || out.reply === undefined)
+      out = { reply: '⚠️ PM unreachable — ' + ((out && out.error) || e.message || 'controller offline') + '. Your message was not processed.', trace: [] };
+  }
   pmHideThinking();
+  // the reply is usually ALSO the last streamed narration — retract the interim copy
+  const last = pmMessages[pmMessages.length - 1];
+  if (last && last.who === 'work' && last.kind === 'text' && last.text === (out.reply || '')) {
+    pmMessages.pop();
+    if (last.el && last.el.parentNode) last.el.remove();
+  }
   const msg = { who: 'bot', text: out.reply || '(no reply)', trace: out.trace || [] };
   pmMessages.push(msg);
   pmRenderTrace(msg.trace);     // tool + collapsible result bubbles
