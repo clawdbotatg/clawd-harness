@@ -145,6 +145,51 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
                 with chat_lock:
                     out = router.chat(msg)
                 return self._send(200, out)
+            if path == "/api/chat/stream":
+                # Live-progress chat: one NDJSON line per PM event ({kind, text},
+                # kind tool|result|text|final) AS the turn runs, then a closing
+                # {kind:"done", reply, trace}. EOF-terminated (Connection: close, no
+                # Content-Length) so it flows through the harness/relay pass-through
+                # proxies and fetch() streaming without buffering.
+                msg = (data.get("message") or "").strip()
+                if not msg:
+                    return self._send(400, {"error": "empty message"})
+                if not hasattr(router, "chat_stream"):
+                    with chat_lock:
+                        out = router.chat(msg)
+                    return self._send(200, out)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.close_connection = True
+                dead = []
+
+                def emit(kind, body):
+                    if dead:
+                        return
+                    try:
+                        self.wfile.write(
+                            (json.dumps({"kind": kind, "text": body}) + "\n").encode())
+                        self.wfile.flush()
+                    except OSError:
+                        # client went away — keep the turn running so it still
+                        # records to the thread; the feed catches up on reload
+                        dead.append(1)
+
+                with chat_lock:
+                    out = router.chat_stream(msg, emit)
+                if not dead:
+                    try:
+                        self.wfile.write((json.dumps({
+                            "kind": "done", "reply": out.get("reply", ""),
+                            "trace": out.get("trace") or []}) + "\n").encode())
+                        self.wfile.flush()
+                    except OSError:
+                        pass
+                return
             if path == "/api/model":         # pick the PM's claude --model (debug page)
                 if not prompt_brain or not hasattr(prompt_brain, "set_model"):
                     return self._send(400, {"error": "active backend has no model knob"})

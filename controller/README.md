@@ -74,6 +74,18 @@ the brain history + `--resume` id inside them — survive a daemon restart. API:
 `GET /api/thread/messages?id=`, `POST /api/thread/{new,select,clear,archive}`.
 Telegram shares the **current** thread.
 
+## Live progress (the feed shows the work, not a spinner)
+
+A turn streams over **`POST /api/chat/stream`** — NDJSON, one `{kind, text}`
+line per event as the PM works (`tool` a tool call, `result` its clipped
+output, `text` interim narration), closed by `{kind:"done", reply, trace}`.
+Both chat UIs consume it (falling back to blocking `/api/chat` if it's
+unavailable); the harness `/pm` proxy and the fleet relay pass the stream
+through unbuffered. Every event is **also recorded to the thread as a
+`who:"work"` message the moment it happens** — and the user prompt is persisted
+*before* the turn runs — so a reload, thread switch, or crash mid-turn replays
+the full work log instead of losing it.
+
 ## Autonomy (the write guard)
 
 Write verbs (assign / ask / answer_prompt / interrupt / create|clone project)

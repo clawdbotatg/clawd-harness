@@ -108,20 +108,47 @@ def main(argv):
                 brain.forget_conversation(k)
 
             def chat(self, text):
-                brain.conversation_key = _key()
+                tid = threads.current
+                brain.conversation_key = _key(tid)
+                # Record + persist the user turn BEFORE the brain runs — a reload,
+                # thread rebuild, or crash mid-turn must never lose the prompt
+                # (it used to: nothing hit disk until the whole turn finished).
+                threads.record("me", text, tid=tid)
+                threads.persist()
                 out = brain.chat(text)
-                threads.record("me", text)
-                threads.record("bot", out.get("reply", ""), out.get("trace"))
+                threads.record("bot", out.get("reply", ""), out.get("trace"), tid=tid)
                 threads.persist()
                 return out
 
             def chat_stream(self, text, emit):
-                """Streaming variant — same bookkeeping as chat(), but the brain fires
-                emit(kind, text) per event so a front-end (Telegram) shows live progress."""
-                brain.conversation_key = _key()
-                out = brain.chat_stream(text, emit)
-                threads.record("me", text)
-                threads.record("bot", out.get("reply", ""), out.get("trace"))
+                """Streaming variant — same bookkeeping as chat(), but every brain
+                event is forwarded to the front-end AND recorded to the thread as it
+                happens, so a mid-turn rebuild replays the work log, not just the
+                final reply."""
+                tid = threads.current
+                brain.conversation_key = _key(tid)
+                threads.record("me", text, tid=tid)
+                threads.persist()
+                last_text = [None]
+
+                def _emit(kind, body):
+                    if kind in ("tool", "result", "text"):
+                        threads.record("work", body, tid=tid, kind=kind)
+                        threads.persist()
+                        if kind == "text":
+                            last_text[0] = body
+                    emit(kind, body)
+
+                out = brain.chat_stream(text, _emit)
+                reply = out.get("reply", "")
+                # the reply is usually ALSO the last streamed narration — drop the
+                # interim copy so the transcript doesn't show it twice
+                t = threads.get(tid)
+                if (reply and last_text[0] == reply and t and t["messages"]
+                        and t["messages"][-1].get("who") == "work"
+                        and t["messages"][-1].get("kind") == "text"):
+                    t["messages"].pop()
+                threads.record("bot", reply, out.get("trace"), tid=tid)
                 threads.persist()
                 return out
 

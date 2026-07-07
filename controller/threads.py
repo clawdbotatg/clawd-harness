@@ -82,12 +82,17 @@ class Threads:
         if t is not None:
             t["state"][backend] = state
 
-    def record(self, who, text, trace=None, tid=None):
-        """Append a display message; lock the title from the first user message."""
+    def record(self, who, text, trace=None, tid=None, kind=None):
+        """Append a display message; lock the title from the first user message.
+        who="work" entries are the PM's streamed progress (kind: tool|result|text)
+        recorded AS the turn runs, so a rebuild replays the work, not just the reply."""
         t = self.threads.get(tid or self.current)
         if t is None:
             return
-        t["messages"].append({"who": who, "text": text, "trace": trace or []})
+        m = {"who": who, "text": text, "trace": trace or []}
+        if kind:
+            m["kind"] = kind
+        t["messages"].append(m)
         if who == "me" and not t["title_locked"]:
             t["title"] = _derive_title(text)
             t["title_locked"] = True
