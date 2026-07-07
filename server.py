@@ -958,7 +958,9 @@ class SessionManager:
         added = 0
         for name in entries:
             path = str(PROJECTS_DIR / name)
-            if path in known_paths or not os.path.isdir(os.path.join(path, ".git")):
+            # .git is a DIR for a clone but a FILE for a linked worktree — both
+            # are adoptable (the code orchestrator parks selfdev worktrees here).
+            if path in known_paths or not os.path.exists(os.path.join(path, ".git")):
                 continue
             p = Project(pid=str(uuid.uuid4()), name=name, path=path,
                         repo_url=_git_remote_url(path), status="ready")
@@ -1099,7 +1101,7 @@ class SessionManager:
             present = False
         if not present:
             return None                          # nothing on disk → clone fresh
-        is_git = os.path.isdir(os.path.join(path, ".git"))
+        is_git = os.path.exists(os.path.join(path, ".git"))  # dir=clone, file=worktree
         p = Project(pid=str(uuid.uuid4()), name=base, path=path,
                     repo_url=_git_remote_url(path) if is_git else "",
                     status="ready", created=time.time())
