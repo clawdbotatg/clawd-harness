@@ -179,6 +179,11 @@ REGISTRY_FILE = HERE / ".clawd-harness.sessions.json"   # persists projects+sess
 # enter the harness repo. The GitHub owner new repos are created under.
 PROJECTS_DIR = Path(os.environ.get("PROJECTS_DIR", str(HERE / "projects"))).resolve()
 GH_OWNER     = os.environ.get("GH_OWNER", "clawdbotatg")
+# How long a failed clone/create's error entry stays in the list (so the user
+# can read the error) before reconcile_projects() drops it. Without a folder on
+# disk the reconcile loop used to leave it forever, permanently blocking a
+# retry of the same repo name.
+ERROR_LINGER = float(os.environ.get("ERROR_LINGER", "45"))
 # The harness always offers *itself* as a pinned project (path = HERE, outside
 # PROJECTS_DIR) so you can open a session and live-edit the app you're running.
 # Stable sentinel pid so its sessions resume across restarts; never persisted to
@@ -282,6 +287,7 @@ class Project:
         self.repo_url = _scrub_url_creds(repo_url)  # never store/broadcast embedded creds
         self.status = status                     # ready | cloning | error
         self.error = error
+        self.error_at = 0.0                      # when status flipped to error (in-memory only)
         self.created = created or time.time()
         self.pinned = pinned                     # the harness-itself project: top of list, not removable
 
@@ -966,9 +972,11 @@ class SessionManager:
         in-app "remove" — you delete a repo's folder yourself). Drop any ready
         project under PROJECTS_DIR whose folder has vanished (killing its now
         cwd-less sessions), then adopt any new repo dir. The pinned self-project
-        and in-flight clones/errors (transient, in-memory only) are left alone.
-        Returns True if the set of projects changed. Cheap; runs on the watch
-        loop so the list follows disk within ~1s for every open browser."""
+        and in-flight clones are left alone; a folder-less `error` entry (failed
+        clone/create) is dropped after ERROR_LINGER, or healed to ready if a git
+        repo appears at its path. Returns True if the set of projects changed.
+        Cheap; runs on the watch loop so the list follows disk within ~1s for
+        every open browser."""
         base = str(PROJECTS_DIR) + os.sep
         try:
             on_disk = {str(PROJECTS_DIR / n) for n in os.listdir(PROJECTS_DIR)}
@@ -995,14 +1003,38 @@ class SessionManager:
                       flush=True)
             gone = ([pid for pid, p in ready if p.path not in on_disk]
                     if safe_to_drop else [])
+            # A failed clone/create leaves an `error` entry with no folder on
+            # disk. The ready-only pass above never touches it, so it lingered
+            # forever — and its registered path blocked re-cloning the same
+            # repo. Drop it once the user has had a moment to read the error
+            # (ERROR_LINGER); and if a git repo *appears* at its path (manual
+            # clone, later retry), heal the entry to ready instead.
+            now = time.time()
+            errored = [(pid, p) for pid, p in self.projects.items()
+                       if not p.pinned and p.status == "error"
+                       and p.path.startswith(base)]
+            gone += [pid for pid, p in errored
+                     if scan_ok and p.path not in on_disk
+                     and now - (p.error_at or p.created) > ERROR_LINGER]
+            healed = [p for _, p in errored
+                      if os.path.isdir(os.path.join(p.path, ".git"))]
         changed = False
+        for p in healed:
+            p.status, p.error = "ready", ""
+            if not p.repo_url:
+                p.repo_url = _git_remote_url(p.path)
+            print(f"[project {p.name}] git repo appeared at its path → "
+                  "error entry healed to ready", flush=True)
+            changed = True
         for pid in gone:
             with self.lock:
                 p = self.projects.pop(pid, None)
                 cids = [c for c, s in self.sessions.items() if s.pid == pid]
             if not p:
                 continue
-            print(f"[project {p.name}] folder gone from disk → dropped", flush=True)
+            what = ("failed clone/create entry expired" if p.status == "error"
+                    else "folder gone from disk")
+            print(f"[project {p.name}] {what} → dropped", flush=True)
             for cid in cids:
                 self.close(cid, _broadcast=False)
             changed = True
@@ -1049,9 +1081,18 @@ class SessionManager:
         None when there's nothing on disk to adopt (→ clone fresh)."""
         path = str(PROJECTS_DIR / base)
         with self.lock:
-            for p in self.projects.values():
-                if p.path == path:               # already registered → reuse it
-                    return p
+            for p in list(self.projects.values()):
+                if p.path != path:
+                    continue
+                if p.status == "error" and not os.path.isdir(path):
+                    # a failed clone left a folder-less error corpse at this
+                    # path — returning it would block the retry the user just
+                    # asked for; drop it and clone fresh under the same name
+                    self.projects.pop(p.pid, None)
+                    print(f"[project {base}] dropped failed entry → retrying",
+                          flush=True)
+                    break
+                return p                         # already registered → reuse it
         try:
             present = os.path.isdir(path) and bool(os.listdir(path))
         except OSError:
@@ -1154,6 +1195,7 @@ class SessionManager:
                 print(f"[project {project.name}] {kind} ok", flush=True)
             else:
                 project.status = "error"
+                project.error_at = time.time()
                 err = (r.stderr or r.stdout or "failed").strip()
                 if kind == "create" and ("auth" in err.lower() or "gh auth" in err.lower()):
                     err += " (is `gh` authenticated in the server's environment?)"
@@ -1162,6 +1204,7 @@ class SessionManager:
                       flush=True)
         except Exception as e:
             project.status = "error"
+            project.error_at = time.time()
             project.error = str(e)[-300:]
             print(f"[project {project.name}] {kind} error: {e}", flush=True)
         self.save_registry()
