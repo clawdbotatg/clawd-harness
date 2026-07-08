@@ -324,34 +324,58 @@
   #addProject .arow, .madd .arow { display:flex; gap:8px; }
   #addProject .arow button, .madd .arow button { flex:1; font-size:13px; padding:8px 10px; }
   #addProject .ahint, .madd .ahint { color:var(--dim); font-size:11px; }
-  /* accounts: subscription logins + headroom meters (the 🧠 overlay) */
-  .accounts { margin-top:6px; }
-  .accountscard { text-align:left; width:min(480px,94vw); max-width:480px; max-height:82vh;
-            display:flex; flex-direction:column; }
-  .accountscard #accountsbody { flex:1; min-height:0; overflow-y:auto; margin-bottom:12px; }
-  .accountscard #accountsclose { align-self:center; }
-  #accountsbody .menutitle.amach { margin-top:14px; }
-  .accounts .acct { border:1px solid var(--edge); padding:10px 14px; background:var(--panel); margin-bottom:8px; }
-  .accounts .acct.active { border-color:var(--accent); background:#0e0e0e; }
-  .accounts .arow2 { display:flex; align-items:center; gap:9px; }
-  .accounts .aname { font-weight:600; font-size:13px; }
-  .accounts .amail { color:var(--dim); font-size:11px; flex:1; min-width:0;
-                     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .accounts .aleft { font-size:11px; font-family:var(--mono); }
-  .accounts button.ause { font-size:11px; padding:3px 9px; }
-  .accounts .awin { display:flex; align-items:center; gap:8px; margin-top:6px;
-                    font-size:10px; color:var(--dim); font-family:var(--mono); }
-  .accounts .awin .wlab { flex:0 0 62px; }
-  .accounts .awin .wpct { flex:0 0 66px; text-align:right; }
-  .accounts .abar { position:relative; flex:1; height:6px; background:var(--raised);
-                    border:1px solid var(--edge); }
-  .accounts .abar i { position:absolute; top:0; bottom:0; left:0; }
-  .accounts .ahint2 { color:var(--dim); font-size:11px; margin-top:6px; }
-  .accounts .aadd { display:flex; gap:8px; border:1px dashed var(--edge); padding:10px 14px; }
-  .accounts .aadd input { flex:1; background:var(--raised); color:var(--ink);
-                          border:1px solid var(--edge); padding:8px 10px; font-size:13px; }
-  .accounts .aadd input:focus { outline:none; border-color:var(--accent); }
-  .accounts .aadd button { font-size:13px; padding:8px 10px; white-space:nowrap; }
+  /* 🧠 subscriptions — a full page, not a modal */
+  #accountsmodal { position:fixed; inset:0; background:var(--bg); z-index:50;
+                   display:flex; flex-direction:column; }
+  #accountsmodal[hidden] { display:none; }
+  #acctshead { display:flex; align-items:center; gap:14px; padding:14px 22px;
+               border-bottom:1px solid var(--edge); flex:0 0 auto; }
+  #acctshead .bico { font-size:22px; }
+  #acctshead .ah-t { font-weight:700; font-size:15px; }
+  #acctshead .ah-s { color:var(--dim); font-size:11px; margin-top:2px; }
+  #acctshead .spacer { flex:1; }
+  #accountsclose { background:transparent; border:1px solid var(--edge); color:var(--dim);
+                   padding:7px 12px; font-size:13px; }
+  #accountsclose:hover { color:var(--ink); border-color:var(--edge-hi); }
+  #accountsbody { flex:1; min-height:0; overflow-y:auto; padding:20px 22px 44px;
+                  display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr));
+                  gap:16px; align-content:start; }
+  @media (max-width:740px) { #accountsbody { grid-template-columns:1fr; padding:14px 12px 44px; } }
+  .amach-sec { border:1px solid var(--edge); background:var(--panel); padding:14px 16px 16px; }
+  .amach-sec.offline { opacity:.55; }
+  .amach-hd { display:flex; align-items:center; gap:9px; font-weight:600; font-size:13px; }
+  .amach-hd .amach-sub { color:var(--dim); font-weight:400; font-size:11px; margin-left:auto;
+                         font-family:var(--mono); }
+  .acct { border:1px solid var(--edge); background:var(--raised); padding:12px 14px; margin-top:10px; }
+  .acct.active { border-color:var(--accent); }
+  .arow2 { display:flex; align-items:center; gap:10px; }
+  .aid { flex:1; min-width:0; }
+  .aname { font-weight:700; font-size:14px; }
+  .amail { color:var(--dim); font-size:11px; overflow:hidden; text-overflow:ellipsis;
+           white-space:nowrap; margin-top:1px; }
+  .abigwrap { text-align:right; flex:0 0 auto; }
+  .abig { font-family:var(--mono); font-size:24px; font-weight:700; line-height:1; }
+  .abiglbl { color:var(--dim); font-size:9px; text-transform:uppercase; letter-spacing:.14em;
+             margin-top:3px; }
+  .actrow { display:flex; align-items:center; gap:8px; margin-top:10px; }
+  .actrow .achk { color:var(--dim); font-size:10px; margin-left:auto; font-family:var(--mono); }
+  button.ause { font-size:11px; padding:4px 11px; }
+  .awin { display:flex; align-items:center; gap:8px; margin-top:8px;
+          font-size:10px; color:var(--dim); font-family:var(--mono); }
+  .awin .wlab { flex:0 0 56px; }
+  .awin .abar { position:relative; flex:1; height:9px; background:var(--bg);
+                border:1px solid var(--edge); }
+  .awin .abar i { position:absolute; top:0; bottom:0; left:0; }
+  .awin .wpct { flex:0 0 56px; text-align:right; }
+  .awin .wreset { flex:0 0 64px; font-size:9px; text-align:right;
+                  overflow:hidden; white-space:nowrap; }
+  .ahint2 { color:var(--dim); font-size:11px; margin-top:6px; line-height:1.5; }
+  .aadd { margin-top:14px; border-top:1px dashed var(--edge); padding-top:12px; }
+  .aadd .aaddrow { display:flex; gap:8px; margin-top:8px; }
+  .aadd input { flex:1; min-width:0; background:var(--bg); color:var(--ink);
+                border:1px solid var(--edge); padding:9px 11px; font-size:13px; }
+  .aadd input:focus { outline:none; border-color:var(--accent); }
+  .aadd button { font-size:13px; padding:9px 12px; white-space:nowrap; }
   /* per-machine add-project: a slim toggle that unfolds the clone/create form
      inside the machine's roster card (the only place to target a SPECIFIC host) */
   .madd { margin-top:8px; padding:10px 12px; }
@@ -399,9 +423,9 @@
   #newSession:hover { color:var(--accent); border-color:var(--accent-dim); }
   .menutitle { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.16em;
                padding:0 2px 2px; }
-  #qrmodal, #machinesmodal, #accountsmodal { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex;
+  #qrmodal, #machinesmodal { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex;
              align-items:center; justify-content:center; z-index:50; }
-  #qrmodal[hidden], #machinesmodal[hidden], #accountsmodal[hidden] { display:none; }
+  #qrmodal[hidden], #machinesmodal[hidden] { display:none; }
   .qrcard { background:var(--panel); border:1px solid var(--edge); border-top:2px solid var(--accent);
             padding:22px; text-align:center; max-width:340px; }
   /* machines roster overlay: a scrollable card of read-only machine stats */
@@ -511,10 +535,16 @@
     </div>
   </div>
   <div id="accountsmodal" hidden>
-    <div class="qrcard accountscard">
-      <div id="accountsbody"></div>
-      <button id="accountsclose">close</button>
+    <div id="acctshead">
+      <span class="bico">🧠</span>
+      <div>
+        <div class="ah-t">subscriptions</div>
+        <div class="ah-s">every machine signed into every claude plan — new sessions route to the most headroom</div>
+      </div>
+      <span class="spacer"></span>
+      <button id="accountsclose" title="Back to the app">✕ close</button>
     </div>
+    <div id="accountsbody"></div>
   </div>
   <div id="login" hidden>
     <div class="qrcard">
@@ -2657,65 +2687,57 @@ function leftColor(left) {
   return left >= 50 ? 'var(--ok)' : left >= 20 ? 'var(--accent)' : 'var(--err)';
 }
 
+// "in 3h" — compact time until an ISO timestamp (window reset countdowns)
+function fmtUntil(iso) {
+  if (!iso) return '';
+  const s = (new Date(iso).getTime() - Date.now()) / 1000;
+  if (!isFinite(s)) return '';
+  if (s <= 0) return 'now';
+  return s < 5400 ? `${Math.round(s / 60)}m` : s < 172800 ? `${Math.round(s / 3600)}h`
+       : `${Math.round(s / 86400)}d`;
+}
+
 // One machine's accounts panel, appended to `container`. mid='local' in
 // direct mode; a machine id in fleet mode (controls route to that harness).
 function renderAccountsPanel(container, info, mid) {
-  const wrap = document.createElement('div');
-  wrap.className = 'accounts';
   if (!info) {
     const hint = document.createElement('div'); hint.className = 'ahint2';
     hint.textContent = 'no account data — machine offline, or its harness predates accounts (git pull on the box)';
-    wrap.appendChild(hint);
-    container.appendChild(wrap);
+    container.appendChild(hint);
     return;
   }
-  // routing status: where new sessions land, whether the auto brain is on
-  const st = document.createElement('div'); st.className = 'ahint2';
-  st.textContent = `new sessions → ${info.active}`
-    + (info.auto && info.accounts.length > 1 ? ' · auto-routing to most headroom' : '')
-    + (info.lastSwitch ? ` · switched ${accountAge(info.lastSwitch)} ago` : '');
-  wrap.appendChild(st);
 
   (info.accounts || []).forEach(a => {
     const card = document.createElement('div');
     card.className = 'acct' + (a.active ? ' active' : '');
+
+    // headline: identity on the left, the big headroom number on the right
     const row = document.createElement('div'); row.className = 'arow2';
     const dot = document.createElement('span');
     dot.className = 'sdot' + (a.status === 'pending' ? ' dead' : a.active ? ' busy' : '');
-    const nm = document.createElement('span');
+    const id = document.createElement('div'); id.className = 'aid';
+    const nm = document.createElement('div');
     nm.className = 'aname'; nm.textContent = a.name;
-    const mail = document.createElement('span');
-    mail.className = 'amail'; mail.textContent = a.email || (a.status === 'pending' ? 'not signed in yet' : '');
-    row.appendChild(dot); row.appendChild(nm); row.appendChild(mail);
+    const mail = document.createElement('div');
+    mail.className = 'amail';
+    mail.textContent = a.email || (a.status === 'pending' ? 'not signed in yet' : '');
+    id.appendChild(nm); id.appendChild(mail);
+    row.appendChild(dot); row.appendChild(id);
     if (a.headroom != null) {
-      const left = document.createElement('span');
-      left.className = 'aleft';
-      left.style.color = leftColor(a.headroom);
-      left.textContent = `${a.headroom}% left`;
-      left.title = a.checkedAt ? `most-constrained window · checked ${accountAge(a.checkedAt)} ago` : '';
-      row.appendChild(left);
-    }
-    const nsess = accountSessionCount(mid, a.name);
-    if (nsess > 0) {
-      const sc = document.createElement('span');
-      sc.className = 'scount'; sc.textContent = `${nsess} sess`;
-      sc.title = `${nsess} live session${nsess === 1 ? '' : 's'} running under this account`;
-      row.appendChild(sc);
-    }
-    if (a.active) {
-      const tag = document.createElement('span');
-      tag.className = 'scount swork'; tag.textContent = 'active';
-      tag.title = 'new sessions spawn under this account';
-      row.appendChild(tag);
-    } else if (a.status === 'ready') {
-      const use = document.createElement('button');
-      use.className = 'ause'; use.textContent = 'use';
-      use.title = 'spawn NEW sessions under this account (running sessions are untouched)';
-      use.onclick = (e) => { e.stopPropagation(); accountSend(mid, { type: 'accountUse', name: a.name }); };
-      row.appendChild(use);
+      const bw = document.createElement('div'); bw.className = 'abigwrap';
+      const big = document.createElement('div');
+      big.className = 'abig';
+      big.style.color = leftColor(a.headroom);
+      big.textContent = `${Math.round(a.headroom)}%`;
+      const lbl = document.createElement('div');
+      lbl.className = 'abiglbl'; lbl.textContent = 'headroom';
+      bw.appendChild(big); bw.appendChild(lbl);
+      bw.title = 'what remains of the most-constrained usage window';
+      row.appendChild(bw);
     }
     card.appendChild(row);
 
+    // usage windows: bar + % left + reset countdown
     (a.windows || []).forEach(w => {
       const win = document.createElement('div'); win.className = 'awin';
       const lab = document.createElement('span'); lab.className = 'wlab'; lab.textContent = w.label;
@@ -2727,28 +2749,64 @@ function renderAccountsPanel(container, info, mid) {
       bar.appendChild(fill);
       const pct = document.createElement('span'); pct.className = 'wpct';
       pct.textContent = `${Math.round(left)}% left`;
-      if (w.resets) pct.title = `resets ${new Date(w.resets).toLocaleString()}`;
-      win.appendChild(lab); win.appendChild(bar); win.appendChild(pct);
+      const rst = document.createElement('span'); rst.className = 'wreset';
+      const until = fmtUntil(w.resets);
+      rst.textContent = until ? `↻ in ${until}` : '';
+      if (w.resets) rst.title = `window resets ${new Date(w.resets).toLocaleString()}`;
+      win.appendChild(lab); win.appendChild(bar); win.appendChild(pct); win.appendChild(rst);
       card.appendChild(win);
     });
 
+    // action row: active tag / use button · session count · data freshness
+    const act = document.createElement('div'); act.className = 'actrow';
+    if (a.active) {
+      const tag = document.createElement('span');
+      tag.className = 'scount swork'; tag.textContent = '● active';
+      tag.title = 'new sessions spawn under this account';
+      act.appendChild(tag);
+    } else if (a.status === 'ready') {
+      const use = document.createElement('button');
+      use.className = 'ause'; use.textContent = 'use this plan';
+      use.title = 'spawn NEW sessions under this account (running sessions are untouched)';
+      use.onclick = (e) => { e.stopPropagation(); accountSend(mid, { type: 'accountUse', name: a.name }); };
+      act.appendChild(use);
+    }
+    const nsess = accountSessionCount(mid, a.name);
+    if (nsess > 0) {
+      const sc = document.createElement('span');
+      sc.className = 'scount'; sc.textContent = `${nsess} live session${nsess === 1 ? '' : 's'}`;
+      act.appendChild(sc);
+    }
+    if (a.checkedAt) {
+      const chk = document.createElement('span');
+      chk.className = 'achk'; chk.textContent = `checked ${accountAge(a.checkedAt)} ago`;
+      act.appendChild(chk);
+    }
+    if (act.childNodes.length) card.appendChild(act);
+
     if (a.status === 'pending') {
       const hint = document.createElement('div'); hint.className = 'ahint2';
-      hint.textContent = 'sign-in not finished — open its session and complete the OAuth login';
+      hint.textContent = 'sign-in not finished — open the sign-in terminal and complete the claude.ai login there';
       card.appendChild(hint);
       const open = document.createElement('button');
-      open.className = 'ause'; open.textContent = 'open sign-in';
-      open.style.marginTop = '6px';
+      open.className = 'ause'; open.textContent = '🔑 open sign-in terminal';
+      open.style.marginTop = '8px';
       open.onclick = (e) => { e.stopPropagation(); addAccount(mid, a.name); };
       card.appendChild(open);
     }
-    wrap.appendChild(card);
+    container.appendChild(card);
   });
 
-  // add row: name a new account (work / personal / …) → sign-in session opens
+  // add flow: pick a nickname → a terminal opens → do the claude.ai OAuth there
   const add = document.createElement('div'); add.className = 'aadd';
+  const how = document.createElement('div'); how.className = 'ahint2';
+  how.textContent = 'add another claude.ai subscription: pick a nickname for it '
+    + '(work, personal, team…), then sign in to that claude.ai account in the '
+    + 'terminal that opens. one sign-in per machine — it sticks.';
+  add.appendChild(how);
+  const arow = document.createElement('div'); arow.className = 'aaddrow';
   const inp = document.createElement('input');
-  inp.placeholder = 'add a Claude subscription · name it (work, personal…)';
+  inp.placeholder = 'nickname · e.g. work';
   inp.dataset.mid = mid;
   inp.value = accountAddDrafts[mid] || '';
   inp.addEventListener('input', () => { accountAddDrafts[mid] = inp.value; });
@@ -2757,19 +2815,19 @@ function renderAccountsPanel(container, info, mid) {
   });
   const btn = document.createElement('button');
   btn.textContent = '🔑 sign in';
-  btn.title = 'opens a terminal session where you complete the Claude OAuth login';
+  btn.title = 'opens a terminal session where you complete the claude.ai login';
   btn.onclick = () => addAccount(mid, inp.value);
   const ref = document.createElement('button');
   ref.textContent = '↻';
   ref.title = 'refresh usage now';
   ref.onclick = () => accountSend(mid, { type: 'accountsRefresh' });
-  add.appendChild(inp); add.appendChild(btn); add.appendChild(ref);
-  wrap.appendChild(add);
-  container.appendChild(wrap);
+  arow.appendChild(inp); arow.appendChild(btn); arow.appendChild(ref);
+  add.appendChild(arow);
+  container.appendChild(add);
 }
 
-// Populate the 🧠 overlay — one section per machine in fleet mode, this
-// harness alone in direct mode. Preserves the focused add-input's caret
+// Populate the 🧠 page — a grid with one section per machine in fleet mode,
+// this harness alone in direct mode. Preserves the focused add-input's caret
 // across repaints (accounts frames land while you type).
 function renderAccountsBody() {
   const body = document.getElementById('accountsbody');
@@ -2778,12 +2836,34 @@ function renderAccountsBody() {
   const focusMid = (ae && ae.tagName === 'INPUT' && body.contains(ae)) ? ae.dataset.mid : null;
   const sS = focusMid ? ae.selectionStart : null, sE = focusMid ? ae.selectionEnd : null;
   body.innerHTML = '';
-  const title = document.createElement('div');
-  title.className = 'menutitle';
-  title.textContent = 'claude subscriptions · headroom routing';
-  body.appendChild(title);
+
+  const section = (label, online, info, mid) => {
+    const sec = document.createElement('div');
+    sec.className = 'amach-sec' + (online ? '' : ' offline');
+    const hd = document.createElement('div'); hd.className = 'amach-hd';
+    const dot = document.createElement('span');
+    dot.className = 'sdot' + (online ? '' : ' dead');
+    const nm = document.createElement('span'); nm.textContent = `🖥️ ${label}`;
+    hd.appendChild(dot); hd.appendChild(nm);
+    if (info) {
+      const sub = document.createElement('span'); sub.className = 'amach-sub';
+      sub.textContent = `new sessions → ${info.active}`
+        + (info.auto && (info.accounts || []).length > 1 ? ' · auto' : '');
+      sub.title = 'which plan new sessions spawn under'
+        + (info.lastSwitch ? ` · last switched ${accountAge(info.lastSwitch)} ago` : '');
+      hd.appendChild(sub);
+    } else if (!online) {
+      const sub = document.createElement('span'); sub.className = 'amach-sub';
+      sub.textContent = 'offline';
+      hd.appendChild(sub);
+    }
+    sec.appendChild(hd);
+    renderAccountsPanel(sec, info, mid);
+    body.appendChild(sec);
+  };
+
   if (!FLEET) {
-    renderAccountsPanel(body, accountsInfo, 'local');
+    section('this machine', true, accountsInfo, 'local');
   } else {
     const machines = machineList.filter(m => m.kind !== 'relay');
     if (!machines.length) {
@@ -2791,13 +2871,8 @@ function renderAccountsBody() {
       h.textContent = 'no machines connected yet';
       body.appendChild(h);
     }
-    machines.forEach(m => {
-      const hd = document.createElement('div');
-      hd.className = 'menutitle amach';
-      hd.textContent = `🖥️ ${(m.name || m.id).replace(/^clawd-/, '')}` + (m.online ? '' : ' · offline');
-      body.appendChild(hd);
-      renderAccountsPanel(body, accountsInfoFor(m.id), m.id);
-    });
+    machines.forEach(m => section((m.name || m.id).replace(/^clawd-/, ''),
+                                  !!m.online, accountsInfoFor(m.id), m.id));
   }
   if (focusMid) {
     const ni = body.querySelector(`.aadd input[data-mid="${focusMid}"]`);
