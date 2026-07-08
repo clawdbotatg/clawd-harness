@@ -310,6 +310,29 @@ def _has_creds(config_dir):
     return bool(oauth.get("accessToken"))
 
 
+def _link_transcript(session_id, src_cfg, dst_cfg):
+    """Make `--resume` under dst_cfg find a transcript recorded under src_cfg:
+    symlink the .jsonl (+ its subagents dir) into dst's projects tree.
+    Real-file-wins, never clobber; best-effort (a miss just means the session
+    starts fresh instead of resuming)."""
+    src_base = Path(src_cfg or os.path.expanduser("~/.claude"))
+    dst_base = Path(dst_cfg or os.path.expanduser("~/.claude"))
+    if src_base == dst_base:
+        return
+    for hit in glob.glob(f"{src_base}/projects/*/{session_id}.jsonl"):
+        src = Path(hit)
+        for extra in [src, src.with_suffix("")]:
+            if not extra.exists():
+                continue
+            dst = dst_base / extra.relative_to(src_base)
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if not (dst.exists() or dst.is_symlink()):
+                    dst.symlink_to(extra)
+            except OSError as e:
+                print(f"[transcript link] {dst} failed: {e}", flush=True)
+
+
 AUTH_FAIL = "auth"   # _fetch_usage sentinel: credentials are present but refused
 
 
@@ -1273,11 +1296,40 @@ class SessionManager:
             if pid not in known:
                 continue                         # orphaned session — its project is gone
             cfg = e.get("config_dir", "")
+            name = e.get("account", "default")
             if cfg and not os.path.isdir(cfg):
                 print(f"[session {(e.get('cid') or '')[:8]}] account dir gone "
                       f"({cfg}) — session will start fresh and logged out; "
                       "restore the dir to resume", flush=True)
             sid = e.get("session_id")
+            # The RESUME gate, mirror of the spawn gate in create_session():
+            # never reopen a session onto a login screen. A session recorded
+            # under an account that is signed out (or gone from the roster,
+            # e.g. a removed `default`) is landed on the signed-in account
+            # with the most headroom, its transcript linked across so
+            # --resume still finds it. A pending sign-in ceremony (roster
+            # entry exists but not ready) is exempt — its login screen is
+            # the whole point.
+            acct_entry = self.accounts.get(name)
+            if not _has_creds(cfg) and not (acct_entry and not acct_entry.ready):
+                alts = sorted([a for a in self.accounts.values()
+                               if a.ready and not a.broken],
+                              key=lambda a: (a.usage or {}).get("pct", 100.0))
+                alt = next((a for a in alts if _has_creds(a.config_dir)), None)
+                if acct_entry:
+                    acct_entry.broken = True
+                if alt is not None:
+                    print(f"[session {(e.get('cid') or '')[:8]}] account "
+                          f"{name!r} is signed out — resuming under "
+                          f"{alt.name}", flush=True)
+                    if sid:
+                        _link_transcript(sid, cfg, alt.config_dir)
+                    name, cfg = alt.name, alt.config_dir
+                else:
+                    print(f"[session {(e.get('cid') or '')[:8]}] account "
+                          f"{name!r} is signed out and NO plan is signed in — "
+                          "this session opens Claude's login screen",
+                          flush=True)
             resuming = bool(sid and _transcript_exists(sid, cfg))
             if sid and not resuming:
                 # transcript gone (e.g. cleared history) — start it fresh instead
@@ -1291,7 +1343,7 @@ class SessionManager:
                 first_prompt=e.get("first_prompt", ""),
                 created=e.get("created", 0.0),
                 last_active=e.get("last_active", 0.0),
-                account=e.get("account", "default"), config_dir=cfg)
+                account=name, config_dir=cfg)
             self.sessions[s.cid] = s
             s.start()
         # No auto-created session: with zero projects there are legitimately zero
