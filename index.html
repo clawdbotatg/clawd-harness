@@ -373,6 +373,16 @@
   .awin .wreset { flex:0 0 64px; font-size:9px; text-align:right;
                   overflow:hidden; white-space:nowrap; }
   .ahint2 { color:var(--dim); font-size:11px; margin-top:6px; line-height:1.5; }
+  /* fleet plan summary: one card per SUBSCRIPTION (deduped across machines),
+     freshest reading leading — spans the whole grid above the machine sections */
+  .asum { grid-column:1 / -1; border-top:2px solid var(--accent); }
+  .asum-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr));
+               gap:10px; margin-top:10px; }
+  .asum-grid .acct { margin-top:0; }
+  .aplan-machines { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  .amchip { font-family:var(--mono); font-size:10px; color:var(--dim);
+            border:1px solid var(--edge); padding:3px 8px; white-space:nowrap; }
+  .amchip.fresh { color:var(--ink); border-color:var(--edge-hi); }
   .aadd { margin-top:14px; border-top:1px dashed var(--edge); padding-top:12px; }
   .aadd .aaddrow { display:flex; gap:8px; margin-top:8px; }
   .aadd input { flex:1; min-width:0; background:var(--bg); color:var(--ink);
@@ -2713,6 +2723,32 @@ function fmtUntil(iso) {
        : `${Math.round(s / 86400)}d`;
 }
 
+// the usage window that caps the headline headroom number (most used wins)
+function bindingWindow(a) {
+  return (a.windows || []).reduce((w, x) => (!w || x.used > w.used) ? x : w, null);
+}
+
+// one usage-window row: label · bar · % left · reset countdown
+function windowRow(w) {
+  const win = document.createElement('div'); win.className = 'awin';
+  const lab = document.createElement('span'); lab.className = 'wlab'; lab.textContent = w.label;
+  const bar = document.createElement('div'); bar.className = 'abar';
+  const fill = document.createElement('i');
+  const left = Math.max(0, Math.min(100, 100 - w.used));
+  fill.style.width = left + '%';
+  fill.style.background = leftColor(left);
+  bar.appendChild(fill);
+  bar.title = `${w.label}: ${Math.round(w.used)}% used`;
+  const pct = document.createElement('span'); pct.className = 'wpct';
+  pct.textContent = `${Math.round(left)}% left`;
+  const rst = document.createElement('span'); rst.className = 'wreset';
+  const until = fmtUntil(w.resets);
+  rst.textContent = until ? `↻ in ${until}` : '';
+  if (w.resets) rst.title = `window resets ${new Date(w.resets).toLocaleString()}`;
+  win.appendChild(lab); win.appendChild(bar); win.appendChild(pct); win.appendChild(rst);
+  return win;
+}
+
 // One machine's accounts panel, appended to `container`. mid='local' in
 // direct mode; a machine id in fleet mode (controls route to that harness).
 function renderAccountsPanel(container, info, mid) {
@@ -2750,33 +2786,26 @@ function renderAccountsPanel(container, info, mid) {
       big.className = 'abig';
       big.style.color = leftColor(a.headroom);
       big.textContent = `${Math.round(a.headroom)}%`;
+      const bind = bindingWindow(a);
       const lbl = document.createElement('div');
-      lbl.className = 'abiglbl'; lbl.textContent = 'headroom';
+      lbl.className = 'abiglbl';
+      lbl.textContent = bind ? `headroom · ${bind.label}` : 'headroom';
       bw.appendChild(big); bw.appendChild(lbl);
-      bw.title = 'what remains of the most-constrained usage window';
+      bw.title = 'what remains of the most-constrained usage window'
+               + (bind ? ` — the ${bind.label} window is the cap right now` : '');
       row.appendChild(bw);
     }
     card.appendChild(row);
 
     // usage windows: bar + % left + reset countdown
-    (a.windows || []).forEach(w => {
-      const win = document.createElement('div'); win.className = 'awin';
-      const lab = document.createElement('span'); lab.className = 'wlab'; lab.textContent = w.label;
-      const bar = document.createElement('div'); bar.className = 'abar';
-      const fill = document.createElement('i');
-      const left = Math.max(0, Math.min(100, 100 - w.used));
-      fill.style.width = left + '%';
-      fill.style.background = leftColor(left);
-      bar.appendChild(fill);
-      const pct = document.createElement('span'); pct.className = 'wpct';
-      pct.textContent = `${Math.round(left)}% left`;
-      const rst = document.createElement('span'); rst.className = 'wreset';
-      const until = fmtUntil(w.resets);
-      rst.textContent = until ? `↻ in ${until}` : '';
-      if (w.resets) rst.title = `window resets ${new Date(w.resets).toLocaleString()}`;
-      win.appendChild(lab); win.appendChild(bar); win.appendChild(pct); win.appendChild(rst);
-      card.appendChild(win);
-    });
+    (a.windows || []).forEach(w => card.appendChild(windowRow(w)));
+
+    // a failing usage poll is data too — say so instead of silently going stale
+    if (a.error && a.status === 'ready') {
+      const perr = document.createElement('div'); perr.className = 'ahint2';
+      perr.textContent = `⚠ usage poll: ${a.error} — showing the last good reading`;
+      card.appendChild(perr);
+    }
 
     // action row: routing tag / pin button · session count · data freshness
     const act = document.createElement('div'); act.className = 'actrow';
@@ -2865,6 +2894,80 @@ function renderAccountsPanel(container, info, mid) {
   container.appendChild(add);
 }
 
+// Fleet-wide plan summary — the SAME claude.ai subscription signed into
+// several machines shows different headroom only because each box polls the
+// usage endpoint on its own clock. So dedupe by identity (email) and lead
+// with the freshest reading: the summary answers "how much is left on each
+// PLAN" before the per-machine sections answer "what does each box think".
+// Machine chips under each plan expose the raw readings + their age — the
+// spread between them IS the polling lag, made legible instead of confusing.
+function renderPlanSummary(body, machines) {
+  const plans = new Map();                       // email (or machine:name) → plan
+  machines.forEach(m => {
+    (((accountsInfoFor(m.id) || {}).accounts) || []).forEach(a => {
+      if (a.status !== 'ready' || a.headroom == null) return;
+      const key = a.email || `${m.id}:${a.name}`;
+      if (!plans.has(key)) plans.set(key, { name: a.name, email: a.email, readings: [] });
+      plans.get(key).readings.push({ mid: m.id,
+                                     machine: (m.name || m.id).replace(/^clawd-/, ''), a });
+    });
+  });
+  if (!plans.size) return;
+  const rows = [...plans.values()];
+  rows.forEach(p => p.readings.sort((x, y) => (y.a.checkedAt || 0) - (x.a.checkedAt || 0)));
+  rows.sort((x, y) => (y.readings[0].a.checkedAt || 0) - (x.readings[0].a.checkedAt || 0));
+
+  const sec = document.createElement('div'); sec.className = 'amach-sec asum';
+  const hd = document.createElement('div'); hd.className = 'amach-hd';
+  const t = document.createElement('span'); t.textContent = '⚡ plans';
+  const sub = document.createElement('span'); sub.className = 'amach-sub';
+  sub.textContent = 'one card per subscription · freshest machine’s reading';
+  sub.title = 'a plan signed into several machines reports different numbers only '
+            + 'because each box polls on its own clock — the freshest reading wins';
+  hd.appendChild(t); hd.appendChild(sub); sec.appendChild(hd);
+
+  const grid = document.createElement('div'); grid.className = 'asum-grid';
+  rows.forEach(p => {
+    const fresh = p.readings[0], a = fresh.a;
+    const card = document.createElement('div'); card.className = 'acct';
+    const row = document.createElement('div'); row.className = 'arow2';
+    const id = document.createElement('div'); id.className = 'aid';
+    const nm = document.createElement('div'); nm.className = 'aname'; nm.textContent = p.name;
+    const mail = document.createElement('div'); mail.className = 'amail';
+    mail.textContent = p.email || '';
+    id.appendChild(nm); id.appendChild(mail);
+    const bw = document.createElement('div'); bw.className = 'abigwrap';
+    const big = document.createElement('div'); big.className = 'abig';
+    big.style.color = leftColor(a.headroom);
+    big.textContent = `${Math.round(a.headroom)}%`;
+    const bind = bindingWindow(a);
+    const lbl = document.createElement('div'); lbl.className = 'abiglbl';
+    lbl.textContent = bind ? `headroom · ${bind.label}` : 'headroom';
+    bw.title = `freshest reading — ${fresh.machine}, ${accountAge(a.checkedAt)} ago`
+             + (bind ? ` — the ${bind.label} window is the cap right now` : '');
+    bw.appendChild(big); bw.appendChild(lbl);
+    row.appendChild(id); row.appendChild(bw);
+    card.appendChild(row);
+    (a.windows || []).forEach(w => card.appendChild(windowRow(w)));
+    const chips = document.createElement('div'); chips.className = 'aplan-machines';
+    p.readings.forEach((r, i) => {
+      const n = accountSessionCount(r.mid, r.a.name);
+      const c = document.createElement('span');
+      c.className = 'amchip' + (i ? '' : ' fresh');
+      c.textContent = `🖥️ ${r.machine} · ${Math.round(r.a.headroom)}% · ${accountAge(r.a.checkedAt)}`
+                    + (n ? ` · ${n} live` : '');
+      c.title = `${r.machine} polled this plan ${accountAge(r.a.checkedAt)} ago and saw `
+              + `${Math.round(r.a.headroom)}% headroom`
+              + (n ? `; ${n} live session${n === 1 ? '' : 's'} on it there` : '');
+      chips.appendChild(c);
+    });
+    card.appendChild(chips);
+    grid.appendChild(card);
+  });
+  sec.appendChild(grid);
+  body.appendChild(sec);
+}
+
 // Populate the 🧠 page — a grid with one section per machine in fleet mode,
 // this harness alone in direct mode. Preserves the focused add-input's caret
 // across repaints (accounts frames land while you type).
@@ -2912,6 +3015,13 @@ function renderAccountsBody() {
       h.textContent = 'no machines connected yet';
       body.appendChild(h);
     }
+    // freshest usage check first — the top section is the one whose numbers
+    // you can trust; an offline box (stale by definition) sinks to the bottom
+    const lastCheck = m => Math.max(0, ...(((accountsInfoFor(m.id) || {}).accounts) || [])
+                                          .map(a => a.checkedAt || 0));
+    machines.sort((x, y) => ((y.online ? 1 : 0) - (x.online ? 1 : 0))
+                         || (lastCheck(y) - lastCheck(x)));
+    if (machines.length > 1) renderPlanSummary(body, machines);
     machines.forEach(m => section((m.name || m.id).replace(/^clawd-/, ''),
                                   !!m.online, accountsInfoFor(m.id), m.id));
   }
