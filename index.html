@@ -2724,6 +2724,11 @@ function fmtUntil(iso) {
        : `${Math.round(s / 86400)}d`;
 }
 
+// 'default_claude_max_20x' → 'max 20x' (plan tier from the profile endpoint)
+function tierShort(t) {
+  return (t || '').replace(/^default_/, '').replace(/^claude_/, '').replace(/_/g, ' ');
+}
+
 // the usage window that caps the headline headroom number (most used wins)
 function bindingWindow(a) {
   return (a.windows || []).reduce((w, x) => (!w || x.used > w.used) ? x : w, null);
@@ -2777,7 +2782,8 @@ function renderAccountsPanel(container, info, mid) {
     const mail = document.createElement('div');
     mail.className = 'amail';
     mail.textContent = a.status === 'needs-login' ? '⚠ signed out — needs re-sign-in'
-                     : (a.email || (a.status === 'pending' ? 'not signed in yet' : ''));
+                     : [a.email || (a.status === 'pending' ? 'not signed in yet' : ''),
+                        tierShort(a.tier)].filter(Boolean).join(' · ');
     if (a.status === 'needs-login') mail.style.color = 'var(--err)';
     id.appendChild(nm); id.appendChild(mail);
     row.appendChild(dot); row.appendChild(id);
@@ -2913,10 +2919,13 @@ function renderPlanSummary(body, machines) {
       const key = a.orgUuid || a.email || `${m.id}:${a.name}`;
       if (!plans.has(key)) plans.set(key, { names: new Set(), email: a.email,
                                             org: a.orgUuid || '',
+                                            orgName: '', tier: '',
                                             readings: [], broken: [] });
       const p = plans.get(key);
       p.names.add(a.name);
       p.email = p.email || a.email;
+      p.orgName = p.orgName || a.orgName || '';
+      p.tier = p.tier || a.tier || '';
       const entry = { mid: m.id, machine: (m.name || m.id).replace(/^clawd-/, ''), a };
       // a signed-out login is a footnote ON its plan's card, not a separate
       // scary card — the plan itself may be perfectly healthy elsewhere
@@ -2928,9 +2937,10 @@ function renderPlanSummary(body, machines) {
   const rows = [...plans.values()];
   rows.forEach(p => {
     p.readings.sort((x, y) => (y.a.checkedAt || 0) - (x.a.checkedAt || 0));
-    // stable identity: the email names the human; per-machine account names
+    // stable identity: the org's own name (token-bound, from the profile
+    // endpoint) beats the email guess; per-machine account names
     // (ef / default / …) are just local folder labels and vary by box
-    p.title = p.email ? p.email.split('@')[0] : [...p.names][0];
+    p.title = p.orgName || (p.email ? p.email.split('@')[0] : [...p.names][0]);
   });
   // two pools under one email (personal + team org) would share a title —
   // disambiguate with the fleet nicknames, falling back to the org id
@@ -2964,7 +2974,7 @@ function renderPlanSummary(body, machines) {
                 p.org ? `usage pool (org): ${p.org}` : '']
                .filter(Boolean).join('\n');
     const mail = document.createElement('div'); mail.className = 'amail';
-    mail.textContent = p.email || '';
+    mail.textContent = [p.email, tierShort(p.tier)].filter(Boolean).join(' · ');
     if (p.org) mail.title = `usage pool (org): ${p.org}`;
     id.appendChild(nm); id.appendChild(mail);
     const bw = document.createElement('div'); bw.className = 'abigwrap';

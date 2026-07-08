@@ -206,7 +206,8 @@ ACCOUNTS_DIR = Path(os.environ.get("CLAWD_ACCOUNTS_DIR",
 # Claude Code's production OAuth client id (public; used only for token refresh)
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"   # UNDOCUMENTED — degrade gracefully
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"     # UNDOCUMENTED — degrade gracefully
+OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"  # UNDOCUMENTED — degrade gracefully
 OAUTH_BETA      = "oauth-2025-04-20"
 USAGE_TTL       = float(os.environ.get("USAGE_TTL", "180"))     # s between usage polls per account
 # Local auto-switch rule (direct mode; the fleet relay will own this fleet-wide):
@@ -353,9 +354,32 @@ def _link_transcript(session_id, src_cfg, dst_cfg):
 AUTH_FAIL = "auth"   # _fetch_usage sentinel: credentials are present but refused
 
 
-def _fetch_usage(config_dir, tok_cache=None):
-    """(pct_used, windows) for one account via Claude's OAuth usage endpoint;
-    AUTH_FAIL when the credentials themselves are gone/refused (401 even
+def _fetch_profile(tok):
+    """Token-bound identity {email, org, org_name, tier} via the OAuth profile
+    endpoint (UNDOCUMENTED — degrade gracefully). This is the truth about
+    WHOSE usage pool `tok` draws from: .claude.json can lie (a re-login can
+    update the keychain and leave the json stale, so an account wears the
+    wrong email), but the token cannot. None on any failure — callers keep
+    what they have."""
+    req = urllib.request.Request(OAUTH_PROFILE_URL, headers={
+        "Authorization": f"Bearer {tok}", "anthropic-beta": OAUTH_BETA})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            p = json.loads(r.read().decode())
+        acct, org = p.get("account") or {}, p.get("organization") or {}
+        return {"email": acct.get("email") or "",
+                "org": org.get("uuid") or "",
+                "org_name": org.get("name") or "",
+                "tier": org.get("rate_limit_tier") or ""}
+    except Exception:
+        return None
+
+
+def _fetch_usage(config_dir, tok_cache=None, want_ident=False):
+    """(pct_used, windows) for one account via Claude's OAuth usage endpoint —
+    (pct_used, windows, ident|None) when want_ident, ident fetched from the
+    profile endpoint with the same working token; AUTH_FAIL when the
+    credentials themselves are gone/refused (401 even
     after a refresh — the account needs a re-sign-in); None for everything
     else (network blip, endpoint change) — callers keep the last snapshot and
     the router stays put rather than flapping to a blind guess.
@@ -381,8 +405,11 @@ def _fetch_usage(config_dir, tok_cache=None):
             return None, None, None
 
     code = usage = retry_after = None
+    good = None                                  # the token the 200 came from
     for tok in [t for t in (cached, access) if t]:
         code, usage, retry_after = call(tok)
+        if code == 200:
+            good = tok
         if code != 401:
             break
         if tok is cached and tok_cache:          # cache went stale — drop it
@@ -403,6 +430,8 @@ def _fetch_usage(config_dir, tok_cache=None):
             if tok_cache is not None:
                 tok_cache["access"] = fresh
             code, usage, retry_after = call(fresh)
+            if code == 200:
+                good = fresh
     if code == 401:
         return AUTH_FAIL                         # refused even after refresh
     if code == 429:
@@ -416,10 +445,10 @@ def _fetch_usage(config_dir, tok_cache=None):
             until = time.time() + max(60.0, float(retry_after))
         except (TypeError, ValueError):
             until = time.time() + 1800
-        return 100.0, [{"key": "rate_limited", "label": "limited",
-                        "used": 100.0,
-                        "resets": time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
-                                                time.gmtime(until))}]
+        win = [{"key": "rate_limited", "label": "limited", "used": 100.0,
+                "resets": time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                        time.gmtime(until))}]
+        return (100.0, win, None) if want_ident else (100.0, win)
     if code != 200 or not isinstance(usage, dict):
         return None
     windows, worst = [], 0.0
@@ -452,7 +481,11 @@ def _fetch_usage(config_dir, tok_cache=None):
                         "label": f"{grp} {model.lower()}".strip(),
                         "used": round(float(pct), 1),
                         "resets": lim.get("resets_at")})
-    return (worst, windows) if windows else None
+    if not windows:
+        return None
+    if want_ident:
+        return worst, windows, (_fetch_profile(good) if good else None)
+    return worst, windows
 
 
 def _account_identity(config_dir):
@@ -556,12 +589,14 @@ class Account:
     as they always have). `ready` flips when credentials are first observed
     (i.e. the sign-in ceremony completed)."""
 
-    def __init__(self, name, config_dir="", email="", org="", ready=False,
-                 created=0.0, usage=None):
+    def __init__(self, name, config_dir="", email="", org="", org_name="",
+                 tier="", ready=False, created=0.0, usage=None):
         self.name = name
         self.config_dir = config_dir
         self.email = email
         self.org = org                           # organizationUuid = the usage pool
+        self.org_name = org_name                 # human name of that org (profile)
+        self.tier = tier                         # rate_limit_tier, e.g. …max_20x
         self.ready = ready
         self.created = created or time.time()
         self.usage = usage or None               # {"pct","windows","checkedAt"}
@@ -575,7 +610,9 @@ class Account:
 
     def to_registry(self):
         return {"name": self.name, "config_dir": self.config_dir,
-                "email": self.email, "org": self.org, "ready": self.ready,
+                "email": self.email, "org": self.org,
+                "org_name": self.org_name, "tier": self.tier,
+                "ready": self.ready,
                 "created": self.created, "usage": self.usage}
 
     def meta(self, active=False):
@@ -583,7 +620,8 @@ class Account:
         status = ("pending" if not self.ready
                   else "needs-login" if self.broken else "ready")
         return {"name": self.name, "email": self.email,
-                "orgUuid": self.org,
+                "orgUuid": self.org, "orgName": self.org_name,
+                "tier": self.tier,
                 "status": status,
                 "active": active, "usagePct": pct,
                 "headroom": None if pct is None else round(100 - pct, 1),
@@ -1328,6 +1366,7 @@ class SessionManager:
                 continue
             a = Account(name=e["name"], config_dir=e.get("config_dir", ""),
                         email=e.get("email", ""), org=e.get("org", ""),
+                        org_name=e.get("org_name", ""), tier=e.get("tier", ""),
                         ready=e.get("ready", False),
                         created=e.get("created", 0.0), usage=e.get("usage"))
             self.accounts[a.name] = a
@@ -1725,7 +1764,8 @@ class SessionManager:
             if due:
                 with ThreadPoolExecutor(max_workers=min(4, len(due))) as ex:
                     got = list(ex.map(
-                        lambda a: _fetch_usage(a.config_dir, a.tok), due))
+                        lambda a: _fetch_usage(a.config_dir, a.tok,
+                                               want_ident=True), due))
                 for a, res in zip(due, got):
                     if res == AUTH_FAIL:
                         # login gone/revoked → OUT of routing until re-sign-in;
@@ -1738,25 +1778,33 @@ class SessionManager:
                               "excluded from routing until re-sign-in", flush=True)
                         changed = True
                     elif res:
-                        pct, windows = res
+                        pct, windows, ident = res
                         with self.lock:
                             a.usage = {"pct": round(pct, 1), "windows": windows,
                                        "checkedAt": now}
                             a.error = ""
+                            if ident:
+                                # token-bound identity is THE authority: it
+                                # names the pool the numbers above came from,
+                                # even when a stale .claude.json disagrees
+                                a.email = ident["email"] or a.email
+                                a.org = ident["org"] or a.org
+                                a.org_name = ident["org_name"] or a.org_name
+                                a.tier = ident["tier"] or a.tier
                         changed = True
                     elif not a.error:
                         with self.lock:
                             a.error = "usage unavailable"
                         changed = True
-                    # keep the identity label honest on EVERY poll — a re-login
-                    # under the same nickname can change the email and
-                    # (crucially) the org whose usage pool the token draws from
-                    email, org = _account_identity(a.config_dir)
-                    if (email and email != a.email) or (org and org != a.org):
-                        with self.lock:
-                            a.email = email or a.email
-                            a.org = org or a.org
-                        changed = True
+                    # backfill from .claude.json only while the profile
+                    # endpoint hasn't spoken — a label guess, never an override
+                    if not a.email or not a.org:
+                        email, org = _account_identity(a.config_dir)
+                        if (email and not a.email) or (org and not a.org):
+                            with self.lock:
+                                a.email = a.email or email
+                                a.org = a.org or org
+                            changed = True
             if changed:
                 self.save_registry()
                 self.broadcast_accounts()
