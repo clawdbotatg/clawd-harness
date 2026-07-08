@@ -50,6 +50,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn, TCPServer
@@ -298,14 +299,19 @@ def _read_oauth_creds(config_dir):
         return None
 
 
-def _fetch_usage(config_dir):
+def _fetch_usage(config_dir, tok_cache=None):
     """(pct_used, windows) for one account via Claude's OAuth usage endpoint,
     or None. Handles one 401 → refresh → retry. The endpoint is undocumented,
     so every failure degrades to None — callers keep the last snapshot and the
-    router stays put rather than flapping to a blind guess."""
+    router stays put rather than flapping to a blind guess.
+    `tok_cache` (a mutable dict) keeps a refreshed access token in memory
+    across polls, so an account whose stored token has expired doesn't repeat
+    the 401→refresh dance every cycle. We never write tokens back to the
+    credential store — Claude Code owns and refreshes its own."""
     oauth = (_read_oauth_creds(config_dir) or {}).get("claudeAiOauth") or {}
     access, refresh = oauth.get("accessToken"), oauth.get("refreshToken")
-    if not access:
+    cached = (tok_cache or {}).get("access")
+    if not (access or cached):
         return None
 
     def call(tok):
@@ -319,7 +325,13 @@ def _fetch_usage(config_dir):
         except Exception:
             return None, None
 
-    code, usage = call(access)
+    code = usage = None
+    for tok in [t for t in (cached, access) if t]:
+        code, usage = call(tok)
+        if code != 401:
+            break
+        if tok is cached and tok_cache:          # cache went stale — drop it
+            tok_cache.pop("access", None)
     if code == 401 and refresh:
         req = urllib.request.Request(
             OAUTH_TOKEN_URL, method="POST",
@@ -333,6 +345,8 @@ def _fetch_usage(config_dir):
         except Exception:
             fresh = None
         if fresh:
+            if tok_cache is not None:
+                tok_cache["access"] = fresh
             code, usage = call(fresh)
     if code != 200 or not isinstance(usage, dict):
         return None
@@ -421,6 +435,8 @@ class Account:
         self.created = created or time.time()
         self.usage = usage or None               # {"pct","windows","checkedAt"}
         self.error = ""                          # last poll error (in-memory)
+        self.tok = {}                            # in-memory refreshed-access-token cache
+        self.last_pending_check = 0.0            # backoff anchor while awaiting sign-in
 
     def to_registry(self):
         return {"name": self.name, "config_dir": self.config_dir,
@@ -610,6 +626,11 @@ class ClaudeSession:
             env.pop(k, None)
         if self.config_dir:                      # non-default subscription account
             env["CLAUDE_CONFIG_DIR"] = self.config_dir
+        else:
+            # default = plain ~/.claude, always: an operator-exported
+            # CLAUDE_CONFIG_DIR would strand transcripts where our globs
+            # (config_dir or ~/.claude) never look.
+            env.pop("CLAUDE_CONFIG_DIR", None)
 
         self.settings_path = self._write_hook_settings()
         cmd = [CLAUDE_BIN,
@@ -1150,7 +1171,8 @@ class SessionManager:
             self.accounts[a.name] = a
         self._ensure_default_account()
         self.active_account = reg.get("active_account") or "default"
-        if self.active_account not in self.accounts:
+        act = self.accounts.get(self.active_account)
+        if not act or not act.ready:             # unknown or never-signed-in → default
             self.active_account = "default"
         self.last_switch_at = reg.get("last_switch_at", 0.0)
 
@@ -1160,6 +1182,10 @@ class SessionManager:
             if pid not in known:
                 continue                         # orphaned session — its project is gone
             cfg = e.get("config_dir", "")
+            if cfg and not os.path.isdir(cfg):
+                print(f"[session {(e.get('cid') or '')[:8]}] account dir gone "
+                      f"({cfg}) — session will start fresh and logged out; "
+                      "restore the dir to resume", flush=True)
             sid = e.get("session_id")
             resuming = bool(sid and _transcript_exists(sid, cfg))
             if sid and not resuming:
@@ -1369,9 +1395,12 @@ class SessionManager:
 
     def use_account(self, name, why="manual"):
         """Flip which account NEW sessions spawn under. Existing sessions
-        finish on their old account — zero interruption."""
+        finish on their old account — zero interruption. Refuses a pending
+        (credential-less) account — spawning there would drop the user's next
+        session into a login TUI instead of running their prompt."""
         with self.lock:
-            if name not in self.accounts or name == self.active_account:
+            a = self.accounts.get(name)
+            if not a or not a.ready or name == self.active_account:
                 return False
             self.active_account = name
             self.last_switch_at = time.time()
@@ -1380,11 +1409,18 @@ class SessionManager:
         self.broadcast_accounts()
         return True
 
+    def refresh_accounts(self):
+        """Kick the usage poller now instead of waiting out the TTL."""
+        self._poll_now.set()
+
     def poll_accounts_loop(self):
         """Background: watch pending accounts for their first credentials
         (sign-in completed) and keep every ready account's usage fresh
         (USAGE_TTL cadence; the endpoint is undocumented, so failures keep the
-        last snapshot). Any change re-evaluates the auto-switch rule."""
+        last snapshot). Account fields are mutated under self.lock (readers —
+        accounts_meta/save_registry — snapshot under the same lock); the
+        blocking credential/network reads happen outside it. Any change
+        re-evaluates the auto-switch rule."""
         while True:
             forced = self._poll_now.wait(timeout=15.0)
             self._poll_now.clear()
@@ -1392,34 +1428,57 @@ class SessionManager:
             now = time.time()
             with self.lock:
                 accts = list(self.accounts.values())
+            # Pending accounts: watch for first credentials. Full 15s cadence
+            # while the sign-in is plausibly in progress (first hour), then
+            # back off to USAGE_TTL — an abandoned ceremony must not fork a
+            # Keychain subprocess every 15s forever.
             for a in accts:
-                if not a.ready:
-                    oauth = (_read_oauth_creds(a.config_dir) or {}
-                             ).get("claudeAiOauth") or {}
-                    if not oauth.get("accessToken"):
-                        continue
-                    a.ready = True
-                    a.email = _account_email(a.config_dir)
-                    if a.config_dir:
-                        _merge_mcp(a.config_dir)
-                    print(f"[account {a.name}] signed in"
-                          f" ({a.email or 'email unknown'})", flush=True)
-                    changed = True
-                if not a.email:                  # backfill (written after login)
-                    a.email = _account_email(a.config_dir)
-                    changed = changed or bool(a.email)
-                checked = (a.usage or {}).get("checkedAt", 0)
-                if forced or now - checked > USAGE_TTL:
-                    got = _fetch_usage(a.config_dir)
-                    if got:
-                        pct, windows = got
-                        a.usage = {"pct": round(pct, 1), "windows": windows,
-                                   "checkedAt": now}
-                        a.error = ""
+                if a.ready:
+                    continue
+                fresh_add = now - a.created < 3600
+                if not (forced or fresh_add
+                        or now - a.last_pending_check > USAGE_TTL):
+                    continue
+                a.last_pending_check = now
+                oauth = (_read_oauth_creds(a.config_dir) or {}
+                         ).get("claudeAiOauth") or {}
+                if not oauth.get("accessToken"):
+                    continue
+                email = _account_email(a.config_dir)
+                if a.config_dir:
+                    _merge_mcp(a.config_dir)
+                with self.lock:
+                    a.ready, a.email = True, email
+                print(f"[account {a.name}] signed in"
+                      f" ({email or 'email unknown'})", flush=True)
+                changed = True
+            # Ready accounts due a usage refresh — fetched in PARALLEL so one
+            # slow/hung endpoint can't stall the other accounts (or the
+            # sign-in watch above) behind a serial chain of 10s timeouts.
+            due = [a for a in accts if a.ready and
+                   (forced or now - (a.usage or {}).get("checkedAt", 0) > USAGE_TTL)]
+            if due:
+                with ThreadPoolExecutor(max_workers=min(4, len(due))) as ex:
+                    got = list(ex.map(
+                        lambda a: _fetch_usage(a.config_dir, a.tok), due))
+                for a, res in zip(due, got):
+                    if res:
+                        pct, windows = res
+                        with self.lock:
+                            a.usage = {"pct": round(pct, 1), "windows": windows,
+                                       "checkedAt": now}
+                            a.error = ""
                         changed = True
                     elif not a.error:
-                        a.error = "usage unavailable"
+                        with self.lock:
+                            a.error = "usage unavailable"
                         changed = True
+                    if not a.email:              # backfill (written after login)
+                        email = _account_email(a.config_dir)
+                        if email:
+                            with self.lock:
+                                a.email = email
+                            changed = True
             if changed:
                 self.save_registry()
                 self.broadcast_accounts()
@@ -1447,7 +1506,12 @@ class SessionManager:
         if best.name == cur.name:
             return
         gain = cur_pct - best.usage["pct"]
-        exhausted = cur_pct >= SUB_EXHAUSTED
+        # The exhausted bypass only fires when the TARGET actually has room —
+        # two accounts both over the threshold would otherwise ping-pong every
+        # poll (each switch making the other one "best"), debounce ignored.
+        # All-exhausted falls back to the normal hysteresis+debounce rule.
+        exhausted = (cur_pct >= SUB_EXHAUSTED
+                     and best.usage["pct"] < SUB_EXHAUSTED)
         if exhausted or (gain >= SUB_HYSTERESIS
                          and time.time() - self.last_switch_at >= SUB_DEBOUNCE):
             self.use_account(best.name, why=("active exhausted" if exhausted
@@ -1661,6 +1725,9 @@ class SessionManager:
         name = account or self.active_account
         acct = self.accounts.get(name)
         if acct is None:
+            if account:                          # explicit ask for a missing account
+                print(f"[accounts] unknown account {account!r} requested — "
+                      "spawning under default", flush=True)
             name, acct = "default", self.accounts.get("default")
         cid = str(uuid.uuid4())
         s = ClaudeSession(self, cid=cid, pid=pid, session_id=str(uuid.uuid4()),
@@ -2276,7 +2343,7 @@ class Handler(BaseHTTPRequestHandler):
         elif t == "accountUse":
             MGR.use_account(frame.get("name", ""))
         elif t == "accountsRefresh":
-            MGR._poll_now.set()
+            MGR.refresh_accounts()
         elif t == "close":
             MGR.close(frame.get("cid"))
         elif t == "createProject":

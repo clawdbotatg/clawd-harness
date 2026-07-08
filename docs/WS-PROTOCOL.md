@@ -97,7 +97,7 @@ reconnect (i.e. the server restarted).
 ```jsonc
 // 1) a binary frame: recent PTY bytes (ring buffer snapshot)
 // 2) then:
-{ "type":"hello", "cid", "pid", "sessionId", "title", "workdir",
+{ "type":"hello", "cid", "pid", "account", "sessionId", "title", "workdir",
   "busy":bool, "waiting":bool, "tool":<string|null>, "cols":int, "rows":int }
 // 3) then recent transcript history, each:
 { "type":"transcript", "cid", "event":<event>, "history":true }
