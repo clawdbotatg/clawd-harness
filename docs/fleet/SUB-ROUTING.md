@@ -97,14 +97,19 @@ worker's harness WS. Harnesses under a relay should run with
 bars + the active sub on the machines rung; badge sessions on the non-active
 account (the session `account` field already flows).
 
-### Phase 5 — mid-session handoff (later)
+### Phase 5 — mid-session handoff (BUILT)
 
-On a Stop hook, if `session.account != active` and the session is idle:
-symlink its transcript (+ subagents dir) into the active account's dir
-(real-file-wins, never clobber), then respawn via the existing
-graceful-restart machinery with `--resume` and the new `CLAUDE_CONFIG_DIR`.
-Easier for us than for claw-router's `--watch`: we have hook-driven busy
-state and the restart/`--resume` path already exists.
+`maybe_handoff` runs after every Stop: if the session's plan is drained
+(≥ `SUB_EXHAUSTED` used — checked with a LIVE usage fetch, the 10-min poll is
+too slow for a dying window — or its login broke) and a better plan is ready,
+the session is respawned under it with `--resume`: transcript (+ subagents
+dir) symlinked into the target config dir (never clobbering), the session
+object replaced under the SAME cid, viewers re-subscribed. A poller-driven
+`_handoff_sweep` catches sessions idling on a drained plan that never emit
+another Stop (their last turn died on the limit screen). Per-session
+`HANDOFF_COOLDOWN` (600s) stops churn. This is the piece that makes the
+guarantee hold for LONG-LIVED sessions, not just fresh spawns: no session
+ever sits on a dead plan while another has headroom.
 
 ## Risks / notes
 

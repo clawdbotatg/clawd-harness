@@ -217,6 +217,10 @@ SUB_AUTOSWITCH = os.environ.get("SUB_AUTOSWITCH", "1") != "0"
 SUB_HYSTERESIS = float(os.environ.get("SUB_HYSTERESIS", "20"))  # headroom pts
 SUB_DEBOUNCE   = float(os.environ.get("SUB_DEBOUNCE", "7200"))  # seconds
 SUB_EXHAUSTED  = float(os.environ.get("SUB_EXHAUSTED", "95"))   # % used
+# Mid-session handoff: an IDLE session whose plan has run dry is respawned
+# under the best plan with --resume (transcript symlinked across). Checked on
+# every Stop; per-session cooldown so a flapping window can't churn respawns.
+HANDOFF_COOLDOWN = float(os.environ.get("HANDOFF_COOLDOWN", "600"))
 # Paths symlinked from ~/.claude into each account dir so every account runs
 # with the user's full extension environment (same list claw-router shares).
 SHARE_PATHS = ["settings.json", "CLAUDE.md", "commands", "rules", "skills",
@@ -562,6 +566,7 @@ class ClaudeSession:
         # keeps resuming even if the account entry is later removed.
         self.account = account or "default"
         self.config_dir = config_dir
+        self.last_handoff = 0.0                  # cooldown anchor for account handoffs
 
         self.title = title
         self.desc = desc
@@ -748,6 +753,10 @@ class ClaudeSession:
             # naming milestones) so live session state stays current for the
             # controller / dashboard. Cheap, async, in-memory only.
             threading.Thread(target=self._regenerate_digest, daemon=True).start()
+            # Turn over + idle = the safe moment to move this session off a
+            # drained plan (no-ops fast in the common case).
+            threading.Thread(target=self.manager.maybe_handoff, args=(self,),
+                             daemon=True).start()
         elif ev == "Notification":
             # Fires both for "needs your permission / input" (mid-turn, busy) and
             # for a 60s-idle nudge (turn already Stopped, not busy). Only the
@@ -889,8 +898,11 @@ class ClaudeSession:
             self._to_subscribers_bytes(chunk)
         self.alive = False
         print(f"[session {self.cid[:8]}] PTY closed / claude exited", flush=True)
-        self.manager.broadcast_all({"type": "exit", "cid": self.cid})
-        self.manager.broadcast_sessions()
+        # An account handoff replaces this object under the same cid — the
+        # dying child's exit must not paint "session ended" over its successor.
+        if self.manager.sessions.get(self.cid) is self:
+            self.manager.broadcast_all({"type": "exit", "cid": self.cid})
+            self.manager.broadcast_sessions()
 
     # -- read channel: transcript JSONL -> structured events -------------------
     def _find_transcript(self):
@@ -1570,6 +1582,111 @@ class SessionManager:
                 self.save_registry()
                 self.broadcast_accounts()
                 self._maybe_autoswitch()
+                self._handoff_sweep()
+
+    def _handoff_sweep(self):
+        """Poller-driven safety net behind maybe_handoff: sessions idling on a
+        drained/broken plan get moved even if they never emit another Stop
+        (e.g. the limit screen already ate their last turn)."""
+        if not SUB_AUTOSWITCH:
+            return
+        now = time.time()
+        with self.lock:
+            drained = {a.name for a in self.accounts.values() if a.broken
+                       or (a.usage or {}).get("pct", 0) >= SUB_EXHAUSTED}
+            sessions = list(self.sessions.values())
+        best = self.accounts.get(self._best_account() or "")
+        if not best or best.name in drained:
+            return
+        for s in sessions:
+            if (s.alive and not s.busy and s.account in drained
+                    and s.account != best.name
+                    and now - s.last_handoff >= HANDOFF_COOLDOWN):
+                self._handoff(s, best)
+
+    def maybe_handoff(self, s):
+        """Mid-session account handoff (SUB-ROUTING.md Phase 5): called after
+        every Stop. If THIS session's plan is drained (>= SUB_EXHAUSTED used,
+        or its login broke) and a better plan is ready, respawn the session
+        under that plan with --resume — transcript symlinked across, so the
+        conversation continues seamlessly and the user is never asked to do
+        anything. The usage check hits the endpoint directly (the 10-min poll
+        is too slow to catch a window dying mid-conversation)."""
+        if not SUB_AUTOSWITCH or s.busy or not s.alive:
+            return
+        if time.time() - s.last_handoff < HANDOFF_COOLDOWN:
+            return
+        acct = self.accounts.get(s.account)      # may be None (e.g. removed default)
+        cfg = acct.config_dir if acct else (s.config_dir or "")
+        got = _fetch_usage(cfg, acct.tok if acct else None)
+        drained = got == AUTH_FAIL
+        if got and got != AUTH_FAIL:
+            pct, windows = got
+            drained = pct >= SUB_EXHAUSTED
+            if acct:
+                with self.lock:
+                    acct.usage = {"pct": round(pct, 1), "windows": windows,
+                                  "checkedAt": time.time()}
+                    acct.broken = False
+        elif acct and drained:
+            with self.lock:
+                acct.broken = True
+        if not drained:
+            return
+        best = self.accounts.get(self._best_account() or "")
+        if (not best or best.name == s.account
+                or (best.usage or {}).get("pct", 100.0) >= SUB_EXHAUSTED):
+            self.broadcast_accounts()
+            return                               # nowhere better to go — stay put
+        self.broadcast_accounts()
+        self._handoff(s, best)
+
+    def _handoff(self, s, target):
+        """Move one idle session to `target`'s account: link its transcript
+        into the target config dir (real-file-wins, never clobber), replace
+        the session object under the SAME cid with a --resume respawn, and
+        move the viewers over. The old claude gets SIGTERM once we're sure."""
+        if s.busy or not s.alive:                # re-check after the network call
+            return
+        s.last_handoff = time.time()
+        src = s.transcript_path or s._find_transcript()
+        base_src = Path(s.config_dir or os.path.expanduser("~/.claude"))
+        base_dst = Path(target.config_dir or os.path.expanduser("~/.claude"))
+        if src and base_src != base_dst:
+            try:
+                src = Path(src)
+                rel = src.relative_to(base_src)  # projects/<munged-cwd>/<sid>.jsonl
+                for extra in [src, src.with_suffix("")]:   # + subagents dir if present
+                    if not extra.exists():
+                        continue
+                    dst = base_dst / extra.relative_to(base_src)
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if not (dst.exists() or dst.is_symlink()):
+                        dst.symlink_to(extra)
+            except (ValueError, OSError) as e:
+                print(f"[handoff {s.cid[:8]}] transcript link failed ({e}) — "
+                      "staying on the drained plan", flush=True)
+                return
+        print(f"[handoff {s.cid[:8]}] {s.account} → {target.name} "
+              "(plan drained; resuming under the fresh one)", flush=True)
+        fresh = ClaudeSession(
+            self, cid=s.cid, pid=s.pid, session_id=s.session_id, resuming=True,
+            title=s.title, desc=s.desc, prompt_count=s.prompt_count,
+            first_prompt=s.first_prompt, created=s.created,
+            last_active=time.time(),
+            account=target.name, config_dir=target.config_dir)
+        fresh.last_handoff = s.last_handoff
+        with self.lock:
+            self.sessions[s.cid] = fresh
+        s.kill()                                 # SIGTERM the drained claude (exit broadcast suppressed)
+        fresh.start()
+        with s.clients_lock:                     # carry the viewers across
+            viewers = list(s.clients)
+            s.clients.clear()
+        for c in viewers:
+            fresh.subscribe(c)
+        self.save_registry()
+        self.broadcast_sessions()
 
     def _maybe_autoswitch(self):
         """Local switch rule (direct mode; the fleet relay will own this
