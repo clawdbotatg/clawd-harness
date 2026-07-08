@@ -53,7 +53,7 @@ user-facing overview; this file orients an agent working **on** the code.
   (shows the PID) or `lsof -nP -iTCP:8787 -sTCP:LISTEN`. So: edit `index.html` →
   it live-reloads (see below); no need to start a server first.
 - Needs the `claude` CLI on a Claude **subscription** (OAuth, not an API key).
-  Pure Python stdlib; xterm.js + a QR lib load from a CDN.
+  Pure Python stdlib; xterm.js loads from a CDN.
 - Verify JS edits: extract the `<script>` from index.html and `node --check` it.
   The app has been verified live in Chrome via the **LAN URL** (see stale-cache note).
 - **Watch the UI run yourself — `tools/uiprobe.mjs`.** For any *visual/DOM* bug
@@ -175,7 +175,7 @@ user-facing overview; this file orients an agent working **on** the code.
   page is scoped to the selected `currentPid`. View switcher (terminal xterm ↔
   transcript bubbles), **key bar** (sends raw escape seqs to drive TUI menus —
   works even on touch where the terminal is read-only), message box
-  (type/dictate/paste images), QR. The app opens on the projects rung; mobile
+  (type/dictate/paste images). The app opens on the projects rung; mobile
   defaults to transcript for a session (native scroll, markdown), desktop to
   terminal. Terminal is **read-only on touch** (mobile dictation streams
   self-revising text that xterm forwards as garbled keystrokes).

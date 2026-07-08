@@ -268,10 +268,10 @@
   #send:hover { border-color:var(--accent); }
   button:disabled { opacity:.4; cursor:default; }
   .hint { color:var(--dim); font-size:11px; padding:0 12px 8px; }
-  #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #accountsBtn, #notifyBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
+  #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #accountsBtn, #notifyBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
               padding:5px 10px; font-size:12px; font-family:var(--mono); text-transform:lowercase; letter-spacing:.04em;
               white-space:nowrap; }
-  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover, #machinesBtn:hover, #accountsBtn:hover, #notifyBtn:hover { color:var(--ink); border-color:var(--edge-hi); }
+  #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover, #machinesBtn:hover, #accountsBtn:hover, #notifyBtn:hover { color:var(--ink); border-color:var(--edge-hi); }
   #panelBtn.on, #menuBtn.on, #projectsBtn.on, #machinesBtn.on, #accountsBtn.on, #notifyBtn.on { color:var(--accent); border-color:var(--accent); }
   .bico { font-size:14px; line-height:1; }
   /* Fleet PM — folded into the harness as a first-class view: PM threads ride the
@@ -294,7 +294,7 @@
   @media (pointer: coarse) {
     header { gap:8px; padding:calc(8px + env(safe-area-inset-top, 0px)) 10px 8px; }
     header .blbl { display:none; }
-    #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #accountsBtn, #notifyBtn { padding:6px 9px; }
+    #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #accountsBtn, #notifyBtn { padding:6px 9px; }
     #status { font-size:11px; padding:3px 8px; }
     #brand { display:none; }
   }
@@ -426,9 +426,9 @@
   #newSession:hover { color:var(--accent); border-color:var(--accent-dim); }
   .menutitle { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.16em;
                padding:0 2px 2px; }
-  #qrmodal, #machinesmodal { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex;
+  #machinesmodal { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex;
              align-items:center; justify-content:center; z-index:50; }
-  #qrmodal[hidden], #machinesmodal[hidden] { display:none; }
+  #machinesmodal[hidden] { display:none; }
   .qrcard { background:var(--panel); border:1px solid var(--edge); border-top:2px solid var(--accent);
             padding:22px; text-align:center; max-width:340px; }
   /* machines roster overlay: a scrollable card of read-only machine stats */
@@ -448,10 +448,6 @@
             border-radius:4px; padding:4px 8px; font-size:11px; cursor:pointer; }
   .machinepick .setdefault:hover { color:var(--accent); border-color:var(--accent-dim); }
   .scount.smach { color:var(--dim); border-color:var(--edge); }
-  #qrcode { background:#fff; padding:12px; display:inline-block; }
-  #qrcode img, #qrcode canvas { display:block; }
-  .qrurl { font-family:var(--mono); font-size:11px; color:var(--dim);
-           margin:12px 0; word-break:break-all; }
   /* token entry — shown only when no token is in the URL or localStorage */
   #login, #passkey { position:fixed; inset:0; background:var(--bg); display:flex;
            align-items:center; justify-content:center; z-index:70; padding:20px; }
@@ -506,7 +502,6 @@
     <button id="projectsBtn" title="All projects"><span class="bico">▦</span><span class="blbl"> projects</span></button>
     <button id="menuBtn" title="Sessions in this project"><span class="bico">≡</span><span class="blbl"> sessions</span></button>
     <button id="reloadBtn" title="Reload (recover a blank screen)"><span class="bico">⟳</span></button>
-    <button id="phoneBtn" title="Open on your phone"><span class="bico">▢</span></button>
     <button id="machinesBtn" title="Fleet machines"><span class="bico">🖥️</span></button>
     <button id="accountsBtn" title="Claude subscription accounts — headroom & sign-in"><span class="bico">🧠</span></button>
     <button id="notifyBtn" title="Notify me when a session needs me" hidden><span class="bico">🔔</span></button>
@@ -524,13 +519,6 @@
     <div class="rb-title" id="rebootlbl">Updating…</div>
     <div class="rb-row"><span class="rb-spin big"></span><span class="rb-sub" id="rebootsub">reconnecting automatically</span></div>
   </div></div>
-  <div id="qrmodal" hidden>
-    <div class="qrcard">
-      <div id="qrcode"></div>
-      <div class="qrurl" id="qrurl"></div>
-      <button id="qrclose">close</button>
-    </div>
-  </div>
   <div id="machinesmodal" hidden>
     <div class="qrcard machinescard">
       <div id="machinelist"></div>
@@ -617,7 +605,6 @@
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@master/qrcode.min.js"></script>
 <script>
 // Kill all zoom on mobile. The viewport meta (user-scalable=no, min=max=scale)
 // handles Android/Chrome, but iOS Safari deliberately *ignores* user-scalable=no
@@ -979,7 +966,7 @@ function renderNeedsBar() {
 }
 
 // Token handling: the relay still accepts ?t=<token> in the URL (so a shared
-// link / QR carries it), but we don't LEAVE it in the address bar — on first load
+// link carries it), but we don't LEAVE it in the address bar — on first load
 // we stash it in localStorage and strip it from the URL (replaceState), so it
 // can't leak via history/screenshots. Later loads read it from storage; a device
 // with neither gets a paste-the-token screen.
@@ -4504,22 +4491,6 @@ stage.addEventListener('touchend', (e) => {
 
 window.addEventListener('resize', () => { fit.fit(); sendResize(); term.scrollToBottom(); bottomJustifyTTY(); });
 
-// -- phone / QR --------------------------------------------------------------
-const qrmodal = document.getElementById('qrmodal');
-document.getElementById('phoneBtn').onclick = () => {
-  // Fleet is passkey-only → the QR is just the URL (the passkey gate does the rest).
-  // Direct mode re-attaches the harness token so scanning pairs a new device.
-  const url = location.origin + location.pathname +
-              (FLEET || !token ? '' : '?t=' + encodeURIComponent(token)) + location.hash;
-  const holder = document.getElementById('qrcode');
-  holder.innerHTML = '';
-  new QRCode(holder, { text: url, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.M });
-  document.getElementById('qrurl').textContent = url;
-  qrmodal.hidden = false;
-};
-document.getElementById('qrclose').onclick = () => { qrmodal.hidden = true; };
-qrmodal.onclick = (e) => { if (e.target === qrmodal) qrmodal.hidden = true; };
-
 // -- machines roster overlay (the 🖥️ button) ---------------------------------
 // Read-only fleet overview with per-machine stats. Replaces the old machines rung;
 // renderMachines keeps it live on every roster broadcast.
@@ -4543,7 +4514,6 @@ window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || e.defaultPrevented) return;
   if (!document.getElementById('login').hidden ||
       !document.getElementById('passkey').hidden) return;   // gated — nowhere to go
-  if (!qrmodal.hidden) { qrmodal.hidden = true; e.preventDefault(); return; }
   if (!machinesModal.hidden) { machinesModal.hidden = true; e.preventDefault(); return; }
   const el = document.activeElement;
   if (el && el.closest && el.closest('#term')) return;      // live terminal owns Esc (claude's TUI)

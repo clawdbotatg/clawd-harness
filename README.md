@@ -9,7 +9,7 @@ text." Forked from [`clawd-console`](https://github.com/clawdbotatg/clawd-consol
 which proved out the single-session mirror; the harness is where it grows up.
 
 Pure Python stdlib server + a single HTML page. No build, no dependencies
-(xterm.js and a QR lib load from a CDN).
+(xterm.js loads from a CDN).
 
 **Where it's headed** (the reason for the fork):
 - **Multiple projects** — group sessions by workdir/repo, switch between them.
@@ -62,7 +62,6 @@ Shared across both:
 - **Image paste/drop** — uploads to the workdir; the path is folded into your
   message and claude `Read`s it (vision works by file path).
 - **Status pill** — `working…` / `idle · ready`, driven by Stop/tool hooks.
-- **📱 Phone** — a QR to open the same UI on your phone over the LAN.
 
 ## Run
 
@@ -85,9 +84,9 @@ Env knobs: `PORT` (8787), `BIND` (0.0.0.0), `WORKDIR` (cwd — where claude runs
 
 ### Phone / LAN
 
-Tap **📱 Phone** → a QR of `http://<lan-ip>:<port>/?t=<token>`. Scan it on a phone
-on the same network for the same live session. (Both clients drive the one PTY and
-share its terminal size — fine for a prototype.)
+Open `http://<lan-ip>:<port>/?t=<token>` on a phone on the same network for the
+same live session. (Both clients drive the one PTY and share its terminal size —
+fine for a prototype.)
 
 ### Run as a daemon (survives closing the terminal)
 
@@ -128,7 +127,7 @@ One WebSocket carries everything: **binary** frames are raw PTY bytes (→ xterm
   config via `claude --settings`.
 - **`index.html`** — the whole UI: view switcher, xterm terminal, key bar,
   transcript renderer (safe markdown + command/system parsing), message box,
-  image paste, QR.
+  image paste.
 - **`daemon.sh`** — launchd install/uninstall/status/logs/restart.
 - **`smoke_test.py`** — headless WebSocket client; asserts both channels (PTY
   stream + structured events + on-disk transcript).

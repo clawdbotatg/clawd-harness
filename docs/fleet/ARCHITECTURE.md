@@ -131,8 +131,7 @@ laptop proxy worker is a launchd agent (`com.clawd.fleet-worker`). Both
 `exec` off by default (see decision log).
 
 ✅ **Token kept out of the URL** — `index.html` migrates `?t=` into localStorage
-and strips it from the bar (replaceState); tokenless → a paste-the-token screen;
-the QR re-appends it for pairing.
+and strips it from the bar (replaceState); tokenless → a paste-the-token screen.
 
 🚧 **Remaining:** server-side TTS isn't proxied (`/tts`/`/config` are
 harness-only); the box is still scp-deployed (a leftover — the repo is now
