@@ -190,6 +190,37 @@ ERROR_LINGER = float(os.environ.get("ERROR_LINGER", "45"))
 # the registry (always re-injected) and never removable.
 SELF_PID = "self"
 
+# ── multi-account subscription routing (docs/fleet/SUB-ROUTING.md) ───────────
+# Claude Code keys its credential store off CLAUDE_CONFIG_DIR: each distinct
+# dir gets its own isolated login (macOS Keychain item / .credentials.json on
+# Linux). One `/login` per account dir, once — Claude Code refreshes its own
+# tokens after that. So N subscriptions = N config dirs under ACCOUNTS_DIR,
+# and a session spawns under whichever account is ACTIVE. The `default`
+# account is the machine's plain ~/.claude login (empty config_dir — sessions
+# spawn exactly as they always have). Mechanism studied from
+# github.com/dennisonbertram/claw-router; implemented in-house (stdlib only).
+# NOTE: an account dir's absolute path keys its Keychain item — never move it.
+ACCOUNTS_DIR = Path(os.environ.get("CLAWD_ACCOUNTS_DIR",
+                                   str(Path.home() / ".clawd-accounts")))
+# Claude Code's production OAuth client id (public; used only for token refresh)
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"   # UNDOCUMENTED — degrade gracefully
+OAUTH_BETA      = "oauth-2025-04-20"
+USAGE_TTL       = float(os.environ.get("USAGE_TTL", "600"))     # s between usage polls per account
+# Local auto-switch rule (direct mode; the fleet relay will own this fleet-wide):
+# switch to the account with the most headroom iff it beats the active one by
+# HYSTERESIS points AND the last switch was DEBOUNCE ago — or the active account
+# is EXHAUSTED (no loyalty to a dead account; bypasses the debounce).
+SUB_AUTOSWITCH = os.environ.get("SUB_AUTOSWITCH", "1") != "0"
+SUB_HYSTERESIS = float(os.environ.get("SUB_HYSTERESIS", "20"))  # headroom pts
+SUB_DEBOUNCE   = float(os.environ.get("SUB_DEBOUNCE", "7200"))  # seconds
+SUB_EXHAUSTED  = float(os.environ.get("SUB_EXHAUSTED", "95"))   # % used
+# Paths symlinked from ~/.claude into each account dir so every account runs
+# with the user's full extension environment (same list claw-router shares).
+SHARE_PATHS = ["settings.json", "CLAUDE.md", "commands", "rules", "skills",
+               "agents", "hooks", "workflows", "plugins"]
+
 # Shared secret. Required on /ws and /hook because we bind to the LAN and the
 # session runs with bypass-permissions — without it anyone on the wifi could run
 # commands as you. Persisted so the URL/QR stays stable across restarts.
@@ -231,9 +262,181 @@ def lan_ip():
         sk.close()
 
 
-def _transcript_exists(session_id):
-    return bool(glob.glob(os.path.expanduser(
-        f"~/.claude/projects/*/{session_id}.jsonl")))
+def _transcript_exists(session_id, config_dir=""):
+    base = config_dir or os.path.expanduser("~/.claude")
+    return bool(glob.glob(f"{base}/projects/*/{session_id}.jsonl"))
+
+
+# ── account helpers: credentials, usage, settings sharing ────────────────────
+def _keychain_service(config_dir):
+    """Mirror Claude Code's own Keychain item derivation: the default login is
+    'Claude Code-credentials'; a CLAUDE_CONFIG_DIR login appends
+    -<sha256(NFC(dir))[0:8]>."""
+    if not config_dir:
+        return "Claude Code-credentials"
+    import unicodedata
+    nfc = unicodedata.normalize("NFC", config_dir)
+    return "Claude Code-credentials-" + hashlib.sha256(nfc.encode()).hexdigest()[:8]
+
+
+def _read_oauth_creds(config_dir):
+    """The credential JSON blob for an account dir: macOS Keychain first, then
+    the Linux-style <dir>/.credentials.json. None if absent/unreadable."""
+    try:
+        r = subprocess.run(["security", "find-generic-password",
+                            "-s", _keychain_service(config_dir),
+                            "-a", os.environ.get("USER", ""), "-w"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            return json.loads(r.stdout.strip())
+    except Exception:
+        pass
+    path = Path(config_dir or os.path.expanduser("~/.claude")) / ".credentials.json"
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _fetch_usage(config_dir):
+    """(pct_used, windows) for one account via Claude's OAuth usage endpoint,
+    or None. Handles one 401 → refresh → retry. The endpoint is undocumented,
+    so every failure degrades to None — callers keep the last snapshot and the
+    router stays put rather than flapping to a blind guess."""
+    oauth = (_read_oauth_creds(config_dir) or {}).get("claudeAiOauth") or {}
+    access, refresh = oauth.get("accessToken"), oauth.get("refreshToken")
+    if not access:
+        return None
+
+    def call(tok):
+        req = urllib.request.Request(OAUTH_USAGE_URL, headers={
+            "Authorization": f"Bearer {tok}", "anthropic-beta": OAUTH_BETA})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, None
+        except Exception:
+            return None, None
+
+    code, usage = call(access)
+    if code == 401 and refresh:
+        req = urllib.request.Request(
+            OAUTH_TOKEN_URL, method="POST",
+            headers={"Content-Type": "application/json"},
+            data=json.dumps({"grant_type": "refresh_token",
+                             "refresh_token": refresh,
+                             "client_id": OAUTH_CLIENT_ID}).encode())
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                fresh = json.loads(r.read().decode()).get("access_token")
+        except Exception:
+            fresh = None
+        if fresh:
+            code, usage = call(fresh)
+    if code != 200 or not isinstance(usage, dict):
+        return None
+    windows, worst = [], 0.0
+    for key, label in [("five_hour", "5h"), ("seven_day", "7d"),
+                       ("seven_day_opus", "7d opus"),
+                       ("seven_day_sonnet", "7d sonnet")]:
+        w = usage.get(key)
+        used = w.get("utilization") if isinstance(w, dict) else w
+        if not isinstance(used, (int, float)):
+            continue
+        worst = max(worst, used)
+        windows.append({"key": key, "label": label, "used": round(used, 1),
+                        "resets": w.get("resets_at") if isinstance(w, dict) else None})
+    return (worst, windows) if windows else None
+
+
+def _account_email(config_dir):
+    """Best-effort login email from the account's .claude.json (the default
+    account's lives at ~/.claude.json, not inside ~/.claude)."""
+    path = (Path(config_dir) / ".claude.json") if config_dir \
+        else (Path.home() / ".claude.json")
+    try:
+        return ((json.loads(path.read_text()).get("oauthAccount") or {})
+                .get("emailAddress") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+def _link_shared_paths(config_dir):
+    """Symlink the user's ~/.claude extension environment (SHARE_PATHS) into an
+    account dir so every account behaves identically. Idempotent; never
+    clobbers a real file, only replaces stale symlinks."""
+    src_home = Path.home() / ".claude"
+    dst_home = Path(config_dir)
+    dst_home.mkdir(parents=True, exist_ok=True)
+    for name in SHARE_PATHS:
+        src, dst = src_home / name, dst_home / name
+        if not src.exists():
+            continue
+        if dst.is_symlink():
+            if os.readlink(str(dst)) == str(src):
+                continue
+            dst.unlink()
+        elif dst.exists():
+            continue                             # real file — leave it alone
+        try:
+            dst.symlink_to(src)
+        except OSError:
+            pass
+
+
+def _merge_mcp(config_dir):
+    """One-shot after login: merge ~/.claude.json's mcpServers into the
+    account's .claude.json (shared source wins) so accounts share the MCP
+    environment. Identity keys untouched; atomic replace."""
+    dst = Path(config_dir) / ".claude.json"
+    try:
+        shared = json.loads((Path.home() / ".claude.json").read_text()
+                            ).get("mcpServers") or {}
+        if not shared or not dst.exists():
+            return
+        obj = json.loads(dst.read_text())
+        merged = dict(obj.get("mcpServers") or {})
+        merged.update(shared)
+        obj["mcpServers"] = merged
+        tmp = dst.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(obj, indent=2))
+        os.replace(tmp, dst)
+    except (OSError, ValueError) as e:
+        print(f"[account] mcp merge skipped for {config_dir}: {e}", flush=True)
+
+
+class Account:
+    """One Claude subscription login = one config dir. `default` is the
+    machine's plain ~/.claude login (empty config_dir — sessions spawn exactly
+    as they always have). `ready` flips when credentials are first observed
+    (i.e. the sign-in ceremony completed)."""
+
+    def __init__(self, name, config_dir="", email="", ready=False,
+                 created=0.0, usage=None):
+        self.name = name
+        self.config_dir = config_dir
+        self.email = email
+        self.ready = ready
+        self.created = created or time.time()
+        self.usage = usage or None               # {"pct","windows","checkedAt"}
+        self.error = ""                          # last poll error (in-memory)
+
+    def to_registry(self):
+        return {"name": self.name, "config_dir": self.config_dir,
+                "email": self.email, "ready": self.ready,
+                "created": self.created, "usage": self.usage}
+
+    def meta(self, active=False):
+        pct = (self.usage or {}).get("pct")
+        return {"name": self.name, "email": self.email,
+                "status": "ready" if self.ready else "pending",
+                "active": active, "usagePct": pct,
+                "headroom": None if pct is None else round(100 - pct, 1),
+                "windows": (self.usage or {}).get("windows") or [],
+                "checkedAt": (self.usage or {}).get("checkedAt"),
+                "error": self.error,
+                "configDir": self.config_dir}
 
 
 def _safe_name(name):
@@ -312,13 +515,20 @@ class ClaudeSession:
 
     def __init__(self, manager, cid, session_id, resuming, pid="",
                  title="", desc="", prompt_count=0, first_prompt="", created=0.0,
-                 last_active=0.0):
+                 last_active=0.0, account="default", config_dir=""):
         self.manager = manager
         self.pid = pid                           # owning project id
         self.cid = cid                           # stable console id (ours; survives claude rotation)
         self.session_id = session_id             # claude's id (rotates on compaction/resume)
         self.resuming = resuming
         self.created = created or time.time()
+        # Which subscription this claude runs under — RECORDED AT SPAWN and
+        # persisted: a --resume after a harness restart must reuse the same
+        # config dir or the transcript/login won't be found. config_dir is the
+        # resolved path (not re-derived from the account name) so the session
+        # keeps resuming even if the account entry is later removed.
+        self.account = account or "default"
+        self.config_dir = config_dir
 
         self.title = title
         self.desc = desc
@@ -351,7 +561,8 @@ class ClaudeSession:
         return {"cid": self.cid, "pid": self.pid, "session_id": self.session_id,
                 "title": self.title, "desc": self.desc,
                 "prompt_count": self.prompt_count, "first_prompt": self.first_prompt,
-                "created": self.created, "last_active": self.last_active}
+                "created": self.created, "last_active": self.last_active,
+                "account": self.account, "config_dir": self.config_dir}
 
     def workdir(self):
         """Where this session's claude runs — its project's repo path."""
@@ -382,7 +593,8 @@ class ClaudeSession:
                 "promptCount": self.prompt_count,
                 "lastActive": self.last_active,
                 "created": self.created,
-                "alive": self.alive}
+                "alive": self.alive,
+                "account": self.account}
 
     # -- lifecycle -------------------------------------------------------------
     def start(self):
@@ -396,6 +608,8 @@ class ClaudeSession:
         env["LINES"] = str(ROWS)
         for k in SCRUB_ENV:                      # pristine top-level + subscription auth
             env.pop(k, None)
+        if self.config_dir:                      # non-default subscription account
+            env["CLAUDE_CONFIG_DIR"] = self.config_dir
 
         self.settings_path = self._write_hook_settings()
         cmd = [CLAUDE_BIN,
@@ -642,9 +856,11 @@ class ClaudeSession:
 
     # -- read channel: transcript JSONL -> structured events -------------------
     def _find_transcript(self):
-        # Locate by session-id across all project dirs (robust to path encoding).
-        hits = glob.glob(os.path.expanduser(
-            f"~/.claude/projects/*/{self.session_id}.jsonl"))
+        # Locate by session-id across all project dirs (robust to path
+        # encoding), under THIS session's account config dir — a session
+        # spawned under a non-default account writes its transcript there.
+        base = self.config_dir or os.path.expanduser("~/.claude")
+        hits = glob.glob(f"{base}/projects/*/{self.session_id}.jsonl")
         return hits[0] if hits else None
 
     def _follow_session(self, obj):
@@ -774,6 +990,7 @@ class ClaudeSession:
             client.send_bytes(snapshot)
         client.send_json({"type": "hello",
                           "cid": self.cid, "pid": self.pid,
+                          "account": self.account,
                           "sessionId": self.session_id,
                           "title": self.title or self._fallback_title(),
                           "workdir": self.workdir(),
@@ -835,6 +1052,10 @@ class SessionManager:
     def __init__(self):
         self.projects = {}                       # pid -> Project
         self.sessions = {}                       # cid -> ClaudeSession
+        self.accounts = {}                       # name -> Account (subscriptions)
+        self.active_account = "default"          # new sessions spawn under this
+        self.last_switch_at = 0.0                # debounce anchor for auto-switch
+        self._poll_now = threading.Event()       # kick the usage poller early
         self.lock = threading.RLock()
         self.all_clients = set()                 # every connected browser
         self.clients_lock = threading.Lock()
@@ -920,13 +1141,27 @@ class SessionManager:
         self._discover_projects()                # adopt repos dropped into projects/ by hand
         self._ensure_self_project()              # always offer the harness itself, pinned
 
+        for e in reg.get("accounts", []):
+            if not e.get("name"):
+                continue
+            a = Account(name=e["name"], config_dir=e.get("config_dir", ""),
+                        email=e.get("email", ""), ready=e.get("ready", False),
+                        created=e.get("created", 0.0), usage=e.get("usage"))
+            self.accounts[a.name] = a
+        self._ensure_default_account()
+        self.active_account = reg.get("active_account") or "default"
+        if self.active_account not in self.accounts:
+            self.active_account = "default"
+        self.last_switch_at = reg.get("last_switch_at", 0.0)
+
         known = set(self.projects)
         for e in reg.get("sessions", []):
             pid = e.get("pid")
             if pid not in known:
                 continue                         # orphaned session — its project is gone
+            cfg = e.get("config_dir", "")
             sid = e.get("session_id")
-            resuming = bool(sid and _transcript_exists(sid))
+            resuming = bool(sid and _transcript_exists(sid, cfg))
             if sid and not resuming:
                 # transcript gone (e.g. cleared history) — start it fresh instead
                 # of resuming into nothing.
@@ -938,7 +1173,8 @@ class SessionManager:
                 prompt_count=e.get("prompt_count", 0),
                 first_prompt=e.get("first_prompt", ""),
                 created=e.get("created", 0.0),
-                last_active=e.get("last_active", 0.0))
+                last_active=e.get("last_active", 0.0),
+                account=e.get("account", "default"), config_dir=cfg)
             self.sessions[s.cid] = s
             s.start()
         # No auto-created session: with zero projects there are legitimately zero
@@ -1068,11 +1304,154 @@ class SessionManager:
         with self.lock:
             data = {"projects": [p.to_registry() for p in self._ordered_projects()
                                  if not p.pinned],   # self project is re-injected, not stored
-                    "sessions": [s.to_registry() for s in self._ordered()]}
+                    "sessions": [s.to_registry() for s in self._ordered()],
+                    "accounts": [a.to_registry() for a in self._ordered_accounts()],
+                    "active_account": self.active_account,
+                    "last_switch_at": self.last_switch_at}
         try:
             REGISTRY_FILE.write_text(json.dumps(data, indent=2))
         except OSError:
             pass
+
+    # -- accounts: subscription logins + usage-aware routing --------------------
+    def _ensure_default_account(self):
+        """The machine's plain ~/.claude login always exists as `default`
+        (empty config_dir → sessions spawn exactly as before accounts existed)."""
+        if "default" not in self.accounts:
+            self.accounts["default"] = Account(
+                "default", "", email=_account_email(""), ready=True)
+
+    def _ordered_accounts(self):
+        return sorted(self.accounts.values(),
+                      key=lambda a: (a.name != "default", a.created))
+
+    def accounts_meta(self):
+        with self.lock:
+            active = self.active_account
+            return {"type": "accounts", "active": active,
+                    "auto": SUB_AUTOSWITCH,
+                    "accounts": [a.meta(active=(a.name == active))
+                                 for a in self._ordered_accounts()]}
+
+    def broadcast_accounts(self):
+        self.broadcast_all(self.accounts_meta())
+
+    def add_account(self, name):
+        """Register a new subscription account and spawn its sign-in session —
+        a normal claude in the self project with CLAUDE_CONFIG_DIR pointed at
+        the fresh dir, so it walks the user through OAuth right in the harness
+        UI. Re-invoking on a still-pending account just opens another sign-in
+        session. Returns the login ClaudeSession (None if nothing to do)."""
+        slug = _safe_name(name).lower()
+        if not slug or slug == "default":
+            return None
+        with self.lock:
+            a = self.accounts.get(slug)
+            if a and a.ready:
+                return None                      # already signed in
+            if not a:
+                a = Account(slug, str(ACCOUNTS_DIR / slug))
+                self.accounts[slug] = a
+        try:
+            _link_shared_paths(a.config_dir)
+        except Exception as e:
+            print(f"[account {slug}] share links failed: {e}", flush=True)
+        self.save_registry()
+        self.broadcast_accounts()
+        s = self.create_session(SELF_PID, account=slug)
+        if s:
+            s.title = f"sign in · {slug}"
+            s.desc = "complete the Claude OAuth login in this terminal"
+            self.broadcast_sessions()
+        print(f"[account {slug}] created — sign-in session "
+              f"{s.cid[:8] if s else 'FAILED'}", flush=True)
+        return s
+
+    def use_account(self, name, why="manual"):
+        """Flip which account NEW sessions spawn under. Existing sessions
+        finish on their old account — zero interruption."""
+        with self.lock:
+            if name not in self.accounts or name == self.active_account:
+                return False
+            self.active_account = name
+            self.last_switch_at = time.time()
+        print(f"[accounts] active → {name} ({why})", flush=True)
+        self.save_registry()
+        self.broadcast_accounts()
+        return True
+
+    def poll_accounts_loop(self):
+        """Background: watch pending accounts for their first credentials
+        (sign-in completed) and keep every ready account's usage fresh
+        (USAGE_TTL cadence; the endpoint is undocumented, so failures keep the
+        last snapshot). Any change re-evaluates the auto-switch rule."""
+        while True:
+            forced = self._poll_now.wait(timeout=15.0)
+            self._poll_now.clear()
+            changed = False
+            now = time.time()
+            with self.lock:
+                accts = list(self.accounts.values())
+            for a in accts:
+                if not a.ready:
+                    oauth = (_read_oauth_creds(a.config_dir) or {}
+                             ).get("claudeAiOauth") or {}
+                    if not oauth.get("accessToken"):
+                        continue
+                    a.ready = True
+                    a.email = _account_email(a.config_dir)
+                    if a.config_dir:
+                        _merge_mcp(a.config_dir)
+                    print(f"[account {a.name}] signed in"
+                          f" ({a.email or 'email unknown'})", flush=True)
+                    changed = True
+                if not a.email:                  # backfill (written after login)
+                    a.email = _account_email(a.config_dir)
+                    changed = changed or bool(a.email)
+                checked = (a.usage or {}).get("checkedAt", 0)
+                if forced or now - checked > USAGE_TTL:
+                    got = _fetch_usage(a.config_dir)
+                    if got:
+                        pct, windows = got
+                        a.usage = {"pct": round(pct, 1), "windows": windows,
+                                   "checkedAt": now}
+                        a.error = ""
+                        changed = True
+                    elif not a.error:
+                        a.error = "usage unavailable"
+                        changed = True
+            if changed:
+                self.save_registry()
+                self.broadcast_accounts()
+                self._maybe_autoswitch()
+
+    def _maybe_autoswitch(self):
+        """Local switch rule (direct mode; the fleet relay will own this
+        fleet-wide): move to the account with the most headroom iff it beats
+        the active one by SUB_HYSTERESIS points AND the last switch was
+        SUB_DEBOUNCE ago — or the active account is at/over SUB_EXHAUSTED
+        (bypasses the debounce; no loyalty to a dead account). Only ever
+        affects NEW spawns."""
+        if not SUB_AUTOSWITCH:
+            return
+        with self.lock:
+            cur = self.accounts.get(self.active_account)
+            ready = [a for a in self.accounts.values()
+                     if a.ready and (a.usage or {}).get("pct") is not None]
+        if not cur or len(ready) < 2:
+            return
+        cur_pct = (cur.usage or {}).get("pct")
+        if cur_pct is None:
+            return
+        best = min(ready, key=lambda a: a.usage["pct"])
+        if best.name == cur.name:
+            return
+        gain = cur_pct - best.usage["pct"]
+        exhausted = cur_pct >= SUB_EXHAUSTED
+        if exhausted or (gain >= SUB_HYSTERESIS
+                         and time.time() - self.last_switch_at >= SUB_DEBOUNCE):
+            self.use_account(best.name, why=("active exhausted" if exhausted
+                                             else f"+{gain:.0f} pts headroom"))
 
     # -- project crud ----------------------------------------------------------
     def _readopt(self, base):
@@ -1273,12 +1652,21 @@ class SessionManager:
                 for p in self._ordered_projects()]
 
     # -- session crud ----------------------------------------------------------
-    def create_session(self, pid):
+    def create_session(self, pid, account=None):
         if pid not in self.projects:
             return None
+        # New sessions spawn under the active subscription account (or an
+        # explicit override, e.g. the sign-in ceremony). The resolved config
+        # dir is recorded on the session so --resume always finds it.
+        name = account or self.active_account
+        acct = self.accounts.get(name)
+        if acct is None:
+            name, acct = "default", self.accounts.get("default")
         cid = str(uuid.uuid4())
         s = ClaudeSession(self, cid=cid, pid=pid, session_id=str(uuid.uuid4()),
-                          resuming=False, created=time.time())
+                          resuming=False, created=time.time(),
+                          account=name,
+                          config_dir=acct.config_dir if acct else "")
         with self.lock:
             self.sessions[cid] = s
         s.start()
@@ -1329,6 +1717,7 @@ class SessionManager:
         client.send_json({"type": "sessions",
                           "sessions": self.sessions_meta(),
                           "current": self.default_cid()})
+        client.send_json(self.accounts_meta())
         if self.restart_pending:                 # a late joiner still sees the banner
             client.send_json(self.restart_state())
 
@@ -1876,9 +2265,18 @@ class Handler(BaseHTTPRequestHandler):
                               "sessions": MGR.sessions_meta(),
                               "current": MGR.default_cid()})
         elif t == "new":
-            s = MGR.create_session(frame.get("pid"))
+            s = MGR.create_session(frame.get("pid"),
+                                   account=frame.get("account"))
             if s:
                 client.send_json({"type": "focus", "cid": s.cid})
+        elif t == "accountAdd":
+            s = MGR.add_account(frame.get("name", ""))
+            if s:
+                client.send_json({"type": "focus", "cid": s.cid})
+        elif t == "accountUse":
+            MGR.use_account(frame.get("name", ""))
+        elif t == "accountsRefresh":
+            MGR._poll_now.set()
         elif t == "close":
             MGR.close(frame.get("cid"))
         elif t == "createProject":
@@ -1945,6 +2343,7 @@ def watch_ui():
 def main():
     MGR.load()
     threading.Thread(target=watch_ui, daemon=True).start()
+    threading.Thread(target=MGR.poll_accounts_loop, daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     ip = lan_ip()
     print(f"[http] clawd-harness ({'token required' if AUTH_REQUIRED else 'no auth — loopback only'})", flush=True)
