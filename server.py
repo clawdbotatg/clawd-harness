@@ -1172,8 +1172,9 @@ class SessionManager:
         self._ensure_default_account()
         self.active_account = reg.get("active_account") or "default"
         act = self.accounts.get(self.active_account)
-        if not act or not act.ready:             # unknown or never-signed-in → default
-            self.active_account = "default"
+        if not act or not act.ready:             # unknown / never-signed-in / removed
+            self.active_account = next(
+                (a.name for a in self._ordered_accounts() if a.ready), "default")
         self.last_switch_at = reg.get("last_switch_at", 0.0)
 
         known = set(self.projects)
@@ -1341,9 +1342,12 @@ class SessionManager:
 
     # -- accounts: subscription logins + usage-aware routing --------------------
     def _ensure_default_account(self):
-        """The machine's plain ~/.claude login always exists as `default`
-        (empty config_dir → sessions spawn exactly as before accounts existed)."""
-        if "default" not in self.accounts:
+        """Bootstrap only: on an EMPTY roster, the machine's plain ~/.claude
+        login is injected as `default` (empty config_dir → sessions spawn
+        exactly as before accounts existed). Once named accounts exist the
+        user may remove `default` and it stays removed — typing `default`
+        into the add box re-adopts it (no sign-in needed)."""
+        if not self.accounts:
             self.accounts["default"] = Account(
                 "default", "", email=_account_email(""), ready=True)
 
@@ -1370,7 +1374,19 @@ class SessionManager:
         UI. Re-invoking on a still-pending account just opens another sign-in
         session. Returns the login ClaudeSession (None if nothing to do)."""
         slug = _safe_name(name).lower()
-        if not slug or slug == "default":
+        if not slug:
+            return None
+        if slug == "default":
+            # Re-adopt the machine's plain ~/.claude login (e.g. after a
+            # remove). Already signed in — no ceremony, no session.
+            with self.lock:
+                if "default" in self.accounts:
+                    return None
+                self.accounts["default"] = Account(
+                    "default", "", email=_account_email(""), ready=True)
+            self.save_registry()
+            self.broadcast_accounts()
+            print("[account default] re-adopted the ~/.claude login", flush=True)
             return None
         with self.lock:
             a = self.accounts.get(slug)
@@ -1393,6 +1409,30 @@ class SessionManager:
         print(f"[account {slug}] created — sign-in session "
               f"{s.cid[:8] if s else 'FAILED'}", flush=True)
         return s
+
+    def remove_account(self, name):
+        """Drop an account from the routing roster. This logs NOTHING out —
+        the config dir and Keychain credential stay (delete those yourself if
+        you really mean it), and sessions already running under it keep their
+        recorded config_dir, so they resume fine. Refused when it would leave
+        no ready account. Removing the ACTIVE account re-routes new spawns to
+        the ready account with the most headroom."""
+        with self.lock:
+            a = self.accounts.get(name)
+            others = [x for x in self.accounts.values()
+                      if x.name != name and x.ready]
+            if not a or not others:
+                return False                     # never drop the last usable login
+            del self.accounts[name]
+            if self.active_account == name:
+                best = min(others, key=lambda x: (x.usage or {}).get("pct", 100))
+                self.active_account = best.name
+                self.last_switch_at = time.time()
+        print(f"[account {name}] removed from roster (credentials untouched)",
+              flush=True)
+        self.save_registry()
+        self.broadcast_accounts()
+        return True
 
     def use_account(self, name, why="manual"):
         """Flip which account NEW sessions spawn under. Existing sessions
@@ -2343,6 +2383,8 @@ class Handler(BaseHTTPRequestHandler):
                 client.send_json({"type": "focus", "cid": s.cid})
         elif t == "accountUse":
             MGR.use_account(frame.get("name", ""))
+        elif t == "accountRemove":
+            MGR.remove_account(frame.get("name", ""))
         elif t == "accountsRefresh":
             MGR.refresh_accounts()
         elif t == "close":

@@ -57,7 +57,8 @@ viewer** (each with its own `client.cid`).
 | `list` | — | Server replies with `projects` then `sessions` snapshots. |
 | `new` | `pid`, `account?` | Create a session in project `pid`, spawned under the ACTIVE subscription account (or the named `account` override). Server replies `{type:"focus", cid}` with the new id, and broadcasts `sessions`. |
 | `accountAdd` | `name` | Register a new subscription account (config dir under `~/.clawd-accounts/<name>` + settings symlinks) and spawn its **sign-in session** — a normal claude in the self project under that `CLAUDE_CONFIG_DIR`, where the user completes the OAuth login. Replies `{type:"focus", cid}` for the sign-in session; broadcasts `accounts`. Re-invoking on a still-pending account opens another sign-in session; a no-op on a ready one. |
-| `accountUse` | `name` | Flip which account NEW sessions spawn under (manual switch; running sessions untouched). Broadcasts `accounts`. |
+| `accountUse` | `name` | Flip which account NEW sessions spawn under (manual switch; running sessions untouched). Refused for a pending account. Broadcasts `accounts`. |
+| `accountRemove` | `name` | Drop an account from the routing roster. Logs nothing out (config dir + Keychain credential stay; running sessions keep their recorded dir). Refused when it would leave no ready account; removing the ACTIVE account re-routes new spawns to the most headroom. `default` stays removed (it's only re-injected on an empty roster; `accountAdd` with name `default` re-adopts it, sans ceremony). Broadcasts `accounts`. |
 | `accountsRefresh` | — | Poll every account's usage now (instead of waiting out the TTL). Broadcasts `accounts` on change. |
 | `close` | `cid` | Kill that session (SIGTERM) and detach viewers. Files on disk untouched. |
 | `createProject` | `name` | Create a new public GitHub repo under `GH_OWNER` and adopt it (async; status broadcasts via `projects`). |

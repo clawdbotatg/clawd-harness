@@ -360,6 +360,9 @@
   .actrow { display:flex; align-items:center; gap:8px; margin-top:10px; }
   .actrow .achk { color:var(--dim); font-size:10px; margin-left:auto; font-family:var(--mono); }
   button.ause { font-size:11px; padding:4px 11px; }
+  button.arm { font-size:11px; padding:4px 8px; background:transparent;
+               border:1px solid var(--edge); color:var(--dim); }
+  button.arm:hover { color:var(--err); border-color:var(--err); }
   .awin { display:flex; align-items:center; gap:8px; margin-top:8px;
           font-size:10px; color:var(--dim); font-family:var(--mono); }
   .awin .wlab { flex:0 0 56px; }
@@ -2659,8 +2662,15 @@ function addAccount(mid, name) {
   // leaked flag hijacks the next real session's focus.
   const info = accountsInfoFor(mid);
   const existing = info && (info.accounts || []).find(a => a.name === name);
-  if (name === 'default' || (existing && existing.status === 'ready')) {
-    meta.textContent = existing ? `${name} is already signed in` : 'that name is reserved';
+  if (name === 'default') {
+    // re-adopt the machine's plain ~/.claude login — already signed in, so
+    // no ceremony (and no focus reply: don't arm pendingNewFocus)
+    if (existing) { meta.textContent = 'default is already on the roster'; return; }
+    accountSend(mid, { type: 'accountAdd', name });
+    return;
+  }
+  if (existing && existing.status === 'ready') {
+    meta.textContent = `${name} is already signed in`;
     return;
   }
   accountAddDrafts[mid] = '';
@@ -2781,6 +2791,15 @@ function renderAccountsPanel(container, info, mid) {
       const chk = document.createElement('span');
       chk.className = 'achk'; chk.textContent = `checked ${accountAge(a.checkedAt)} ago`;
       act.appendChild(chk);
+    }
+    if ((info.accounts || []).length > 1) {      // never offer to drop the last login
+      const rm = document.createElement('button');
+      rm.className = 'arm'; rm.textContent = '✕';
+      rm.title = 'remove from routing — does NOT log out or delete credentials; '
+               + 'running sessions are untouched (re-add later with the same nickname)';
+      if (!a.checkedAt) rm.style.marginLeft = 'auto';
+      rm.onclick = (e) => { e.stopPropagation(); accountSend(mid, { type: 'accountRemove', name: a.name }); };
+      act.appendChild(rm);
     }
     if (act.childNodes.length) card.appendChild(act);
 
