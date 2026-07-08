@@ -416,6 +416,42 @@ def _link_shared_paths(config_dir):
             pass
 
 
+def _share_projects(config_dir):
+    """Point <account>/projects at the shared ~/.claude/projects store so
+    EVERY account sees EVERY session transcript: --resume works under any
+    plan, account handoffs need no per-file links, and the PM can jump plans
+    between turns without losing its threads. Migrates a real per-account
+    projects dir by moving its transcripts into the shared store first
+    (never clobbering); aborts harmlessly if anything is in the way."""
+    src = Path.home() / ".claude" / "projects"
+    dst = Path(config_dir) / "projects"
+    try:
+        src.mkdir(parents=True, exist_ok=True)
+        if dst.is_symlink():
+            return
+        if dst.is_dir():
+            for proj in list(dst.iterdir()):
+                tgt = src / proj.name
+                if proj.is_dir():
+                    tgt.mkdir(exist_ok=True)
+                    for f in list(proj.iterdir()):
+                        if not (tgt / f.name).exists():
+                            f.rename(tgt / f.name)
+                    proj.rmdir()                 # raises if we skipped anything
+                elif not tgt.exists():
+                    proj.rename(tgt)
+            dst.rmdir()
+        elif dst.exists():
+            return
+        Path(config_dir).mkdir(parents=True, exist_ok=True)
+        dst.symlink_to(src)
+        print(f"[accounts] {config_dir}/projects → shared ~/.claude/projects",
+              flush=True)
+    except OSError as e:
+        print(f"[accounts] projects share skipped for {config_dir}: {e}",
+              flush=True)
+
+
 def _merge_mcp(config_dir):
     """One-shot after login: merge ~/.claude.json's mcpServers into the
     account's .claude.json (shared source wins) so accounts share the MCP
@@ -1199,6 +1235,9 @@ class SessionManager:
                         created=e.get("created", 0.0), usage=e.get("usage"))
             self.accounts[a.name] = a
         self._ensure_default_account()
+        for a in self.accounts.values():         # boot migration: shared transcripts
+            if a.config_dir:
+                _share_projects(a.config_dir)
         self.active_account = reg.get("active_account") or "default"
         act = self.accounts.get(self.active_account)
         if not act or not act.ready:             # unknown / never-signed-in / removed
@@ -1427,6 +1466,7 @@ class SessionManager:
                 self.accounts[slug] = a
         try:
             _link_shared_paths(a.config_dir)
+            _share_projects(a.config_dir)
         except Exception as e:
             print(f"[account {slug}] share links failed: {e}", flush=True)
         self.save_registry()

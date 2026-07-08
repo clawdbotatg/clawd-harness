@@ -7,6 +7,7 @@ and prompts in controller/prompts/.
 import json
 import os
 import sys
+import time
 
 from . import config
 from .mcp import TOOLS
@@ -15,6 +16,41 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 PROMPTS_DIR = os.path.join(HERE, "prompts")
 MCP_CONFIG = os.path.join(HERE, ".mcp-config.json")
+
+# ── subscription routing (the PM jumps plans like harness sessions do) ───────
+# The PM's claude runs on whatever login CLAUDE_CONFIG_DIR points at. The
+# harness in this same checkout maintains per-account usage snapshots in its
+# registry; before each turn we point CLAUDE_CONFIG_DIR at the plan with the
+# most headroom. Safe to jump between turns: all account dirs share one
+# projects/ transcript store (server.py _share_projects), so the engine's
+# --resume finds its threads under any plan. No registry / no accounts →
+# env untouched (the box's plain ~/.claude, exactly as before).
+HARNESS_REGISTRY = os.path.join(ROOT, ".clawd-harness.sessions.json")
+_USAGE_FRESH = 3 * float(os.environ.get("USAGE_TTL", "600"))
+_last_route = {"name": None}
+
+
+def _route_account():
+    try:
+        with open(HARNESS_REGISTRY, encoding="utf-8") as f:
+            accounts = json.load(f).get("accounts") or []
+    except (OSError, ValueError):
+        return
+    now = time.time()
+    fresh = [a for a in accounts
+             if a.get("ready") and (a.get("usage") or {}).get("pct") is not None
+             and now - (a.get("usage") or {}).get("checkedAt", 0) < _USAGE_FRESH]
+    if not fresh:
+        return
+    best = min(fresh, key=lambda a: a["usage"]["pct"])
+    if best.get("config_dir"):
+        os.environ["CLAUDE_CONFIG_DIR"] = best["config_dir"]
+    else:
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+    if best["name"] != _last_route["name"]:
+        _last_route["name"] = best["name"]
+        print(f"[pm] routing turns via account {best['name']} "
+              f"({best['usage']['pct']}% used)", flush=True)
 
 AGENT_HOME = os.path.abspath(os.environ.get(
     "CLAUDE_P_AGENT_HOME",
@@ -206,6 +242,7 @@ class AgentBrain:
             return self._finish(_missing_engine_msg(), [])
         sys_prompt = (self.current_prompt() or "") + _autonomy_note(self.guard.autonomy)
         os.environ["CONTROLLER_AUTONOMY"] = self.guard.autonomy
+        _route_account()                 # this turn runs on the plan with most headroom
         try:
             r = run_turn(
                 user_text,
@@ -236,6 +273,7 @@ class AgentBrain:
             return self._finish(_missing_engine_msg(), [])
         sys_prompt = (self.current_prompt() or "") + _autonomy_note(self.guard.autonomy)
         os.environ["CONTROLLER_AUTONOMY"] = self.guard.autonomy
+        _route_account()                 # this turn runs on the plan with most headroom
         seen = {"text": ""}
 
         def _ev(event):
