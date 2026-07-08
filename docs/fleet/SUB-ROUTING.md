@@ -31,7 +31,10 @@ ping-pongs; running sessions are never interrupted.
    `Authorization: Bearer <accessToken>` + `anthropic-beta: oauth-2025-04-20`
    returns per-window utilization (`five_hour`, `seven_day`,
    `seven_day_opus`, `seven_day_sonnet`; each `utilization` 0–100 +
-   `resets_at`). Headroom = 100 − max(windows). On 401, refresh via
+   `resets_at`) plus a newer `limits` array carrying model-scoped caps
+   (e.g. the Fable weekly limit as `kind:"weekly_scoped"` with
+   `scope.model.display_name` and `percent`) that have no legacy key.
+   Headroom = 100 − max(windows, scoped limits). On 401, refresh via
    `platform.claude.com/v1/oauth/token` with Claude Code's public client id.
    **Undocumented — every consumer degrades to "stay put" (keep the last
    snapshot, never flap to a blind guess).** `tools/usage_probe.py` validates

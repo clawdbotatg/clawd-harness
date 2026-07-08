@@ -99,6 +99,19 @@ def main():
         if isinstance(util, (int, float)):
             worst = max(worst, util)
             print(f"  {lab:11s} {util:5.1f}% used" + (f"   resets {resets}" if resets else ""))
+    # model-scoped caps (e.g. the Fable weekly limit) live only in `limits`
+    group_lab = {"session": "5h", "weekly": "7d"}
+    for lim in usage.get("limits") or []:
+        if not isinstance(lim, dict):
+            continue
+        pct = lim.get("percent")
+        model = (((lim.get("scope") or {}).get("model") or {}).get("display_name") or "")
+        if not isinstance(pct, (int, float)) or not model:
+            continue
+        worst = max(worst, pct)
+        lab = f"{group_lab.get(lim.get('group'), lim.get('group') or '')} {model}".strip()
+        resets = lim.get("resets_at") or ""
+        print(f"  {lab:11s} {pct:5.1f}% used" + (f"   resets {resets}" if resets else ""))
     print(f"headroom (100 - most constrained window): {100 - worst:.1f}")
     return 0
 

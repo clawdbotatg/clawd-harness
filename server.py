@@ -378,6 +378,25 @@ def _fetch_usage(config_dir, tok_cache=None):
         worst = max(worst, used)
         windows.append({"key": key, "label": label, "used": round(used, 1),
                         "resets": w.get("resets_at") if isinstance(w, dict) else None})
+    # Model-scoped caps (e.g. the Fable weekly limit) only appear in the newer
+    # `limits` array — the legacy per-model keys above are null for them. The
+    # unscoped kinds (session / weekly_all) duplicate five_hour / seven_day,
+    # so only scoped entries with a model name are added.
+    group_label = {"session": "5h", "weekly": "7d"}
+    for lim in usage.get("limits") or []:
+        if not isinstance(lim, dict):
+            continue
+        pct = lim.get("percent")
+        model = (((lim.get("scope") or {}).get("model") or {})
+                 .get("display_name") or "")
+        if not isinstance(pct, (int, float)) or not model:
+            continue
+        worst = max(worst, pct)
+        grp = group_label.get(lim.get("group"), lim.get("group") or "")
+        windows.append({"key": f"{lim.get('kind') or 'scoped'}_{model.lower()}",
+                        "label": f"{grp} {model.lower()}".strip(),
+                        "used": round(float(pct), 1),
+                        "resets": lim.get("resets_at")})
     return (worst, windows) if windows else None
 
 
