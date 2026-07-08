@@ -2384,6 +2384,50 @@ WATCH_FILES = [HERE / "index.html"]               # served fresh → just reload
 # browser reload. This is what makes "live-edit the harness" safe.
 RESTART_FILES = [Path(__file__).resolve(), HERE / ".clawd-harness.env"]
 
+def auto_update_loop():
+    """Fleet-wide deploy = `git push`. Every harness polls origin/main and
+    fast-forwards itself when it's cleanly behind — the RESTART_FILES watcher
+    then gracefully restarts into the new server.py (waiting for idle turns),
+    and a changed index.html hot-reloads every open browser. Guards: only on
+    the main branch, only with a clean worktree (a box being live-edited is
+    skipped until its work is committed or dropped), ff-only (a diverged box
+    never gets rewritten). Disable per box with AUTO_PULL=0."""
+    if os.environ.get("AUTO_PULL", "1") == "0":
+        return
+    import random
+    interval = float(os.environ.get("AUTO_PULL_INTERVAL", "300"))
+
+    def git(*args, timeout=30):
+        return subprocess.run(["git", "-C", str(HERE)] + list(args),
+                              capture_output=True, text=True, timeout=timeout)
+
+    while True:
+        time.sleep(interval + random.uniform(0, min(interval, 60)))  # jitter: don't stampede origin
+        try:
+            if git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip() != "main":
+                continue
+            # Tracked modifications = a live-edit in progress → hands off.
+            # Untracked files (logs, scratch) don't block: an ff merge never
+            # touches them, and a genuine path collision just fails the merge
+            # cleanly below.
+            if git("status", "--porcelain", "--untracked-files=no").stdout.strip():
+                continue
+            if git("fetch", "--quiet", "origin", "main", timeout=60).returncode != 0:
+                continue                                 # offline — try again next tick
+            behind = git("rev-list", "--count", "HEAD..origin/main").stdout.strip()
+            if behind in ("", "0"):
+                continue
+            r = git("merge", "--ff-only", "origin/main", timeout=60)
+            if r.returncode == 0:
+                print(f"[autoupdate] pulled {behind} commit(s) from origin/main "
+                      "— watcher will reload/restart as needed", flush=True)
+            else:
+                print(f"[autoupdate] ff-only merge refused: "
+                      f"{(r.stderr or r.stdout).strip()[-120:]}", flush=True)
+        except Exception as e:
+            print(f"[autoupdate] {e}", flush=True)
+
+
 def watch_ui():
     last = {}
     for f in WATCH_FILES + RESTART_FILES:
@@ -2412,6 +2456,7 @@ def main():
     MGR.load()
     threading.Thread(target=watch_ui, daemon=True).start()
     threading.Thread(target=MGR.poll_accounts_loop, daemon=True).start()
+    threading.Thread(target=auto_update_loop, daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     ip = lan_ip()
     print(f"[http] clawd-harness ({'token required' if AUTH_REQUIRED else 'no auth — loopback only'})", flush=True)
