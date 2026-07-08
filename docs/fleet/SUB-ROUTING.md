@@ -1,5 +1,9 @@
 # Subscription routing — multi-account, usage-aware
 
+> Reading the accounts panel / debugging why a card's graphs look wrong:
+> that's [ACCOUNTS-PANEL.md](ACCOUNTS-PANEL.md). This doc is the routing
+> machinery behind the numbers.
+
 **Status: Phases 0–2 + the local switch rule are BUILT (in the harness).**
 The fleet-wide relay brain (Phases 3–4) and mid-session handoff (Phase 5) are
 still plans. Mechanisms were studied from

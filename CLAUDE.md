@@ -112,7 +112,10 @@ user-facing overview; this file orients an agent working **on** the code.
   endpoint; new sessions spawn under the ACTIVE account, auto-switched to the
   most headroom with hysteresis + a 2h debounce (`SUB_*` env knobs). Sessions
   record `account`+`config_dir` at spawn so `--resume` finds the right dir.
-  Deep doc: [`docs/fleet/SUB-ROUTING.md`](docs/fleet/SUB-ROUTING.md); probe:
+  Deep doc: [`docs/fleet/SUB-ROUTING.md`](docs/fleet/SUB-ROUTING.md); what the
+  accounts panel should display + mis-bound-login runbook:
+  [`docs/fleet/ACCOUNTS-PANEL.md`](docs/fleet/ACCOUNTS-PANEL.md) (key trap: one
+  email can hold seats in several orgs — the ORG is the usage pool); probe:
   `python3 tools/usage_probe.py [config_dir]`.
 - **Self-project:** the harness always injects *itself* as a **pinned** project
   (`SELF_PID="self"`, `path=HERE`, top of the list, never persisted —

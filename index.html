@@ -2781,8 +2781,12 @@ function renderAccountsPanel(container, info, mid) {
     nm.className = 'aname'; nm.textContent = a.name;
     const mail = document.createElement('div');
     mail.className = 'amail';
+    // orgName leads: one email can hold seats in several orgs (personal Max +
+    // an employer seat), and the ORG is the usage pool — without it, two cards
+    // on different subs look identical and mis-bound logins hide (ACCOUNTS-PANEL.md)
     mail.textContent = a.status === 'needs-login' ? '⚠ signed out — needs re-sign-in'
-                     : [a.email || (a.status === 'pending' ? 'not signed in yet' : ''),
+                     : [a.orgName,
+                        a.email || (a.status === 'pending' ? 'not signed in yet' : ''),
                         tierShort(a.tier)].filter(Boolean).join(' · ');
     if (a.status === 'needs-login') mail.style.color = 'var(--err)';
     id.appendChild(nm); id.appendChild(mail);
