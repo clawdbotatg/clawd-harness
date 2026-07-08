@@ -41,7 +41,12 @@ user-facing overview; this file orients an agent working **on** the code.
   `auto_update_loop` (~5 min + jitter): on-main + clean-worktree + ff-only →
   it pulls itself, then the file watcher hot-reloads browsers (index.html) or
   gracefully restarts (server.py). A dirty worktree (live-edit in progress) is
-  skipped. Opt a box out with `AUTO_PULL=0`. No ssh, no manual pulls.
+  skipped. Opt a box out with `AUTO_PULL=0`. No ssh, no manual pulls — **for
+  harness machines**. The one exception is the **relay box** (serves the fleet
+  UI at `h.atg.link`): it runs no harness, so nothing auto-pulls it — a UI
+  change is NOT live on the fleet URL until the box's `~/clawd-harness`
+  checkout is pulled (no restart needed; the relay reads `index.html` per
+  request). See `docs/fleet/DEPLOY.md` for the box details.
 - Daemon: `./daemon.sh install [WORKDIR]` (launchd, RunAtLoad + KeepAlive,
   re-`--resume`s sessions). Also `status | logs | restart | uninstall`.
 - Smoke test: `python3 smoke_test.py` (reads the token file; asserts both channels).
