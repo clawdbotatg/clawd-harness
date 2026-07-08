@@ -455,16 +455,19 @@ def _fetch_usage(config_dir, tok_cache=None):
     return (worst, windows) if windows else None
 
 
-def _account_email(config_dir):
-    """Best-effort login email from the account's .claude.json (the default
-    account's lives at ~/.claude.json, not inside ~/.claude)."""
+def _account_identity(config_dir):
+    """Best-effort (email, org_uuid) from the account's .claude.json (the
+    default account's lives at ~/.claude.json, not inside ~/.claude). The
+    ORG uuid — not the email — names the usage pool: one email can hold
+    seats in several orgs (personal + team), each with its own limits, so
+    grouping plans by email merges pools that are actually separate."""
     path = (Path(config_dir) / ".claude.json") if config_dir \
         else (Path.home() / ".claude.json")
     try:
-        return ((json.loads(path.read_text()).get("oauthAccount") or {})
-                .get("emailAddress") or "")
+        oa = json.loads(path.read_text()).get("oauthAccount") or {}
+        return (oa.get("emailAddress") or "", oa.get("organizationUuid") or "")
     except (OSError, ValueError):
-        return ""
+        return ("", "")
 
 
 def _link_shared_paths(config_dir):
@@ -553,11 +556,12 @@ class Account:
     as they always have). `ready` flips when credentials are first observed
     (i.e. the sign-in ceremony completed)."""
 
-    def __init__(self, name, config_dir="", email="", ready=False,
+    def __init__(self, name, config_dir="", email="", org="", ready=False,
                  created=0.0, usage=None):
         self.name = name
         self.config_dir = config_dir
         self.email = email
+        self.org = org                           # organizationUuid = the usage pool
         self.ready = ready
         self.created = created or time.time()
         self.usage = usage or None               # {"pct","windows","checkedAt"}
@@ -571,7 +575,7 @@ class Account:
 
     def to_registry(self):
         return {"name": self.name, "config_dir": self.config_dir,
-                "email": self.email, "ready": self.ready,
+                "email": self.email, "org": self.org, "ready": self.ready,
                 "created": self.created, "usage": self.usage}
 
     def meta(self, active=False):
@@ -579,6 +583,7 @@ class Account:
         status = ("pending" if not self.ready
                   else "needs-login" if self.broken else "ready")
         return {"name": self.name, "email": self.email,
+                "orgUuid": self.org,
                 "status": status,
                 "active": active, "usagePct": pct,
                 "headroom": None if pct is None else round(100 - pct, 1),
@@ -1322,7 +1327,8 @@ class SessionManager:
             if not e.get("name"):
                 continue
             a = Account(name=e["name"], config_dir=e.get("config_dir", ""),
-                        email=e.get("email", ""), ready=e.get("ready", False),
+                        email=e.get("email", ""), org=e.get("org", ""),
+                        ready=e.get("ready", False),
                         created=e.get("created", 0.0), usage=e.get("usage"))
             self.accounts[a.name] = a
         self._ensure_default_account()
@@ -1536,8 +1542,9 @@ class SessionManager:
         user may remove `default` and it stays removed — typing `default`
         into the add box re-adopts it (no sign-in needed)."""
         if not self.accounts:
+            em, org = _account_identity("")
             self.accounts["default"] = Account(
-                "default", "", email=_account_email(""), ready=True)
+                "default", "", email=em, org=org, ready=True)
 
     def _ordered_accounts(self):
         return sorted(self.accounts.values(),
@@ -1571,8 +1578,9 @@ class SessionManager:
             with self.lock:
                 if "default" in self.accounts:
                     return None
+                em, org = _account_identity("")
                 self.accounts["default"] = Account(
-                    "default", "", email=_account_email(""), ready=True)
+                    "default", "", email=em, org=org, ready=True)
             self.save_registry()
             self.broadcast_accounts()
             print("[account default] re-adopted the ~/.claude login", flush=True)
@@ -1695,7 +1703,7 @@ class SessionManager:
                         and _cred_sig(a.config_dir) == a.refused_sig:
                     continue                     # same refused login still there —
                                                  # wait for an actual re-sign-in
-                email = _account_email(a.config_dir)
+                email, org = _account_identity(a.config_dir)
                 if not a.ready and a.config_dir:
                     _merge_mcp(a.config_dir)
                 with self.lock:
@@ -1703,6 +1711,7 @@ class SessionManager:
                     a.ready, a.broken = True, False
                     a.refused_sig = ""
                     a.email = email or a.email
+                    a.org = org or a.org
                     a.tok.clear()                # stale cached token from the old login
                 print(f"[account {a.name}] "
                       f"{'re-signed in' if was_broken else 'signed in'}"
@@ -1739,12 +1748,15 @@ class SessionManager:
                         with self.lock:
                             a.error = "usage unavailable"
                         changed = True
-                    if not a.email:              # backfill (written after login)
-                        email = _account_email(a.config_dir)
-                        if email:
-                            with self.lock:
-                                a.email = email
-                            changed = True
+                    # keep the identity label honest on EVERY poll — a re-login
+                    # under the same nickname can change the email and
+                    # (crucially) the org whose usage pool the token draws from
+                    email, org = _account_identity(a.config_dir)
+                    if (email and email != a.email) or (org and org != a.org):
+                        with self.lock:
+                            a.email = email or a.email
+                            a.org = org or a.org
+                        changed = True
             if changed:
                 self.save_registry()
                 self.broadcast_accounts()

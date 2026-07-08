@@ -2895,23 +2895,28 @@ function renderAccountsPanel(container, info, mid) {
   container.appendChild(add);
 }
 
-// Fleet-wide plan summary — the SAME claude.ai subscription signed into
-// several machines shows different headroom only because each box polls the
-// usage endpoint on its own clock. So dedupe by identity (email) and lead
-// with the freshest reading: the summary answers "how much is left on each
-// PLAN" before the per-machine sections answer "what does each box think".
-// Machine chips under each plan expose the raw readings + their age — the
-// spread between them IS the polling lag, made legible instead of confusing.
+// Fleet-wide plan summary — the SAME usage pool signed into several machines
+// shows different headroom only because each box polls the endpoint on its
+// own clock. The pool's identity is the ORG uuid, not the email: one email
+// can hold seats in several orgs (personal + team), each with separate
+// limits, so keying by email would merge pools that genuinely differ (and
+// their "freshest reading" would flap between contradictory numbers). Dedupe
+// by org, lead with the freshest reading; machine chips expose the raw
+// readings + age — within one pool, the spread between them IS polling lag.
 function renderPlanSummary(body, machines) {
-  const plans = new Map();                       // email (or machine:name) → plan
+  const plans = new Map();                       // orgUuid (or email, or machine:name) → plan
   machines.forEach(m => {
     (((accountsInfoFor(m.id) || {}).accounts) || []).forEach(a => {
       if (a.status === 'pending') return;        // mid-sign-in ceremony — not a plan yet
-      const key = a.email || `${m.id}:${a.name}`;
+      // orgUuid is absent from harnesses predating it (and from signed-out
+      // logins whose .claude.json is gone) — degrade to the old email key
+      const key = a.orgUuid || a.email || `${m.id}:${a.name}`;
       if (!plans.has(key)) plans.set(key, { names: new Set(), email: a.email,
+                                            org: a.orgUuid || '',
                                             readings: [], broken: [] });
       const p = plans.get(key);
       p.names.add(a.name);
+      p.email = p.email || a.email;
       const entry = { mid: m.id, machine: (m.name || m.id).replace(/^clawd-/, ''), a };
       // a signed-out login is a footnote ON its plan's card, not a separate
       // scary card — the plan itself may be perfectly healthy elsewhere
@@ -2923,9 +2928,17 @@ function renderPlanSummary(body, machines) {
   const rows = [...plans.values()];
   rows.forEach(p => {
     p.readings.sort((x, y) => (y.a.checkedAt || 0) - (x.a.checkedAt || 0));
-    // stable identity: the email names the SUBSCRIPTION; per-machine account
-    // names (ef / default / …) are just local folder labels and vary by box
+    // stable identity: the email names the human; per-machine account names
+    // (ef / default / …) are just local folder labels and vary by box
     p.title = p.email ? p.email.split('@')[0] : [...p.names][0];
+  });
+  // two pools under one email (personal + team org) would share a title —
+  // disambiguate with the fleet nicknames, falling back to the org id
+  const titleCount = {};
+  rows.forEach(p => { titleCount[p.title] = (titleCount[p.title] || 0) + 1; });
+  rows.forEach(p => {
+    if (titleCount[p.title] > 1)
+      p.title += ` · ${[...p.names].slice(0, 2).join('/') || p.org.slice(0, 8)}`;
   });
   // live plans first, freshest reading first; signed-out-everywhere plans sink
   rows.sort((x, y) => ((y.readings.length ? 1 : 0) - (x.readings.length ? 1 : 0))
@@ -2947,10 +2960,12 @@ function renderPlanSummary(body, machines) {
     const row = document.createElement('div'); row.className = 'arow2';
     const id = document.createElement('div'); id.className = 'aid';
     const nm = document.createElement('div'); nm.className = 'aname'; nm.textContent = p.title;
-    if (p.names.size > 1)
-      nm.title = `known on the fleet as: ${[...p.names].join(' · ')}`;
+    nm.title = [p.names.size > 1 ? `known on the fleet as: ${[...p.names].join(' · ')}` : '',
+                p.org ? `usage pool (org): ${p.org}` : '']
+               .filter(Boolean).join('\n');
     const mail = document.createElement('div'); mail.className = 'amail';
     mail.textContent = p.email || '';
+    if (p.org) mail.title = `usage pool (org): ${p.org}`;
     id.appendChild(nm); id.appendChild(mail);
     const bw = document.createElement('div'); bw.className = 'abigwrap';
     const big = document.createElement('div'); big.className = 'abig';
@@ -2976,11 +2991,13 @@ function renderPlanSummary(body, machines) {
     card.appendChild(row);
     if (a) (a.windows || []).forEach(w => card.appendChild(windowRow(w)));
     const chips = document.createElement('div'); chips.className = 'aplan-machines';
+    // when a plan spans several local nicknames, say WHICH login each chip is
+    const who = r => p.names.size > 1 ? ` (${r.a.name})` : '';
     p.readings.forEach((r, i) => {
       const n = accountSessionCount(r.mid, r.a.name);
       const c = document.createElement('span');
       c.className = 'amchip' + (i ? '' : ' fresh');
-      c.textContent = `🖥️ ${r.machine} · ${Math.round(r.a.headroom)}% · ${accountAge(r.a.checkedAt)}`
+      c.textContent = `🖥️ ${r.machine}${who(r)} · ${Math.round(r.a.headroom)}% · ${accountAge(r.a.checkedAt)}`
                     + (n ? ` · ${n} live` : '');
       c.title = `${r.machine} polled this plan ${accountAge(r.a.checkedAt)} ago and saw `
               + `${Math.round(r.a.headroom)}% headroom`
@@ -2990,8 +3007,8 @@ function renderPlanSummary(body, machines) {
     p.broken.forEach(r => {
       const c = document.createElement('span');
       c.className = 'amchip dead';
-      c.textContent = `⚠ ${r.machine} · needs sign-in`;
-      c.title = `${r.machine}'s login for this plan stopped working — that box is `
+      c.textContent = `⚠ ${r.machine}${who(r)} · needs sign-in`;
+      c.title = `${r.machine}'s "${r.a.name}" login for this plan stopped working — that box is `
               + 'excluded from this plan until you sign in again (its section below)';
       chips.appendChild(c);
     });
