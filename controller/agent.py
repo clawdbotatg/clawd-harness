@@ -26,15 +26,77 @@ MCP_CONFIG = os.path.join(HERE, ".mcp-config.json")
 # --resume finds its threads under any plan. No registry / no accounts →
 # env untouched (the box's plain ~/.claude, exactly as before).
 HARNESS_REGISTRY = os.path.join(ROOT, ".clawd-harness.sessions.json")
+ACCOUNTS_DIR = os.path.expanduser(
+    os.environ.get("CLAWD_ACCOUNTS_DIR", "~/.clawd-accounts"))
 _USAGE_FRESH = 3 * float(os.environ.get("USAGE_TTL", "600"))
+_USAGE_TTL = float(os.environ.get("USAGE_TTL", "600"))
 _last_route = {"name": None}
+_own_usage = {}                # name -> {"pct", "checkedAt"} (no-harness fallback)
+
+
+def _registry_accounts():
+    """Accounts as maintained by a harness in this checkout, or None."""
+    try:
+        with open(HARNESS_REGISTRY, encoding="utf-8") as f:
+            return json.load(f).get("accounts") or None
+    except (OSError, ValueError):
+        return None
+
+
+def _own_accounts():
+    """No harness on this box (e.g. the relay): discover account dirs under
+    ~/.clawd-accounts (+ the plain ~/.claude as `default`) and poll their
+    usage ourselves via tools/usage_probe's primitives, cached on _USAGE_TTL.
+    Returns the same shape as the registry so the picker below is shared."""
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    try:
+        import usage_probe as up
+    except ImportError:
+        return None
+    finally:
+        sys.path.pop(0)
+    dirs = [("default", "")]
+    try:
+        dirs += sorted((d.name, os.path.join(ACCOUNTS_DIR, d.name))
+                       for d in os.scandir(ACCOUNTS_DIR) if d.is_dir())
+    except OSError:
+        pass
+    out, now = [], time.time()
+    for name, cfg in dirs:
+        cached = _own_usage.get(name)
+        if not cached or now - cached["checkedAt"] > _USAGE_TTL:
+            creds = up.read_credentials(cfg)
+            oauth = (creds or {}).get("claudeAiOauth") or {}
+            access, refresh = oauth.get("accessToken"), oauth.get("refreshToken")
+            if not access:
+                _own_usage.pop(name, None)
+                continue
+            status, usage = up.fetch_usage(access)
+            if status == 401 and refresh:
+                st, tok = up.http_json(
+                    up.TOKEN_URL, {"Content-Type": "application/json"},
+                    {"grant_type": "refresh_token", "refresh_token": refresh,
+                     "client_id": up.OAUTH_CLIENT_ID})
+                if st == 200 and tok and tok.get("access_token"):
+                    status, usage = up.fetch_usage(tok["access_token"])
+            if status != 200 or not isinstance(usage, dict):
+                continue                       # degrade: skip, keep others
+            worst = 0.0
+            for key, _lab in up.WINDOWS:
+                w = usage.get(key)
+                u = w.get("utilization") if isinstance(w, dict) else w
+                if isinstance(u, (int, float)):
+                    worst = max(worst, u)
+            cached = {"pct": round(worst, 1), "checkedAt": now}
+            _own_usage[name] = cached
+        out.append({"name": name, "config_dir": cfg, "ready": True,
+                    "usage": cached})
+    return out or None
 
 
 def _route_account():
-    try:
-        with open(HARNESS_REGISTRY, encoding="utf-8") as f:
-            accounts = json.load(f).get("accounts") or []
-    except (OSError, ValueError):
+    accounts = _registry_accounts() or _own_accounts()
+    if not accounts:
         return
     now = time.time()
     fresh = [a for a in accounts
@@ -44,6 +106,7 @@ def _route_account():
         return
     best = min(fresh, key=lambda a: a["usage"]["pct"])
     if best.get("config_dir"):
+        _share_projects_min(best["config_dir"])   # threads resume across jumps
         os.environ["CLAUDE_CONFIG_DIR"] = best["config_dir"]
     else:
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
@@ -51,6 +114,22 @@ def _route_account():
         _last_route["name"] = best["name"]
         print(f"[pm] routing turns via account {best['name']} "
               f"({best['usage']['pct']}% used)", flush=True)
+
+
+def _share_projects_min(config_dir):
+    """Minimal mirror of the harness's shared-transcripts link for boxes with
+    no harness: <account>/projects → ~/.claude/projects, so the engine's
+    --resume finds its threads under any plan. Fresh dirs only — anything
+    already there is left alone (the harness handles real migrations)."""
+    src = os.path.expanduser("~/.claude/projects")
+    dst = os.path.join(config_dir, "projects")
+    try:
+        os.makedirs(src, exist_ok=True)
+        if not os.path.lexists(dst):
+            os.makedirs(config_dir, exist_ok=True)
+            os.symlink(src, dst)
+    except OSError:
+        pass
 
 AGENT_HOME = os.path.abspath(os.environ.get(
     "CLAUDE_P_AGENT_HOME",
