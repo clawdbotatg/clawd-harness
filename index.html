@@ -114,8 +114,8 @@
               opacity:.55; transition:opacity .12s, color .12s, border-color .12s; }
   #closeBtn:hover { opacity:1; color:var(--err); border-color:var(--err); }
   #closeBtn.show { display:block; }
-  /* which fleet box this session lives on — quiet grey tag beside the close-✕
-     (fleet mode only; direct mode has just the one machine) */
+  /* quiet grey tag beside the close-✕: the session's 🔑 subscription account
+     (when not the default login) and — fleet mode — which box it lives on */
   #machineTag { position:absolute; top:6px; right:46px; z-index:20; display:none;
                 height:30px; line-height:30px; font-size:11px; color:var(--dim);
                 opacity:.7; pointer-events:none; user-select:none; }
@@ -1779,6 +1779,7 @@ function handleMachineJson(machine, m) {
       sessionList = pm.sessionList; gotSessions = true;
       renderSessions();
       refreshBreadcrumb();
+      refreshSessionTag();               // account may have just landed for the open session
       resolvePendingNav();               // …or a session
     } else if (machineHostsOpenProject(machine)) {
       // The open project's sessions rung now spans every host. A non-attached
@@ -1970,6 +1971,7 @@ function handleJson(m) {
     gotSessions = true;
     renderSessions();
     refreshBreadcrumb();                  // a renamed session updates the crumb live
+    refreshSessionTag();                  // account may have just landed for the open session
     resolvePendingNav();                  // …or a session
   } else if (m.type === 'accounts') {
     accountsInfo = m;                     // subscription logins + headroom (direct mode)
@@ -3625,13 +3627,16 @@ function renderChips() {
 }
 
 async function uploadImage(file) {
-  if (!currentMachine) return;   // no machine selected → nowhere to upload to
+  if (FLEET && !currentMachine) return;   // fleet: no machine selected → nowhere to upload to
   const slot = { pending: true, url: URL.createObjectURL(file) };
   attachments.push(slot); renderChips();
   try {
-    // The relay forwards the bytes to the current machine's worker, which POSTs
-    // to that machine's local harness /upload and returns a path local to it.
-    const res = await fetch(`/upload?t=${encodeURIComponent(token)}&machine=${encodeURIComponent(currentMachine)}`, {
+    // Fleet: the relay forwards the bytes to the current machine's worker, which
+    // POSTs to that machine's local harness /upload and returns a path local to
+    // it. Direct mode talks straight to the local /upload (no machine param —
+    // currentMachine is fleet-only state and stays null here).
+    const mq = FLEET ? `&machine=${encodeURIComponent(currentMachine)}` : '';
+    const res = await fetch(`/upload?t=${encodeURIComponent(token)}${mq}`, {
       method: 'POST', headers: { 'Content-Type': file.type || 'image/png' }, body: file });
     if (!res.ok) throw new Error('upload failed');
     const j = await res.json();
@@ -4092,6 +4097,21 @@ const projectsBtn = document.getElementById('projectsBtn');
 const closeBtn = document.getElementById('closeBtn');
 const machineTag = document.getElementById('machineTag');
 closeBtn.onclick = () => closeCurrentSession();
+// Tag beside the close-✕: which subscription account this session burns (🔑, when
+// it isn't the default login) and — fleet mode — which box it lives on. Re-run on
+// view changes AND on `sessions` frames: the account rides session metadata, which
+// can land after the view is already open.
+function refreshSessionTag() {
+  const v = currentView();
+  const inSession = (v === 'tty' || v === 'transcript') && !!currentCid;
+  const s = inSession ? sessionList.find(x => x.cid === currentCid) : null;
+  const acct = (s && s.account && s.account !== 'default') ? '🔑 ' + s.account : '';
+  const mach = (FLEET && currentMachine) ? shortMachine(currentMachine) : '';
+  machineTag.textContent = [acct, mach].filter(Boolean).join(' · ');
+  machineTag.title = [acct && ('running under the ' + s.account + ' subscription account'),
+                      currentMachine || ''].filter(Boolean).join(' · ');
+  machineTag.classList.toggle('show', inSession && !!machineTag.textContent);
+}
 function setView(view) {
   const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects',
         pm = view === 'pm';
@@ -4103,10 +4123,7 @@ function setView(view) {
   document.getElementById('keys').style.display = (tty && isTouch) ? '' : 'none';  // key bar only for touch (the desktop terminal takes these keys natively)
   const inSession = (tty || view === 'transcript') && !!currentCid;
   closeBtn.classList.toggle('show', inSession);  // big close-✕ only when a session is open
-  // Fleet: name the box this session lives on, right where you'd look to close it.
-  machineTag.textContent = (FLEET && currentMachine) ? shortMachine(currentMachine) : '';
-  machineTag.title = currentMachine || '';
-  machineTag.classList.toggle('show', inSession && !!machineTag.textContent);
+  refreshSessionTag();  // 🔑 account + machine tag beside the close-✕
   // Composer is hidden on the projects rung (nothing to talk to). On the sessions
   // list it stays, but a message there starts a new session rather than going to a
   // session you're not viewing — say so in the placeholder. The PM view keeps the
