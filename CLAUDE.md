@@ -92,6 +92,18 @@ user-facing overview; this file orients an agent working **on** the code.
   delete its repo folder under `projects/` yourself and the reconcile loop
   follows within ~1s (the pinned self-project lives outside `projects/`, so it's
   never touched).
+- **Accounts (subscription routing):** the harness can hold N Claude
+  subscription logins at once — each account = a config dir under
+  `~/.clawd-accounts/<name>` (`CLAUDE_CONFIG_DIR` isolates the credential
+  store; `default` = plain `~/.claude`). Sign-in happens **in the UI**: the
+  accounts panel at the foot of the projects rung spawns a claude session
+  under the fresh dir and you complete OAuth in its terminal. A poller tracks
+  per-account usage via Claude's (undocumented — always degrade) OAuth usage
+  endpoint; new sessions spawn under the ACTIVE account, auto-switched to the
+  most headroom with hysteresis + a 2h debounce (`SUB_*` env knobs). Sessions
+  record `account`+`config_dir` at spawn so `--resume` finds the right dir.
+  Deep doc: [`docs/fleet/SUB-ROUTING.md`](docs/fleet/SUB-ROUTING.md); probe:
+  `python3 tools/usage_probe.py [config_dir]`.
 - **Self-project:** the harness always injects *itself* as a **pinned** project
   (`SELF_PID="self"`, `path=HERE`, top of the list, never persisted —
   re-injected each boot) so you can open a session and **live-edit the running

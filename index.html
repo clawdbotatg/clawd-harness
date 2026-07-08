@@ -324,6 +324,29 @@
   #addProject .arow, .madd .arow { display:flex; gap:8px; }
   #addProject .arow button, .madd .arow button { flex:1; font-size:13px; padding:8px 10px; }
   #addProject .ahint, .madd .ahint { color:var(--dim); font-size:11px; }
+  /* accounts: subscription logins + headroom meters (projects rung footer) */
+  #accounts { margin-top:6px; }
+  #accounts .acct { border:1px solid var(--edge); padding:10px 14px; background:var(--panel); margin-bottom:8px; }
+  #accounts .acct.active { border-color:var(--accent); background:#0e0e0e; }
+  #accounts .arow2 { display:flex; align-items:center; gap:9px; }
+  #accounts .aname { font-weight:600; font-size:13px; }
+  #accounts .amail { color:var(--dim); font-size:11px; flex:1; min-width:0;
+                     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #accounts .aleft { font-size:11px; font-family:var(--mono); }
+  #accounts button.ause { font-size:11px; padding:3px 9px; }
+  #accounts .awin { display:flex; align-items:center; gap:8px; margin-top:6px;
+                    font-size:10px; color:var(--dim); font-family:var(--mono); }
+  #accounts .awin .wlab { flex:0 0 62px; }
+  #accounts .awin .wpct { flex:0 0 66px; text-align:right; }
+  #accounts .abar { position:relative; flex:1; height:6px; background:var(--raised);
+                    border:1px solid var(--edge); }
+  #accounts .abar i { position:absolute; top:0; bottom:0; left:0; }
+  #accounts .ahint2 { color:var(--dim); font-size:11px; margin-top:6px; }
+  #accounts .aadd { display:flex; gap:8px; border:1px dashed var(--edge); padding:10px 14px; }
+  #accounts .aadd input { flex:1; background:var(--raised); color:var(--ink);
+                          border:1px solid var(--edge); padding:8px 10px; font-size:13px; }
+  #accounts .aadd input:focus { outline:none; border-color:var(--accent); }
+  #accounts .aadd button { font-size:13px; padding:8px 10px; }
   /* per-machine add-project: a slim toggle that unfolds the clone/create form
      inside the machine's roster card (the only place to target a SPECIFIC host) */
   .madd { margin-top:8px; padding:10px 12px; }
@@ -799,6 +822,8 @@ let projectFilter = '';         // live filter text in the projects add/search b
 let gotSessions = false;        // have we received the first sessions snapshot?
 let pendingNav = null;          // nav state parsed from the URL, awaiting server data
 let pendingNewFocus = false;    // a `new` we issued — its focus should switch us in
+                                // (the value 'tty' also forces the terminal view:
+                                //  the sign-in ceremony is a TUI flow)
 let pendingSendText = null;     // text typed on the sessions list — delivered once the new session boots
 let lastWrittenHash = '';       // the hash we last wrote, so hashchange ignores our own writes
 
@@ -1893,13 +1918,18 @@ function handleJson(m) {
     renderSessions();
     refreshBreadcrumb();                  // a renamed session updates the crumb live
     resolvePendingNav();                  // …or a session
+  } else if (m.type === 'accounts') {
+    accountsInfo = m;                     // subscription logins + headroom (direct mode)
+    renderAccountsWrap();                 // targeted repaint — never rebuilds the whole rung
   } else if (m.type === 'focus') {
     // server's pick of which session to view, sent only in reply to a `new` we
     // issued. Switch into the freshly spawned session. (The defensive `stay`
     // check guards a stray focus from clobbering a session we're already viewing.)
     if (pendingNewFocus) {
+      const wantTty = pendingNewFocus === 'tty';
       pendingNewFocus = false;
       openSession(m.cid);                 // subscribe + drop to the transcript
+      if (wantTty) setView('tty');        // sign-in ceremony: the login TUI needs the terminal
       // openSession→subscribe clears the feed, so show the queued box now (after).
       if (pendingSendText) addPending(pendingSendText, pendingSendText);
     } else {
@@ -2540,6 +2570,165 @@ function cloneProjectOnMachine(machineId, url) {
   hsendTo(machineId, { type: 'addProject', repoUrl: url });
   meta.textContent = `cloning onto ${machineId}…`;
 }
+// -- accounts: subscription logins + usage-aware routing ----------------------
+// The server broadcasts an `accounts` frame (logins, per-window usage, which is
+// active); we render it at the foot of the projects rung. New sessions spawn
+// under the ACTIVE account; the server auto-switches to the account with the
+// most headroom (hysteresis + hours-debounce). Sign-in = a normal claude
+// session in a fresh CLAUDE_CONFIG_DIR — complete the OAuth login in its
+// terminal and the account flips to ready on its own.
+let accountsInfo = null;                  // last `accounts` frame (direct mode)
+let accountAddDraft = '';                 // survives the rung's re-renders
+
+function addAccount(name) {
+  // Mirror the server's _safe_name slug so the checks below match what it
+  // will actually register.
+  name = (name || '').trim().replace(/[^A-Za-z0-9._-]+/g, '-')
+                            .replace(/^[-._]+|[-._]+$/g, '').toLowerCase();
+  if (!name) return;
+  // The server sends NO focus reply when there's nothing to spawn (reserved
+  // name, already signed in) — catch those here, BEFORE blanking the view and
+  // arming pendingNewFocus, or the user gets a dead blank screen and the
+  // leaked flag hijacks the next real session's focus.
+  const existing = accountsInfo && (accountsInfo.accounts || []).find(a => a.name === name);
+  if (name === 'default' || (existing && existing.status === 'ready')) {
+    meta.textContent = existing ? `${name} is already signed in` : 'that name is reserved';
+    return;
+  }
+  accountAddDraft = '';
+  // mirrors newSession(): the focus reply switches us into the sign-in session
+  pendingNewFocus = 'tty';
+  currentCid = null;
+  term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
+  if (activeType) { activeType.finish(); activeType = null; }
+  hsend({ type: 'accountAdd', name });
+}
+
+function accountAge(ts) {
+  if (!ts) return '';
+  const s = Math.max(0, (Date.now() / 1000) - ts);
+  return s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)}m`
+       : s < 172800 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`;
+}
+
+// one ramp for every headroom read-out (label + bars) — green/amber/red
+function leftColor(left) {
+  return left >= 50 ? 'var(--ok)' : left >= 20 ? 'var(--accent)' : 'var(--err)';
+}
+
+// Repaint ONLY the accounts panel, inside its own wrapper div at the rung's
+// foot. An accounts broadcast must not rebuild the whole projects rung (DOM
+// churn + caret loss); the wrapper is created by renderProjectRung, so if the
+// rung hasn't rendered yet this is a no-op and the panel appears with it.
+function renderAccountsWrap() {
+  const aw = document.getElementById('accountswrap');
+  if (!aw) return;
+  const inp = aw.querySelector('.aadd input');
+  const hadFocus = inp && document.activeElement === inp;
+  const s = inp ? inp.selectionStart : null, e = inp ? inp.selectionEnd : null;
+  aw.innerHTML = '';
+  renderAccountsPanel(aw);
+  if (hadFocus) {
+    const ni = aw.querySelector('.aadd input');
+    if (ni) { ni.focus(); try { ni.setSelectionRange(s, e); } catch {} }
+  }
+}
+
+function renderAccountsPanel(container) {
+  if (!accountsInfo || FLEET) return;     // fleet rendering arrives with the relay brain
+  const info = accountsInfo;
+  const label = document.createElement('div');
+  label.className = 'menutitle';
+  label.textContent = `accounts · ${info.accounts.length}`
+                    + (info.auto && info.accounts.length > 1 ? ' · routing to most headroom' : '');
+  container.appendChild(label);
+  const wrap = document.createElement('div');
+  wrap.id = 'accounts';
+
+  info.accounts.forEach(a => {
+    const card = document.createElement('div');
+    card.className = 'acct' + (a.active ? ' active' : '');
+    const row = document.createElement('div'); row.className = 'arow2';
+    const dot = document.createElement('span');
+    dot.className = 'sdot' + (a.status === 'pending' ? ' dead' : a.active ? ' busy' : '');
+    const nm = document.createElement('span');
+    nm.className = 'aname'; nm.textContent = a.name;
+    const mail = document.createElement('span');
+    mail.className = 'amail'; mail.textContent = a.email || (a.status === 'pending' ? 'not signed in yet' : '');
+    row.appendChild(dot); row.appendChild(nm); row.appendChild(mail);
+    if (a.headroom != null) {
+      const left = document.createElement('span');
+      left.className = 'aleft';
+      left.style.color = leftColor(a.headroom);
+      left.textContent = `${a.headroom}% left`;
+      left.title = a.checkedAt ? `most-constrained window · checked ${accountAge(a.checkedAt)} ago` : '';
+      row.appendChild(left);
+    }
+    if (a.active) {
+      const tag = document.createElement('span');
+      tag.className = 'scount swork'; tag.textContent = 'active';
+      tag.title = 'new sessions spawn under this account';
+      row.appendChild(tag);
+    } else if (a.status === 'ready') {
+      const use = document.createElement('button');
+      use.className = 'ause'; use.textContent = 'use';
+      use.title = 'spawn NEW sessions under this account (running sessions are untouched)';
+      use.onclick = (e) => { e.stopPropagation(); hsend({ type: 'accountUse', name: a.name }); };
+      row.appendChild(use);
+    }
+    card.appendChild(row);
+
+    (a.windows || []).forEach(w => {
+      const win = document.createElement('div'); win.className = 'awin';
+      const lab = document.createElement('span'); lab.className = 'wlab'; lab.textContent = w.label;
+      const bar = document.createElement('div'); bar.className = 'abar';
+      const fill = document.createElement('i');
+      const left = Math.max(0, Math.min(100, 100 - w.used));
+      fill.style.width = left + '%';
+      fill.style.background = leftColor(left);
+      bar.appendChild(fill);
+      const pct = document.createElement('span'); pct.className = 'wpct';
+      pct.textContent = `${Math.round(left)}% left`;
+      if (w.resets) pct.title = `resets ${new Date(w.resets).toLocaleString()}`;
+      win.appendChild(lab); win.appendChild(bar); win.appendChild(pct);
+      card.appendChild(win);
+    });
+
+    if (a.status === 'pending') {
+      const hint = document.createElement('div'); hint.className = 'ahint2';
+      hint.textContent = 'sign-in not finished — open its session and complete the OAuth login';
+      card.appendChild(hint);
+      const open = document.createElement('button');
+      open.className = 'ause'; open.textContent = 'open sign-in';
+      open.style.marginTop = '6px';
+      open.onclick = (e) => { e.stopPropagation(); addAccount(a.name); };
+      card.appendChild(open);
+    }
+    wrap.appendChild(card);
+  });
+
+  // add row: name a new account (work / personal / …) → sign-in session opens
+  const add = document.createElement('div'); add.className = 'aadd';
+  const inp = document.createElement('input');
+  inp.placeholder = 'add a Claude subscription · name it (work, personal…)';
+  inp.value = accountAddDraft;
+  inp.addEventListener('input', () => { accountAddDraft = inp.value; });
+  inp.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); addAccount(inp.value); }
+  });
+  const btn = document.createElement('button');
+  btn.textContent = '🔑 sign in';
+  btn.title = 'opens a terminal session where you complete the Claude OAuth login';
+  btn.onclick = () => addAccount(inp.value);
+  const ref = document.createElement('button');
+  ref.textContent = '↻';
+  ref.title = 'refresh usage now';
+  ref.onclick = () => hsend({ type: 'accountsRefresh' });
+  add.appendChild(inp); add.appendChild(btn); add.appendChild(ref);
+  wrap.appendChild(add);
+  container.appendChild(wrap);
+}
+
 // Direct mode entry point: a `projects` frame for the (single) local harness.
 // Fleet mode never calls this — its rung is driven by mergeProjects/renderProjectRung.
 function renderProjects(list) {
@@ -2559,6 +2748,10 @@ function renderProjectRung() {
   const oldInp = projectsEl.querySelector('#addProject input');
   const keepFocus = oldInp && document.activeElement === oldInp;
   const selStart = oldInp ? oldInp.selectionStart : null, selEnd = oldInp ? oldInp.selectionEnd : null;
+  // …and the add-account input's (captured BEFORE the wipe destroys it).
+  const oldAcct = projectsEl.querySelector('#accountswrap .aadd input');
+  const acctFocus = oldAcct && document.activeElement === oldAcct;
+  const aS = oldAcct ? oldAcct.selectionStart : null, aE = oldAcct ? oldAcct.selectionEnd : null;
   projectsEl.innerHTML = '';
   const label = document.createElement('div');
   label.className = 'menutitle'; label.textContent = `projects · ${rows.length}`;
@@ -2662,6 +2855,18 @@ function renderProjectRung() {
 
     projectsEl.appendChild(card);
   });
+
+  // Accounts panel lives in its own wrapper so accounts broadcasts can repaint
+  // it without touching the rung; restore the add-account input's caret
+  // across THIS full rebuild too (projects frames land on every hook event).
+  const aw = document.createElement('div');
+  aw.id = 'accountswrap';
+  projectsEl.appendChild(aw);
+  renderAccountsPanel(aw);
+  if (acctFocus) {
+    const ni = aw.querySelector('.aadd input');
+    if (ni) { ni.focus(); try { ni.setSelectionRange(aS, aE); } catch {} }
+  }
 
   applyProjectFilter();          // honor any live filter text after a re-render
   if (keepFocus) {               // we owned focus before the rebuild — keep it, caret intact
@@ -2957,6 +3162,12 @@ function renderSessions() {
       mt.className = 'scount smach'; mt.textContent = '🖥️ ' + shortMachine(s._machine);
       mt.title = 'running on ' + s._machine;
       row.appendChild(mt);
+    }
+    if (s.account && s.account !== 'default') { // which subscription it burns
+      const at = document.createElement('span');
+      at.className = 'scount smach'; at.textContent = '🔑 ' + s.account;
+      at.title = 'running under the ' + s.account + ' subscription account';
+      row.appendChild(at);
     }
     card.appendChild(row);
 

@@ -55,7 +55,10 @@ viewer** (each with its own `client.cid`).
 |---|---|---|
 | `subscribe` | `cid` | Attach to that session's live stream. Server immediately sends a ring-buffer byte snapshot, a `hello`, then replays recent `transcript` history. |
 | `list` | — | Server replies with `projects` then `sessions` snapshots. |
-| `new` | `pid` | Create a session in project `pid`. Server replies `{type:"focus", cid}` with the new id, and broadcasts `sessions`. |
+| `new` | `pid`, `account?` | Create a session in project `pid`, spawned under the ACTIVE subscription account (or the named `account` override). Server replies `{type:"focus", cid}` with the new id, and broadcasts `sessions`. |
+| `accountAdd` | `name` | Register a new subscription account (config dir under `~/.clawd-accounts/<name>` + settings symlinks) and spawn its **sign-in session** — a normal claude in the self project under that `CLAUDE_CONFIG_DIR`, where the user completes the OAuth login. Replies `{type:"focus", cid}` for the sign-in session; broadcasts `accounts`. Re-invoking on a still-pending account opens another sign-in session; a no-op on a ready one. |
+| `accountUse` | `name` | Flip which account NEW sessions spawn under (manual switch; running sessions untouched). Broadcasts `accounts`. |
+| `accountsRefresh` | — | Poll every account's usage now (instead of waiting out the TTL). Broadcasts `accounts` on change. |
 | `close` | `cid` | Kill that session (SIGTERM) and detach viewers. Files on disk untouched. |
 | `createProject` | `name` | Create a new public GitHub repo under `GH_OWNER` and adopt it (async; status broadcasts via `projects`). |
 | `addProject` | `repoUrl` | Clone a repo and adopt it (async). Input normalized: full URL as-is; `owner/repo` and bare `repo` resolved against github.com. |
@@ -84,6 +87,7 @@ a project, delete its folder on disk; there is no wire message for it.
 ```jsonc
 { "type":"projects", "projects":[<projectMeta>...], "boot":"<BOOT_ID>" }
 { "type":"sessions", "sessions":[<sessionMeta>...], "current":"<cid|null>" }
+{ "type":"accounts", "accounts":[<accountMeta>...], "active":"<name>", "auto":bool }
 // + a restart-state frame if a restart is already pending
 ```
 `boot` is a per-process id; the browser auto-reloads when it changes after a
@@ -93,7 +97,7 @@ reconnect (i.e. the server restarted).
 ```jsonc
 // 1) a binary frame: recent PTY bytes (ring buffer snapshot)
 // 2) then:
-{ "type":"hello", "cid", "pid", "sessionId", "title", "workdir",
+{ "type":"hello", "cid", "pid", "account", "sessionId", "title", "workdir",
   "busy":bool, "waiting":bool, "tool":<string|null>, "cols":int, "rows":int }
 // 3) then recent transcript history, each:
 { "type":"transcript", "cid", "event":<event>, "history":true }
@@ -107,6 +111,7 @@ reconnect (i.e. the server restarted).
 { "type":"exit", "cid" }                               // the claude process for cid exited
 { "type":"projects", "projects":[...], "boot" }        // re-broadcast on any project change
 { "type":"sessions", "sessions":[...], "current" }     // re-broadcast on any session change
+{ "type":"accounts", "accounts":[...], "active", "auto" }  // subscription logins/usage/active changed
 { "type":"reload" }                                    // index.html changed on disk → browser should reload
 { "type":"restart", "pending":bool, "reason", "busy":int }   // restart state (banner)
 { "type":"restart", "state":"go" }                     // restart firing now (process about to exit)
@@ -128,7 +133,7 @@ reconnect (i.e. the server restarted).
 { "cid", "pid", "title", "desc", "named":bool, "busy":bool, "waiting":bool,
   "tool":<str|null>, "status":"blocked|working|idle", "digest":str,
   "blocked_on":str, "sessionId", "promptCount":int,
-  "lastActive":float, "created":float, "alive":bool }
+  "lastActive":float, "created":float, "alive":bool, "account":str }
 ```
 - `waiting` = the session is blocked on an interactive TUI prompt (a permission
   request, `AskUserQuestion`, or `ExitPlanMode`) and needs a human answer — it
@@ -150,6 +155,24 @@ reconnect (i.e. the server restarted).
 - `cid` = stable console id (ours; survives claude's id rotation). **Address
   sessions by `cid`, never `sessionId`.**
 - `sessionId` = claude's own id; rotates on compaction/resume.
+- `account` = which subscription account this session's claude runs under
+  (recorded at spawn; `"default"` = the machine's plain `~/.claude` login).
+
+### accountMeta
+```jsonc
+{ "name", "email", "status":"ready|pending", "active":bool,
+  "usagePct":<float|null>, "headroom":<float|null>,
+  "windows":[{ "key", "label", "used":float, "resets":<iso|null> }...],
+  "checkedAt":<float|null>, "error":str, "configDir":str }
+```
+- `status:"pending"` = the account dir exists but no credentials yet (the
+  sign-in ceremony hasn't been completed). It flips to `ready` on its own once
+  the harness observes credentials (~15s poll).
+- `usagePct` = the most-constrained usage window (0–100, from Claude's OAuth
+  usage endpoint — **undocumented**, so `null`/stale data must degrade to "no
+  opinion"). `headroom` = `100 − usagePct`. `active` = new sessions spawn here.
+- `auto` (top-level) = the harness's local usage-aware auto-switch is on
+  (hysteresis + debounce; see `docs/fleet/SUB-ROUTING.md`).
 
 ### transcript `event` (from `_slim_event`)
 One of:
