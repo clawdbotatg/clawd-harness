@@ -1356,6 +1356,7 @@ class SessionManager:
             active = self.active_account
             return {"type": "accounts", "active": active,
                     "auto": SUB_AUTOSWITCH,
+                    "lastSwitch": self.last_switch_at,
                     "accounts": [a.meta(active=(a.name == active))
                                  for a in self._ordered_accounts()]}
 

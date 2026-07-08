@@ -268,11 +268,11 @@
   #send:hover { border-color:var(--accent); }
   button:disabled { opacity:.4; cursor:default; }
   .hint { color:var(--dim); font-size:11px; padding:0 12px 8px; }
-  #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #notifyBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
+  #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #accountsBtn, #notifyBtn { background:transparent; border:1px solid var(--edge); color:var(--dim);
               padding:5px 10px; font-size:12px; font-family:var(--mono); text-transform:lowercase; letter-spacing:.04em;
               white-space:nowrap; }
-  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover, #machinesBtn:hover:hover, #notifyBtn:hover { color:var(--ink); border-color:var(--edge-hi); }
-  #panelBtn.on, #menuBtn.on, #projectsBtn.on, #machinesBtn.on.on, #notifyBtn.on { color:var(--accent); border-color:var(--accent); }
+  #phoneBtn:hover, #panelBtn:hover, #menuBtn:hover, #projectsBtn:hover, #machinesBtn:hover, #accountsBtn:hover, #notifyBtn:hover { color:var(--ink); border-color:var(--edge-hi); }
+  #panelBtn.on, #menuBtn.on, #projectsBtn.on, #machinesBtn.on, #accountsBtn.on, #notifyBtn.on { color:var(--accent); border-color:var(--accent); }
   .bico { font-size:14px; line-height:1; }
   /* Fleet PM — folded into the harness as a first-class view: PM threads ride the
      same #sessionbar tab strip, and the chat reuses the transcript #feed look.
@@ -294,7 +294,7 @@
   @media (pointer: coarse) {
     header { gap:8px; padding:calc(8px + env(safe-area-inset-top, 0px)) 10px 8px; }
     header .blbl { display:none; }
-    #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #notifyBtn { padding:6px 9px; }
+    #phoneBtn, #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #accountsBtn, #notifyBtn { padding:6px 9px; }
     #status { font-size:11px; padding:3px 8px; }
     #brand { display:none; }
   }
@@ -324,29 +324,34 @@
   #addProject .arow, .madd .arow { display:flex; gap:8px; }
   #addProject .arow button, .madd .arow button { flex:1; font-size:13px; padding:8px 10px; }
   #addProject .ahint, .madd .ahint { color:var(--dim); font-size:11px; }
-  /* accounts: subscription logins + headroom meters (projects rung footer) */
-  #accounts { margin-top:6px; }
-  #accounts .acct { border:1px solid var(--edge); padding:10px 14px; background:var(--panel); margin-bottom:8px; }
-  #accounts .acct.active { border-color:var(--accent); background:#0e0e0e; }
-  #accounts .arow2 { display:flex; align-items:center; gap:9px; }
-  #accounts .aname { font-weight:600; font-size:13px; }
-  #accounts .amail { color:var(--dim); font-size:11px; flex:1; min-width:0;
+  /* accounts: subscription logins + headroom meters (the 🧠 overlay) */
+  .accounts { margin-top:6px; }
+  .accountscard { text-align:left; width:min(480px,94vw); max-width:480px; max-height:82vh;
+            display:flex; flex-direction:column; }
+  .accountscard #accountsbody { flex:1; min-height:0; overflow-y:auto; margin-bottom:12px; }
+  .accountscard #accountsclose { align-self:center; }
+  #accountsbody .menutitle.amach { margin-top:14px; }
+  .accounts .acct { border:1px solid var(--edge); padding:10px 14px; background:var(--panel); margin-bottom:8px; }
+  .accounts .acct.active { border-color:var(--accent); background:#0e0e0e; }
+  .accounts .arow2 { display:flex; align-items:center; gap:9px; }
+  .accounts .aname { font-weight:600; font-size:13px; }
+  .accounts .amail { color:var(--dim); font-size:11px; flex:1; min-width:0;
                      overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  #accounts .aleft { font-size:11px; font-family:var(--mono); }
-  #accounts button.ause { font-size:11px; padding:3px 9px; }
-  #accounts .awin { display:flex; align-items:center; gap:8px; margin-top:6px;
+  .accounts .aleft { font-size:11px; font-family:var(--mono); }
+  .accounts button.ause { font-size:11px; padding:3px 9px; }
+  .accounts .awin { display:flex; align-items:center; gap:8px; margin-top:6px;
                     font-size:10px; color:var(--dim); font-family:var(--mono); }
-  #accounts .awin .wlab { flex:0 0 62px; }
-  #accounts .awin .wpct { flex:0 0 66px; text-align:right; }
-  #accounts .abar { position:relative; flex:1; height:6px; background:var(--raised);
+  .accounts .awin .wlab { flex:0 0 62px; }
+  .accounts .awin .wpct { flex:0 0 66px; text-align:right; }
+  .accounts .abar { position:relative; flex:1; height:6px; background:var(--raised);
                     border:1px solid var(--edge); }
-  #accounts .abar i { position:absolute; top:0; bottom:0; left:0; }
-  #accounts .ahint2 { color:var(--dim); font-size:11px; margin-top:6px; }
-  #accounts .aadd { display:flex; gap:8px; border:1px dashed var(--edge); padding:10px 14px; }
-  #accounts .aadd input { flex:1; background:var(--raised); color:var(--ink);
+  .accounts .abar i { position:absolute; top:0; bottom:0; left:0; }
+  .accounts .ahint2 { color:var(--dim); font-size:11px; margin-top:6px; }
+  .accounts .aadd { display:flex; gap:8px; border:1px dashed var(--edge); padding:10px 14px; }
+  .accounts .aadd input { flex:1; background:var(--raised); color:var(--ink);
                           border:1px solid var(--edge); padding:8px 10px; font-size:13px; }
-  #accounts .aadd input:focus { outline:none; border-color:var(--accent); }
-  #accounts .aadd button { font-size:13px; padding:8px 10px; }
+  .accounts .aadd input:focus { outline:none; border-color:var(--accent); }
+  .accounts .aadd button { font-size:13px; padding:8px 10px; white-space:nowrap; }
   /* per-machine add-project: a slim toggle that unfolds the clone/create form
      inside the machine's roster card (the only place to target a SPECIFIC host) */
   .madd { margin-top:8px; padding:10px 12px; }
@@ -394,9 +399,9 @@
   #newSession:hover { color:var(--accent); border-color:var(--accent-dim); }
   .menutitle { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.16em;
                padding:0 2px 2px; }
-  #qrmodal, #machinesmodal { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex;
+  #qrmodal, #machinesmodal, #accountsmodal { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex;
              align-items:center; justify-content:center; z-index:50; }
-  #qrmodal[hidden], #machinesmodal[hidden] { display:none; }
+  #qrmodal[hidden], #machinesmodal[hidden], #accountsmodal[hidden] { display:none; }
   .qrcard { background:var(--panel); border:1px solid var(--edge); border-top:2px solid var(--accent);
             padding:22px; text-align:center; max-width:340px; }
   /* machines roster overlay: a scrollable card of read-only machine stats */
@@ -476,6 +481,7 @@
     <button id="reloadBtn" title="Reload (recover a blank screen)"><span class="bico">⟳</span></button>
     <button id="phoneBtn" title="Open on your phone"><span class="bico">▢</span></button>
     <button id="machinesBtn" title="Fleet machines"><span class="bico">🖥️</span></button>
+    <button id="accountsBtn" title="Claude subscription accounts — headroom & sign-in"><span class="bico">🧠</span></button>
     <button id="notifyBtn" title="Notify me when a session needs me" hidden><span class="bico">🔔</span></button>
     <span id="status" title="Fleet PM — click to open"><span class="bico">🛰️</span><span class="blbl"> pm</span></span>
   </header>
@@ -502,6 +508,12 @@
     <div class="qrcard machinescard">
       <div id="machinelist"></div>
       <button id="machinesclose">close</button>
+    </div>
+  </div>
+  <div id="accountsmodal" hidden>
+    <div class="qrcard accountscard">
+      <div id="accountsbody"></div>
+      <button id="accountsclose">close</button>
     </div>
   </div>
   <div id="login" hidden>
@@ -1745,6 +1757,14 @@ function handleMachineJson(machine, m) {
     renderNeedsBar();                    // any machine's blocked sessions → the needs-you bar
     return;
   }
+  if (m.type === 'accounts') {
+    // Every machine's subscription accounts feed the 🧠 overlay, whichever
+    // machine we're viewing (each box holds its own logins).
+    const pm = perMachine[machine] || (perMachine[machine] = {});
+    pm.accounts = m;
+    renderAccountsBody();
+    return;
+  }
   if (machine !== currentMachine) return;   // all other frames act only on the viewed machine
   handleJson(m);
 }
@@ -1920,7 +1940,7 @@ function handleJson(m) {
     resolvePendingNav();                  // …or a session
   } else if (m.type === 'accounts') {
     accountsInfo = m;                     // subscription logins + headroom (direct mode)
-    renderAccountsWrap();                 // targeted repaint — never rebuilds the whole rung
+    renderAccountsBody();                 // repaint the 🧠 overlay if it's open
   } else if (m.type === 'focus') {
     // server's pick of which session to view, sent only in reply to a `new` we
     // issued. Switch into the freshly spawned session. (The defensive `stay`
@@ -2570,17 +2590,34 @@ function cloneProjectOnMachine(machineId, url) {
   hsendTo(machineId, { type: 'addProject', repoUrl: url });
   meta.textContent = `cloning onto ${machineId}…`;
 }
-// -- accounts: subscription logins + usage-aware routing ----------------------
-// The server broadcasts an `accounts` frame (logins, per-window usage, which is
-// active); we render it at the foot of the projects rung. New sessions spawn
-// under the ACTIVE account; the server auto-switches to the account with the
-// most headroom (hysteresis + hours-debounce). Sign-in = a normal claude
-// session in a fresh CLAUDE_CONFIG_DIR — complete the OAuth login in its
-// terminal and the account flips to ready on its own.
-let accountsInfo = null;                  // last `accounts` frame (direct mode)
-let accountAddDraft = '';                 // survives the rung's re-renders
+// -- accounts: subscription logins + usage-aware routing (the 🧠 overlay) -----
+// Each harness broadcasts an `accounts` frame (logins, per-window usage, which
+// is active). The 🧠 header button opens an overlay: direct mode shows this
+// harness's accounts; fleet mode shows a section PER MACHINE (every box holds
+// its own Keychain logins — the sign-in ceremony runs once per machine, and
+// the OAuth code paste works fine through a remote terminal). New sessions
+// spawn under the ACTIVE account; the harness auto-switches to the most
+// headroom (hysteresis + hours-debounce).
+let accountsInfo = null;                  // direct mode: last `accounts` frame
+const accountAddDrafts = {};              // per-machine input drafts (survive repaints)
 
-function addAccount(name) {
+// which accounts frame applies to a machine ('local' = direct mode)
+function accountsInfoFor(mid) {
+  return (FLEET && mid !== 'local') ? ((perMachine[mid] || {}).accounts || null)
+                                    : accountsInfo;
+}
+// route a control frame to the right harness
+function accountSend(mid, frame) {
+  if (FLEET && mid !== 'local') hsendTo(mid, frame); else hsend(frame);
+}
+// live sessions currently burning an account on a machine (badge on its card)
+function accountSessionCount(mid, name) {
+  const list = (FLEET && mid !== 'local') ? ((perMachine[mid] || {}).sessionList || [])
+                                          : sessionList;
+  return list.filter(s => (s.account || 'default') === name && s.alive).length;
+}
+
+function addAccount(mid, name) {
   // Mirror the server's _safe_name slug so the checks below match what it
   // will actually register.
   name = (name || '').trim().replace(/[^A-Za-z0-9._-]+/g, '-')
@@ -2590,18 +2627,22 @@ function addAccount(name) {
   // name, already signed in) — catch those here, BEFORE blanking the view and
   // arming pendingNewFocus, or the user gets a dead blank screen and the
   // leaked flag hijacks the next real session's focus.
-  const existing = accountsInfo && (accountsInfo.accounts || []).find(a => a.name === name);
+  const info = accountsInfoFor(mid);
+  const existing = info && (info.accounts || []).find(a => a.name === name);
   if (name === 'default' || (existing && existing.status === 'ready')) {
     meta.textContent = existing ? `${name} is already signed in` : 'that name is reserved';
     return;
   }
-  accountAddDraft = '';
+  accountAddDrafts[mid] = '';
   // mirrors newSession(): the focus reply switches us into the sign-in session
+  // (focus frames only act on the viewed machine, so attach the target first)
+  if (FLEET && mid !== 'local') attachMachine(mid);
+  accountsModal.hidden = true;
   pendingNewFocus = 'tty';
   currentCid = null;
   term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
   if (activeType) { activeType.finish(); activeType = null; }
-  hsend({ type: 'accountAdd', name });
+  accountSend(mid, { type: 'accountAdd', name });
 }
 
 function accountAge(ts) {
@@ -2616,36 +2657,26 @@ function leftColor(left) {
   return left >= 50 ? 'var(--ok)' : left >= 20 ? 'var(--accent)' : 'var(--err)';
 }
 
-// Repaint ONLY the accounts panel, inside its own wrapper div at the rung's
-// foot. An accounts broadcast must not rebuild the whole projects rung (DOM
-// churn + caret loss); the wrapper is created by renderProjectRung, so if the
-// rung hasn't rendered yet this is a no-op and the panel appears with it.
-function renderAccountsWrap() {
-  const aw = document.getElementById('accountswrap');
-  if (!aw) return;
-  const inp = aw.querySelector('.aadd input');
-  const hadFocus = inp && document.activeElement === inp;
-  const s = inp ? inp.selectionStart : null, e = inp ? inp.selectionEnd : null;
-  aw.innerHTML = '';
-  renderAccountsPanel(aw);
-  if (hadFocus) {
-    const ni = aw.querySelector('.aadd input');
-    if (ni) { ni.focus(); try { ni.setSelectionRange(s, e); } catch {} }
-  }
-}
-
-function renderAccountsPanel(container) {
-  if (!accountsInfo || FLEET) return;     // fleet rendering arrives with the relay brain
-  const info = accountsInfo;
-  const label = document.createElement('div');
-  label.className = 'menutitle';
-  label.textContent = `accounts · ${info.accounts.length}`
-                    + (info.auto && info.accounts.length > 1 ? ' · routing to most headroom' : '');
-  container.appendChild(label);
+// One machine's accounts panel, appended to `container`. mid='local' in
+// direct mode; a machine id in fleet mode (controls route to that harness).
+function renderAccountsPanel(container, info, mid) {
   const wrap = document.createElement('div');
-  wrap.id = 'accounts';
+  wrap.className = 'accounts';
+  if (!info) {
+    const hint = document.createElement('div'); hint.className = 'ahint2';
+    hint.textContent = 'no account data — machine offline, or its harness predates accounts (git pull on the box)';
+    wrap.appendChild(hint);
+    container.appendChild(wrap);
+    return;
+  }
+  // routing status: where new sessions land, whether the auto brain is on
+  const st = document.createElement('div'); st.className = 'ahint2';
+  st.textContent = `new sessions → ${info.active}`
+    + (info.auto && info.accounts.length > 1 ? ' · auto-routing to most headroom' : '')
+    + (info.lastSwitch ? ` · switched ${accountAge(info.lastSwitch)} ago` : '');
+  wrap.appendChild(st);
 
-  info.accounts.forEach(a => {
+  (info.accounts || []).forEach(a => {
     const card = document.createElement('div');
     card.className = 'acct' + (a.active ? ' active' : '');
     const row = document.createElement('div'); row.className = 'arow2';
@@ -2664,6 +2695,13 @@ function renderAccountsPanel(container) {
       left.title = a.checkedAt ? `most-constrained window · checked ${accountAge(a.checkedAt)} ago` : '';
       row.appendChild(left);
     }
+    const nsess = accountSessionCount(mid, a.name);
+    if (nsess > 0) {
+      const sc = document.createElement('span');
+      sc.className = 'scount'; sc.textContent = `${nsess} sess`;
+      sc.title = `${nsess} live session${nsess === 1 ? '' : 's'} running under this account`;
+      row.appendChild(sc);
+    }
     if (a.active) {
       const tag = document.createElement('span');
       tag.className = 'scount swork'; tag.textContent = 'active';
@@ -2673,7 +2711,7 @@ function renderAccountsPanel(container) {
       const use = document.createElement('button');
       use.className = 'ause'; use.textContent = 'use';
       use.title = 'spawn NEW sessions under this account (running sessions are untouched)';
-      use.onclick = (e) => { e.stopPropagation(); hsend({ type: 'accountUse', name: a.name }); };
+      use.onclick = (e) => { e.stopPropagation(); accountSend(mid, { type: 'accountUse', name: a.name }); };
       row.appendChild(use);
     }
     card.appendChild(row);
@@ -2701,7 +2739,7 @@ function renderAccountsPanel(container) {
       const open = document.createElement('button');
       open.className = 'ause'; open.textContent = 'open sign-in';
       open.style.marginTop = '6px';
-      open.onclick = (e) => { e.stopPropagation(); addAccount(a.name); };
+      open.onclick = (e) => { e.stopPropagation(); addAccount(mid, a.name); };
       card.appendChild(open);
     }
     wrap.appendChild(card);
@@ -2711,22 +2749,70 @@ function renderAccountsPanel(container) {
   const add = document.createElement('div'); add.className = 'aadd';
   const inp = document.createElement('input');
   inp.placeholder = 'add a Claude subscription · name it (work, personal…)';
-  inp.value = accountAddDraft;
-  inp.addEventListener('input', () => { accountAddDraft = inp.value; });
+  inp.dataset.mid = mid;
+  inp.value = accountAddDrafts[mid] || '';
+  inp.addEventListener('input', () => { accountAddDrafts[mid] = inp.value; });
   inp.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); addAccount(inp.value); }
+    if (e.key === 'Enter') { e.preventDefault(); addAccount(mid, inp.value); }
   });
   const btn = document.createElement('button');
   btn.textContent = '🔑 sign in';
   btn.title = 'opens a terminal session where you complete the Claude OAuth login';
-  btn.onclick = () => addAccount(inp.value);
+  btn.onclick = () => addAccount(mid, inp.value);
   const ref = document.createElement('button');
   ref.textContent = '↻';
   ref.title = 'refresh usage now';
-  ref.onclick = () => hsend({ type: 'accountsRefresh' });
+  ref.onclick = () => accountSend(mid, { type: 'accountsRefresh' });
   add.appendChild(inp); add.appendChild(btn); add.appendChild(ref);
   wrap.appendChild(add);
   container.appendChild(wrap);
+}
+
+// Populate the 🧠 overlay — one section per machine in fleet mode, this
+// harness alone in direct mode. Preserves the focused add-input's caret
+// across repaints (accounts frames land while you type).
+function renderAccountsBody() {
+  const body = document.getElementById('accountsbody');
+  if (!body || accountsModal.hidden) return;
+  const ae = document.activeElement;
+  const focusMid = (ae && ae.tagName === 'INPUT' && body.contains(ae)) ? ae.dataset.mid : null;
+  const sS = focusMid ? ae.selectionStart : null, sE = focusMid ? ae.selectionEnd : null;
+  body.innerHTML = '';
+  const title = document.createElement('div');
+  title.className = 'menutitle';
+  title.textContent = 'claude subscriptions · headroom routing';
+  body.appendChild(title);
+  if (!FLEET) {
+    renderAccountsPanel(body, accountsInfo, 'local');
+  } else {
+    const machines = machineList.filter(m => m.kind !== 'relay');
+    if (!machines.length) {
+      const h = document.createElement('div'); h.className = 'ahint2';
+      h.textContent = 'no machines connected yet';
+      body.appendChild(h);
+    }
+    machines.forEach(m => {
+      const hd = document.createElement('div');
+      hd.className = 'menutitle amach';
+      hd.textContent = `🖥️ ${(m.name || m.id).replace(/^clawd-/, '')}` + (m.online ? '' : ' · offline');
+      body.appendChild(hd);
+      renderAccountsPanel(body, accountsInfoFor(m.id), m.id);
+    });
+  }
+  if (focusMid) {
+    const ni = body.querySelector(`.aadd input[data-mid="${focusMid}"]`);
+    if (ni) { ni.focus(); try { ni.setSelectionRange(sS, sE); } catch {} }
+  }
+}
+
+function openAccounts() {
+  accountsModal.hidden = false;
+  renderAccountsBody();
+  // freshen the meters on open (forced poll, cheap)
+  if (!FLEET) hsend({ type: 'accountsRefresh' });
+  else machineList.forEach(m => {
+    if (m.online && m.kind !== 'relay') hsendTo(m.id, { type: 'accountsRefresh' });
+  });
 }
 
 // Direct mode entry point: a `projects` frame for the (single) local harness.
@@ -2748,10 +2834,6 @@ function renderProjectRung() {
   const oldInp = projectsEl.querySelector('#addProject input');
   const keepFocus = oldInp && document.activeElement === oldInp;
   const selStart = oldInp ? oldInp.selectionStart : null, selEnd = oldInp ? oldInp.selectionEnd : null;
-  // …and the add-account input's (captured BEFORE the wipe destroys it).
-  const oldAcct = projectsEl.querySelector('#accountswrap .aadd input');
-  const acctFocus = oldAcct && document.activeElement === oldAcct;
-  const aS = oldAcct ? oldAcct.selectionStart : null, aE = oldAcct ? oldAcct.selectionEnd : null;
   projectsEl.innerHTML = '';
   const label = document.createElement('div');
   label.className = 'menutitle'; label.textContent = `projects · ${rows.length}`;
@@ -2855,18 +2937,6 @@ function renderProjectRung() {
 
     projectsEl.appendChild(card);
   });
-
-  // Accounts panel lives in its own wrapper so accounts broadcasts can repaint
-  // it without touching the rung; restore the add-account input's caret
-  // across THIS full rebuild too (projects frames land on every hook event).
-  const aw = document.createElement('div');
-  aw.id = 'accountswrap';
-  projectsEl.appendChild(aw);
-  renderAccountsPanel(aw);
-  if (acctFocus) {
-    const ni = aw.querySelector('.aadd input');
-    if (ni) { ni.focus(); try { ni.setSelectionRange(aS, aE); } catch {} }
-  }
 
   applyProjectFilter();          // honor any live filter text after a re-render
   if (keepFocus) {               // we owned focus before the rebuild — keep it, caret intact
@@ -4282,6 +4352,9 @@ qrmodal.onclick = (e) => { if (e.target === qrmodal) qrmodal.hidden = true; };
 // renderMachines keeps it live on every roster broadcast.
 const machinesModal = document.getElementById('machinesmodal');
 function openMachines() { renderMachines(machineList); machinesModal.hidden = false; }
+const accountsModal = document.getElementById('accountsmodal');
+document.getElementById('accountsclose').onclick = () => { accountsModal.hidden = true; };
+document.getElementById('accountsBtn').onclick = () => openAccounts();   // 🧠 subscriptions overlay
 document.getElementById('machinesclose').onclick = () => { machinesModal.hidden = true; };
 machinesModal.onclick = (e) => { if (e.target === machinesModal) machinesModal.hidden = true; };
 
