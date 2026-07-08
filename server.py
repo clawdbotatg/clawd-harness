@@ -299,11 +299,22 @@ def _read_oauth_creds(config_dir):
         return None
 
 
+def _has_creds(config_dir):
+    """True iff a usable credential blob exists for this account dir RIGHT
+    NOW. The pre-spawn gate: a session must never open onto a login screen."""
+    oauth = (_read_oauth_creds(config_dir) or {}).get("claudeAiOauth") or {}
+    return bool(oauth.get("accessToken"))
+
+
+AUTH_FAIL = "auth"   # _fetch_usage sentinel: credentials are present but refused
+
+
 def _fetch_usage(config_dir, tok_cache=None):
-    """(pct_used, windows) for one account via Claude's OAuth usage endpoint,
-    or None. Handles one 401 → refresh → retry. The endpoint is undocumented,
-    so every failure degrades to None — callers keep the last snapshot and the
-    router stays put rather than flapping to a blind guess.
+    """(pct_used, windows) for one account via Claude's OAuth usage endpoint;
+    AUTH_FAIL when the credentials themselves are gone/refused (401 even
+    after a refresh — the account needs a re-sign-in); None for everything
+    else (network blip, endpoint change) — callers keep the last snapshot and
+    the router stays put rather than flapping to a blind guess.
     `tok_cache` (a mutable dict) keeps a refreshed access token in memory
     across polls, so an account whose stored token has expired doesn't repeat
     the 401→refresh dance every cycle. We never write tokens back to the
@@ -312,7 +323,7 @@ def _fetch_usage(config_dir, tok_cache=None):
     access, refresh = oauth.get("accessToken"), oauth.get("refreshToken")
     cached = (tok_cache or {}).get("access")
     if not (access or cached):
-        return None
+        return AUTH_FAIL
 
     def call(tok):
         req = urllib.request.Request(OAUTH_USAGE_URL, headers={
@@ -348,6 +359,8 @@ def _fetch_usage(config_dir, tok_cache=None):
             if tok_cache is not None:
                 tok_cache["access"] = fresh
             code, usage = call(fresh)
+    if code == 401:
+        return AUTH_FAIL                         # refused even after refresh
     if code != 200 or not isinstance(usage, dict):
         return None
     windows, worst = [], 0.0
@@ -435,6 +448,8 @@ class Account:
         self.created = created or time.time()
         self.usage = usage or None               # {"pct","windows","checkedAt"}
         self.error = ""                          # last poll error (in-memory)
+        self.broken = False                      # ready but credentials now refused →
+                                                 # excluded from routing until re-sign-in
         self.tok = {}                            # in-memory refreshed-access-token cache
         self.last_pending_check = 0.0            # backoff anchor while awaiting sign-in
 
@@ -445,8 +460,10 @@ class Account:
 
     def meta(self, active=False):
         pct = (self.usage or {}).get("pct")
+        status = ("pending" if not self.ready
+                  else "needs-login" if self.broken else "ready")
         return {"name": self.name, "email": self.email,
-                "status": "ready" if self.ready else "pending",
+                "status": status,
                 "active": active, "usagePct": pct,
                 "headroom": None if pct is None else round(100 - pct, 1),
                 "windows": (self.usage or {}).get("windows") or [],
@@ -651,7 +668,7 @@ class ClaudeSession:
         self.os_pid = self.proc.pid
         self.alive = True
         print(f"[session {self.cid[:8]}] claude pid={self.os_pid} "
-              f"session_id={self.session_id} "
+              f"session_id={self.session_id} account={self.account} "
               f"({'resumed' if self.resuming else 'new'})", flush=True)
 
         threading.Thread(target=self._pump_pty, daemon=True).start()
@@ -1360,6 +1377,7 @@ class SessionManager:
             active = self.active_account
             return {"type": "accounts", "active": active,
                     "auto": SUB_AUTOSWITCH,
+                    "best": self._best_account(),   # what a new session would pick now
                     "lastSwitch": self.last_switch_at,
                     "accounts": [a.meta(active=(a.name == active))
                                  for a in self._ordered_accounts()]}
@@ -1390,7 +1408,7 @@ class SessionManager:
             return None
         with self.lock:
             a = self.accounts.get(slug)
-            if a and a.ready:
+            if a and a.ready and not a.broken:
                 return None                      # already signed in
             if not a:
                 a = Account(slug, str(ACCOUNTS_DIR / slug))
@@ -1410,6 +1428,22 @@ class SessionManager:
               f"{s.cid[:8] if s else 'FAILED'}", flush=True)
         return s
 
+    def _best_account(self):
+        """The ready account with the most headroom RIGHT NOW, from cached
+        usage that's fresh enough to trust (< 3×USAGE_TTL old). None when no
+        account qualifies — callers fall back to active_account. This is what
+        routes each NEW session when auto-routing is on: per-spawn choice,
+        not a sticky default."""
+        now = time.time()
+        with self.lock:
+            fresh = [a for a in self.accounts.values()
+                     if a.ready and not a.broken
+                     and (a.usage or {}).get("pct") is not None
+                     and now - (a.usage or {}).get("checkedAt", 0) < 3 * USAGE_TTL]
+        if not fresh:
+            return None
+        return min(fresh, key=lambda a: a.usage["pct"]).name
+
     def remove_account(self, name):
         """Drop an account from the routing roster. This logs NOTHING out —
         the config dir and Keychain credential stay (delete those yourself if
@@ -1420,7 +1454,7 @@ class SessionManager:
         with self.lock:
             a = self.accounts.get(name)
             others = [x for x in self.accounts.values()
-                      if x.name != name and x.ready]
+                      if x.name != name and x.ready and not x.broken]
             if not a or not others:
                 return False                     # never drop the last usable login
             del self.accounts[name]
@@ -1441,7 +1475,7 @@ class SessionManager:
         session into a login TUI instead of running their prompt."""
         with self.lock:
             a = self.accounts.get(name)
-            if not a or not a.ready or name == self.active_account:
+            if not a or not a.ready or a.broken or name == self.active_account:
                 return False
             self.active_account = name
             self.last_switch_at = time.time()
@@ -1474,36 +1508,48 @@ class SessionManager:
             # back off to USAGE_TTL — an abandoned ceremony must not fork a
             # Keychain subprocess every 15s forever.
             for a in accts:
-                if a.ready:
+                if a.ready and not a.broken:
                     continue
+                # pending accounts await their FIRST credentials; broken ones
+                # await a RE-sign-in — both watched the same way
                 fresh_add = now - a.created < 3600
-                if not (forced or fresh_add
+                if not (forced or fresh_add or a.broken
                         or now - a.last_pending_check > USAGE_TTL):
                     continue
                 a.last_pending_check = now
-                oauth = (_read_oauth_creds(a.config_dir) or {}
-                         ).get("claudeAiOauth") or {}
-                if not oauth.get("accessToken"):
+                if not _has_creds(a.config_dir):
                     continue
                 email = _account_email(a.config_dir)
-                if a.config_dir:
+                if not a.ready and a.config_dir:
                     _merge_mcp(a.config_dir)
                 with self.lock:
-                    a.ready, a.email = True, email
-                print(f"[account {a.name}] signed in"
+                    was_broken = a.broken
+                    a.ready, a.broken = True, False
+                    a.email = email or a.email
+                    a.tok.clear()                # stale cached token from the old login
+                print(f"[account {a.name}] "
+                      f"{'re-signed in' if was_broken else 'signed in'}"
                       f" ({email or 'email unknown'})", flush=True)
                 changed = True
             # Ready accounts due a usage refresh — fetched in PARALLEL so one
             # slow/hung endpoint can't stall the other accounts (or the
             # sign-in watch above) behind a serial chain of 10s timeouts.
-            due = [a for a in accts if a.ready and
+            due = [a for a in accts if a.ready and not a.broken and
                    (forced or now - (a.usage or {}).get("checkedAt", 0) > USAGE_TTL)]
             if due:
                 with ThreadPoolExecutor(max_workers=min(4, len(due))) as ex:
                     got = list(ex.map(
                         lambda a: _fetch_usage(a.config_dir, a.tok), due))
                 for a, res in zip(due, got):
-                    if res:
+                    if res == AUTH_FAIL:
+                        # login gone/revoked → OUT of routing until re-sign-in;
+                        # the pending watcher above picks it back up
+                        with self.lock:
+                            a.broken = True
+                        print(f"[account {a.name}] credentials refused — "
+                              "excluded from routing until re-sign-in", flush=True)
+                        changed = True
+                    elif res:
                         pct, windows = res
                         with self.lock:
                             a.usage = {"pct": round(pct, 1), "windows": windows,
@@ -1537,7 +1583,8 @@ class SessionManager:
         with self.lock:
             cur = self.accounts.get(self.active_account)
             ready = [a for a in self.accounts.values()
-                     if a.ready and (a.usage or {}).get("pct") is not None]
+                     if a.ready and not a.broken
+                     and (a.usage or {}).get("pct") is not None]
         if not cur or len(ready) < 2:
             return
         cur_pct = (cur.usage or {}).get("pct")
@@ -1760,16 +1807,43 @@ class SessionManager:
     def create_session(self, pid, account=None):
         if pid not in self.projects:
             return None
-        # New sessions spawn under the active subscription account (or an
-        # explicit override, e.g. the sign-in ceremony). The resolved config
-        # dir is recorded on the session so --resume always finds it.
-        name = account or self.active_account
+        # Routing: an explicit override (e.g. the sign-in ceremony) always
+        # wins; otherwise, with auto-routing on, each new session picks the
+        # account with the MOST HEADROOM at this moment (per-spawn — not a
+        # sticky default), falling back to active_account when no fresh usage
+        # data qualifies. The resolved config dir is recorded on the session
+        # so --resume always finds it.
+        name = account
+        if not name:
+            name = (self._best_account() if SUB_AUTOSWITCH else None) \
+                   or self.active_account
         acct = self.accounts.get(name)
         if acct is None:
             if account:                          # explicit ask for a missing account
                 print(f"[accounts] unknown account {account!r} requested — "
                       "spawning under default", flush=True)
             name, acct = "default", self.accounts.get("default")
+        # NEVER ambush the user with a login screen: verify the chosen
+        # account's credentials exist at THIS moment (explicit overrides are
+        # exempt — the sign-in ceremony spawns into a credential-less dir on
+        # purpose). A signed-out account gets flagged + skipped for the
+        # next-best ready one; last resort is the machine's plain ~/.claude.
+        if not account and acct and acct.config_dir and not _has_creds(acct.config_dir):
+            acct.broken = True
+            print(f"[accounts] {name} is signed out — rerouting this spawn",
+                  flush=True)
+            with self.lock:
+                alts = sorted(
+                    [x for x in self.accounts.values()
+                     if x.ready and not x.broken and x.name != name],
+                    key=lambda x: (x.usage or {}).get("pct", 100.0))
+            name, acct = "default", None         # fallback: plain ~/.claude
+            for alt in alts:
+                if not alt.config_dir or _has_creds(alt.config_dir):
+                    name, acct = alt.name, alt
+                    break
+                alt.broken = True
+            self.broadcast_accounts()
         cid = str(uuid.uuid4())
         s = ClaudeSession(self, cid=cid, pid=pid, session_id=str(uuid.uuid4()),
                           resuming=False, created=time.time(),

@@ -2718,19 +2718,24 @@ function renderAccountsPanel(container, info, mid) {
   }
 
   (info.accounts || []).forEach(a => {
+    // the highlighted card = where the next session lands (best under auto,
+    // the pinned active account in manual mode)
+    const routed = info.auto ? (a.name === info.best) : a.active;
     const card = document.createElement('div');
-    card.className = 'acct' + (a.active ? ' active' : '');
+    card.className = 'acct' + (routed ? ' active' : '');
 
     // headline: identity on the left, the big headroom number on the right
     const row = document.createElement('div'); row.className = 'arow2';
     const dot = document.createElement('span');
-    dot.className = 'sdot' + (a.status === 'pending' ? ' dead' : a.active ? ' busy' : '');
+    dot.className = 'sdot' + (a.status !== 'ready' ? ' dead' : routed ? ' busy' : '');
     const id = document.createElement('div'); id.className = 'aid';
     const nm = document.createElement('div');
     nm.className = 'aname'; nm.textContent = a.name;
     const mail = document.createElement('div');
     mail.className = 'amail';
-    mail.textContent = a.email || (a.status === 'pending' ? 'not signed in yet' : '');
+    mail.textContent = a.status === 'needs-login' ? '⚠ signed out — needs re-sign-in'
+                     : (a.email || (a.status === 'pending' ? 'not signed in yet' : ''));
+    if (a.status === 'needs-login') mail.style.color = 'var(--err)';
     id.appendChild(nm); id.appendChild(mail);
     row.appendChild(dot); row.appendChild(id);
     if (a.headroom != null) {
@@ -2767,17 +2772,23 @@ function renderAccountsPanel(container, info, mid) {
       card.appendChild(win);
     });
 
-    // action row: active tag / use button · session count · data freshness
+    // action row: routing tag / pin button · session count · data freshness
     const act = document.createElement('div'); act.className = 'actrow';
-    if (a.active) {
+    if (info.auto && a.name === info.best) {
       const tag = document.createElement('span');
-      tag.className = 'scount swork'; tag.textContent = '● active';
-      tag.title = 'new sessions spawn under this account';
+      tag.className = 'scount swork'; tag.textContent = '▸ next spawn';
+      tag.title = 'most headroom right now — the next new session lands here';
       act.appendChild(tag);
-    } else if (a.status === 'ready') {
+    } else if (!info.auto && a.active) {
+      const tag = document.createElement('span');
+      tag.className = 'scount swork'; tag.textContent = '● pinned';
+      tag.title = 'new sessions spawn under this account (auto-routing off)';
+      act.appendChild(tag);
+    } else if (!info.auto && a.status === 'ready') {
+      // manual mode only — with auto-routing on, per-spawn choice wins anyway
       const use = document.createElement('button');
       use.className = 'ause'; use.textContent = 'use this plan';
-      use.title = 'spawn NEW sessions under this account (running sessions are untouched)';
+      use.title = 'pin NEW sessions to this account (running sessions are untouched)';
       use.onclick = (e) => { e.stopPropagation(); accountSend(mid, { type: 'accountUse', name: a.name }); };
       act.appendChild(use);
     }
@@ -2803,12 +2814,15 @@ function renderAccountsPanel(container, info, mid) {
     }
     if (act.childNodes.length) card.appendChild(act);
 
-    if (a.status === 'pending') {
+    if (a.status !== 'ready') {
       const hint = document.createElement('div'); hint.className = 'ahint2';
-      hint.textContent = 'sign-in not finished — open the sign-in terminal and complete the claude.ai login there';
+      hint.textContent = a.status === 'needs-login'
+        ? 'this login stopped working (revoked or expired beyond refresh) — it is EXCLUDED from routing until you sign in again'
+        : 'sign-in not finished — open the sign-in terminal and complete the claude.ai login there';
       card.appendChild(hint);
       const open = document.createElement('button');
-      open.className = 'ause'; open.textContent = '🔑 open sign-in terminal';
+      open.className = 'ause';
+      open.textContent = a.status === 'needs-login' ? '🔑 sign in again' : '🔑 open sign-in terminal';
       open.style.marginTop = '8px';
       open.onclick = (e) => { e.stopPropagation(); addAccount(mid, a.name); };
       card.appendChild(open);
@@ -2866,10 +2880,12 @@ function renderAccountsBody() {
     hd.appendChild(dot); hd.appendChild(nm);
     if (info) {
       const sub = document.createElement('span'); sub.className = 'amach-sub';
-      sub.textContent = `new sessions → ${info.active}`
-        + (info.auto && (info.accounts || []).length > 1 ? ' · auto' : '');
-      sub.title = 'which plan new sessions spawn under'
-        + (info.lastSwitch ? ` · last switched ${accountAge(info.lastSwitch)} ago` : '');
+      sub.textContent = info.auto
+        ? `new sessions: most headroom → ${info.best || info.active}`
+        : `new sessions: ${info.active} (pinned)`;
+      sub.title = info.auto
+        ? 'every new session spawns under whichever plan has the most headroom right now'
+        : 'auto-routing is off (SUB_AUTOSWITCH=0) — new sessions spawn under the pinned plan';
       hd.appendChild(sub);
     } else if (!online) {
       const sub = document.createElement('span'); sub.className = 'amach-sub';
