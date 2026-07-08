@@ -221,6 +221,10 @@ SUB_EXHAUSTED  = float(os.environ.get("SUB_EXHAUSTED", "95"))   # % used
 # under the best plan with --resume (transcript symlinked across). Checked on
 # every Stop; per-session cooldown so a flapping window can't churn respawns.
 HANDOFF_COOLDOWN = float(os.environ.get("HANDOFF_COOLDOWN", "600"))
+# A session on a HARD-dead plan (100% used / login refused) whose hooks have
+# been silent this long is stuck on the limit screen (the eaten turn never
+# emits Stop, so `busy` never clears) — the sweep reclaims and moves it.
+BUSY_STUCK = float(os.environ.get("BUSY_STUCK", "600"))
 # Paths symlinked from ~/.claude into each account dir so every account runs
 # with the user's full extension environment (same list claw-router shares).
 SHARE_PATHS = ["settings.json", "CLAUDE.md", "commands", "rules", "skills",
@@ -310,6 +314,19 @@ def _has_creds(config_dir):
     return bool(oauth.get("accessToken"))
 
 
+def _cred_sig(config_dir):
+    """Fingerprint of the stored credential blob, '' when there is none.
+    Lets the poller tell 'the same refused login is still sitting there'
+    apart from 'someone actually re-signed in' — a broken account is only
+    re-admitted to routing when this changes."""
+    oauth = (_read_oauth_creds(config_dir) or {}).get("claudeAiOauth") or {}
+    tok = oauth.get("accessToken") or ""
+    if not tok:
+        return ""
+    return hashlib.sha256(
+        f"{tok}:{oauth.get('refreshToken') or ''}".encode()).hexdigest()
+
+
 def _link_transcript(session_id, src_cfg, dst_cfg):
     """Make `--resume` under dst_cfg find a transcript recorded under src_cfg:
     symlink the .jsonl (+ its subagents dir) into dst's projects tree.
@@ -357,15 +374,15 @@ def _fetch_usage(config_dir, tok_cache=None):
             "Authorization": f"Bearer {tok}", "anthropic-beta": OAUTH_BETA})
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
-                return r.status, json.loads(r.read().decode())
+                return r.status, json.loads(r.read().decode()), None
         except urllib.error.HTTPError as e:
-            return e.code, None
+            return e.code, None, e.headers.get("Retry-After")
         except Exception:
-            return None, None
+            return None, None, None
 
-    code = usage = None
+    code = usage = retry_after = None
     for tok in [t for t in (cached, access) if t]:
-        code, usage = call(tok)
+        code, usage, retry_after = call(tok)
         if code != 401:
             break
         if tok is cached and tok_cache:          # cache went stale — drop it
@@ -385,9 +402,24 @@ def _fetch_usage(config_dir, tok_cache=None):
         if fresh:
             if tok_cache is not None:
                 tok_cache["access"] = fresh
-            code, usage = call(fresh)
+            code, usage, retry_after = call(fresh)
     if code == 401:
         return AUTH_FAIL                         # refused even after refresh
+    if code == 429:
+        # A hard-limited plan 429s even its usage endpoint — which is exactly
+        # when routing away matters most. Report it as fully used (not "no
+        # data", which would freeze a stale-green snapshot and blind the
+        # router) so autoswitch/handoff treat it like any exhausted window.
+        # The next successful poll (endpoint recovers ≤ Retry-After) restores
+        # real numbers.
+        try:
+            until = time.time() + max(60.0, float(retry_after))
+        except (TypeError, ValueError):
+            until = time.time() + 1800
+        return 100.0, [{"key": "rate_limited", "label": "limited",
+                        "used": 100.0,
+                        "resets": time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                                time.gmtime(until))}]
     if code != 200 or not isinstance(usage, dict):
         return None
     windows, worst = [], 0.0
@@ -532,6 +564,8 @@ class Account:
         self.error = ""                          # last poll error (in-memory)
         self.broken = False                      # ready but credentials now refused →
                                                  # excluded from routing until re-sign-in
+        self.refused_sig = ""                    # _cred_sig of the blob that was refused —
+                                                 # re-admit only when it changes
         self.tok = {}                            # in-memory refreshed-access-token cache
         self.last_pending_check = 0.0            # backoff anchor while awaiting sign-in
 
@@ -1098,6 +1132,18 @@ class ClaudeSession:
             if tools:
                 out["tools"] = tools
             return out if (text or tools) else None
+        if t == "attachment":
+            # A message sent while claude is busy never gets a `type:"user"`
+            # line — the TUI queues it (`queue-operation` enqueue/remove) and
+            # the only record carrying its text is this queued_command
+            # attachment, written when the turn actually consumes it. Emit the
+            # user event here or the client's "⏳ queued" box never lands.
+            att = obj.get("attachment") or {}
+            if att.get("type") == "queued_command":
+                clean = _strip_noise(att.get("prompt") or "").strip()
+                if clean:
+                    return {"role": "user", "text": clean}
+            return None
         if t == "result":
             return {"role": "result",
                     "subtype": obj.get("subtype"),
@@ -1645,12 +1691,17 @@ class SessionManager:
                 a.last_pending_check = now
                 if not _has_creds(a.config_dir):
                     continue
+                if a.broken and a.refused_sig \
+                        and _cred_sig(a.config_dir) == a.refused_sig:
+                    continue                     # same refused login still there —
+                                                 # wait for an actual re-sign-in
                 email = _account_email(a.config_dir)
                 if not a.ready and a.config_dir:
                     _merge_mcp(a.config_dir)
                 with self.lock:
                     was_broken = a.broken
                     a.ready, a.broken = True, False
+                    a.refused_sig = ""
                     a.email = email or a.email
                     a.tok.clear()                # stale cached token from the old login
                 print(f"[account {a.name}] "
@@ -1670,8 +1721,10 @@ class SessionManager:
                     if res == AUTH_FAIL:
                         # login gone/revoked → OUT of routing until re-sign-in;
                         # the pending watcher above picks it back up
+                        sig = _cred_sig(a.config_dir)
                         with self.lock:
                             a.broken = True
+                            a.refused_sig = sig
                         print(f"[account {a.name}] credentials refused — "
                               "excluded from routing until re-sign-in", flush=True)
                         changed = True
@@ -1706,17 +1759,31 @@ class SessionManager:
             return
         now = time.time()
         with self.lock:
-            drained = {a.name for a in self.accounts.values() if a.broken
-                       or (a.usage or {}).get("pct", 0) >= SUB_EXHAUSTED}
+            drained, dead = set(), set()
+            for a in self.accounts.values():
+                pct = (a.usage or {}).get("pct", 0)
+                if a.broken or pct >= SUB_EXHAUSTED:
+                    drained.add(a.name)
+                if a.broken or pct >= 100:
+                    dead.add(a.name)             # an in-flight turn CANNOT finish here
             sessions = list(self.sessions.values())
         best = self.accounts.get(self._best_account() or "")
         if not best or best.name in drained:
             return
         for s in sessions:
-            if (s.alive and not s.busy and s.account in drained
-                    and s.account != best.name
+            if not (s.alive and s.account in drained and s.account != best.name
                     and now - s.last_handoff >= HANDOFF_COOLDOWN):
-                self._handoff(s, best)
+                continue
+            if s.busy:
+                # `busy` with silent hooks on a dead plan = the limit screen ate
+                # the turn (no Stop ever comes) — stuck, not working. Reclaim it.
+                if not (s.account in dead and now - s.last_active > BUSY_STUCK):
+                    continue
+                print(f"[handoff {s.cid[:8]}] busy but hook-silent "
+                      f"{int(now - s.last_active)}s on dead plan {s.account} — "
+                      "treating as stuck", flush=True)
+                s.busy = False
+            self._handoff(s, best)
 
     def maybe_handoff(self, s):
         """Mid-session account handoff (SUB-ROUTING.md Phase 5): called after
@@ -1743,8 +1810,10 @@ class SessionManager:
                                   "checkedAt": time.time()}
                     acct.broken = False
         elif acct and drained:
+            sig = _cred_sig(acct.config_dir)
             with self.lock:
                 acct.broken = True
+                acct.refused_sig = sig
         if not drained:
             return
         best = self.accounts.get(self._best_account() or "")
