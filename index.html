@@ -2911,27 +2911,40 @@ function renderAccountsPanel(container, info, mid) {
 // readings + age — within one pool, the spread between them IS polling lag.
 function renderPlanSummary(body, machines) {
   const plans = new Map();                       // orgUuid (or email, or machine:name) → plan
+  const add = (key, m, a) => {
+    if (!plans.has(key)) plans.set(key, { names: new Set(), email: a.email,
+                                          org: a.orgUuid || '',
+                                          orgName: '', tier: '',
+                                          readings: [], broken: [] });
+    const p = plans.get(key);
+    p.names.add(a.name);
+    p.email = p.email || a.email;
+    p.orgName = p.orgName || a.orgName || '';
+    p.tier = p.tier || a.tier || '';
+    const entry = { mid: m.id, machine: (m.name || m.id).replace(/^clawd-/, ''), a };
+    // a signed-out login is a footnote ON its plan's card, not a separate
+    // scary card — the plan itself may be perfectly healthy elsewhere
+    if (a.status === 'ready' && a.headroom != null) p.readings.push(entry);
+    else p.broken.push(entry);
+  };
+  const entries = [];
   machines.forEach(m => {
     (((accountsInfoFor(m.id) || {}).accounts) || []).forEach(a => {
       if (a.status === 'pending') return;        // mid-sign-in ceremony — not a plan yet
-      // orgUuid is absent from harnesses predating it (and from signed-out
-      // logins whose .claude.json is gone) — degrade to the old email key
-      const key = a.orgUuid || a.email || `${m.id}:${a.name}`;
-      if (!plans.has(key)) plans.set(key, { names: new Set(), email: a.email,
-                                            org: a.orgUuid || '',
-                                            orgName: '', tier: '',
-                                            readings: [], broken: [] });
-      const p = plans.get(key);
-      p.names.add(a.name);
-      p.email = p.email || a.email;
-      p.orgName = p.orgName || a.orgName || '';
-      p.tier = p.tier || a.tier || '';
-      const entry = { mid: m.id, machine: (m.name || m.id).replace(/^clawd-/, ''), a };
-      // a signed-out login is a footnote ON its plan's card, not a separate
-      // scary card — the plan itself may be perfectly healthy elsewhere
-      if (a.status === 'ready' && a.headroom != null) p.readings.push(entry);
-      else p.broken.push(entry);
+      entries.push({ m, a });
     });
+  });
+  // pass 1: logins whose pool is KNOWN (token-bound org uuid)
+  entries.filter(e => e.a.orgUuid).forEach(e => add(e.a.orgUuid, e.m, e.a));
+  // pass 2: org-less logins (harness predating orgUuid, or signed out before
+  // the profile endpoint could speak) — join the unique same-email pool when
+  // there is exactly one, so a dead twin can't split off its own card; with
+  // zero or several candidates the email key is the honest fallback
+  entries.filter(e => !e.a.orgUuid).forEach(e => {
+    const cand = [...plans.keys()].filter(k => plans.get(k).email
+                                            && plans.get(k).email === e.a.email);
+    add(cand.length === 1 ? cand[0]
+        : (e.a.email || `${e.m.id}:${e.a.name}`), e.m, e.a);
   });
   if (!plans.size) return;
   const rows = [...plans.values()];
@@ -2943,12 +2956,16 @@ function renderPlanSummary(body, machines) {
     p.title = p.orgName || (p.email ? p.email.split('@')[0] : [...p.names][0]);
   });
   // two pools under one email (personal + team org) would share a title —
-  // disambiguate with the fleet nicknames, falling back to the org id
+  // disambiguate with the fleet nicknames (only when they actually add
+  // information — 'clawd · clawd' helps nobody), else the org id
   const titleCount = {};
   rows.forEach(p => { titleCount[p.title] = (titleCount[p.title] || 0) + 1; });
   rows.forEach(p => {
-    if (titleCount[p.title] > 1)
-      p.title += ` · ${[...p.names].slice(0, 2).join('/') || p.org.slice(0, 8)}`;
+    if (titleCount[p.title] > 1) {
+      const names = [...p.names].slice(0, 2).join('/');
+      const alt = (names && names !== p.title) ? names : p.org.slice(0, 8);
+      if (alt) p.title += ` · ${alt}`;
+    }
   });
   // live plans first, freshest reading first; signed-out-everywhere plans sink
   rows.sort((x, y) => ((y.readings.length ? 1 : 0) - (x.readings.length ? 1 : 0))
@@ -2974,8 +2991,10 @@ function renderPlanSummary(body, machines) {
                 p.org ? `usage pool (org): ${p.org}` : '']
                .filter(Boolean).join('\n');
     const mail = document.createElement('div'); mail.className = 'amail';
-    mail.textContent = [p.email, tierShort(p.tier)].filter(Boolean).join(' · ');
-    if (p.org) mail.title = `usage pool (org): ${p.org}`;
+    // tier first — it's short and load-bearing; a long email can ellipsize
+    mail.textContent = [tierShort(p.tier), p.email].filter(Boolean).join(' · ');
+    if (p.org) mail.title = `usage pool (org): ${p.org}`
+                          + (p.email ? `\n${p.email}` : '');
     id.appendChild(nm); id.appendChild(mail);
     const bw = document.createElement('div'); bw.className = 'abigwrap';
     const big = document.createElement('div'); big.className = 'abig';
