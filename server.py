@@ -1983,10 +1983,14 @@ class SessionManager:
         # NEVER ambush the user with a login screen: verify the chosen
         # account's credentials exist at THIS moment (explicit overrides are
         # exempt — the sign-in ceremony spawns into a credential-less dir on
-        # purpose). A signed-out account gets flagged + skipped for the
-        # next-best ready one; last resort is the machine's plain ~/.claude.
-        if not account and acct and acct.config_dir and not _has_creds(acct.config_dir):
-            acct.broken = True
+        # purpose). This includes `default`: the machine's plain ~/.claude is
+        # a login like any other, and on a box whose sign-ins all live in
+        # named account dirs it may hold nothing. A signed-out account gets
+        # flagged + skipped for the next-best ready one.
+        no_creds_anywhere = False
+        if not account and not _has_creds(acct.config_dir if acct else ""):
+            if acct:
+                acct.broken = True
             print(f"[accounts] {name} is signed out — rerouting this spawn",
                   flush=True)
             with self.lock:
@@ -1994,18 +1998,26 @@ class SessionManager:
                     [x for x in self.accounts.values()
                      if x.ready and not x.broken and x.name != name],
                     key=lambda x: (x.usage or {}).get("pct", 100.0))
-            name, acct = "default", None         # fallback: plain ~/.claude
+            name, acct = "default", None         # last resort: plain ~/.claude
             for alt in alts:
-                if not alt.config_dir or _has_creds(alt.config_dir):
+                if _has_creds(alt.config_dir):
                     name, acct = alt.name, alt
                     break
                 alt.broken = True
+            if acct is None and not _has_creds(""):
+                no_creds_anywhere = True
+                print("[accounts] NO plan is signed in on this machine — the "
+                      "new session opens Claude's login screen; complete it "
+                      "once (or sign in via the \U0001f9e0 page)", flush=True)
             self.broadcast_accounts()
         cid = str(uuid.uuid4())
         s = ClaudeSession(self, cid=cid, pid=pid, session_id=str(uuid.uuid4()),
                           resuming=False, created=time.time(),
                           account=name,
                           config_dir=acct.config_dir if acct else "")
+        if no_creds_anywhere:
+            s.desc = ("no plan is signed in on this machine yet — complete "
+                      "the login in this terminal (once per machine)")
         with self.lock:
             self.sessions[cid] = s
         s.start()
