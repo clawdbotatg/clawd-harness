@@ -1067,13 +1067,12 @@ class ClaudeSession:
     # -- subscriber registry / streaming --------------------------------------
     def subscribe(self, client):
         """Attach a client to this session's live stream and catch it up:
-        recent screen bytes, a hello, and the structured history."""
+        a hello, recent screen bytes, and the structured history. The hello
+        goes FIRST so the client knows which cid the bytes that follow belong
+        to — it gates painting on that, which is what keeps a stale/mis-routed
+        subscription from leaking another session's output into its terminal."""
         with self.clients_lock:
             self.clients.add(client)
-        with self.ring_lock:
-            snapshot = bytes(self.ring)
-        if snapshot:
-            client.send_bytes(snapshot)
         client.send_json({"type": "hello",
                           "cid": self.cid, "pid": self.pid,
                           "account": self.account,
@@ -1082,6 +1081,10 @@ class ClaudeSession:
                           "workdir": self.workdir(),
                           "busy": self.busy, "waiting": self.waiting, "tool": self.last_tool,
                           "cols": COLS, "rows": ROWS})
+        with self.ring_lock:
+            snapshot = bytes(self.ring)
+        if snapshot:
+            client.send_bytes(snapshot)
         self._replay_history(client)
 
     def _replay_history(self, client, limit=150):
@@ -1724,7 +1727,8 @@ class SessionManager:
             viewers = list(s.clients)
             s.clients.clear()
         for c in viewers:
-            fresh.subscribe(c)
+            if c.cid == fresh.cid:               # skip a viewer that switched away mid-handoff
+                fresh.subscribe(c)
         self.save_registry()
         self.broadcast_sessions()
 
@@ -2082,12 +2086,19 @@ class SessionManager:
 
     def subscribe_client(self, client, cid):
         s = self.get(cid)
-        if not s:
-            return
         if client.cid and client.cid != cid:
             old = self.get(client.cid)
             if old:
                 old.unsubscribe(client)
+        if not s:
+            # Unknown cid (closed here, or a fleet subscribe routed to the wrong
+            # box). Going silent while the previous subscription kept streaming is
+            # how "another session's output paints into this terminal" happened —
+            # detach (above) and answer loudly instead.
+            client.cid = None
+            client.send_json({"type": "error", "cid": cid,
+                              "error": f"no such session: {cid}"})
+            return
         client.cid = cid
         s.subscribe(client)
 

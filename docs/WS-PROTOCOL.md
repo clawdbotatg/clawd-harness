@@ -53,7 +53,7 @@ viewer** (each with its own `client.cid`).
 
 | `type` | Fields | Effect |
 |---|---|---|
-| `subscribe` | `cid` | Attach to that session's live stream. Server immediately sends a ring-buffer byte snapshot, a `hello`, then replays recent `transcript` history. |
+| `subscribe` | `cid` | Attach to that session's live stream. Server immediately sends a `hello`, then a ring-buffer byte snapshot, then replays recent `transcript` history (see "On `subscribe`" below, incl. the unknown-cid error reply). |
 | `list` | — | Server replies with `projects` then `sessions` snapshots. |
 | `new` | `pid`, `account?` | Create a session in project `pid`, spawned under the ACTIVE subscription account (or the named `account` override). Server replies `{type:"focus", cid}` with the new id, and broadcasts `sessions`. |
 | `accountAdd` | `name` | Register a new subscription account (config dir under `~/.clawd-accounts/<name>` + settings symlinks) and spawn its **sign-in session** — a normal claude in the self project under that `CLAUDE_CONFIG_DIR`, where the user completes the OAuth login. Replies `{type:"focus", cid}` for the sign-in session; broadcasts `accounts`. Re-invoking on a still-pending account opens another sign-in session; a no-op on a ready one. |
@@ -96,13 +96,18 @@ reconnect (i.e. the server restarted).
 
 ### On `subscribe` (that client only)
 ```jsonc
-// 1) a binary frame: recent PTY bytes (ring buffer snapshot)
-// 2) then:
+// 1) FIRST the hello — it names the cid the bytes that follow belong to, so a
+//    client can gate painting on it (binary PTY frames carry no session id):
 { "type":"hello", "cid", "pid", "account", "sessionId", "title", "workdir",
   "busy":bool, "waiting":bool, "tool":<string|null>, "cols":int, "rows":int }
+// 2) then a binary frame: recent PTY bytes (ring buffer snapshot)
 // 3) then recent transcript history, each:
 { "type":"transcript", "cid", "event":<event>, "history":true }
 ```
+An **unknown `cid`** detaches the client from its previous session and replies
+`{ "type":"error", "cid", "error":"no such session: …" }` — never a silent
+no-op that would leave the previous session's stream flowing (that's how
+"another session's output paints into this terminal" used to happen).
 
 ### Live, ongoing
 ```jsonc

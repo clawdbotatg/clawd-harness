@@ -849,6 +849,7 @@ let ws = null, decoder = new TextDecoder();
 let currentMachine = null;      // fleet machine the viewed project resolved to (null = none yet)
 let machineList = [];           // latest roster from the relay
 let currentCid = null;          // session this browser is viewing
+let streamCid = null;           // session the server last bound this link to (from `hello`)
 let currentTitle = '';          // title of the viewed session (for the breadcrumb)
 let currentPid = null;          // project this browser has selected (the resolved machine's pid)
 let sessionList = [];           // latest session metadata for the resolved machine
@@ -1271,6 +1272,7 @@ function connect() {
     opened = true; authFails = 0;   // a successful open proves the token is good
     lastRx = Date.now();            // the open handshake itself is proof of life
     clearResumeReload();            // live again → no need for the resume backstop reload
+    streamCid = null;               // fresh socket = fresh server-side link, bound to nothing yet
     dot.classList.add('up');
     if (!FLEET) {
       sendResize();
@@ -1336,6 +1338,7 @@ function connect() {
     if (typeof e.data === 'string') { FLEET ? handleRelay(JSON.parse(e.data)) : handleJson(JSON.parse(e.data)); }
     else if (FLEET) { handleBinary(e.data); }
     else if (pendingNewFocus) { /* awaiting a new session's focus — drop stragglers from the session we just left so they don't paint over the about-to-spawn blank one */ }
+    else if (!ttyStreamLive()) { /* link is bound to a session we're not viewing (stale/crossed subscribe) — never paint another session's bytes; the hello watchdog re-asserts */ }
     else { const stick = ttyAtBottom(); term.write(new Uint8Array(e.data), () => { if (stick) term.scrollToBottom(); }); scheduleHardRepaint(); }   // direct: raw PTY — follow only if already pinned to bottom; debounce a hard repaint of the replayed screen
   };
 }
@@ -1745,6 +1748,7 @@ function e2eOnRecord(machine, rec) {
     if (out.kind === E2E.KIND_BIN) {
       if (machine !== currentMachine) return;                      // only the viewed terminal paints
       if (pendingNewFocus) return;                                 // awaiting a new session's focus — drop the leaving session's stragglers (see newSession)
+      if (!ttyStreamLive()) return;                                // link bound to a session we're not viewing (stale/crossed subscribe) — the hello watchdog re-asserts
       const stick = ttyAtBottom(); term.write(out.payload, () => { if (stick) term.scrollToBottom(); }); scheduleHardRepaint();
     } else {
       handleMachineJson(machine, JSON.parse(new TextDecoder().decode(out.payload)));
@@ -1989,11 +1993,17 @@ function handleJson(m) {
       if (pendingSendText) addPending(pendingSendText, pendingSendText);
     } else {
       const stay = currentCid && sessionList.some(s => s.cid === currentCid);
-      console.log('[TRACE focus-else] m.cid=', m.cid, 'currentCid=', currentCid, 'stay=', stay);
       subscribe(stay ? currentCid : m.cid);
     }
   } else if (m.type === 'hello') {
-    console.log('[TRACE hello] m.cid=', m.cid, 'm.pid=', m.pid, 'was currentPid=', currentPid);
+    streamCid = m.cid;
+    if (currentCid && m.cid !== currentCid) {
+      // The server bound this link to a session we're not viewing (a stale or
+      // crossed subscribe) — re-assert ours instead of following the wrong stream.
+      hsend({ type: 'subscribe', cid: currentCid });
+      armHelloWatch(currentCid);
+      return;
+    }
     currentCid = m.cid;
     if (m.pid) currentPid = m.pid;
     updateBreadcrumb(m.title || '');
@@ -2013,6 +2023,10 @@ function handleJson(m) {
     hideThinking();
     meta.textContent = 'session ended';
     setStatus('🔴', 'ended', '');
+  } else if (m.type === 'error') {
+    // e.g. a subscribe for a cid this box doesn't know (subscribe_client): the
+    // server detached us rather than leaking the previous stream — surface it.
+    meta.textContent = m.error || 'error';
   }
 }
 
@@ -2543,6 +2557,9 @@ function attachMachine(machineId) {
   if (machineId !== currentMachine) {
     currentMachine = machineId;
     currentCid = null; currentTitle = '';
+    // (streamCid deliberately KEPT: this machine's link may still be bound to a
+    // session we viewed here earlier — a stale non-null value keeps its stream
+    // gated until the next hello re-binds; null would let it paint.)
     term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
     if (activeType) { activeType.finish(); activeType = null; }
   }
@@ -3085,6 +3102,32 @@ function applyProjectFilter() {
   });
 }
 
+// -- PTY stream gate ----------------------------------------------------------
+// PTY bytes carry no session id, so the only thing tying them to a session is
+// which cid the server has this link bound to — reported by the `hello` that
+// (hello-first ordering) precedes every replay. Paint only when that binding
+// matches the session we're viewing: a subscribe lost in flight (relay flap,
+// e2e channel rebuild) or routed to a box that doesn't know the cid otherwise
+// leaves the link streaming the PREVIOUS session, and its live output keeps
+// painting into the new terminal. null = no hello yet on this link (or a
+// pre-hello-first harness) — let that paint rather than blank a healthy tty.
+function ttyStreamLive() { return !!currentCid && (streamCid === null || streamCid === currentCid); }
+
+// The hello doubles as the subscribe ACK. If it hasn't arrived shortly after we
+// asked, the frame (or its reply) died in flight — re-send the subscribe rather
+// than sit on a dead binding. Re-armed by every subscribe(); gives up after two
+// retries (the socket-level recovery paths take over from there).
+let helloWatch = null;
+function armHelloWatch(cid, tries = 0) {
+  clearTimeout(helloWatch);
+  helloWatch = setTimeout(() => {
+    if (currentCid !== cid || streamCid === cid) return;   // moved on, or the hello landed
+    if (tries >= 2) return;
+    hsend({ type: 'subscribe', cid });                     // bare re-send: no term reset, no flicker
+    armHelloWatch(cid, tries + 1);
+  }, 4000);
+}
+
 // -- sessions (the next rung, scoped to the selected project) ----------------
 function subscribe(cid) {
   if (!cid) return;
@@ -3100,6 +3143,7 @@ function subscribe(cid) {
   highlightCard(cid);
   syncComposer();              // load this session's own draft (bring back text from before a reload)
   hsend({ type: 'subscribe', cid });
+  armHelloWatch(cid);          // hello = the subscribe ACK; re-send if it never lands
   armHardRepaint();            // the replayed screen lands as async PTY bursts — force one full repaint once it settles
   syncUrl();
 }
@@ -3186,6 +3230,8 @@ function machineForCid(cid) {
   const g = currentProjectKey && unifiedProjects.get(currentProjectKey);
   if (g) for (const me of g.machines)
     if (((perMachine[me.machineId] || {}).sessionList || []).some(s => s.cid === cid)) return me.machineId;
+  for (const mid of Object.keys(perMachine))   // not on the open project's hosts — any machine that knows it
+    if (((perMachine[mid] || {}).sessionList || []).some(s => s.cid === cid)) return mid;
   return currentMachine;
 }
 
