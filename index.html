@@ -383,6 +383,7 @@
   .amchip { font-family:var(--mono); font-size:10px; color:var(--dim);
             border:1px solid var(--edge); padding:3px 8px; white-space:nowrap; }
   .amchip.fresh { color:var(--ink); border-color:var(--edge-hi); }
+  .amchip.dead { color:var(--err); border-color:var(--err); opacity:.75; }
   .aadd { margin-top:14px; border-top:1px dashed var(--edge); padding-top:12px; }
   .aadd .aaddrow { display:flex; gap:8px; margin-top:8px; }
   .aadd input { flex:1; min-width:0; background:var(--bg); color:var(--ink);
@@ -2905,17 +2906,30 @@ function renderPlanSummary(body, machines) {
   const plans = new Map();                       // email (or machine:name) → plan
   machines.forEach(m => {
     (((accountsInfoFor(m.id) || {}).accounts) || []).forEach(a => {
-      if (a.status !== 'ready' || a.headroom == null) return;
+      if (a.status === 'pending') return;        // mid-sign-in ceremony — not a plan yet
       const key = a.email || `${m.id}:${a.name}`;
-      if (!plans.has(key)) plans.set(key, { name: a.name, email: a.email, readings: [] });
-      plans.get(key).readings.push({ mid: m.id,
-                                     machine: (m.name || m.id).replace(/^clawd-/, ''), a });
+      if (!plans.has(key)) plans.set(key, { names: new Set(), email: a.email,
+                                            readings: [], broken: [] });
+      const p = plans.get(key);
+      p.names.add(a.name);
+      const entry = { mid: m.id, machine: (m.name || m.id).replace(/^clawd-/, ''), a };
+      // a signed-out login is a footnote ON its plan's card, not a separate
+      // scary card — the plan itself may be perfectly healthy elsewhere
+      if (a.status === 'ready' && a.headroom != null) p.readings.push(entry);
+      else p.broken.push(entry);
     });
   });
   if (!plans.size) return;
   const rows = [...plans.values()];
-  rows.forEach(p => p.readings.sort((x, y) => (y.a.checkedAt || 0) - (x.a.checkedAt || 0)));
-  rows.sort((x, y) => (y.readings[0].a.checkedAt || 0) - (x.readings[0].a.checkedAt || 0));
+  rows.forEach(p => {
+    p.readings.sort((x, y) => (y.a.checkedAt || 0) - (x.a.checkedAt || 0));
+    // stable identity: the email names the SUBSCRIPTION; per-machine account
+    // names (ef / default / …) are just local folder labels and vary by box
+    p.title = p.email ? p.email.split('@')[0] : [...p.names][0];
+  });
+  // live plans first, freshest reading first; signed-out-everywhere plans sink
+  rows.sort((x, y) => ((y.readings.length ? 1 : 0) - (x.readings.length ? 1 : 0))
+                   || ((y.readings[0]?.a.checkedAt || 0) - (x.readings[0]?.a.checkedAt || 0)));
 
   const sec = document.createElement('div'); sec.className = 'amach-sec asum';
   const hd = document.createElement('div'); hd.className = 'amach-hd';
@@ -2928,27 +2942,39 @@ function renderPlanSummary(body, machines) {
 
   const grid = document.createElement('div'); grid.className = 'asum-grid';
   rows.forEach(p => {
-    const fresh = p.readings[0], a = fresh.a;
+    const fresh = p.readings[0], a = fresh && fresh.a;
     const card = document.createElement('div'); card.className = 'acct';
     const row = document.createElement('div'); row.className = 'arow2';
     const id = document.createElement('div'); id.className = 'aid';
-    const nm = document.createElement('div'); nm.className = 'aname'; nm.textContent = p.name;
+    const nm = document.createElement('div'); nm.className = 'aname'; nm.textContent = p.title;
+    if (p.names.size > 1)
+      nm.title = `known on the fleet as: ${[...p.names].join(' · ')}`;
     const mail = document.createElement('div'); mail.className = 'amail';
     mail.textContent = p.email || '';
     id.appendChild(nm); id.appendChild(mail);
     const bw = document.createElement('div'); bw.className = 'abigwrap';
     const big = document.createElement('div'); big.className = 'abig';
-    big.style.color = leftColor(a.headroom);
-    big.textContent = `${Math.round(a.headroom)}%`;
-    const bind = bindingWindow(a);
-    const lbl = document.createElement('div'); lbl.className = 'abiglbl';
-    lbl.textContent = bind ? `headroom · ${bind.label}` : 'headroom';
-    bw.title = `freshest reading — ${fresh.machine}, ${accountAge(a.checkedAt)} ago`
-             + (bind ? ` — the ${bind.label} window is the cap right now` : '');
-    bw.appendChild(big); bw.appendChild(lbl);
+    if (a) {
+      big.style.color = leftColor(a.headroom);
+      big.textContent = `${Math.round(a.headroom)}%`;
+      const bind = bindingWindow(a);
+      const lbl = document.createElement('div'); lbl.className = 'abiglbl';
+      lbl.textContent = bind ? `headroom · ${bind.label}` : 'headroom';
+      bw.title = `freshest reading — ${fresh.machine}, ${accountAge(a.checkedAt)} ago`
+               + (bind ? ` — the ${bind.label} window is the cap right now` : '');
+      bw.appendChild(big); bw.appendChild(lbl);
+    } else {
+      big.style.color = 'var(--err)';
+      big.textContent = '⚠';
+      const lbl = document.createElement('div'); lbl.className = 'abiglbl';
+      lbl.textContent = 'signed out';
+      bw.title = 'no machine holds a working login for this plan — '
+               + 'sign in from a machine section below to bring it back';
+      bw.appendChild(big); bw.appendChild(lbl);
+    }
     row.appendChild(id); row.appendChild(bw);
     card.appendChild(row);
-    (a.windows || []).forEach(w => card.appendChild(windowRow(w)));
+    if (a) (a.windows || []).forEach(w => card.appendChild(windowRow(w)));
     const chips = document.createElement('div'); chips.className = 'aplan-machines';
     p.readings.forEach((r, i) => {
       const n = accountSessionCount(r.mid, r.a.name);
@@ -2959,6 +2985,14 @@ function renderPlanSummary(body, machines) {
       c.title = `${r.machine} polled this plan ${accountAge(r.a.checkedAt)} ago and saw `
               + `${Math.round(r.a.headroom)}% headroom`
               + (n ? `; ${n} live session${n === 1 ? '' : 's'} on it there` : '');
+      chips.appendChild(c);
+    });
+    p.broken.forEach(r => {
+      const c = document.createElement('span');
+      c.className = 'amchip dead';
+      c.textContent = `⚠ ${r.machine} · needs sign-in`;
+      c.title = `${r.machine}'s login for this plan stopped working — that box is `
+              + 'excluded from this plan until you sign in again (its section below)';
       chips.appendChild(c);
     });
     card.appendChild(chips);

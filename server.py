@@ -208,7 +208,7 @@ OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"   # UNDOCUMENTED — degrade gracefully
 OAUTH_BETA      = "oauth-2025-04-20"
-USAGE_TTL       = float(os.environ.get("USAGE_TTL", "600"))     # s between usage polls per account
+USAGE_TTL       = float(os.environ.get("USAGE_TTL", "180"))     # s between usage polls per account
 # Local auto-switch rule (direct mode; the fleet relay will own this fleet-wide):
 # switch to the account with the most headroom iff it beats the active one by
 # HYSTERESIS points AND the last switch was DEBOUNCE ago — or the active account
