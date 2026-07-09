@@ -97,6 +97,25 @@ turn ends early and the session heals itself before my next message."**
 | `d4cd882` | identity from the **OAuth profile endpoint** — token truth beats stale files; org name + tier displayed |
 | `0f9f0e3` | org-less dead logins merge into their email's unique pool (no more twin signed-out cards); tier-first subtitles |
 | `fc77c82` | docs: the relay box (h.atg.link UI) does NOT auto-pull — a UI deploy ends with a pull there |
+| `d116eb2`+`1fe0048` | identity headlines every card (nicknames demoted to small print, then dropped from display); machine panel groups by pool |
+
+**2026-07-09** (the day the real killer was found — and the day GOAL.md was written):
+
+| commit | what |
+|---|---|
+| `479b417` | **root cause v2**: Cloudflare 1010 was killing logins — refresh via curl; infra errors can never mark a login dead; single-consumer rule; timestamped creds log |
+| `f159900` | GOAL.md — the two non-negotiables in the user's words |
+| `d5a5152` | add-sub is one button — folder labels auto-picked server-side |
+| `faece99` | the 429 death-spiral: never poll with known-expired tokens; honor Retry-After; 'limited' placeholders explain themselves |
+| `52432b2` | back off on token-endpoint 429s too (the refresh retry was its own hammer) |
+
+**End-state verified 2026-07-09 afternoon:** all four pools (austingriffith
+20x · Ethereum Foundation 5x · clawd 20x · slop 5x) live with real numbers
+on head, leftclaw, and heart simultaneously — chips identical across
+machines, all three routers independently picking the same best pool. The
+one still-unexercised path: the keychain write-back's first live run comes
+at the first natural refresh (~8 h after the day's sign-ins); it either logs
+`persisted` (case closed) or `WRITE FAILED` (named repair).
 
 Deploy contract: `git push` → worker machines self-update (~5 min; server.py
 changes wait for idle sessions before the graceful restart) → the relay box
