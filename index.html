@@ -83,15 +83,15 @@
   #sessionbar .stab .sdot.blocked { background:var(--err); animation:pulse 1.1s ease-in-out infinite; }   /* needs-you: turn ended asking the human */
   #sessionbar .stab .sdot.dead { background:var(--err); }
   #sessionbar .stab .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  #status { font-size:11px; padding:3px 9px; border:1px solid var(--edge); text-transform:uppercase;
-            letter-spacing:.1em; color:var(--dim); white-space:nowrap; cursor:pointer; user-select:none; }
-  #status:hover { border-color:var(--edge-hi); color:var(--ink); }
-  #status.pmopen { border-color:var(--accent); color:var(--accent); }
-  #status.needs { border-color:var(--err); color:var(--err); }
-  #status::before { content:"["; margin-right:5px; color:var(--dim); }
-  #status::after  { content:"]"; margin-left:5px;  color:var(--dim); }
-  #status.working { color:var(--accent); border-color:var(--accent-dim); background:var(--accent-bg); }
-  #status.idle    { color:var(--ok); border-color:#22401f; background:#07120a; }
+  /* PM chip: just the face — session status shows as border color only
+     (green idle · accent+pulse working · red ended/needs-you) */
+  #status { font-size:15px; line-height:1; padding:3px 7px; border:1px solid var(--edge);
+            white-space:nowrap; cursor:pointer; user-select:none; }
+  #status:hover { border-color:var(--edge-hi); }
+  #status.pmopen { border-color:var(--accent); }
+  #status.needs, #status.ended { border-color:var(--err); }
+  #status.working { border-color:var(--accent); }
+  #status.idle    { border-color:var(--ok); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   #status.working { animation:pulse 1.1s ease-in-out infinite; }
   /* live "claude is thinking" row, pinned to the bottom of the transcript while a turn is in flight */
@@ -295,7 +295,7 @@
     header { gap:8px; padding:calc(8px + env(safe-area-inset-top, 0px)) 10px 8px; }
     header .blbl { display:none; }
     #panelBtn, #menuBtn, #projectsBtn, #machinesBtn, #accountsBtn, #notifyBtn { padding:6px 9px; }
-    #status { font-size:11px; padding:3px 8px; }
+    #status { padding:3px 6px; }
     #brand { display:none; }
   }
   /* projects (top rung) + sessions (next rung): both are scrollable card lists */
@@ -516,7 +516,7 @@
     <button id="machinesBtn" title="Fleet machines"><span class="bico">🖥️</span></button>
     <button id="accountsBtn" title="Claude subscription accounts — headroom & sign-in"><span class="bico">🧠</span></button>
     <button id="notifyBtn" title="Notify me when a session needs me" hidden><span class="bico">🔔</span></button>
-    <span id="status" title="Fleet PM — click to open"><span class="bico">🛰️</span><span class="blbl"> pm</span></span>
+    <span id="status" title="Fleet PM — click to open">👩‍💼</span>
   </header>
   <div id="sessionbar" hidden></div>
   <div id="needsbar" hidden></div>
@@ -824,16 +824,13 @@ new ResizeObserver(() => refitTTY()).observe(document.querySelector('footer'));
 const dot = document.getElementById('dot');
 const meta = document.getElementById('meta');
 const statusEl = document.getElementById('status');
-// Status pill: emoji always shows; the word label is hidden on mobile (.blbl).
-// Set text via textContent (not innerHTML) so tool labels can't inject markup.
+// Status chip: the content is always the PM face (👩‍💼, set in the HTML);
+// session status is conveyed by border color alone via the class.
 function setStatus(emoji, text, cls) {
   // #status doubles as the Fleet PM launcher; preserve the open marker across
-  // session-status updates so the emoji state and the PM affordance coexist.
+  // session-status updates so the border state and the PM affordance coexist.
   const open = statusEl.classList.contains('pmopen');
   statusEl.className = (cls || '') + (open ? ' pmopen' : '');
-  statusEl.innerHTML = '<span class="bico"></span><span class="blbl"></span>';
-  statusEl.firstChild.textContent = emoji;
-  statusEl.lastChild.textContent = ' ' + text;
 }
 const feed = document.getElementById('feed');
 const box = document.getElementById('box');
@@ -1799,6 +1796,7 @@ function handleMachineJson(machine, m) {
     const pm = perMachine[machine] || (perMachine[machine] = {});
     pm.accounts = m;
     renderAccountsBody();
+    refreshSessionTag();               // 🔑 tag names the plan, not the folder label
     return;
   }
   if (machine !== currentMachine) return;   // all other frames act only on the viewed machine
@@ -1978,6 +1976,7 @@ function handleJson(m) {
   } else if (m.type === 'accounts') {
     accountsInfo = m;                     // subscription logins + headroom (direct mode)
     renderAccountsBody();                 // repaint the 🧠 overlay if it's open
+    refreshSessionTag();                  // 🔑 tag names the plan, not the folder label
   } else if (m.type === 'focus') {
     // server's pick of which session to view, sent only in reply to a `new` we
     // issued. Switch into the freshly spawned session. (The defensive `stay`
@@ -2020,7 +2019,7 @@ function handleJson(m) {
     if (m.cid !== currentCid) return;
     hideThinking();
     meta.textContent = 'session ended';
-    setStatus('🔴', 'ended', '');
+    setStatus('🔴', 'ended', 'ended');
   } else if (m.type === 'error') {
     // e.g. a subscribe for a cid this box doesn't know (subscribe_client): the
     // server detached us rather than leaking the previous stream — surface it.
@@ -3716,7 +3715,7 @@ function handleHook(m) {
   }
   else if (ev === 'Stop')        { setBusy(false, null); restoreViewAfterQuestion(); }
   else if (ev === 'SessionStart') { setBusy(false, null); if (pendingSendText) setTimeout(flushPendingSend, 500); }
-  else if (ev === 'SessionEnd')  { hideThinking(); setStatus('🔴', 'session ended', ''); }
+  else if (ev === 'SessionEnd')  { hideThinking(); setStatus('🔴', 'session ended', 'ended'); }
   else if (ev === 'Notification') {
     setBusy(m.busy, d.message ? d.message.slice(0,40) : null);
     openTtyForQuestion();                      // permission / "needs your input" — surface the TUI
@@ -4368,10 +4367,19 @@ function refreshSessionTag() {
   const v = currentView();
   const inSession = (v === 'tty' || v === 'transcript') && !!currentCid;
   const s = inSession ? sessionList.find(x => x.cid === currentCid) : null;
-  const acct = (s && s.account && s.account !== 'default') ? '🔑 ' + s.account : '';
+  // Resolve the local folder label (sub1/sub2/…) to the plan's real identity
+  // via the machine's accounts frame — the labels are auto-picked and mean
+  // nothing since nicknames went away. Fall back to the label only while the
+  // accounts frame (or the login's identity) hasn't landed yet.
+  let acct = '';
+  if (s && s.account && s.account !== 'default') {
+    const info = accountsInfoFor(FLEET ? currentMachine : 'local');
+    const rec = info && (info.accounts || []).find(x => x.name === s.account);
+    acct = '🔑 ' + ((rec && acctIdent(rec)) || s.account);
+  }
   const mach = (FLEET && currentMachine) ? shortMachine(currentMachine) : '';
   machineTag.textContent = [acct, mach].filter(Boolean).join(' · ');
-  machineTag.title = [acct && ('running under the ' + s.account + ' subscription account'),
+  machineTag.title = [acct && ('running under the ' + acct.slice(3) + ' subscription'),
                       currentMachine || ''].filter(Boolean).join(' · ');
   machineTag.classList.toggle('show', inSession && !!machineTag.textContent);
 }
