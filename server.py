@@ -1745,9 +1745,19 @@ class SessionManager:
         the fresh dir, so it walks the user through OAuth right in the harness
         UI. Re-invoking on a still-pending account just opens another sign-in
         session. Returns the login ClaudeSession (None if nothing to do)."""
-        slug = _safe_name(name).lower()
-        if not slug:
-            return None
+        if not (name or "").strip():
+            # The add flow is just a button now — no nickname field. Auto-pick
+            # the first free folder label: it's invisible in the display
+            # (identity headlines every card), it only names the config dir.
+            # Skip existing dirs too: adopting a stale one would silently
+            # inherit whatever login it last held.
+            n = 2
+            while (f"sub{n}" in self.accounts
+                   or (ACCOUNTS_DIR / f"sub{n}").exists()):
+                n += 1
+            slug = f"sub{n}"
+        else:
+            slug = _safe_name(name).lower()
         if slug == "default":
             # Re-adopt the machine's plain ~/.claude login (e.g. after a
             # remove). Already signed in — no ceremony, no session.

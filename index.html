@@ -2649,7 +2649,6 @@ function cloneProjectOnMachine(machineId, url) {
 // spawn under the ACTIVE account; the harness auto-switches to the most
 // headroom (hysteresis + hours-debounce).
 let accountsInfo = null;                  // direct mode: last `accounts` frame
-const accountAddDrafts = {};              // per-machine input drafts (survive repaints)
 
 // which accounts frame applies to a machine ('local' = direct mode)
 function accountsInfoFor(mid) {
@@ -2668,17 +2667,17 @@ function accountSessionCount(mid, name) {
 }
 
 function addAccount(mid, name) {
-  // Mirror the server's _safe_name slug so the checks below match what it
-  // will actually register.
+  // name = '' → a brand-new sub: the server auto-picks a free folder label
+  // (the label is invisible now — identity headlines every card). A non-empty
+  // name only arrives from re-sign-in buttons on existing accounts.
   name = (name || '').trim().replace(/[^A-Za-z0-9._-]+/g, '-')
                             .replace(/^[-._]+|[-._]+$/g, '').toLowerCase();
-  if (!name) return;
   // The server sends NO focus reply when there's nothing to spawn (reserved
   // name, already signed in) — catch those here, BEFORE blanking the view and
   // arming pendingNewFocus, or the user gets a dead blank screen and the
   // leaked flag hijacks the next real session's focus.
   const info = accountsInfoFor(mid);
-  const existing = info && (info.accounts || []).find(a => a.name === name);
+  const existing = name && info && (info.accounts || []).find(a => a.name === name);
   if (name === 'default') {
     // re-adopt the machine's plain ~/.claude login — already signed in, so
     // no ceremony (and no focus reply: don't arm pendingNewFocus)
@@ -2690,7 +2689,6 @@ function addAccount(mid, name) {
     meta.textContent = `${name} is already signed in`;
     return;
   }
-  accountAddDrafts[mid] = '';
   // mirrors newSession(): the focus reply switches us into the sign-in session
   // (focus frames only act on the viewed machine, so attach the target first)
   if (FLEET && mid !== 'local') attachMachine(mid);
@@ -2914,33 +2912,25 @@ function renderAccountsPanel(container, info, mid) {
     container.appendChild(card);
   });
 
-  // add flow: pick a folder label → a terminal opens → do the claude.ai OAuth
-  // there. The label only names ~/.clawd-accounts/<label> on this box — once
-  // signed in, cards are titled by the plan's real identity, never the label.
+  // add flow: one tap → a terminal opens → do the claude.ai OAuth there.
+  // No label field: the server auto-picks the folder name (sub2, sub3, …),
+  // and every card titles itself by the signed-in identity anyway.
   const add = document.createElement('div'); add.className = 'aadd';
   const how = document.createElement('div'); how.className = 'ahint2';
-  how.textContent = 'add another claude.ai subscription: give it a short label '
-    + '(work, personal, team…), then sign in to that claude.ai account in the '
+  how.textContent = 'add another claude.ai subscription: sign in to it in the '
     + 'terminal that opens. one sign-in per machine — it sticks.';
   add.appendChild(how);
   const arow = document.createElement('div'); arow.className = 'aaddrow';
-  const inp = document.createElement('input');
-  inp.placeholder = 'label · e.g. work';
-  inp.dataset.mid = mid;
-  inp.value = accountAddDrafts[mid] || '';
-  inp.addEventListener('input', () => { accountAddDrafts[mid] = inp.value; });
-  inp.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); addAccount(mid, inp.value); }
-  });
   const btn = document.createElement('button');
-  btn.textContent = '🔑 sign in';
+  btn.textContent = '🔑 sign in · add sub';
+  btn.style.flex = '1';
   btn.title = 'opens a terminal session where you complete the claude.ai login';
-  btn.onclick = () => addAccount(mid, inp.value);
+  btn.onclick = () => addAccount(mid, '');
   const ref = document.createElement('button');
   ref.textContent = '↻';
   ref.title = 'refresh usage now';
   ref.onclick = () => accountSend(mid, { type: 'accountsRefresh' });
-  arow.appendChild(inp); arow.appendChild(btn); arow.appendChild(ref);
+  arow.appendChild(btn); arow.appendChild(ref);
   add.appendChild(arow);
   container.appendChild(add);
 }
@@ -3102,14 +3092,10 @@ function renderPlanSummary(body, machines) {
 }
 
 // Populate the 🧠 page — a grid with one section per machine in fleet mode,
-// this harness alone in direct mode. Preserves the focused add-input's caret
-// across repaints (accounts frames land while you type).
+// this harness alone in direct mode.
 function renderAccountsBody() {
   const body = document.getElementById('accountsbody');
   if (!body || accountsModal.hidden) return;
-  const ae = document.activeElement;
-  const focusMid = (ae && ae.tagName === 'INPUT' && body.contains(ae)) ? ae.dataset.mid : null;
-  const sS = focusMid ? ae.selectionStart : null, sE = focusMid ? ae.selectionEnd : null;
   body.innerHTML = '';
 
   const section = (label, online, info, mid) => {
@@ -3162,10 +3148,6 @@ function renderAccountsBody() {
     if (machines.length > 1) renderPlanSummary(body, machines);
     machines.forEach(m => section((m.name || m.id).replace(/^clawd-/, ''),
                                   !!m.online, accountsInfoFor(m.id), m.id));
-  }
-  if (focusMid) {
-    const ni = body.querySelector(`.aadd input[data-mid="${focusMid}"]`);
-    if (ni) { ni.focus(); try { ni.setSelectionRange(sS, sE); } catch {} }
   }
 }
 
