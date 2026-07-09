@@ -2729,6 +2729,16 @@ function tierShort(t) {
   return (t || '').replace(/^default_/, '').replace(/^claude_/, '').replace(/_/g, ' ');
 }
 
+// Display identity for a login: the org name (it IS the usage pool), except
+// the auto-generated personal "<email>'s Organization" reads better as the
+// email's local part. '' when nothing is known (never-signed-in login).
+function acctIdent(a) {
+  const local = (a.email || '').split('@')[0];
+  const org = a.orgName || '';
+  if (!org || (a.email && org === `${a.email}'s Organization`)) return local;
+  return org;
+}
+
 // the usage window that caps the headline headroom number (most used wins)
 function bindingWindow(a) {
   return (a.windows || []).reduce((w, x) => (!w || x.used > w.used) ? x : w, null);
@@ -2778,16 +2788,23 @@ function renderAccountsPanel(container, info, mid) {
     dot.className = 'sdot' + (a.status !== 'ready' ? ' dead' : routed ? ' busy' : '');
     const id = document.createElement('div'); id.className = 'aid';
     const nm = document.createElement('div');
-    nm.className = 'aname'; nm.textContent = a.name;
+    nm.className = 'aname';
+    // the TITLE is the pool's identity — the nickname is just this box's
+    // folder label and has lied before (head's "clawd" held austin's login);
+    // it survives as small print because it's still the re-add key and the
+    // sign-in session name (ACCOUNTS-PANEL.md)
+    const ident = acctIdent(a);
+    nm.textContent = ident || a.name;
     const mail = document.createElement('div');
     mail.className = 'amail';
-    // orgName leads: one email can hold seats in several orgs (personal Max +
-    // an employer seat), and the ORG is the usage pool — without it, two cards
-    // on different subs look identical and mis-bound logins hide (ACCOUNTS-PANEL.md)
-    mail.textContent = a.status === 'needs-login' ? '⚠ signed out — needs re-sign-in'
-                     : [a.orgName,
-                        a.email || (a.status === 'pending' ? 'not signed in yet' : ''),
-                        tierShort(a.tier)].filter(Boolean).join(' · ');
+    const sub = [];
+    if (a.status === 'needs-login') sub.push('⚠ signed out — needs re-sign-in');
+    else {
+      sub.push(a.email || (a.status === 'pending' ? 'not signed in yet' : ''));
+      sub.push(tierShort(a.tier));
+    }
+    if (ident && ident !== a.name) sub.push(`“${a.name}”`);
+    mail.textContent = sub.filter(Boolean).join(' · ');
     if (a.status === 'needs-login') mail.style.color = 'var(--err)';
     id.appendChild(nm); id.appendChild(mail);
     row.appendChild(dot); row.appendChild(id);
@@ -2957,7 +2974,7 @@ function renderPlanSummary(body, machines) {
     // stable identity: the org's own name (token-bound, from the profile
     // endpoint) beats the email guess; per-machine account names
     // (ef / default / …) are just local folder labels and vary by box
-    p.title = p.orgName || (p.email ? p.email.split('@')[0] : [...p.names][0]);
+    p.title = acctIdent({ email: p.email, orgName: p.orgName }) || [...p.names][0];
   });
   // two pools under one email (personal + team org) would share a title —
   // disambiguate with the fleet nicknames (only when they actually add
@@ -3073,9 +3090,14 @@ function renderAccountsBody() {
     hd.appendChild(dot); hd.appendChild(nm);
     if (info) {
       const sub = document.createElement('span'); sub.className = 'amach-sub';
+      // name the POOL the router picked, not its local folder label
+      const disp = n => {
+        const acc = (info.accounts || []).find(x => x.name === n);
+        return (acc && acctIdent(acc)) || n;
+      };
       sub.textContent = info.auto
-        ? `new sessions: most headroom → ${info.best || info.active}`
-        : `new sessions: ${info.active} (pinned)`;
+        ? `new sessions: most headroom → ${disp(info.best || info.active)}`
+        : `new sessions: ${disp(info.active)} (pinned)`;
       sub.title = info.auto
         ? 'every new session spawns under whichever plan has the most headroom right now'
         : 'auto-routing is off (SUB_AUTOSWITCH=0) — new sessions spawn under the pinned plan';

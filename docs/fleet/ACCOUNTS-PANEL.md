@@ -40,14 +40,23 @@ From that, the invariants:
 ## Anatomy of a healthy card
 
 ```
-┌ ef                                              41% ┐   ← local name · headroom
-│   Ethereum Foundation · austin.griffith@… · max 5x  │   ← org · email · tier  (the POOL)
+┌ Ethereum Foundation                             41% ┐   ← POOL identity · headroom
+│   austin.griffith@… · max 5x · “ef”                 │   ← email · tier · local nickname
 │   5h       ████████████████████   99% left  ↻ in 3h │   ← 5-hour session window
 │   7d       ████████░░░░░░░░░░░░   41% left  ↻ in 6d │   ← 7-day all-models window
 │   7d fable █████████░░░░░░░░░░░   44% left  ↻ in 6d │   ← 7-day Fable/Opus window
 │   ▸ next spawn · 1 live session      checked 1s ago │
 └──────────────────────────────────────────────────────┘
 ```
+
+Since 2026-07-08 the **title is the pool's identity** (org name; the
+auto-generated `<email>'s Organization` demotes to the email's local part)
+and the local nickname is small print in quotes — shown only when it differs
+from the identity. Nicknames proved themselves liars (head's “clawd” held
+austin's login for weeks); they remain visible because they're still the
+re-add key and the sign-in session name, but they never headline. The
+machine header's router line (`new sessions: most headroom → …`) names the
+pool the same way.
 
 - **Big number** = headroom (100 − usage of the binding window); its label
   names which window binds. Card highlight + "▸ next spawn" = the router's
