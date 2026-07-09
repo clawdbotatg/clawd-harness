@@ -360,7 +360,12 @@ def _persist_refreshed(config_dir, consumed_refresh, resp):
     blob = _read_oauth_creds(config_dir) or {}
     oa = blob.get("claudeAiOauth")
     if not isinstance(oa, dict) or (oa.get("refreshToken") or "") != consumed_refresh:
-        return                                   # store moved on — leave it be
+        # store moved on — leave it be, but say so: this is the signature of
+        # a concurrent rotation race (claude and the poller consuming the
+        # same grant), which silent-skipping would hide from a post-mortem
+        _clog(config_dir, "SKIPPED persisting a refresh — the store rotated "
+                          "concurrently (another consumer of this grant beat us)")
+        return
     oa["accessToken"] = fresh_access
     if isinstance(resp.get("expires_in"), (int, float)):
         oa["expiresAt"] = int((time.time() + resp["expires_in"]) * 1000)
@@ -369,10 +374,9 @@ def _persist_refreshed(config_dir, consumed_refresh, resp):
     if rotated:
         oa["refreshToken"] = resp["refresh_token"]
     ok = _write_oauth_creds(config_dir, blob)
-    print(f"[creds {config_dir or '~/.claude'}] refreshed access token "
-          f"persisted{' — refresh token ROTATED and persisted' if rotated else ''}"
-          f"{'' if ok else ' — WRITE FAILED (login will die at next refresh!)'}",
-          flush=True)
+    _clog(config_dir, "refreshed access token persisted"
+          + (" — refresh token ROTATED and persisted" if rotated else "")
+          + ("" if ok else " — WRITE FAILED (login will die at next refresh!)"))
 
 
 def _has_creds(config_dir):
@@ -421,6 +425,45 @@ def _link_transcript(session_id, src_cfg, dst_cfg):
 AUTH_FAIL = "auth"   # _fetch_usage sentinel: credentials are present but refused
 
 
+def _clog(config_dir, msg):
+    """Timestamped credential-event log line. The 2026-07-09 post-mortem was
+    nearly impossible because account/creds events had no timestamps — every
+    credential-lifecycle event goes through here now."""
+    print(f"[creds {config_dir or '~/.claude'} "
+          f"{time.strftime('%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def _refresh_grant(refresh):
+    """POST a refresh grant via CURL and return (http_status, body_dict).
+
+    Curl, not urllib, ON PURPOSE: the token endpoint (platform.claude.com)
+    sits behind Cloudflare bot protection that 403s Python's TLS signature
+    with 'error code: 1010' — every urllib refresh in this file's history
+    FAILED AT THE EDGE without ever reaching Anthropic, and the harness
+    misread that as revoked credentials (the 'idle logins keep dying'
+    epidemic — see EXPECTATIONS.md 2026-07-09). Curl's signature passes.
+    The token travels via stdin so it never appears in `ps` output."""
+    try:
+        r = subprocess.run(
+            ["curl", "-sS", "-m", "15", "-w", "\n%{http_code}",
+             "-X", "POST", OAUTH_TOKEN_URL,
+             "-H", "Content-Type: application/json",
+             "--data-binary", "@-"],
+            input=json.dumps({"grant_type": "refresh_token",
+                              "refresh_token": refresh,
+                              "client_id": OAUTH_CLIENT_ID}),
+            capture_output=True, text=True, timeout=25)
+        body_txt, _, status_txt = (r.stdout or "").rpartition("\n")
+        status = int(status_txt) if status_txt.strip().isdigit() else None
+        try:
+            body = json.loads(body_txt)
+        except ValueError:
+            body = {}
+        return status, body
+    except Exception:
+        return None, {}
+
+
 def _fetch_profile(tok):
     """Token-bound identity {email, org, org_name, tier} via the OAuth profile
     endpoint (UNDOCUMENTED — degrade gracefully). This is the truth about
@@ -442,14 +485,20 @@ def _fetch_profile(tok):
         return None
 
 
-def _fetch_usage(config_dir, tok_cache=None, want_ident=False):
+def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
+                 allow_refresh=True):
     """(pct_used, windows) for one account via Claude's OAuth usage endpoint —
     (pct_used, windows, ident|None) when want_ident, ident fetched from the
-    profile endpoint with the same working token; AUTH_FAIL when the
-    credentials themselves are gone/refused (401 even
-    after a refresh — the account needs a re-sign-in); None for everything
-    else (network blip, endpoint change) — callers keep the last snapshot and
-    the router stays put rather than flapping to a blind guess.
+    profile endpoint with the same working token; AUTH_FAIL ONLY when
+    Anthropic's OAuth service itself rejects the refresh grant (the account
+    truly needs a re-sign-in); None for everything else (network blip,
+    Cloudflare block, endpoint change) — callers keep the last snapshot and
+    the router stays put rather than flapping to a blind guess. NEVER map an
+    infra failure to AUTH_FAIL: that exact misdiagnosis (Cloudflare 1010 read
+    as revocation) caused every 'idle login died' incident before 2026-07-09.
+    allow_refresh=False = poll with the stored access token only and return
+    None when it's expired — for accounts whose grant a live claude process
+    may also hold (two consumers of one rotating grant can kill the family).
     `tok_cache` (a mutable dict) keeps a refreshed access token in memory
     across polls, so an account whose stored token has expired doesn't repeat
     the 401→refresh dance every cycle. We never write tokens back to the
@@ -481,28 +530,33 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False):
             break
         if tok is cached and tok_cache:          # cache went stale — drop it
             tok_cache.pop("access", None)
+    if code == 401 and not allow_refresh:
+        return None                              # stale, not dead: a live claude
+                                                 # owns this grant and will renew it
     if code == 401 and refresh:
-        req = urllib.request.Request(
-            OAUTH_TOKEN_URL, method="POST",
-            headers={"Content-Type": "application/json"},
-            data=json.dumps({"grant_type": "refresh_token",
-                             "refresh_token": refresh,
-                             "client_id": OAUTH_CLIENT_ID}).encode())
-        try:
-            with urllib.request.urlopen(req, timeout=10) as r:
-                tokresp = json.loads(r.read().decode())
-        except Exception:
-            tokresp = {}
+        rstatus, tokresp = _refresh_grant(refresh)
         fresh = tokresp.get("access_token")
         if fresh:
             if tok_cache is not None:
                 tok_cache["access"] = fresh
-            # write the new token(s) back — consuming a refresh grant and
-            # discarding its replacement is how idle logins kept dying
+            # write the new token(s) back — a consumed grant's rotated
+            # replacement must never be discarded
             _persist_refreshed(config_dir, refresh, tokresp)
             code, usage, retry_after = call(fresh)
             if code == 200:
                 good = fresh
+        elif rstatus in (400, 401):
+            # the OAuth service itself rejected the grant — the one and only
+            # signal that a re-sign-in is genuinely needed
+            _clog(config_dir, f"refresh REJECTED by the OAuth service "
+                              f"(HTTP {rstatus} {json.dumps(tokresp)[:120]}) "
+                              "— this login needs a re-sign-in")
+            return AUTH_FAIL
+        else:
+            # edge block / rate limit / outage — NOT a dead login
+            _clog(config_dir, f"refresh blocked in transit (HTTP {rstatus}) "
+                              "— transient; keeping the last snapshot")
+            return None
     if code == 401:
         return AUTH_FAIL                         # refused even after refresh
     if code == 429:
@@ -1846,10 +1900,21 @@ class SessionManager:
             due = [a for a in accts if a.ready and not a.broken and
                    (forced or now - (a.usage or {}).get("checkedAt", 0) > USAGE_TTL)]
             if due:
+                # An account with live claude sessions: those processes hold
+                # (and renew) the very same refresh grant — the poller must
+                # not consume it too, or two consumers of one rotating grant
+                # race and the loser kills the token family. Poll such
+                # accounts with the stored access token only; claude keeps
+                # the store fresh whenever it actually works.
+                with self.lock:
+                    live = {s.account or "default"
+                            for s in self.sessions.values() if s.alive}
                 with ThreadPoolExecutor(max_workers=min(4, len(due))) as ex:
                     got = list(ex.map(
                         lambda a: _fetch_usage(a.config_dir, a.tok,
-                                               want_ident=True), due))
+                                               want_ident=True,
+                                               allow_refresh=a.name not in live),
+                        due))
                 for a, res in zip(due, got):
                     if res == AUTH_FAIL:
                         # login gone/revoked → OUT of routing until re-sign-in;
@@ -1878,7 +1943,9 @@ class SessionManager:
                         changed = True
                     elif not a.error:
                         with self.lock:
-                            a.error = "usage unavailable"
+                            a.error = ("access token stale — a live claude "
+                                       "session renews it on its next turn"
+                                       if a.name in live else "usage unavailable")
                         changed = True
                     # backfill from .claude.json only while the profile
                     # endpoint hasn't spoken — a label guess, never an override
@@ -1945,7 +2012,8 @@ class SessionManager:
             return
         acct = self.accounts.get(s.account)      # may be None (e.g. removed default)
         cfg = acct.config_dir if acct else (s.config_dir or "")
-        got = _fetch_usage(cfg, acct.tok if acct else None)
+        # allow_refresh=False: this session's own claude holds this grant
+        got = _fetch_usage(cfg, acct.tok if acct else None, allow_refresh=False)
         drained = got == AUTH_FAIL
         if got and got != AUTH_FAIL:
             pct, windows = got

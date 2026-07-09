@@ -104,7 +104,60 @@ needs `ssh ubuntu@174.129.67.164 'cd ~/clawd-harness && git pull'` (now
 covered by the `Bash(ssh:*)` allow rule) → **hard-reload the h.atg.link tab**
 (an open tab never refetches by itself).
 
-## Root cause: the poller was killing idle logins (found + fixed 2026-07-08)
+## Root cause v2 — THE REAL ONE (2026-07-09): Cloudflare, not revocation
+
+> The v1 story below (rotation-discard) was **wrong**. It's kept because this
+> file is a ledger, and because the user rightly held it against the contract:
+> clawd died again overnight, hours after the "13th and FINAL" ceremony —
+> a breach on this document's own terms (dead login, zero `[creds]` lines).
+> The investigation that breach forced found the actual killer.
+
+**The evidence trail (2026-07-09 morning):**
+1. Zero `[creds]` lines in the log — the v1 write-back fix never engaged once.
+2. Credential blobs show access tokens live **~8 h** and refresh tokens
+   **~27 days** — so "expired beyond refresh" within 12 h was never expiry.
+3. Every account froze ("checked N h ago") at exactly its 8-hour access-token
+   expiry — every poller refresh attempt failed instantly.
+4. The decisive test: POSTing the token endpoint from Python gets
+   **HTTP 403 `error code: 1010`** — a **Cloudflare bot-block** at the edge.
+   The same request via `curl` reaches Anthropic's real OAuth service.
+
+**The actual mechanism of every "death":** access token expires (8 h after
+claude last persisted one) → poller tries to refresh → **Cloudflare 403s
+Python's TLS signature; the request never reaches Anthropic** → the harness
+misread the failed refresh as "credentials refused" → login flagged
+needs-login, routing excluded, scary red card. **The stored refresh grants
+were still valid the whole time. Nothing was ever revoked. None of the ~13
+re-sign-in ceremonies were actually necessary** — each one merely minted a
+fresh 8-hour access token, so the login "worked" until it sat idle past 8 h
+again. This also explains "five logins died at once" pre-2026-07-08: that
+will have been the day the Cloudflare rule started matching Python.
+
+**The fix (deployed 2026-07-09):**
+- Refresh grants go out via **curl** (passes Cloudflare; token piped via
+  stdin so it never shows in `ps`).
+- **Infra failures are never death sentences:** only an HTTP 400/401 from
+  Anthropic's own OAuth service marks a login needs-login. Cloudflare
+  blocks / 429s / outages → keep the last snapshot, log
+  `refresh blocked in transit — transient`, try again next poll.
+- **Single-consumer rule:** the poller never refreshes an account that has
+  live claude sessions (those processes hold the same grant; two consumers
+  of one rotating grant can race and kill the token family). Such accounts
+  are polled with the stored access token only and show "access token stale —
+  a live claude session renews it" rather than a false death.
+- Every credential event is **timestamped** in the log now (`[creds <dir>
+  MM-DD HH:MM:SS] …`) — the v2 post-mortem was nearly impossible without.
+
+**The falsifiable prediction that tests all of this:** the "signed out"
+logins across the fleet (ef + austinmax on heart, clawd on leftclaw/head…)
+should **resurrect on their own** within minutes of each harness restarting
+onto this fix — their grants were never dead, so the first curl-refresh mints
+a fresh access token, persists it, and the card flips back to live **without
+any human ceremony**. If they do: case closed. If any stays dead with
+`refresh REJECTED by the OAuth service` in the log, that one was genuinely
+revoked and needs the one ceremony the contract always allowed.
+
+## Root cause v1 (2026-07-08, SUPERSEDED — see v2 above): the rotation-discard theory
 
 **The pattern:** every login that sat idle (clawd, austinmax, ~/.claude
 default — on every machine) kept dying "revoked or expired beyond refresh",
@@ -155,7 +208,18 @@ and the log.
 
 ## Sign-in ledger — what each ceremony bought, verified
 
-### clawd on heart, 2026-07-08 (the 13th and FINAL time)
+### clawd on heart, 2026-07-09 morning (the 14th — `/login` in-session)
+The 13th (below) died overnight: its access token expired ~03:00 and the
+Cloudflare-blocked refresh was misread as revocation (root cause v2). The
+user re-authed via `/login` inside a running session. **What's different
+this time is the code, not the promise's volume:** the refresh path actually
+works now (curl), an edge block can no longer be mistaken for a dead login,
+and the single-consumer rule protects this very login (this session's claude
+holds its grant, so the poller will never consume it). The proof to watch
+for: `[creds …] refreshed access token persisted` lines with timestamps, and
+— more telling — the OTHER dead logins resurrecting without ceremonies.
+
+### clawd on heart, 2026-07-08 (the 13th time — "FINAL" claim RETRACTED)
 Verified within minutes of the ceremony, against the live API and the live
 router:
 - login live: `clawd@buidlguidl.com's Organization` (own org
