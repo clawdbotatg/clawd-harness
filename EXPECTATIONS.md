@@ -208,6 +208,21 @@ and the log.
 
 ## Sign-in ledger — what each ceremony bought, verified
 
+### 2026-07-09: the /login mis-bind, and going to four pools
+The morning `/login` (run inside a session, not via the panel) bound the
+"clawd" FOLDER to the wrong account — austin's **Ethereum Foundation** seat
+was picked in the OAuth account chooser, not clawd@buidlguidl.com. The
+identity-first display caught it immediately (the card titles itself
+"Ethereum Foundation" — the display contract doing its job). Net effect:
+heart gained the EF pool it was missing, but the clawd team sub ended up
+signed in nowhere on heart. Lesson: **the account picker in the OAuth flow
+is where mis-binds happen; always glance at the card title right after a
+ceremony — it shows the token's truth, not the nickname.**
+Fleet target is now FOUR pools everywhere: austingriffith max 20x ·
+Ethereum Foundation max 5x · clawd team · slop. Ceremonies spawned on heart
+for the two it lacks ("slop", "clawdteam"); the ⚠ chips on the 🧠 page track
+the rest of the fleet.
+
 ### clawd on heart, 2026-07-09 morning (the 14th — `/login` in-session)
 The 13th (below) died overnight: its access token expired ~03:00 and the
 Cloudflare-blocked refresh was misread as revocation (root cause v2). The
