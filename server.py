@@ -500,14 +500,21 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
     None when it's expired — for accounts whose grant a live claude process
     may also hold (two consumers of one rotating grant can kill the family).
     `tok_cache` (a mutable dict) keeps a refreshed access token in memory
-    across polls, so an account whose stored token has expired doesn't repeat
-    the 401→refresh dance every cycle. We never write tokens back to the
-    credential store — Claude Code owns and refreshes its own."""
+    across polls (plus the 429 back-off horizon); refreshed tokens are
+    written back to the credential store via _persist_refreshed."""
     oauth = (_read_oauth_creds(config_dir) or {}).get("claudeAiOauth") or {}
     access, refresh = oauth.get("accessToken"), oauth.get("refreshToken")
     cached = (tok_cache or {}).get("access")
     if not (access or cached):
         return AUTH_FAIL
+    # A stored access token we KNOW is expired is junk traffic: it can't
+    # answer, and the failed calls feed the endpoint's rate limiter until
+    # even honest polls 429 — which painted a freshly-reset pool as
+    # 'limited · 0%' on 2026-07-09. Skip straight to refresh instead.
+    exp = oauth.get("expiresAt")
+    if access and isinstance(exp, (int, float)) \
+            and exp / 1000 <= time.time() + 60:
+        access = None
 
     def call(tok):
         req = urllib.request.Request(OAUTH_USAGE_URL, headers={
@@ -522,7 +529,8 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
 
     code = usage = retry_after = None
     good = None                                  # the token the 200 came from
-    for tok in [t for t in (cached, access) if t]:
+    tries = [t for t in (cached, access) if t]
+    for tok in tries:
         code, usage, retry_after = call(tok)
         if code == 200:
             good = tok
@@ -530,10 +538,11 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
             break
         if tok is cached and tok_cache:          # cache went stale — drop it
             tok_cache.pop("access", None)
-    if code == 401 and not allow_refresh:
+    needs_auth = (code == 401) or not tries      # refused, or nothing usable
+    if needs_auth and not allow_refresh:
         return None                              # stale, not dead: a live claude
                                                  # owns this grant and will renew it
-    if code == 401 and refresh:
+    if needs_auth and refresh:
         rstatus, tokresp = _refresh_grant(refresh)
         fresh = tokresp.get("access_token")
         if fresh:
@@ -557,8 +566,9 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
             _clog(config_dir, f"refresh blocked in transit (HTTP {rstatus}) "
                               "— transient; keeping the last snapshot")
             return None
-    if code == 401:
-        return AUTH_FAIL                         # refused even after refresh
+    if code == 401 or (not tries and code is None):
+        return AUTH_FAIL                         # refused even after refresh,
+                                                 # or no usable token at all
     if code == 429:
         # A hard-limited plan 429s even its usage endpoint — which is exactly
         # when routing away matters most. Report it as fully used (not "no
@@ -570,6 +580,10 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
             until = time.time() + max(60.0, float(retry_after))
         except (TypeError, ValueError):
             until = time.time() + 1800
+        if tok_cache is not None:
+            # honor Retry-After: re-poking a 429ing endpoint every TTL resets
+            # its limiter and freezes the fake 'limited 0%' card forever
+            tok_cache["no_poll_until"] = until
         win = [{"key": "rate_limited", "label": "limited", "used": 100.0,
                 "resets": time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
                                         time.gmtime(until))}]
@@ -1908,7 +1922,8 @@ class SessionManager:
             # slow/hung endpoint can't stall the other accounts (or the
             # sign-in watch above) behind a serial chain of 10s timeouts.
             due = [a for a in accts if a.ready and not a.broken and
-                   (forced or now - (a.usage or {}).get("checkedAt", 0) > USAGE_TTL)]
+                   (forced or (now - (a.usage or {}).get("checkedAt", 0) > USAGE_TTL
+                               and now >= a.tok.get("no_poll_until", 0)))]
             if due:
                 # An account with live claude sessions: those processes hold
                 # (and renew) the very same refresh grant — the poller must
@@ -1938,10 +1953,17 @@ class SessionManager:
                         changed = True
                     elif res:
                         pct, windows, ident = res
+                        limited = bool(windows) \
+                            and windows[0].get("key") == "rate_limited"
                         with self.lock:
                             a.usage = {"pct": round(pct, 1), "windows": windows,
                                        "checkedAt": now}
-                            a.error = ""
+                            # the 'limited' card is a PLACEHOLDER (the usage
+                            # endpoint 429'd) — say so, or a pool that just
+                            # reset looks drained with no explanation
+                            a.error = ("usage endpoint rate-limited — backing "
+                                       "off per Retry-After; real numbers "
+                                       "resume automatically") if limited else ""
                             if ident:
                                 # token-bound identity is THE authority: it
                                 # names the pool the numbers above came from,

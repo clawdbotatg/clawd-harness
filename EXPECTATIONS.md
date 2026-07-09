@@ -291,6 +291,33 @@ router:
   fatal); writes are atomic, never clobber a concurrent claude rotation,
   and never silent.
 
+## Adding a sub — what you must see (written after the 2026-07-09 'limited 0%' incident)
+
+When you complete a sign-in ceremony on any machine:
+1. **Within ~30 s** the card flips live, titled by the token's real identity
+   (org name · email · tier) — never by the folder label.
+2. **Within one poll (~3 min, usually immediately)** the bars show the
+   pool's REAL windows and accurate headroom. A brand-new or just-reset pool
+   shows green, high numbers.
+3. If the card instead shows a single `limited · 0%` row: that is a
+   **placeholder**, not data — the usage endpoint answered 429. The card now
+   says so explicitly (`usage endpoint rate-limited — backing off…`), and it
+   must resolve to real numbers on its own after the Retry-After horizon.
+   A `limited` placeholder that never resolves, or one WITHOUT that
+   explanatory note, is a bug — point here.
+
+**The incident:** freshly-signed-in and just-reset pools showed `limited ·
+0% · checked 1s ago` indefinitely. Cause: the poller kept calling the usage
+endpoint with access tokens it KNEW were expired; the junk calls fed
+Anthropic's rate limiter until even honest polls 429'd, the 429 was rendered
+as "100% used", and re-polling every TTL kept the limiter hot forever — a
+self-sustaining lie. Fixed the same day: expired tokens are never sent
+(refresh first), Retry-After is honored as a real back-off, and the
+placeholder card explains itself. Note the flip side: once real numbers
+return, a pool may honestly show low weekly headroom (e.g. the 20x weekly
+resets on its own schedule) — honest-low is not this bug; placeholder-stuck
+is.
+
 ## Known limits (not bugs)
 
 - Both usage and profile endpoints are **undocumented**; the code degrades
