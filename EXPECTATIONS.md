@@ -153,6 +153,36 @@ refused the write — surfaced loudly, not silently). Anything else that kills
 a login after this date is a **breach of this contract**: bring this file
 and the log.
 
+## Sign-in ledger — what each ceremony bought, verified
+
+### clawd on heart, 2026-07-08 (the 13th and FINAL time)
+Verified within minutes of the ceremony, against the live API and the live
+router:
+- login live: `clawd@buidlguidl.com's Organization` (own org
+  `94f7f5f0…`, tier max 5x), 7d **76% left**, resets 2026-07-09 16:00 UTC;
+- poller tracking it on the 3-min loop, token-bound identity broadcast;
+- router flipped the moment it appeared: `best: clawd, active: clawd` —
+  new sessions land there, and sessions on the drained 20x pool hand off at
+  their next Stop.
+
+**What to expect from this login, and why:**
+- **You never sign clawd in on heart again.** The thing that killed it 12
+  times (the poller consuming refresh grants and discarding the rotated
+  replacement — see Root cause above) is fixed and was running BEFORE this
+  ceremony, so this login has been under the keep-alive from its first
+  minute.
+- **The ongoing proof is in the log**, not in anyone's word: within hours
+  (first access-token expiry) `~/Library/Logs/clawd-harness.log` on heart
+  gets `[creds /Users/clawd/.clawd-accounts/clawd] refreshed access token
+  persisted — refresh token ROTATED and persisted`. Every ~poll-cycle
+  renewal after that is the same line. Silence + a dead login = breach;
+  `WRITE FAILED` in the log = the Keychain refused us and the login will
+  die at next refresh — either way the log names the culprit.
+- **What ensures it:** the 3-min poll loop renews and PERSISTS every ready
+  account's tokens indefinitely (idle or busy — idleness is what used to be
+  fatal); writes are atomic, never clobber a concurrent claude rotation,
+  and never silent.
+
 ## Known limits (not bugs)
 
 - Both usage and profile endpoints are **undocumented**; the code degrades
