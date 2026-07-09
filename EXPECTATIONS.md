@@ -22,6 +22,13 @@ The contract when that happens:
   plus a one-tap `sign in again` button in the machine's section.
 You should never *discover* a dead login by watching a session fail on it.
 
+**2026-07-08 addendum — why logins kept dying, and why the next sign-in
+should be the last (see "Root cause" below).** Before this date, promise 1
+was structurally broken by the harness itself: idle logins died over and
+over (the log shows `clawd` re-signed-in **12 times** on heart). That was not
+Anthropic randomly revoking, and it was not the user's fault. It is fixed,
+and the fix is verifiable in the log.
+
 ### 2. New work always lands on the pool with the most headroom
 Every new session spawns under the ready login with the most headroom **on
 that machine, at that instant** (fresh poll, not stale cache; stale = >3×TTL is
@@ -96,6 +103,55 @@ changes wait for idle sessions before the graceful restart) → the relay box
 needs `ssh ubuntu@174.129.67.164 'cd ~/clawd-harness && git pull'` (now
 covered by the `Bash(ssh:*)` allow rule) → **hard-reload the h.atg.link tab**
 (an open tab never refetches by itself).
+
+## Root cause: the poller was killing idle logins (found + fixed 2026-07-08)
+
+**The pattern:** every login that sat idle (clawd, austinmax, ~/.claude
+default — on every machine) kept dying "revoked or expired beyond refresh",
+while `ef` — the one account claude itself ran under all day — never died.
+Twelve re-sign-ins of clawd on heart alone.
+
+**The mechanism:** the usage poller, when an idle account's access token had
+expired, used the stored **refresh token** to mint a new access token — and
+then **threw the response away**. `server.py` even documented it proudly:
+*"We never write tokens back — Claude Code owns and refreshes its own."*
+That's fine only if refresh tokens are reusable. If Anthropic **rotates**
+refresh grants on use (issue a new one, kill the consumed one), then every
+harness refresh of an idle account destroyed the stored credential's future:
+the next refresh attempt — ours or claude's — hits a dead grant → 401 →
+"needs re-sign-in". The busy account survived because claude persists its own
+rotations to the Keychain; idle accounts had only the poller touching them,
+and the poller was the assassin.
+
+**The fix (commit of this date):** the poller now writes refreshed tokens
+back to the credential store, exactly like claude does — new access token,
+new expiry, and the rotated refresh token when one is issued — atomically,
+and only when the store still holds the grant we consumed (a concurrent
+claude rotation wins). Every write logs:
+`[creds <dir>] refreshed access token persisted — refresh token ROTATED and persisted`.
+
+**What this buys — "keep them fresh":** the poller touches every ready
+account every ~3 minutes. With write-back, that loop IS the keep-alive: an
+idle login now gets its tokens renewed and persisted indefinitely, the same
+as an active one. Signing in is planting a tree, not lighting a candle.
+
+**Honesty about confidence:** the rotation hypothesis fits all the evidence
+but was confirmed-by-design, not by a live test (mutating a real credential
+store ad hoc was correctly refused in-session). The first
+`refresh token ROTATED` line in `~/Library/Logs/clawd-harness.log` is the
+confirmation; if rotation turns out NOT to happen, the write-back is harmless
+and the true killer is still at large — reopen the hunt, starting from
+`refreshTokenExpiresAt` in the credential blob (absolute expiry would need
+the keep-alive to renew *before* that horizon, which rotation-persistence
+does automatically).
+
+**The renewed promise for "sign in as clawd on heart":** this next ceremony
+is the last one, under exactly two outs — (a) Anthropic revokes the grant
+server-side (outside anyone's control, and now genuinely rare since we
+stopped doing it to ourselves), or (b) the log shows `WRITE FAILED` (Keychain
+refused the write — surfaced loudly, not silently). Anything else that kills
+a login after this date is a **breach of this contract**: bring this file
+and the log.
 
 ## Known limits (not bugs)
 

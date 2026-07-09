@@ -308,6 +308,73 @@ def _read_oauth_creds(config_dir):
         return None
 
 
+def _write_oauth_creds(config_dir, blob):
+    """Write the credential blob back to wherever it currently lives —
+    the macOS Keychain when the Keychain holds this account, else the
+    Linux-style .credentials.json (atomic replace, 0600). Best-effort bool;
+    never creates a store that didn't exist (no shadowing claude's own)."""
+    payload = json.dumps(blob)
+    try:
+        r = subprocess.run(["security", "find-generic-password",
+                            "-s", _keychain_service(config_dir),
+                            "-a", os.environ.get("USER", "")],
+                           capture_output=True, timeout=10)
+        in_keychain = r.returncode == 0
+    except Exception:
+        in_keychain = False
+    if in_keychain:
+        try:
+            r = subprocess.run(["security", "add-generic-password", "-U",
+                                "-a", os.environ.get("USER", ""),
+                                "-s", _keychain_service(config_dir),
+                                "-w", payload],
+                               capture_output=True, text=True, timeout=10)
+            return r.returncode == 0
+        except Exception:
+            return False
+    path = Path(config_dir or os.path.expanduser("~/.claude")) / ".credentials.json"
+    if not path.exists():
+        return False
+    try:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(payload)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def _persist_refreshed(config_dir, consumed_refresh, resp):
+    """After a refresh-grant call, write the new token(s) back to the
+    credential store. If Anthropic ROTATES refresh tokens on use, the grant
+    we just consumed is dead and discarding its replacement kills the login
+    the next time anyone tries to refresh — the prime suspect for idle
+    accounts dying over and over while the busy one survived (claude itself
+    persists its own refreshes; the poller used to throw them away — see
+    EXPECTATIONS.md). Skips the write when the store changed under us
+    (claude rotated concurrently — its blob is newer than what we consumed)."""
+    fresh_access = resp.get("access_token")
+    if not fresh_access:
+        return
+    blob = _read_oauth_creds(config_dir) or {}
+    oa = blob.get("claudeAiOauth")
+    if not isinstance(oa, dict) or (oa.get("refreshToken") or "") != consumed_refresh:
+        return                                   # store moved on — leave it be
+    oa["accessToken"] = fresh_access
+    if isinstance(resp.get("expires_in"), (int, float)):
+        oa["expiresAt"] = int((time.time() + resp["expires_in"]) * 1000)
+    rotated = bool(resp.get("refresh_token")) \
+        and resp["refresh_token"] != consumed_refresh
+    if rotated:
+        oa["refreshToken"] = resp["refresh_token"]
+    ok = _write_oauth_creds(config_dir, blob)
+    print(f"[creds {config_dir or '~/.claude'}] refreshed access token "
+          f"persisted{' — refresh token ROTATED and persisted' if rotated else ''}"
+          f"{'' if ok else ' — WRITE FAILED (login will die at next refresh!)'}",
+          flush=True)
+
+
 def _has_creds(config_dir):
     """True iff a usable credential blob exists for this account dir RIGHT
     NOW. The pre-spawn gate: a session must never open onto a login screen."""
@@ -423,12 +490,16 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False):
                              "client_id": OAUTH_CLIENT_ID}).encode())
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
-                fresh = json.loads(r.read().decode()).get("access_token")
+                tokresp = json.loads(r.read().decode())
         except Exception:
-            fresh = None
+            tokresp = {}
+        fresh = tokresp.get("access_token")
         if fresh:
             if tok_cache is not None:
                 tok_cache["access"] = fresh
+            # write the new token(s) back — consuming a refresh grant and
+            # discarding its replacement is how idle logins kept dying
+            _persist_refreshed(config_dir, refresh, tokresp)
             code, usage, retry_after = call(fresh)
             if code == 200:
                 good = fresh
