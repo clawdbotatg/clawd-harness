@@ -206,6 +206,35 @@ refused the write — surfaced loudly, not silently). Anything else that kills
 a login after this date is a **breach of this contract**: bring this file
 and the log.
 
+## The 2026-07-09 confidence statement — check me against this tomorrow
+
+Written the evening all four pools went live on heart (austingriffith 20x ·
+Ethereum Foundation 5x · clawd team 20x · slop 5x). **Claim: ~90% confident
+none of these logins ever asks for a re-auth again**, and specifically the
+overnight-death pattern is structurally dead — the ONLY code path that can
+mark a login "signed out" now requires Anthropic's own OAuth service to
+answer 400/401 `invalid_grant`. Edge blocks / 429s / outages degrade to a
+stale-usage note on the card, never a sign-in prompt. This already fired in
+production this morning: `[creds … 07-09 08:53:52] refresh blocked in
+transit (HTTP 429) — transient` — the exact event that yesterday would have
+read `credentials refused`.
+
+**The honest 10%, named in advance:**
+1. **The keychain write is unproven.** No `refreshed access token persisted`
+   line exists yet (this morning's attempts were rate-limited — expected to
+   decay). When the first refresh succeeds, either it persists (case closed)
+   or the log shows `WRITE FAILED` — the one repair left, and it fails
+   loudly, not as a mystery sign-out.
+2. **Genuine Anthropic-side revocation** — always the contract's out,
+   logged as `refresh REJECTED by the OAuth service`.
+
+**Tomorrow's audit (2026-07-10):** grep the log for `[creds`. Acceptable
+outcomes: `persisted` lines (proof), `WRITE FAILED` (named repair), or
+transient lines with every card still live (claude's own client renews
+creds at spawn regardless — worst case is a stale percentage, not a login
+screen). **A card saying `needs sign-in` without a `refresh REJECTED` line
+is a breach of this statement — point here.**
+
 ## Sign-in ledger — what each ceremony bought, verified
 
 ### 2026-07-09: the /login mis-bind, and going to four pools
