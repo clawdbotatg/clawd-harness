@@ -121,6 +121,7 @@ turn ends early and the session heals itself before my next message."**
 | `d5a5152` | add-sub is one button — folder labels auto-picked server-side |
 | `faece99` | the 429 death-spiral: never poll with known-expired tokens; honor Retry-After; 'limited' placeholders explain themselves |
 | `52432b2` | back off on token-endpoint 429s too (the refresh retry was its own hammer) |
+| `c32e2e3` | **routing policy change (Austin):** spend the pool whose weekly window resets soonest — headroom is only the tie-break (`_route_key`; promise 2 rewritten) |
 
 **End-state verified 2026-07-09 afternoon:** all four pools (austingriffith
 20x · Ethereum Foundation 5x · clawd 20x · slop 5x) live with real numbers
