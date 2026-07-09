@@ -2775,10 +2775,28 @@ function renderAccountsPanel(container, info, mid) {
     return;
   }
 
+  // ONE CARD PER POOL: two local logins bound to the same subscription (a
+  // mis-aimed sign-in leaves these behind) are one usage reality — rendering
+  // both showed "the same plan twice" and, with nicknames gone, the twins
+  // were indistinguishable. Group by token-bound org uuid; org-less logins
+  // join their email's pool; a still-pending sign-in stands alone (no
+  // identity yet). The card wears the healthiest, freshest member.
+  const pools = new Map();
   (info.accounts || []).forEach(a => {
+    const k = a.status === 'pending' ? `pending:${a.name}`
+            : (a.orgUuid || a.email || a.name);
+    if (!pools.has(k)) pools.set(k, []);
+    pools.get(k).push(a);
+  });
+
+  pools.forEach(members => {
+    const live = members.filter(x => x.status === 'ready')
+                        .sort((x, y) => (y.checkedAt || 0) - (x.checkedAt || 0));
+    const a = live[0] || members[0];
     // the highlighted card = where the next session lands (best under auto,
     // the pinned active account in manual mode)
-    const routed = info.auto ? (a.name === info.best) : a.active;
+    const routed = info.auto ? members.some(x => x.name === info.best)
+                             : members.some(x => x.active);
     const card = document.createElement('div');
     card.className = 'acct' + (routed ? ' active' : '');
 
@@ -2789,10 +2807,10 @@ function renderAccountsPanel(container, info, mid) {
     const id = document.createElement('div'); id.className = 'aid';
     const nm = document.createElement('div');
     nm.className = 'aname';
-    // the TITLE is the pool's identity — the nickname is just this box's
-    // folder label and has lied before (head's "clawd" held austin's login);
-    // it survives as small print because it's still the re-add key and the
-    // sign-in session name (ACCOUNTS-PANEL.md)
+    // the TITLE is the pool's identity — the local folder label is not shown
+    // anywhere: it lied before (head's "clawd" held austin's login) and two
+    // labels can wear one subscription. Pre-identity (mid-sign-in) cards fall
+    // back to the label because nothing truer exists yet (ACCOUNTS-PANEL.md)
     const ident = acctIdent(a);
     nm.textContent = ident || a.name;
     const mail = document.createElement('div');
@@ -2803,7 +2821,6 @@ function renderAccountsPanel(container, info, mid) {
       sub.push(a.email || (a.status === 'pending' ? 'not signed in yet' : ''));
       sub.push(tierShort(a.tier));
     }
-    if (ident && ident !== a.name) sub.push(`“${a.name}”`);
     mail.textContent = sub.filter(Boolean).join(' · ');
     if (a.status === 'needs-login') mail.style.color = 'var(--err)';
     id.appendChild(nm); id.appendChild(mail);
@@ -2837,12 +2854,12 @@ function renderAccountsPanel(container, info, mid) {
 
     // action row: routing tag / pin button · session count · data freshness
     const act = document.createElement('div'); act.className = 'actrow';
-    if (info.auto && a.name === info.best) {
+    if (info.auto && routed) {
       const tag = document.createElement('span');
       tag.className = 'scount swork'; tag.textContent = '▸ next spawn';
       tag.title = 'most headroom right now — the next new session lands here';
       act.appendChild(tag);
-    } else if (!info.auto && a.active) {
+    } else if (!info.auto && routed) {
       const tag = document.createElement('span');
       tag.className = 'scount swork'; tag.textContent = '● pinned';
       tag.title = 'new sessions spawn under this account (auto-routing off)';
@@ -2855,7 +2872,7 @@ function renderAccountsPanel(container, info, mid) {
       use.onclick = (e) => { e.stopPropagation(); accountSend(mid, { type: 'accountUse', name: a.name }); };
       act.appendChild(use);
     }
-    const nsess = accountSessionCount(mid, a.name);
+    const nsess = members.reduce((s, x) => s + accountSessionCount(mid, x.name), 0);
     if (nsess > 0) {
       const sc = document.createElement('span');
       sc.className = 'scount'; sc.textContent = `${nsess} live session${nsess === 1 ? '' : 's'}`;
@@ -2866,13 +2883,17 @@ function renderAccountsPanel(container, info, mid) {
       chk.className = 'achk'; chk.textContent = `checked ${accountAge(a.checkedAt)} ago`;
       act.appendChild(chk);
     }
-    if ((info.accounts || []).length > 1) {      // never offer to drop the last login
+    if (pools.size > 1) {                        // never offer to drop the last plan
       const rm = document.createElement('button');
       rm.className = 'arm'; rm.textContent = '✕';
-      rm.title = 'remove from routing — does NOT log out or delete credentials; '
-               + 'running sessions are untouched (re-add later with the same nickname)';
+      rm.title = 'remove this plan from routing on this box'
+               + (members.length > 1 ? ` (clears all ${members.length} logins holding it)` : '')
+               + ' — does NOT log out or delete credentials; running sessions are untouched';
       if (!a.checkedAt) rm.style.marginLeft = 'auto';
-      rm.onclick = (e) => { e.stopPropagation(); accountSend(mid, { type: 'accountRemove', name: a.name }); };
+      rm.onclick = (e) => {
+        e.stopPropagation();
+        members.forEach(x => accountSend(mid, { type: 'accountRemove', name: x.name }));
+      };
       act.appendChild(rm);
     }
     if (act.childNodes.length) card.appendChild(act);
@@ -2893,16 +2914,18 @@ function renderAccountsPanel(container, info, mid) {
     container.appendChild(card);
   });
 
-  // add flow: pick a nickname → a terminal opens → do the claude.ai OAuth there
+  // add flow: pick a folder label → a terminal opens → do the claude.ai OAuth
+  // there. The label only names ~/.clawd-accounts/<label> on this box — once
+  // signed in, cards are titled by the plan's real identity, never the label.
   const add = document.createElement('div'); add.className = 'aadd';
   const how = document.createElement('div'); how.className = 'ahint2';
-  how.textContent = 'add another claude.ai subscription: pick a nickname for it '
+  how.textContent = 'add another claude.ai subscription: give it a short label '
     + '(work, personal, team…), then sign in to that claude.ai account in the '
     + 'terminal that opens. one sign-in per machine — it sticks.';
   add.appendChild(how);
   const arow = document.createElement('div'); arow.className = 'aaddrow';
   const inp = document.createElement('input');
-  inp.placeholder = 'nickname · e.g. work';
+  inp.placeholder = 'label · e.g. work';
   inp.dataset.mid = mid;
   inp.value = accountAddDrafts[mid] || '';
   inp.addEventListener('input', () => { accountAddDrafts[mid] = inp.value; });
@@ -2977,14 +3000,19 @@ function renderPlanSummary(body, machines) {
     p.title = acctIdent({ email: p.email, orgName: p.orgName }) || [...p.names][0];
   });
   // two pools under one email (personal + team org) would share a title —
-  // disambiguate with the fleet nicknames (only when they actually add
-  // information — 'clawd · clawd' helps nobody), else the org id
-  const titleCount = {};
-  rows.forEach(p => { titleCount[p.title] = (titleCount[p.title] || 0) + 1; });
+  // disambiguate with the plan tier when it differs between them (max 5x vs
+  // max 20x reads instantly), else the org id. Never local folder labels:
+  // they aren't identities.
+  const titleCount = {}, tierCount = {};
+  rows.forEach(p => {
+    titleCount[p.title] = (titleCount[p.title] || 0) + 1;
+    const tk = `${p.title}|${tierShort(p.tier)}`;
+    tierCount[tk] = (tierCount[tk] || 0) + 1;
+  });
   rows.forEach(p => {
     if (titleCount[p.title] > 1) {
-      const names = [...p.names].slice(0, 2).join('/');
-      const alt = (names && names !== p.title) ? names : p.org.slice(0, 8);
+      const t = tierShort(p.tier);
+      const alt = (t && tierCount[`${p.title}|${t}`] === 1) ? t : p.org.slice(0, 8);
       if (alt) p.title += ` · ${alt}`;
     }
   });
@@ -3008,9 +3036,7 @@ function renderPlanSummary(body, machines) {
     const row = document.createElement('div'); row.className = 'arow2';
     const id = document.createElement('div'); id.className = 'aid';
     const nm = document.createElement('div'); nm.className = 'aname'; nm.textContent = p.title;
-    nm.title = [p.names.size > 1 ? `known on the fleet as: ${[...p.names].join(' · ')}` : '',
-                p.org ? `usage pool (org): ${p.org}` : '']
-               .filter(Boolean).join('\n');
+    if (p.org) nm.title = `usage pool (org): ${p.org}`;
     const mail = document.createElement('div'); mail.className = 'amail';
     // tier first — it's short and load-bearing; a long email can ellipsize
     mail.textContent = [tierShort(p.tier), p.email].filter(Boolean).join(' · ');
@@ -3041,13 +3067,17 @@ function renderPlanSummary(body, machines) {
     card.appendChild(row);
     if (a) (a.windows || []).forEach(w => card.appendChild(windowRow(w)));
     const chips = document.createElement('div'); chips.className = 'aplan-machines';
-    // when a plan spans several local nicknames, say WHICH login each chip is
-    const who = r => p.names.size > 1 ? ` (${r.a.name})` : '';
+    // one chip per MACHINE: two local logins holding the same plan on one box
+    // are one reading (freshest wins — readings are already sorted), and a
+    // dead twin on a box that also holds a live login is not news
+    const seenMachine = new Set();
     p.readings.forEach((r, i) => {
-      const n = accountSessionCount(r.mid, r.a.name);
+      if (seenMachine.has(r.mid)) return;
+      seenMachine.add(r.mid);
+      const n = [...p.names].reduce((s, nm2) => s + accountSessionCount(r.mid, nm2), 0);
       const c = document.createElement('span');
       c.className = 'amchip' + (i ? '' : ' fresh');
-      c.textContent = `🖥️ ${r.machine}${who(r)} · ${Math.round(r.a.headroom)}% · ${accountAge(r.a.checkedAt)}`
+      c.textContent = `🖥️ ${r.machine} · ${Math.round(r.a.headroom)}% · ${accountAge(r.a.checkedAt)}`
                     + (n ? ` · ${n} live` : '');
       c.title = `${r.machine} polled this plan ${accountAge(r.a.checkedAt)} ago and saw `
               + `${Math.round(r.a.headroom)}% headroom`
@@ -3055,10 +3085,12 @@ function renderPlanSummary(body, machines) {
       chips.appendChild(c);
     });
     p.broken.forEach(r => {
+      if (seenMachine.has(r.mid)) return;
+      seenMachine.add(r.mid);
       const c = document.createElement('span');
       c.className = 'amchip dead';
-      c.textContent = `⚠ ${r.machine}${who(r)} · needs sign-in`;
-      c.title = `${r.machine}'s "${r.a.name}" login for this plan stopped working — that box is `
+      c.textContent = `⚠ ${r.machine} · needs sign-in`;
+      c.title = `${r.machine}'s login for this plan stopped working — that box is `
               + 'excluded from this plan until you sign in again (its section below)';
       chips.appendChild(c);
     });

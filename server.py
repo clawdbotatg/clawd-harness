@@ -560,18 +560,22 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False):
 
 
 def _account_identity(config_dir):
-    """Best-effort (email, org_uuid) from the account's .claude.json (the
-    default account's lives at ~/.claude.json, not inside ~/.claude). The
+    """Best-effort (email, org_uuid, org_name) from the account's .claude.json
+    (the default account's lives at ~/.claude.json, not inside ~/.claude). The
     ORG uuid — not the email — names the usage pool: one email can hold
     seats in several orgs (personal + team), each with its own limits, so
-    grouping plans by email merges pools that are actually separate."""
+    grouping plans by email merges pools that are actually separate. The org
+    NAME matters most for BROKEN logins: the token-bound profile fetch can't
+    run without a working token, and a dead card titled by its email's local
+    part hides which plan needs the re-sign-in."""
     path = (Path(config_dir) / ".claude.json") if config_dir \
         else (Path.home() / ".claude.json")
     try:
         oa = json.loads(path.read_text()).get("oauthAccount") or {}
-        return (oa.get("emailAddress") or "", oa.get("organizationUuid") or "")
+        return (oa.get("emailAddress") or "", oa.get("organizationUuid") or "",
+                oa.get("organizationName") or "")
     except (OSError, ValueError):
-        return ("", "")
+        return ("", "", "")
 
 
 def _link_shared_paths(config_dir):
@@ -1440,6 +1444,14 @@ class SessionManager:
                         org_name=e.get("org_name", ""), tier=e.get("tier", ""),
                         ready=e.get("ready", False),
                         created=e.get("created", 0.0), usage=e.get("usage"))
+            if not a.org_name:
+                # registries predating org_name (and BROKEN logins, whose
+                # token-bound profile fetch can never run) still deserve a
+                # real title — .claude.json is a fine guess until the profile
+                # endpoint overrides it
+                em, org, oname = _account_identity(a.config_dir)
+                a.email, a.org = a.email or em, a.org or org
+                a.org_name = oname
             self.accounts[a.name] = a
         self._ensure_default_account()
         for a in self.accounts.values():         # boot migration: shared transcripts
@@ -1652,9 +1664,9 @@ class SessionManager:
         user may remove `default` and it stays removed — typing `default`
         into the add box re-adopts it (no sign-in needed)."""
         if not self.accounts:
-            em, org = _account_identity("")
+            em, org, oname = _account_identity("")
             self.accounts["default"] = Account(
-                "default", "", email=em, org=org, ready=True)
+                "default", "", email=em, org=org, org_name=oname, ready=True)
 
     def _ordered_accounts(self):
         return sorted(self.accounts.values(),
@@ -1688,9 +1700,9 @@ class SessionManager:
             with self.lock:
                 if "default" in self.accounts:
                     return None
-                em, org = _account_identity("")
+                em, org, oname = _account_identity("")
                 self.accounts["default"] = Account(
-                    "default", "", email=em, org=org, ready=True)
+                    "default", "", email=em, org=org, org_name=oname, ready=True)
             self.save_registry()
             self.broadcast_accounts()
             print("[account default] re-adopted the ~/.claude login", flush=True)
@@ -1813,7 +1825,7 @@ class SessionManager:
                         and _cred_sig(a.config_dir) == a.refused_sig:
                     continue                     # same refused login still there —
                                                  # wait for an actual re-sign-in
-                email, org = _account_identity(a.config_dir)
+                email, org, oname = _account_identity(a.config_dir)
                 if not a.ready and a.config_dir:
                     _merge_mcp(a.config_dir)
                 with self.lock:
@@ -1822,6 +1834,7 @@ class SessionManager:
                     a.refused_sig = ""
                     a.email = email or a.email
                     a.org = org or a.org
+                    a.org_name = oname or a.org_name
                     a.tok.clear()                # stale cached token from the old login
                 print(f"[account {a.name}] "
                       f"{'re-signed in' if was_broken else 'signed in'}"
@@ -1869,12 +1882,14 @@ class SessionManager:
                         changed = True
                     # backfill from .claude.json only while the profile
                     # endpoint hasn't spoken — a label guess, never an override
-                    if not a.email or not a.org:
-                        email, org = _account_identity(a.config_dir)
-                        if (email and not a.email) or (org and not a.org):
+                    if not a.email or not a.org or not a.org_name:
+                        email, org, oname = _account_identity(a.config_dir)
+                        if (email and not a.email) or (org and not a.org) \
+                                or (oname and not a.org_name):
                             with self.lock:
                                 a.email = a.email or email
                                 a.org = a.org or org
+                                a.org_name = a.org_name or oname
                             changed = True
             if changed:
                 self.save_registry()

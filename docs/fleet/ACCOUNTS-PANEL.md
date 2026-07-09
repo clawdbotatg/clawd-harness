@@ -41,7 +41,7 @@ From that, the invariants:
 
 ```
 ┌ Ethereum Foundation                             41% ┐   ← POOL identity · headroom
-│   austin.griffith@… · max 5x · “ef”                 │   ← email · tier · local nickname
+│   austin.griffith@… · max 5x                        │   ← email · tier
 │   5h       ████████████████████   99% left  ↻ in 3h │   ← 5-hour session window
 │   7d       ████████░░░░░░░░░░░░   41% left  ↻ in 6d │   ← 7-day all-models window
 │   7d fable █████████░░░░░░░░░░░   44% left  ↻ in 6d │   ← 7-day Fable/Opus window
@@ -50,13 +50,21 @@ From that, the invariants:
 ```
 
 Since 2026-07-08 the **title is the pool's identity** (org name; the
-auto-generated `<email>'s Organization` demotes to the email's local part)
-and the local nickname is small print in quotes — shown only when it differs
-from the identity. Nicknames proved themselves liars (head's “clawd” held
-austin's login for weeks); they remain visible because they're still the
-re-add key and the sign-in session name, but they never headline. The
-machine header's router line (`new sessions: most headroom → …`) names the
-pool the same way.
+auto-generated `<email>'s Organization` demotes to the email's local part —
+for broken logins, whose token can't reach the profile endpoint, the org
+name comes from the account's `.claude.json`) and **local nicknames are not
+displayed anywhere**. Nicknames proved themselves liars (head's “clawd” held
+austin's login for weeks); they survive only as the folder key
+(`~/.clawd-accounts/<label>`) used at add/re-add time. The machine header's
+router line (`new sessions: most headroom → …`) names the pool the same way.
+
+**One card per pool per machine.** Two local logins bound to the same
+subscription (a mis-aimed sign-in leaves these behind) render as ONE card:
+the freshest healthy login fronts it, session counts are summed, and a dead
+twin of a live pool is silent — it adds no information. The card's ✕ clears
+*all* of that pool's local logins from routing on that box (credentials
+untouched, as always). The ⚡ plans rung dedupes the same way: one chip per
+machine per plan.
 
 - **Big number** = headroom (100 − usage of the binding window); its label
   names which window binds. Card highlight + "▸ next spawn" = the router's
@@ -77,12 +85,12 @@ of a revoked credential, not a rendering bug.
 
 ## Runbook: symptom → cause → fix
 
-**Same name shows different graphs on different machines.**
-Not a sync bug — the name is bound to *different orgs* on those machines (or
-one is signed out). Read each card's identity line: if the orgs differ,
-that's the whole story. Fix: on the machine wearing the wrong org, hit
-"sign in again" and **pick the intended workspace** in the OAuth org chooser
-(same email — the org step is where it went wrong last time).
+**A machine shows a plan you didn't expect (or is missing one you did).**
+A sign-in landed in the wrong workspace — same email, wrong org picked in
+the OAuth chooser. The card's title tells you which pool the login *actually*
+holds. Fix: hit "sign in again" on the wrong card and **pick the intended
+workspace** in the OAuth org chooser (same email — the org step is where it
+went wrong last time).
 To verify from a shell instead of the UI:
 ```bash
 python3 -c "import json;oa=json.load(open('$HOME/.clawd-accounts/ef/.claude.json')).get('oauthAccount',{});print(oa.get('emailAddress'),'|',oa.get('organizationUuid'))"
@@ -91,11 +99,14 @@ Caveat: `.claude.json` can be stale after a re-login (the keychain updates,
 the json doesn't) — the server's displayed identity is token-bound via the
 OAuth profile endpoint and wins on conflict. Trust the card over the json.
 
-**Two cards on ONE machine show identical bars.**
-Same org double-mounted under two names. Harmless to usage accounting
-(it's one pool either way) but it fools routing diversity: the router sees
-two "accounts" that drain together. Re-sign one into the org it was meant
-for, or delete the redundant account dir.
+**The same plan seems to appear twice.**
+It shouldn't anymore: same-pool logins merge into one card per machine, and
+the plans rung shows one chip per machine. If you still see a double, the
+two cards' org uuids differ (hover the title) — they're genuinely different
+pools that happen to share a title, and the tier / org-id suffix
+disambiguates. A double-mounted pool (two local dirs, one subscription) is
+invisible by design; the ✕ tooltip reveals it ("clears all N logins") and
+clears both.
 
 **A card shows a plan/tier that doesn't match what you expect for that
 login.** The email is shared across orgs and the card is on the *other* org
