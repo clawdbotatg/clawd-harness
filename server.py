@@ -562,9 +562,14 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
                               "— this login needs a re-sign-in")
             return AUTH_FAIL
         else:
-            # edge block / rate limit / outage — NOT a dead login
+            # edge block / rate limit / outage — NOT a dead login. Back off
+            # here too: retrying a 429ing token endpoint every 15s poller
+            # cycle keeps its limiter hot and the refresh never succeeds.
+            if tok_cache is not None:
+                tok_cache["no_poll_until"] = time.time() + 600
             _clog(config_dir, f"refresh blocked in transit (HTTP {rstatus}) "
-                              "— transient; keeping the last snapshot")
+                              "— transient; keeping the last snapshot, "
+                              "next attempt in 10 min")
             return None
     if code == 401 or (not tries and code is None):
         return AUTH_FAIL                         # refused even after refresh,
