@@ -110,7 +110,9 @@ user-facing overview; this file orients an agent working **on** the code.
   under the fresh dir and you complete OAuth in its terminal. A poller tracks
   per-account usage via Claude's (undocumented — always degrade) OAuth usage
   endpoint; new sessions spawn under the ACTIVE account, auto-switched to the
-  most headroom with hysteresis + a 2h debounce (`SUB_*` env knobs). Sessions
+  non-exhausted pool whose WEEKLY window resets soonest (use-it-or-lose-it;
+  headroom is only the tie-break — see `_route_key`), debounced via `SUB_*`
+  env knobs. Sessions
   record `account`+`config_dir` at spawn so `--resume` finds the right dir.
   Deep doc: [`docs/fleet/SUB-ROUTING.md`](docs/fleet/SUB-ROUTING.md); what the
   accounts panel should display + mis-bound-login runbook:

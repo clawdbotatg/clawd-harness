@@ -24,7 +24,9 @@ reason (Cloudflare block, rate limit, outage) must never be shown as
 **I should never get a message that we hit the subscription rate limit if I
 have another subscription with headroom.**
 
-New sessions always spawn on the pool with the most headroom; running
+New sessions always spawn on the best eligible pool — among pools with room,
+the one whose **weekly window resets soonest** (use-it-or-lose-it: drain the
+soonest-resetting sub first, headroom only breaks ties); running
 sessions automatically hand off to a better pool when theirs drains —
 before the wall when possible, and at worst one turn ends early and the
 session heals itself before the next message. This requires every

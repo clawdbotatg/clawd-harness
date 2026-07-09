@@ -18,9 +18,11 @@ four load-bearing mechanisms below are claw-router's discoveries.
 
 N Claude subscriptions, several machines, each running a harness with many
 interactive `claude` sessions. Every machine permanently signed into every
-subscription; new sessions spawn under whichever account has the most
-headroom; switching is hysteresis'd and hours-debounced so it never
-ping-pongs; running sessions are never interrupted.
+subscription; new sessions spawn under the non-exhausted account whose
+**weekly window resets soonest** (use-it-or-lose-it — drain the
+soonest-resetting sub first; headroom only breaks ties / covers unknown
+resets); switching is debounced so it never ping-pongs; running sessions are
+never interrupted.
 
 ## The four mechanisms (all in `server.py` now)
 
@@ -74,10 +76,13 @@ ping-pongs; running sessions are never interrupted.
   (600s default); snapshots persist so bars render instantly after a restart.
   `{type:"accountsRefresh"}` forces a poll.
 - **Local switch rule** (`SUB_AUTOSWITCH=1` default): switch the ACTIVE
-  account to the one with the most headroom iff it wins by
-  `SUB_HYSTERESIS` (20 pts) AND the last switch was `SUB_DEBOUNCE` (2h) ago —
-  OR the active account is ≥ `SUB_EXHAUSTED` (95%) used, which bypasses the
-  debounce (no loyalty to a dead account). Only ever affects NEW spawns;
+  account to the one `_route_key` ranks best — among accounts with room
+  (< `SUB_EXHAUSTED` 95%), the soonest weekly reset wins; headroom is the
+  tie-break/fallback. A reset-driven switch needs only the `SUB_DEBOUNCE`
+  (2h) since reset order is stable; a headroom-fallback switch also needs
+  `SUB_HYSTERESIS` (20 pts). The active account being exhausted (target with
+  room) bypasses the debounce (no loyalty to a dead account). Only ever
+  affects NEW spawns;
   running sessions finish on their old account. Manual override:
   `{type:"accountUse", name}` or the panel's `use` button.
 - Wire contract: the `accounts` frame + controls in `docs/WS-PROTOCOL.md`.

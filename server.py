@@ -31,6 +31,7 @@ Then open http://127.0.0.1:8787
 """
 
 import base64
+import datetime
 import fcntl
 import glob
 import hashlib
@@ -210,10 +211,15 @@ OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"     # UNDOCUMENTED
 OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"  # UNDOCUMENTED — degrade gracefully
 OAUTH_BETA      = "oauth-2025-04-20"
 USAGE_TTL       = float(os.environ.get("USAGE_TTL", "180"))     # s between usage polls per account
-# Local auto-switch rule (direct mode; the fleet relay will own this fleet-wide):
-# switch to the account with the most headroom iff it beats the active one by
-# HYSTERESIS points AND the last switch was DEBOUNCE ago — or the active account
-# is EXHAUSTED (no loyalty to a dead account; bypasses the debounce).
+# Local routing rule (direct mode; the fleet relay will own this fleet-wide):
+# among pools with room (< EXHAUSTED), spend the one whose WEEKLY window resets
+# soonest — weekly headroom is use-it-or-lose-it, so draining the earliest-
+# resetting pool first forfeits the least capacity; once it resets its clock
+# jumps +7d and it goes to the back of the queue. Headroom (pct) is only the
+# fallback when a reset time is unknown, and the tie-break. Reset order is
+# stable between polls, so a reset-driven switch needs only the DEBOUNCE; a
+# pct-driven one also needs HYSTERESIS points — and an EXHAUSTED active
+# account bypasses both (no loyalty to a dead account).
 SUB_AUTOSWITCH = os.environ.get("SUB_AUTOSWITCH", "1") != "0"
 SUB_HYSTERESIS = float(os.environ.get("SUB_HYSTERESIS", "20"))  # headroom pts
 SUB_DEBOUNCE   = float(os.environ.get("SUB_DEBOUNCE", "7200"))  # seconds
@@ -630,6 +636,33 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
     if want_ident:
         return worst, windows, (_fetch_profile(good) if good else None)
     return worst, windows
+
+
+def _parse_reset(ts):
+    """A window's resets_at ISO timestamp → epoch seconds; None when absent
+    or unparseable (never let a malformed API field break routing)."""
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _weekly_reset(usage):
+    """Soonest WEEKLY reset (epoch s) across an account's cached usage
+    windows — every weekly window's label starts '7d' (incl. model-scoped
+    ones like '7d fable'). The 5h window is deliberately ignored: it cycles
+    all day on every pool and says nothing about whose weekly capacity is
+    about to be forfeited."""
+    soonest = None
+    for w in (usage or {}).get("windows") or []:
+        if not str(w.get("label", "")).startswith("7d"):
+            continue
+        t = _parse_reset(w.get("resets"))
+        if t and (soonest is None or t < soonest):
+            soonest = t
+    return soonest
 
 
 def _account_identity(config_dir):
@@ -1813,9 +1846,22 @@ class SessionManager:
               f"{s.cid[:8] if s else 'FAILED'}", flush=True)
         return s
 
+    def _route_key(self, a):
+        """Sort key for 'which pool should we spend right now' (lower wins):
+        pools with room before exhausted ones; among those with room, the
+        soonest WEEKLY reset first (use-it-or-lose-it — see the SUB_* comment
+        block); pct is the fallback when no reset is known, and the
+        tie-break."""
+        pct = (a.usage or {}).get("pct")
+        pct = 100.0 if pct is None else pct
+        reset = _weekly_reset(a.usage)
+        return (pct >= SUB_EXHAUSTED, reset is None, reset or 0.0, pct)
+
     def _best_account(self):
-        """The ready account with the most headroom RIGHT NOW, from cached
-        usage that's fresh enough to trust (< 3×USAGE_TTL old). None when no
+        """The ready account the router would spend RIGHT NOW, from cached
+        usage that's fresh enough to trust (< 3×USAGE_TTL old): the
+        non-exhausted pool whose weekly window resets soonest — NOT the most
+        headroom (that's only the tie-break; see _route_key). None when no
         account qualifies — callers fall back to active_account. This is what
         routes each NEW session when auto-routing is on: per-spawn choice,
         not a sticky default."""
@@ -1827,7 +1873,7 @@ class SessionManager:
                      and now - (a.usage or {}).get("checkedAt", 0) < 3 * USAGE_TTL]
         if not fresh:
             return None
-        return min(fresh, key=lambda a: a.usage["pct"]).name
+        return min(fresh, key=self._route_key).name
 
     def remove_account(self, name):
         """Drop an account from the routing roster. This logs NOTHING out —
@@ -1835,7 +1881,7 @@ class SessionManager:
         you really mean it), and sessions already running under it keep their
         recorded config_dir, so they resume fine. Refused when it would leave
         no ready account. Removing the ACTIVE account re-routes new spawns to
-        the ready account with the most headroom."""
+        the ready account the router ranks best (see _route_key)."""
         with self.lock:
             a = self.accounts.get(name)
             others = [x for x in self.accounts.values()
@@ -1844,7 +1890,7 @@ class SessionManager:
                 return False                     # never drop the last usable login
             del self.accounts[name]
             if self.active_account == name:
-                best = min(others, key=lambda x: (x.usage or {}).get("pct", 100))
+                best = min(others, key=self._route_key)
                 self.active_account = best.name
                 self.last_switch_at = time.time()
         print(f"[account {name}] removed from roster (credentials untouched)",
@@ -2125,11 +2171,13 @@ class SessionManager:
 
     def _maybe_autoswitch(self):
         """Local switch rule (direct mode; the fleet relay will own this
-        fleet-wide): move to the account with the most headroom iff it beats
-        the active one by SUB_HYSTERESIS points AND the last switch was
-        SUB_DEBOUNCE ago — or the active account is at/over SUB_EXHAUSTED
-        (bypasses the debounce; no loyalty to a dead account). Only ever
-        affects NEW spawns."""
+        fleet-wide): move to the pool _route_key ranks best — the
+        non-exhausted one whose weekly window resets soonest. Reset order is
+        stable between polls, so a reset-driven win needs only the
+        SUB_DEBOUNCE; a pct-driven win (reset times unknown) also needs
+        SUB_HYSTERESIS points, as before. An active account at/over
+        SUB_EXHAUSTED bypasses the debounce when the target has room (no
+        loyalty to a dead account). Only ever affects NEW spawns."""
         if not SUB_AUTOSWITCH:
             return
         with self.lock:
@@ -2142,20 +2190,32 @@ class SessionManager:
         cur_pct = (cur.usage or {}).get("pct")
         if cur_pct is None:
             return
-        best = min(ready, key=lambda a: a.usage["pct"])
+        best = min(ready, key=self._route_key)
         if best.name == cur.name:
             return
+        cur_k, best_k = self._route_key(cur), self._route_key(best)
         gain = cur_pct - best.usage["pct"]
         # The exhausted bypass only fires when the TARGET actually has room —
         # two accounts both over the threshold would otherwise ping-pong every
         # poll (each switch making the other one "best"), debounce ignored.
-        # All-exhausted falls back to the normal hysteresis+debounce rule.
-        exhausted = (cur_pct >= SUB_EXHAUSTED
-                     and best.usage["pct"] < SUB_EXHAUSTED)
-        if exhausted or (gain >= SUB_HYSTERESIS
+        # All-exhausted falls back to the debounced rules below.
+        exhausted = cur_k[0] and not best_k[0]
+        # Did best win on the weekly-reset clock (sooner reset, or a known
+        # reset vs an unknown one)? That ordering only changes when a window
+        # actually resets, so debounce alone is enough to prevent flap.
+        by_reset = best_k[:3] < cur_k[:3] and best_k[1:3] != cur_k[1:3]
+        if exhausted or ((by_reset or gain >= SUB_HYSTERESIS)
                          and time.time() - self.last_switch_at >= SUB_DEBOUNCE):
-            self.use_account(best.name, why=("active exhausted" if exhausted
-                                             else f"+{gain:.0f} pts headroom"))
+            if exhausted:
+                why = "active exhausted"
+            elif by_reset and not (cur_k[1] or best_k[1]):
+                why = (f"weekly resets {max(1, int((cur_k[2] - best_k[2]) // 3600))}h "
+                       "sooner — spend it before it's forfeited")
+            elif by_reset:
+                why = "weekly reset known vs unknown"
+            else:
+                why = f"+{gain:.0f} pts headroom"
+            self.use_account(best.name, why=why)
 
     # -- project crud ----------------------------------------------------------
     def _readopt(self, base):

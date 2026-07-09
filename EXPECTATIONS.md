@@ -29,14 +29,27 @@ over (the log shows `clawd` re-signed-in **12 times** on heart). That was not
 Anthropic randomly revoking, and it was not the user's fault. It is fixed,
 and the fix is verifiable in the log.
 
-### 2. New work always lands on the pool with the most headroom
-Every new session spawns under the ready login with the most headroom **on
-that machine, at that instant** (fresh poll, not stale cache; stale = >3×TTL is
-ignored). "Headroom" = what's left of the *most-constrained* usage window,
-including model-scoped ones (e.g. the Fable weekly cap) — the binding window
-is named right on the card (`headroom · 7d fable`). Running sessions move only
-when it's worth it: the target must beat the current pool by
-`SUB_HYSTERESIS` (20) points, with a switch debounce — no flapping.
+### 2. New work always lands on the pool whose weekly window resets soonest
+*(Policy changed 2026-07-09 at Austin's direction — it was "most headroom"
+before.)* Among pools **with room** (< `SUB_EXHAUSTED` = 95% used), every new
+session spawns under the one whose **weekly (7d) window resets soonest**, on
+that machine, at that instant (fresh poll, not stale cache; stale = >3×TTL is
+ignored). Rationale, in Austin's words: a 50% pool and a 60% pool are *both
+eligible* — weekly headroom is use-it-or-lose-it, so **drain the one that
+resets soonest first**; picking by raw headroom spreads load evenly and
+forfeits capacity at every reset. Once a pool's week resets, its clock jumps
++7 days and it goes to the back of the queue; once it crosses 95% it drops
+out of eligibility and the next-soonest takes over. Headroom (the
+most-constrained window, incl. model-scoped ones like `7d fable`) is now only
+the **tie-break**, and the fallback when a pool's reset time is unknown.
+Anti-flap: reset order is stable between polls, so a reset-driven switch
+needs only the debounce; a headroom-driven fallback switch still needs
+`SUB_HYSTERESIS` (20) points too.
+
+**Expected visible behavior (not a bug):** all machines may pin the SAME
+pool and drain it hard while other pools sit half-empty — that's the policy
+working. The 🧠 page's "router →" line says which; the log's switch line says
+why (`weekly resets Nh sooner — spend it before it's forfeited`).
 
 ### 3. With headroom on the machine, you are never stuck
 **The guarantee:** if the machine a session runs on holds a working login for
