@@ -1845,6 +1845,7 @@ function handleMachineJson(machine, m) {
     const pm = perMachine[machine] || (perMachine[machine] = {});
     pm.accounts = m;
     renderAccountsBody();
+    renderSessions();                  // 🔑 card badges name the plan, not the folder label
     refreshSessionTag();               // 🔑 tag names the plan, not the folder label
     return;
   }
@@ -2025,6 +2026,7 @@ function handleJson(m) {
   } else if (m.type === 'accounts') {
     accountsInfo = m;                     // subscription logins + headroom (direct mode)
     renderAccountsBody();                 // repaint the 🧠 overlay if it's open
+    renderSessions();                     // 🔑 card badges name the plan, not the folder label
     refreshSessionTag();                  // 🔑 tag names the plan, not the folder label
   } else if (m.type === 'focus') {
     // server's pick of which session to view, sent only in reply to a `new` we
@@ -2789,6 +2791,16 @@ function acctIdent(a) {
   const org = a.orgName || '';
   if (!org || (a.email && org === `${a.email}'s Organization`)) return local;
   return org;
+}
+
+// Resolve a session's local folder label (sub1/sub2/…) to the plan's real
+// identity via that machine's accounts frame. The labels are auto-picked and
+// mean nothing; fall back to one only while the accounts frame (or the
+// login's identity) hasn't landed yet.
+function acctDisplay(mid, name) {
+  const info = accountsInfoFor(mid);
+  const rec = info && (info.accounts || []).find(x => x.name === name);
+  return (rec && acctIdent(rec)) || name;
 }
 
 // the usage window that caps the headline headroom number (most used wins)
@@ -3681,8 +3693,9 @@ function renderSessions() {
     }
     if (s.account && s.account !== 'default') { // which subscription it burns
       const at = document.createElement('span');
-      at.className = 'scount smach'; at.textContent = '🔑 ' + s.account;
-      at.title = 'running under the ' + s.account + ' subscription account';
+      const plan = acctDisplay(s._machine || 'local', s.account);
+      at.className = 'scount smach'; at.textContent = '🔑 ' + plan;
+      at.title = 'running under the ' + plan + ' subscription account';
       row.appendChild(at);
     }
     card.appendChild(row);
@@ -4506,11 +4519,8 @@ function refreshSessionTag() {
   // nothing since nicknames went away. Fall back to the label only while the
   // accounts frame (or the login's identity) hasn't landed yet.
   let acct = '';
-  if (s && s.account && s.account !== 'default') {
-    const info = accountsInfoFor(FLEET ? currentMachine : 'local');
-    const rec = info && (info.accounts || []).find(x => x.name === s.account);
-    acct = '🔑 ' + ((rec && acctIdent(rec)) || s.account);
-  }
+  if (s && s.account && s.account !== 'default')
+    acct = '🔑 ' + acctDisplay(FLEET ? currentMachine : 'local', s.account);
   const mach = (FLEET && currentMachine) ? shortMachine(currentMachine) : '';
   machineTag.textContent = [acct, mach].filter(Boolean).join(' · ');
   machineTag.title = [acct && ('running under the ' + acct.slice(3) + ' subscription'),
