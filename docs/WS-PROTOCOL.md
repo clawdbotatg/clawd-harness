@@ -65,7 +65,7 @@ viewer** (each with its own `client.cid`).
 | `addProject` | `repoUrl` | Clone a repo and adopt it (async). Input normalized: full URL as-is; `owner/repo` and bare `repo` resolved against github.com. |
 | `input` | `data`, `cid?` | Raw keystrokes → PTY. `data` is a UTF-8 string (incl. escape seqs for TUI menus). Falls back to `client.cid` if `cid` omitted. |
 | `send` | `text`, `cid?` | High-level: type `text`, wait for the paste to settle, then submit `\r`. Use this to "send a message/prompt". |
-| `resize` | `cols`, `rows`, `cid?` | Resize the PTY window. |
+| `resize` | `cols`, `rows`, `cid?`, `claim?` | A size CLAIM, not a command — one PTY serves many differently-sized viewers, so the server sizes it to a single OWNER. `claim:true` (a deliberate act on that device: opening the tty view, resizing the window) takes ownership; without it the size only applies if the sender already owns the PTY (or nobody does). `input`/`send` from a sized viewer also takes ownership (you drive it, it fits you). `cols`/`rows` of `0` releases the claim (viewer left the tty view / went hidden) — ownership falls back to the most recently sized remaining viewer. Applied changes broadcast `ttySize`. Pre-policy servers treat every frame as an unconditional resize, so old/new mixes degrade to the last-write-wins behavior. |
 | `restart` | `reason?` | Request a graceful self-restart (fires once all sessions idle). |
 | `restartCancel` | — | Cancel a pending restart. |
 | `ping` | `id?` | Liveness probe. Server immediately replies `{type:"pong", id}` (echoing `id`). Lets a client prove the *full* path is live (in fleet: browser→relay→worker→harness and back over the e2e channel) before deciding whether to repaint in place vs. tear down + re-subscribe. A pre-`pong` harness just ignores it — the prober falls back to reconnect on timeout, so it's backward-safe. |
@@ -100,6 +100,7 @@ reconnect (i.e. the server restarted).
 //    client can gate painting on it (binary PTY frames carry no session id):
 { "type":"hello", "cid", "pid", "account", "sessionId", "title", "workdir",
   "busy":bool, "waiting":bool, "tool":<string|null>, "cols":int, "rows":int }
+//    cols/rows = the PTY's CURRENT size (some viewer's claim, or the boot default)
 // 2) then a binary frame: recent PTY bytes (ring buffer snapshot)
 // 3) then recent transcript history, each:
 { "type":"transcript", "cid", "event":<event>, "history":true }
@@ -115,6 +116,7 @@ no-op that would leave the previous session's stream flowing (that's how
 { "type":"hook", "cid", "event":<hookName>, "busy":bool, "waiting":bool, "tool":<str|null>, "data":{...} }
 { "type":"focus", "cid" }                              // reply to a "new" you sent
 { "type":"exit", "cid" }                               // the claude process for cid exited
+{ "type":"ttySize", "cid", "cols":int, "rows":int }    // to that session's subscribers: the PTY was re-sized to a viewer's claim (see `resize`)
 { "type":"projects", "projects":[...], "boot" }        // re-broadcast on any project change
 { "type":"sessions", "sessions":[...], "current" }     // re-broadcast on any session change
 { "type":"accounts", "accounts":[...], "active", "auto" }  // subscription logins/usage/active changed

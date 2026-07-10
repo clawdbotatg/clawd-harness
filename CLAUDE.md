@@ -188,10 +188,19 @@ user-facing overview; this file orients an agent working **on** the code.
   page is scoped to the selected `currentPid`. View switcher (terminal xterm ↔
   transcript bubbles), **key bar** (sends raw escape seqs to drive TUI menus —
   works even on touch where the terminal is read-only), message box
-  (type/dictate/paste images). The app opens on the projects rung; mobile
-  defaults to transcript for a session (native scroll, markdown), desktop to
-  terminal. Terminal is **read-only on touch** (mobile dictation streams
-  self-revising text that xterm forwards as garbled keystrokes).
+  (type/dictate/paste images). The app opens on the projects rung; a session
+  opens as the live terminal on every device (the transcript view was pulled —
+  `DEEP_VIEW`). Terminal is **read-only on touch** (mobile dictation streams
+  self-revising text that xterm forwards as garbled keystrokes). **Shared-PTY
+  sizing:** one PTY can't render two geometries, so resize frames are size
+  *claims* and the server follows a single owner — deliberate acts (opening the
+  tty view, resizing the window, typing/sending) claim it; reconnect/refit
+  maintenance resizes only apply if you already own it; leaving the view or
+  going hidden releases it (fallback: most recent remaining viewer). See
+  `claim_resize` in server.py + the `resize`/`ttySize` rows in
+  `docs/WS-PROTOCOL.md`. Don't regress this to last-resize-wins: it's what
+  stopped a background desktop tab from yanking the terminal down to/up from
+  phone size mid-use.
 - **URL routing** — nav state lives in the **hash** (the `?t=` token stays in the
   query): `#/` projects · `#/p/<pid>` sessions · `#/p/<pid>/s/<cid>` transcript ·
   `…/tty` terminal. So a reload (or a shared link) lands back on the same
@@ -217,8 +226,10 @@ user-facing overview; this file orients an agent working **on** the code.
 - **Transcript tailer logs `tailing …` repeatedly** (busy-reattach loop, inherited
   from console) — worth fixing.
 - Roadmap (the reason for the fork): the **AI controller** layer, Telegram
-  front-end, per-client terminal sizing. Multi-session, multi-project (the
-  projects layer), view switcher, and AI naming already exist.
+  front-end. Multi-session, multi-project (the projects layer), view switcher,
+  and AI naming already exist. ("Per-client terminal sizing" was resolved as
+  the size-ownership policy above — true per-viewer rendering would need a
+  server-side terminal emulator per client and isn't planned.)
 
 ## Conventions
 - **Never commit** runtime/secret files (gitignored): `.clawd-harness.token`,

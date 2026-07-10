@@ -779,6 +779,9 @@ function showTTY() {
   setTimeout(hardRepaint, 120);   // fallback for layout that settles a frame late
   // glyph metrics can change when the monospace web-font finishes loading — repaint once it's ready
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(hardRepaint);
+  // Opening the terminal view is a deliberate act on THIS device — claim the
+  // PTY size (after the repaints above have fitted the real dims).
+  setTimeout(() => sendResize(true), 160);
 }
 
 // After subscribing we open a window during which the replayed screen — which
@@ -1087,7 +1090,7 @@ function fleetResync() {
   fleetBootstrap();
   syncPushSubscription();          // re-register notifications with the (possibly restarted) relay
   const v = currentView();
-  if (currentMachine && currentCid && (v === 'tty' || v === 'transcript')) { subscribe(currentCid); sendResize(); armReplayWatchdog(); }
+  if (currentMachine && currentCid && (v === 'tty' || v === 'transcript')) { subscribe(currentCid); sendResize(ttyOwned); armReplayWatchdog(); }
   flushOutbound();
 }
 function scheduleReconnect(delay) {
@@ -1270,11 +1273,12 @@ function connect() {
     streamCid = null;               // fresh socket = fresh server-side link, bound to nothing yet
     dot.classList.add('up');
     if (!FLEET) {
-      sendResize();
       // A fresh socket is unsubscribed server-side: re-bind the session so the PTY
       // stream resumes AND sends can resolve their target again. (First boot has no
-      // currentCid yet — resolvePendingNav subscribes from the URL instead.)
-      if (currentCid) { subscribe(currentCid); flushOutbound(); armReplayWatchdog(); }
+      // currentCid yet — resolvePendingNav subscribes from the URL instead.) The
+      // resize goes AFTER the subscribe (a pre-bind resize has no session to land
+      // on) and re-claims only if we owned the size before the socket died.
+      if (currentCid) { subscribe(currentCid); sendResize(ttyOwned); flushOutbound(); armReplayWatchdog(); }
       else meta.textContent = '';
       return;
     }
@@ -2050,6 +2054,12 @@ function handleJson(m) {
     updateBreadcrumb(m.title || '');
     highlightCard(m.cid);
     setBusy(m.busy, null);
+    ttyOwned = (m.cols === term.cols && m.rows === term.rows);   // hello carries the PTY's current size
+  } else if (m.type === 'ttySize') {
+    // The server applied someone's size claim. Dims matching ours ⇒ we own the
+    // PTY (our maintenance refits will keep applying); differing ⇒ another
+    // device took it (we render its geometry until the user acts here).
+    if (m.cid === currentCid) ttyOwned = (m.cols === term.cols && m.rows === term.rows);
   } else if (m.type === 'transcript') {
     if (m.cid && m.cid !== currentCid) return;        // belongs to a backgrounded session
     renderEvent(m.event, !m.history);   // live events type out; history replay renders instantly
@@ -3909,9 +3919,40 @@ function summarizeInput(input) {
 function clip(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + '…' : s; }
 
 // -- write channel ----------------------------------------------------------
-function sendResize() {
-  hsend({ type: 'resize', cols: term.cols, rows: term.rows });
+// One PTY, many viewers: resize frames are size CLAIMS the server arbitrates
+// (see WS-PROTOCOL). claim=true marks a deliberate act on THIS device (opening
+// the tty view, dragging the window) and takes ownership; the default
+// maintenance resize (refits, reconnect re-syncs) only applies if we already
+// own the PTY — so this tab can't yank the size away from the device the user
+// is actually driving. Guarded to the tty view: other rungs have no terminal
+// geometry worth claiming (their term dims are stale).
+let ttyOwned = false;   // did the server last size the PTY to OUR claim? (ttySize frames keep it honest)
+function sendResize(claim) {
+  if (currentView() !== 'tty' || !currentCid) return;
+  hsend({ type: 'resize', cols: term.cols, rows: term.rows,
+          claim: !!claim && document.visibilityState === 'visible' });
 }
+// Release our size claim (leaving the tty view / going hidden): cols 0×0 tells
+// the server to hand the PTY to whoever is still watching.
+function releaseResize() {
+  ttyOwned = false;
+  if (currentCid) hsend({ type: 'resize', cols: 0, rows: 0 });
+}
+// Pocketed phone / backgrounded tab shouldn't keep owning the PTY size — after
+// a short grace (app-switching to copy something shouldn't thrash the TUI),
+// release so the screen still being watched gets its geometry back; on return,
+// re-claim (the size follows the screen being looked at).
+let ttyHideTimer = null;
+document.addEventListener('visibilitychange', () => {
+  clearTimeout(ttyHideTimer);
+  if (document.visibilityState === 'hidden') {
+    if (ttyOwned && currentView() === 'tty')
+      ttyHideTimer = setTimeout(() => { if (document.visibilityState === 'hidden') releaseResize(); }, 1500);
+  } else if (currentView() === 'tty') {
+    refitTTY();
+    setTimeout(() => sendResize(true), 120);   // after the refit has re-measured
+  }
+});
 // -- image attachments (paste / drop → upload → fold path into message) ------
 let attachments = [];   // {path, name, url}
 const attachEl = document.getElementById('attachments');
@@ -4430,6 +4471,9 @@ function refreshSessionTag() {
 function setView(view) {
   const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects',
         pm = view === 'pm';
+  // Leaving the terminal view: stop claiming the PTY size (read BEFORE the
+  // panel toggles below change what currentView() reports).
+  if (!tty && currentCid && currentView() === 'tty') releaseResize();
   projectsPanel.classList.toggle('hidden', !projects);
   menuPanel.classList.toggle('hidden', !sessions);
   leftPanel.classList.toggle('hidden', !tty);
@@ -4771,7 +4815,8 @@ stage.addEventListener('touchend', (e) => {
   if (dx < 0) navFwd(); else navBack();   // in a session: flip the rail; on a list: change depth
 }, { capture: true, passive: true });
 
-window.addEventListener('resize', () => { fit.fit(); sendResize(); term.scrollToBottom(); bottomJustifyTTY(); });
+// A window resize/rotation is the user manipulating THIS device → claim the PTY size.
+window.addEventListener('resize', () => { fit.fit(); sendResize(true); term.scrollToBottom(); bottomJustifyTTY(); });
 
 // -- machines roster overlay (the 🖥️ button) ---------------------------------
 // Read-only fleet overview with per-machine stats. Replaces the old machines rung;

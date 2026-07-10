@@ -930,6 +930,13 @@ class ClaudeSession:
         self.clients = set()                     # _Clients currently viewing this session
         self.clients_lock = threading.Lock()
 
+        # One PTY, many differently-sized viewers (phone + desktop on the same
+        # session): claude's TUI paints for exactly one geometry, so the PTY
+        # follows a single OWNER at a time instead of last-resize-wins. See
+        # claim_resize() for the policy.
+        self.tty_owner = None                    # the _Client whose size the PTY follows
+        self.tty_cols, self.tty_rows = COLS, ROWS
+
         self.transcript_path = None
         self._live_transcript = None             # live path from hooks; may rotate on compaction
         self.busy = False                        # working (turn in flight) vs idle
@@ -1202,6 +1209,57 @@ class ClaudeSession:
             except OSError:
                 pass
 
+    # -- viewer size policy -----------------------------------------------------
+    # A resize frame is a size CLAIM, not a command. `claim:true` (a deliberate
+    # act on that device: opening the tty view, resizing the window) takes
+    # ownership; a maintenance resize (reconnect re-sync, footer refit) only
+    # applies if the sender already owns the PTY — so a background desktop's
+    # watchdog can't yank the size out from under the phone you're driving.
+    # Typing/sending from a sized viewer also claims (bump_owner): the device
+    # being driven is the one whose geometry the TUI should fit.
+    def claim_resize(self, client, cols, rows, claim=False):
+        try:
+            cols, rows = int(cols or 0), int(rows or 0)
+        except (TypeError, ValueError):
+            return
+        if not cols or not rows:                 # 0×0 = release (left the view / hidden)
+            client.tty_size = None
+            if self.tty_owner is client:
+                self._owner_fallback()
+            return
+        client.tty_size = (cols, rows)
+        client.tty_ts = time.time()
+        owner = self.tty_owner
+        with self.clients_lock:
+            owner_live = owner is not None and not owner.dead and owner in self.clients
+        if claim or owner is client or not owner_live:
+            self._set_owner(client)
+
+    def bump_owner(self, client):
+        if client.tty_size and client.cid == self.cid and self.tty_owner is not client:
+            client.tty_ts = time.time()
+            self._set_owner(client)
+
+    def _set_owner(self, client):
+        self.tty_owner = client
+        self._apply_size(*client.tty_size)
+
+    def _owner_fallback(self):
+        """Owner left: hand the PTY to the most recently sized remaining viewer."""
+        with self.clients_lock:
+            cands = [c for c in self.clients if c.tty_size and not c.dead]
+        self.tty_owner = max(cands, key=lambda c: c.tty_ts, default=None)
+        if self.tty_owner:
+            self._apply_size(*self.tty_owner.tty_size)
+
+    def _apply_size(self, cols, rows):
+        if (cols, rows) == (self.tty_cols, self.tty_rows):
+            return                               # same size → no SIGWINCH, no repaint
+        self.tty_cols, self.tty_rows = cols, rows
+        self.resize(cols, rows)
+        self._to_subscribers_json({"type": "ttySize", "cid": self.cid,
+                                   "cols": cols, "rows": rows})
+
     # -- write channel ---------------------------------------------------------
     def write(self, data: bytes):
         """Raw keystrokes -> PTY."""
@@ -1401,7 +1459,7 @@ class ClaudeSession:
                           "title": self.title or self._fallback_title(),
                           "workdir": self.workdir(),
                           "busy": self.busy, "waiting": self.waiting, "tool": self.last_tool,
-                          "cols": COLS, "rows": ROWS})
+                          "cols": self.tty_cols, "rows": self.tty_rows})
         with self.ring_lock:
             snapshot = bytes(self.ring)
         if snapshot:
@@ -1426,6 +1484,8 @@ class ClaudeSession:
     def unsubscribe(self, client):
         with self.clients_lock:
             self.clients.discard(client)
+        if self.tty_owner is client:             # size owner left → next viewer takes over
+            self._owner_fallback()
 
     def _to_subscribers_bytes(self, data: bytes):
         with self.clients_lock:
@@ -2791,6 +2851,8 @@ class _Client:
         self.lock = threading.Lock()
         self.dead = False
         self.cid = None
+        self.tty_size = None    # (cols, rows) this viewer last fit to — its size claim
+        self.tty_ts = 0.0       # when; recency picks the fallback owner
 
     def send_bytes(self, data: bytes):
         if self.dead:
@@ -3148,13 +3210,16 @@ class Handler(BaseHTTPRequestHandler):
             if not s:
                 return
             if t == "input":
+                s.bump_owner(client)             # driving a session claims its size
                 s.write(frame.get("data", "").encode("utf-8"))
             elif t == "send":
                 txt = frame.get("text", "")
                 print(f"[ws {s.cid[:8]}] send: {txt[:60]!r}", flush=True)
+                s.bump_owner(client)
                 s.send_message(txt)
             elif t == "resize":
-                s.resize(frame.get("cols"), frame.get("rows"))
+                s.claim_resize(client, frame.get("cols"), frame.get("rows"),
+                               bool(frame.get("claim")))
 
 
 class ThreadingHTTPServer(ThreadingMixIn, TCPServer):
