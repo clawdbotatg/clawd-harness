@@ -47,6 +47,7 @@ import hmac
 import json
 import os
 import secrets
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
@@ -946,6 +947,18 @@ class Handler(BaseHTTPRequestHandler):
 class ThreadingHTTPServer(ThreadingMixIn, TCPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        # A peer that vanished mid-response (worker socket flap, phone
+        # backgrounded) makes http.server's final wfile.flush() raise. That's
+        # routine churn, not an incident — the full-traceback default buried
+        # the journal in noise (dozens/day) and hid real errors during the
+        # 2026-07 passkey-storm forensics. Anything else still prints whole.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ValueError, ConnectionError, TimeoutError)):
+            print(f"[relay] dropped link to {client_address}: {exc}", flush=True)
+            return
+        super().handle_error(request, client_address)
 
 
 def main():

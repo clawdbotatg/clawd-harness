@@ -39,8 +39,10 @@ Verify the JS first: extract the `<script>` and `node --check` it.
   retained as `~/clawd-fleet.pre-git-backup` — safe to delete once you trust the checkout.)
 - **Ship relay/worker/controller changes** — commit + push, then pull + restart:
   `git push origin main` then
-  `ssh zkllmapi 'cd ~/clawd-harness && git pull && sudo systemctl restart clawd-fleet-relay clawd-fleet-worker clawd-controller'`.
-  (UI-only `index.html` changes need **no restart** — the relay serves it fresh per request.)
+  `ssh zkllmapi 'cd ~/clawd-harness && git pull && sudo systemctl restart clawd-fleet-relay clawd-controller'`.
+  (UI-only `index.html` changes need **no restart** — the relay serves it fresh per
+  request. The **worker restarts itself** when its code changes on disk — see below —
+  so it's out of the systemctl list; add `clawd-fleet-worker` back only to force it.)
   The box **mirrors the repo layout**: `relay.py`/`worker.py` under `~/clawd-harness/fleet/`,
   the shared UI at `~/clawd-harness/index.html` (`_serve_file` checks `HERE/` then
   `HERE.parent/`). The controller runs `python3 -m controller serve` with cwd
@@ -56,6 +58,18 @@ The laptop runs `worker.py` as a launchd agent `com.clawd.fleet-worker`
 (`~/Library/LaunchAgents/`), pointing `FLEET_RELAY=wss://h.atg.link` and
 `--harness ws://127.0.0.1:8787`. To add a machine: run `worker.py` there with the
 worker token, and add its `--machine` id to `FLEET_WORKER_ALLOW` on the box.
+
+**Workers self-restart on code updates.** The harness's auto-pull refreshes the
+checkout, and the worker watches its own import surface (`worker.py`, `e2e.py`,
+`fleet_ws.py`, `webauthn.py`, `webpush.py`, `sysstats.py`): on an mtime change it
+waits for the pull to settle (~90s) and for no viewer to be attached (forced after
+30 min), then `execv`s itself. Viewers re-attach with a silent E2E resume — no
+passkey. This closed the gap where worker fixes shipped in git but every box kept
+running stale code until someone bounced the daemon (the 2026-07 passkey storms
+outlived their own fix that way). Opt out per box with `FLEET_SELF_RESTART=0`.
+**A box whose worker predates this feature needs one last manual restart** to get
+onto self-restarting code: `launchctl kickstart -k gui/$UID/com.clawd.fleet-worker`
+(Mac) or `sudo systemctl restart clawd-fleet-worker` (the hub box).
 
 ## Auth — passkey-only, one trust story
 **There is no user token.** Your passkey is the sole user credential

@@ -38,6 +38,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -65,6 +66,22 @@ SYSSTATS_INTERVAL = float(os.environ.get("FLEET_SYSSTATS_INTERVAL", "10"))
 # link (relay restart, NAT/Wi-Fi drop, sleep) breaks cleanly and reconnects
 # instead of blocking forever in recv(). Must stay > the relay's ping interval.
 RELAY_READ_TIMEOUT = float(os.environ.get("FLEET_RELAY_READ_TIMEOUT", "70"))
+
+# Self-update: the box's checkout auto-pulls (the harness's auto_update_loop),
+# but nothing restarted the worker process — so worker fixes shipped in git and
+# then ran nowhere, with every box executing stale code until a human bounced
+# the daemon (the 2026-07 passkey storms were fixed in-repo days before the
+# stale workers stopped inflicting them). Watch our own import surface and exec
+# a fresh copy when it changes on disk: wait for a lull (no attached viewer),
+# force after RESTART_MAX_WAIT so a busy box still converges. Resume material
+# is persisted, so viewers re-attach with a silent resume — no passkey owed.
+# Opt out (e.g. while live-editing a worker) with FLEET_SELF_RESTART=0.
+RESTART_POLL = 60.0
+RESTART_SETTLE = 90.0     # change must sit still this long first (mid-pull guard)
+RESTART_MAX_WAIT = 1800.0  # viewer-attached ceiling: restart anyway after 30 min
+RESTART_WATCH = ("worker.py", "e2e.py", "fleet_ws.py", "webauthn.py",
+                 "webpush.py", "sysstats.py")
+SELF_RESTART = os.environ.get("FLEET_SELF_RESTART", "1") != "0"
 
 
 def _load_env_file():
@@ -1061,12 +1078,57 @@ class Worker:
                     pass
             self._drop_all_links()
 
+    def _watch_mtimes(self):
+        m = {}
+        for name in RESTART_WATCH:
+            try:
+                m[name] = (HERE / name).stat().st_mtime
+            except OSError:
+                pass   # mid-pull rename or an optional module — next tick sees it
+        return m
+
+    def update_watch_loop(self):
+        """Exec a fresh copy of ourselves when the code on disk changes (git pull).
+        Settle first (a pull touches several files over a moment), then wait for a
+        lull — no mobile holding a harness link through us — before restarting;
+        after RESTART_MAX_WAIT restart anyway. execv keeps the same pid contract
+        with launchd/systemd, and viewers silently resume off persisted material."""
+        baseline = self._watch_mtimes()
+        last, stable_since, changed_at = baseline, None, None
+        while True:
+            time.sleep(RESTART_POLL)
+            cur = self._watch_mtimes()
+            if cur == baseline:
+                last, stable_since, changed_at = cur, None, None
+                continue
+            now = time.monotonic()
+            if changed_at is None:
+                changed_at = now
+                print(f"{ts()} [worker {self.machine}] code changed on disk — "
+                      f"will restart at the next lull", flush=True)
+            if cur != last:
+                last, stable_since = cur, now
+                continue
+            if stable_since is None:
+                stable_since = now
+            if now - stable_since < RESTART_SETTLE:
+                continue
+            with self.links_lock:
+                busy = bool(self.links)
+            if busy and now - changed_at < RESTART_MAX_WAIT:
+                continue
+            print(f"{ts()} [worker {self.machine}] restarting to pick up new code"
+                  + (" (viewer attached — max wait hit)" if busy else ""), flush=True)
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
     def run(self):
         # A relay node has no harness behind it, so there are no stats to poll —
         # skip the loop (it would just spam "Connection refused" forever).
         if self.kind != "relay":
             threading.Thread(target=self.stats_loop, daemon=True).start()
             threading.Thread(target=self.sysstats_loop, daemon=True).start()
+        if SELF_RESTART:
+            threading.Thread(target=self.update_watch_loop, daemon=True).start()
         backoff = 1.0
         while True:
             up0 = time.monotonic()
