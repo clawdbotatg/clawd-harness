@@ -232,6 +232,15 @@ HANDOFF_COOLDOWN = float(os.environ.get("HANDOFF_COOLDOWN", "600"))
 # been silent this long is stuck on the limit screen (the eaten turn never
 # emits Stop, so `busy` never clears) — the sweep reclaims and moves it.
 BUSY_STUCK = float(os.environ.get("BUSY_STUCK", "600"))
+# Rebalance = the spend-the-soonest-reset policy applied to sessions ALREADY
+# RUNNING: an idle session sitting on a healthy pool still moves to the
+# router's best pool when that pool's weekly window resets ≥ MARGIN sooner —
+# otherwise a long-lived session pins yesterday's routing choice for days
+# while the soonest-resetting pool forfeits capacity. Same handoff mechanics
+# and per-session cooldown as the drain rescue; the margin keeps near-ties
+# (incl. same-day resets) from churning respawns.
+SUB_REBALANCE = os.environ.get("SUB_REBALANCE", "1") != "0"
+SUB_REBALANCE_MARGIN = float(os.environ.get("SUB_REBALANCE_MARGIN", "21600"))  # s
 # Paths symlinked from ~/.claude into each account dir so every account runs
 # with the user's full extension environment (same list claw-router shares).
 SHARE_PATHS = ["settings.json", "CLAUDE.md", "commands", "rules", "skills",
@@ -2050,7 +2059,11 @@ class SessionManager:
     def _handoff_sweep(self):
         """Poller-driven safety net behind maybe_handoff: sessions idling on a
         drained/broken plan get moved even if they never emit another Stop
-        (e.g. the limit screen already ate their last turn)."""
+        (e.g. the limit screen already ate their last turn). With
+        SUB_REBALANCE it ALSO moves idle sessions off healthy pools when the
+        router's best pool wins on the weekly-reset clock (_rebalance_win) —
+        promise 2's spend-the-soonest-reset policy applied to running
+        sessions, not just new spawns."""
         if not SUB_AUTOSWITCH:
             return
         now = time.time()
@@ -2067,19 +2080,47 @@ class SessionManager:
         if not best or best.name in drained:
             return
         for s in sessions:
-            if not (s.alive and s.account in drained and s.account != best.name
+            if not (s.alive and s.account != best.name
                     and now - s.last_handoff >= HANDOFF_COOLDOWN):
                 continue
-            if s.busy:
-                # `busy` with silent hooks on a dead plan = the limit screen ate
-                # the turn (no Stop ever comes) — stuck, not working. Reclaim it.
-                if not (s.account in dead and now - s.last_active > BUSY_STUCK):
-                    continue
-                print(f"[handoff {s.cid[:8]}] busy but hook-silent "
-                      f"{int(now - s.last_active)}s on dead plan {s.account} — "
-                      "treating as stuck", flush=True)
-                s.busy = False
-            self._handoff(s, best)
+            if s.account in drained:
+                if s.busy:
+                    # `busy` with silent hooks on a dead plan = the limit screen ate
+                    # the turn (no Stop ever comes) — stuck, not working. Reclaim it.
+                    if not (s.account in dead and now - s.last_active > BUSY_STUCK):
+                        continue
+                    print(f"[handoff {s.cid[:8]}] busy but hook-silent "
+                          f"{int(now - s.last_active)}s on dead plan {s.account} — "
+                          "treating as stuck", flush=True)
+                    s.busy = False
+                self._handoff(s, best)
+                continue
+            why = None if s.busy else self._rebalance_win(s.account, best)
+            if why:
+                self._handoff(s, best, why)
+
+    def _rebalance_win(self, name, best):
+        """Reason string when an idle session on healthy pool `name` should
+        move to `best` anyway: best's weekly window resets ≥
+        SUB_REBALANCE_MARGIN sooner (use-it-or-lose-it). None = stay put.
+        Same-pool logins (one org, several config dirs) never rebalance —
+        they share the limit, so moving buys nothing. Both reset clocks must
+        be KNOWN: a blind/stale pool is a polling problem, not a routing
+        signal, and pct headroom alone never justifies a respawn (the drain
+        rescue covers that endgame)."""
+        if not SUB_REBALANCE:
+            return None
+        acct = self.accounts.get(name)
+        if not acct or not acct.ready or acct.broken:
+            return None
+        if acct.org and best.org and acct.org == best.org:
+            return None
+        cur_r, best_r = _weekly_reset(acct.usage), _weekly_reset(best.usage)
+        if cur_r is None or best_r is None \
+                or cur_r - best_r < SUB_REBALANCE_MARGIN:
+            return None
+        return (f"rebalance: weekly resets {int((cur_r - best_r) // 3600)}h "
+                "sooner — spend it before it's forfeited")
 
     def maybe_handoff(self, s):
         """Mid-session account handoff (SUB-ROUTING.md Phase 5): called after
@@ -2121,7 +2162,7 @@ class SessionManager:
         self.broadcast_accounts()
         self._handoff(s, best)
 
-    def _handoff(self, s, target):
+    def _handoff(self, s, target, why="plan drained; resuming under the fresh one"):
         """Move one idle session to `target`'s account: link its transcript
         into the target config dir (real-file-wins, never clobber), replace
         the session object under the SAME cid with a --resume respawn, and
@@ -2145,10 +2186,10 @@ class SessionManager:
                         dst.symlink_to(extra)
             except (ValueError, OSError) as e:
                 print(f"[handoff {s.cid[:8]}] transcript link failed ({e}) — "
-                      "staying on the drained plan", flush=True)
+                      "staying put", flush=True)
                 return
         print(f"[handoff {s.cid[:8]}] {s.account} → {target.name} "
-              "(plan drained; resuming under the fresh one)", flush=True)
+              f"({why})", flush=True)
         fresh = ClaudeSession(
             self, cid=s.cid, pid=s.pid, session_id=s.session_id, resuming=True,
             title=s.title, desc=s.desc, prompt_count=s.prompt_count,

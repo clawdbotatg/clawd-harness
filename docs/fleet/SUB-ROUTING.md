@@ -123,6 +123,16 @@ another Stop (their last turn died on the limit screen). Per-session
 guarantee hold for LONG-LIVED sessions, not just fresh spawns: no session
 ever sits on a dead plan while another has headroom.
 
+**Rebalance (2026-07-09):** the sweep also applies the reset-soonest spend
+policy to sessions already running — an IDLE session on a *healthy* pool is
+handed off (same mechanics) when the router's best pool's weekly window
+resets ≥ `SUB_REBALANCE_MARGIN` (6 h) sooner (`_rebalance_win`). Cross-pool
+only (same-org logins share the limit), both weekly clocks must be known
+(pct headroom alone never justifies a respawn), idle only, cooldown applies.
+`SUB_REBALANCE=0` disables. Without this, a session spawned on the right
+pool *yesterday* kept burning it long after another pool became the
+use-it-or-lose-it priority.
+
 ## Risks / notes
 
 - **Undocumented endpoint** — may change or vanish. Everything degrades to

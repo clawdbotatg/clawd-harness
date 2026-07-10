@@ -113,7 +113,10 @@ user-facing overview; this file orients an agent working **on** the code.
   non-exhausted pool whose WEEKLY window resets soonest (use-it-or-lose-it;
   headroom is only the tie-break — see `_route_key`), debounced via `SUB_*`
   env knobs. Sessions
-  record `account`+`config_dir` at spawn so `--resume` finds the right dir.
+  record `account`+`config_dir` at spawn so `--resume` finds the right dir —
+  but they don't stay pinned: the sweep hands an idle session off to a
+  better pool, both as a drain rescue and as a **rebalance** onto the
+  reset-soonest pool (`_rebalance_win`, `SUB_REBALANCE*` knobs).
   Deep doc: [`docs/fleet/SUB-ROUTING.md`](docs/fleet/SUB-ROUTING.md); what the
   accounts panel should display + mis-bound-login runbook:
   [`docs/fleet/ACCOUNTS-PANEL.md`](docs/fleet/ACCOUNTS-PANEL.md) (key trap: one
