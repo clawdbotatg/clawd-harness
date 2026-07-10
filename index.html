@@ -3594,7 +3594,15 @@ function highlightCard(cid) {
     c.classList.toggle('active', c.dataset.cid === cid));
 }
 
+let sessionsRepaintDeferred = false; // a broadcast landed while the machine picker had focus
 function renderSessions() {
+  // A repaint tears down sessionsEl wholesale, which destroys the machine
+  // <select> mid-pick (closes the native dropdown, steals focus). While focus
+  // is inside the picker row, defer metadata-driven repaints; the row's
+  // focusout handler catches up once the user is done.
+  const mp = sessionsEl.querySelector('.machinepick');
+  if (mp && mp.contains(document.activeElement)) { sessionsRepaintDeferred = true; return; }
+  sessionsRepaintDeferred = false;
   // Sessions for this project across EVERY machine that hosts it, each tagged with
   // its `_machine` — no more "pick one machine to view". A multi-machine project
   // now shows one merged list; each card badges the host it's on.
@@ -3629,13 +3637,22 @@ function renderSessions() {
       if (me.machineId === newSessionMachine) opt.selected = true;
       sel.appendChild(opt);
     });
-    sel.onchange = () => { newSessionMachine = sel.value; renderSessions(); };
+    const starLabel = () =>
+      defaultMachineFor(currentProjectKey) === newSessionMachine ? '★ default' : '☆ set default';
+    // update the ★ in place — a full repaint here would drop focus mid-interaction
+    sel.onchange = () => { newSessionMachine = sel.value; star.textContent = starLabel(); };
     const star = document.createElement('button');
     star.className = 'setdefault';
-    star.textContent = defaultMachineFor(currentProjectKey) === newSessionMachine ? '★ default' : '☆ set default';
+    star.textContent = starLabel();
     star.title = 'make this the default machine for new sessions in this project';
-    star.onclick = () => { setDefaultMachine(currentProjectKey, newSessionMachine); renderSessions(); };
+    star.onclick = () => { setDefaultMachine(currentProjectKey, newSessionMachine); star.textContent = starLabel(); };
     mrow.append(add, sel, star);
+    mrow.addEventListener('focusout', e => {
+      if (e.relatedTarget && mrow.contains(e.relatedTarget)) return; // select → ★ stays in-row
+      if (!sessionsRepaintDeferred) return;
+      // small delay so a click that caused this blur lands before the rebuild
+      setTimeout(() => { if (sessionsRepaintDeferred) renderSessions(); }, 300);
+    });
     sessionsEl.appendChild(mrow);
   } else {
     const add = document.createElement('button');
