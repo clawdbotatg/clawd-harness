@@ -228,6 +228,7 @@
           padding:4px 8px; font-size:12px; color:var(--ink); }
   .chip img { width:30px; height:30px; object-fit:cover; border:1px solid var(--edge); }
   .chip.up { color:var(--dim); font-style:italic; }
+  .chip.err { color:var(--err); border-color:var(--err); }
   .chip button { background:transparent; border:0; color:var(--dim); cursor:pointer; padding:0 2px;
                  font-weight:700; font-size:14px; }
   .chip button:hover { color:var(--err); }
@@ -3961,9 +3962,9 @@ function renderChips() {
   attachEl.innerHTML = '';
   attachments.forEach((a, i) => {
     const c = document.createElement('div');
-    c.className = 'chip' + (a.pending ? ' up' : '');
+    c.className = 'chip' + (a.pending ? ' up' : '') + (a.error ? ' err' : '');
     if (a.url) { const im = document.createElement('img'); im.src = a.url; c.appendChild(im); }
-    c.appendChild(document.createTextNode(a.pending ? 'uploading…' : a.name));
+    c.appendChild(document.createTextNode(a.pending ? 'uploading…' : (a.error || a.name)));
     if (!a.pending) {
       const x = document.createElement('button'); x.textContent = '✕';
       x.onclick = () => { attachments.splice(i, 1); renderChips(); };
@@ -3973,11 +3974,39 @@ function renderChips() {
   });
 }
 
+// Phone photos routinely run multi-MB, and the fleet path has proxy body caps
+// in front of the relay — downscale anything big to fit (claude reads the image
+// content; it doesn't need the pixel-perfect original). Falls back to the
+// original file on any decode failure (e.g. a format canvas can't ingest).
+const UPLOAD_SOFT_MAX = 900 * 1024;
+async function shrinkImage(file) {
+  if (file.size <= UPLOAD_SOFT_MAX) return file;
+  try {
+    const bmp = await createImageBitmap(file);
+    let scale = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
+    for (let i = 0; i < 5; i++, scale *= 0.7) {
+      const cv = document.createElement('canvas');
+      cv.width = Math.max(1, Math.round(bmp.width * scale));
+      cv.height = Math.max(1, Math.round(bmp.height * scale));
+      cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+      const blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', 0.85));
+      if (blob && blob.size <= UPLOAD_SOFT_MAX) {
+        bmp.close();
+        return new File([blob], (file.name || 'photo').replace(/\.\w+$/, '') + '.jpg',
+                        { type: 'image/jpeg' });
+      }
+    }
+    bmp.close();
+  } catch (e) { /* fall through with the original */ }
+  return file;
+}
+
 async function uploadImage(file) {
   if (FLEET && !currentMachine) return;   // fleet: no machine selected → nowhere to upload to
   const slot = { pending: true, url: URL.createObjectURL(file) };
   attachments.push(slot); renderChips();
   try {
+    file = await shrinkImage(file);
     // Fleet: the relay forwards the bytes to the current machine's worker, which
     // POSTs to that machine's local harness /upload and returns a path local to
     // it. Direct mode talks straight to the local /upload (no machine param —
@@ -3985,11 +4014,14 @@ async function uploadImage(file) {
     const mq = FLEET ? `&machine=${encodeURIComponent(currentMachine)}` : '';
     const res = await fetch(`/upload?t=${encodeURIComponent(token)}${mq}`, {
       method: 'POST', headers: { 'Content-Type': file.type || 'image/png' }, body: file });
-    if (!res.ok) throw new Error('upload failed');
+    if (!res.ok) throw new Error(`upload failed (${res.status})`);
     const j = await res.json();
     slot.pending = false; slot.path = j.path; slot.name = j.name;
   } catch (e) {
-    attachments = attachments.filter(a => a !== slot);
+    // Keep the chip, visibly failed — a silently vanishing chip reads as "the
+    // button is broken" (it hid a proxy 413 for days). No path → never folded
+    // into a send; ✕ dismisses.
+    slot.pending = false; slot.error = `⚠ ${String(e.message || e)}`;
   }
   renderChips();
 }

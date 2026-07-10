@@ -105,9 +105,12 @@ Corollary directions baked into the design:
   at `GET /` (so the page + WS share one origin). It's the same file the harness
   serves directly — no fork, no copy; the adapter is gated on `FLEET` and
   localized (search `hsend`, `currentMachine`, `renderMachines`). Known gaps vs.
-  direct mode: image upload + server-side TTS hit harness-only endpoints
-  (`/upload`, `/tts`, `/config`) that the relay doesn't proxy — they degrade
-  gracefully (browser TTS still works).
+  direct mode: server-side TTS hits harness-only endpoints (`/tts`, `/config`)
+  that the relay doesn't proxy — degrades gracefully (browser TTS still works).
+  Image upload IS bridged (relay `do_POST` → worker → local harness `/upload`),
+  but note the nginx vhost in front of the relay needs `client_max_body_size`
+  raised past its 1MB default or big phone photos 413 at the edge (the UI also
+  downscales >900KB images before POSTing, so this mostly can't trigger).
 - **fleet_cli.py** — terminal mobile stand-in (prototype `ping`/`exec`); the
   real UI is now `index.html`.
 - **fleet_smoke.py** — relay + 2 workers + scripted mobile; asserts the
