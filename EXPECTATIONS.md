@@ -61,6 +61,21 @@ viewers. This is not theoretical: `~/Library/Logs/clawd-harness.log` shows it
 firing in production (`[handoff …] clawd → ef (plan drained; resuming under
 the fresh one)`).
 
+**Running sessions follow promise 2 too (added 2026-07-09 evening, at
+Austin's direction).** Handoff used to be drain-rescue only: a session
+spawned on yesterday's best pool would sit there for days while the
+soonest-resetting pool forfeited capacity ("I have a session burning slop
+but 100% it should be burning austingriffith — it resets the soonest").
+Now the poller sweep also **rebalances**: an IDLE session on a healthy pool
+moves — same seamless `--resume` handoff, same cid — whenever the router's
+best pool's weekly window resets ≥ 6 h sooner (`SUB_REBALANCE_MARGIN`;
+`SUB_REBALANCE=0` turns it off). Guard rails: never mid-turn (idle only),
+never between logins of the SAME pool (one org, several config dirs — moving
+buys nothing), only when both reset clocks are actually known (a blind/stale
+poll is not a routing signal), and the per-session `HANDOFF_COOLDOWN` (10 min)
+caps churn. Log signature: `[handoff …] slop → sub2 (rebalance: weekly resets
+59h sooner — spend it before it's forfeited)`.
+
 **The two honest caveats:**
 - **Handoff is per-machine.** A session on heart can only switch between
   logins *heart* holds. A pool signed in only on leftclaw cannot rescue heart.
@@ -122,6 +137,7 @@ turn ends early and the session heals itself before my next message."**
 | `faece99` | the 429 death-spiral: never poll with known-expired tokens; honor Retry-After; 'limited' placeholders explain themselves |
 | `52432b2` | back off on token-endpoint 429s too (the refresh retry was its own hammer) |
 | `c32e2e3` | **routing policy change (Austin):** spend the pool whose weekly window resets soonest — headroom is only the tie-break (`_route_key`; promise 2 rewritten) |
+| `26a8eea` | **rebalance (Austin):** promise 2 applied to RUNNING sessions — the sweep hands an idle session off a healthy pool to the reset-soonest one (≥6 h sooner, cross-pool only, both clocks known); before this a long-lived session pinned its spawn-day choice until it drained |
 
 **End-state verified 2026-07-09 afternoon:** all four pools (austingriffith
 20x · Ethereum Foundation 5x · clawd 20x · slop 5x) live with real numbers
