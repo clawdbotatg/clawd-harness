@@ -684,7 +684,10 @@ class Worker:
                 print(f"{ts()} [worker {self.machine}] E2E done re-sent to {frm} "
                       f"(reply to the pre-flap id was lost)", flush=True)
                 return self.reply(frm, dict(cached, t="e2e.done"))
-            return self.reply(frm, {"t": "e2e.err", "error": "no handshake"})
+            # `for` names the attempt this error belongs to (the signed challenge)
+            # so the client can drop a replaced attempt's zombie error instead of
+            # letting it kill the live channel's silent resume (a paid passkey).
+            return self.reply(frm, {"t": "e2e.err", "error": "no handshake", "for": chal})
         if getattr(hs, "origin_frm", frm) != frm:
             print(f"{ts()} [worker {self.machine}] E2E auth from {frm} completes "
                   f"handshake started as {hs.origin_frm} (socket flap mid-passkey)", flush=True)
@@ -695,7 +698,7 @@ class Worker:
             # transcript — a failure here is a bad passkey/replay/forgery, not the old
             # crossed-instance `confirm` (that one is structurally gone).
             print(f"{ts()} [worker {self.machine}] E2E auth failed for {frm}: {e}", flush=True)
-            return self.reply(frm, {"t": "e2e.err", "error": "auth"})
+            return self.reply(frm, {"t": "e2e.err", "error": "auth", "for": chal})
         with self.e2e_lock:
             self.e2e_sessions[frm] = sess
             self.e2e_resume[e2emod.b64u(hs.keys["resume_id"])] = {
@@ -719,7 +722,7 @@ class Worker:
                 self.e2e_resume.pop(msg.get("id", ""), None)
                 ent = None
         if not ent:
-            return self.reply(frm, {"t": "e2e.err", "error": "resume"})
+            return self.reply(frm, {"t": "e2e.err", "error": "resume", "for": msg.get("id", "")})
         rn = os.urandom(32)
         sess = e2emod.Session(e2emod.resume_keys(ent["master"], rn), "worker")
         sess.hard_deadline = ent["hard"]   # resume never extends the hard ceiling

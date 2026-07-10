@@ -75,6 +75,32 @@ def main():
         check("B's done carries B's server-finished",
               r_B.get("cf_w") and e2e.hmac.compare_digest(expect, e2e.b64u_dec(r_B["cf_w"])))
 
+    # The zombie-error correlation echo (2026-07-09: a replaced attempt's stray
+    # 'no handshake' err, landing on the phone's LIVE channel mid-resume, burned
+    # the 24h resume material → an unearned Face ID, 2-3×/machine/day). The
+    # client filters strays by matching `for` against its own attempt — so the
+    # worker must name which attempt an auth error belongs to.
+    ca_C, keys_C = client_auth_for(w, mid, "m62")
+    to, r_dup = deliver_auth(w, "m62", ca_C)     # completes normally…
+    check("attempt C completes", r_dup.get("t") == "e2e.done")
+    ca_C["cf_m"] = e2e.b64u(b"\x00" * 32)        # …then a tampered replay of it:
+    to, r_z = deliver_auth(w, "m62", ca_C)       # done-cache misses (cf_m differs) → err
+    chal_C = e2e.b64u(keys_C["webauthn_challenge"])
+    check("a 'no handshake' err names its attempt (for=challenge)",
+          r_z.get("t") == "e2e.err" and r_z.get("for") == chal_C)
+    to, r_r = None, None
+    replies = []
+    orig = w.reply
+    w.reply = lambda t, m: replies.append((t, m))
+    try:
+        w._e2e_resume("m62", {"t": "e2e.resume", "id": "no-such-resume-id"})
+    finally:
+        w.reply = orig
+    to, r_r = replies[-1]
+    check("a 'resume' err names its attempt (for=resume id)",
+          r_r.get("t") == "e2e.err" and r_r.get("error") == "resume"
+          and r_r.get("for") == "no-such-resume-id")
+
     if FAILED:
         print(f"\nRED ({len(FAILED)} failing) — the confirm livelock is reproduced. "
               f"This is the regression gate for the challenge-first fix.")

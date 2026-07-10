@@ -1552,6 +1552,7 @@ const e2eChans = {};   // machine -> { status, session, queue, sendChain, recvCh
 // crypto handshake is unchanged — so it costs nothing in security.
 const e2eFailUntil = {};            // machine -> epoch ms; suppresses BACKGROUND passkey retries after a failure
 const E2E_FAIL_COOLDOWN_MS = 30000;
+const e2eCfFails = {};              // machine -> consecutive resume-confirm mismatches; ≥2 = diverged material, clear it
 function e2eDeferred() { let r, j; const p = new Promise((res, rej) => { r = res; j = rej; }); p.resolve = r; p.reject = j; return p; }
 function e2ePin(m) { try { return localStorage.getItem('cc_e2e_pin_' + m); } catch { return null; } }
 function e2eSetPin(m, b) { try { localStorage.setItem('cc_e2e_pin_' + m, b); } catch {} }
@@ -1645,34 +1646,52 @@ async function e2eEnsure(machine, opts = {}) {
     if (rs) {
       try {
         meta.textContent = 'resuming ' + machine + '…';
+        ch.phase = 'resume'; ch.resumeId = rs.id;
         e2eSendCtlTracked(ch, machine, { t: 'e2e.resume', id: rs.id });
         const r = await ch.dRes;                                  // {rn, cf}
         ch.pendingCtl = null;
         const master = b64uDec(rs.master), rn = b64uDec(r.rn);
         if (!E2E._eq(await E2E.resumeConfirm(master, rn), b64uDec(r.cf))) throw new Error('resume-cf');
         ch.session = await E2E.resumeSession(master, rn);
-        ch.status = 'open'; delete e2eFailUntil[machine]; meta.textContent = '';
+        ch.status = 'open'; delete e2eFailUntil[machine]; delete e2eCfFails[machine]; meta.textContent = '';
         e2eLog(machine, '#' + ch.inst, 'resumed silently');
         const q = ch.queue; ch.queue = [];
         for (const fr of q) e2eSendFrame(machine, fr);
         return ch;
-      } catch (e) {                                               // expired/dropped → re-handshake
-        e2eLog(machine, '#' + ch.inst, 'resume failed (' + ((e && e.message) || e) + ') → full handshake');
-        e2eClearResume(machine); ch.pendingCtl = null; ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred();
+      } catch (e) {
+        // Burn the material ONLY when the worker itself rejected THIS resume id
+        // (entry expired/unknown — the passkey is genuinely owed), or its confirm
+        // failed twice running (diverged material). Anything else — a flap ate
+        // the reply, a zombie's stray error, a single cf mismatch — keeps the
+        // material and fails this attempt: the next ensure retries the resume
+        // silently. Clearing on every failure here was the 15-passkeys-a-day bug.
+        const why = (e && e.message) || String(e);
+        const dead = why === 'resume'
+          || (why === 'resume-cf' && (e2eCfFails[machine] = (e2eCfFails[machine] || 0) + 1) >= 2);
+        if (!dead) {
+          e2eLog(machine, '#' + ch.inst, 'resume hiccup (' + why + ') — material kept for a silent retry');
+          throw e;
+        }
+        e2eLog(machine, '#' + ch.inst, 'resume dead (' + why + ') → full handshake');
+        e2eClearResume(machine); delete e2eCfFails[machine];
+        ch.pendingCtl = null; ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred();
       }
     }
     // 2) Full handshake (passkey via the gnome modal).
     const pinB64 = e2ePin(machine);
     const cli = E2E.client(machine, pinB64 ? b64uDec(pinB64) : null);
     meta.textContent = 'securing ' + machine + '…';
+    ch.phase = 'hello'; ch.resumeId = null;
     e2eSendCtlTracked(ch, machine, await cli.hello());
     const sh = await ch.dSH;                              // ServerHello (worker-signed)
     ch.pendingCtl = null;
     const { challenge, ikW, build } = await cli.auth(sh); // verify sig + pin, derive keys
     if (!pinB64) { e2eSetPin(machine, b64uEnc(ikW)); ch.firstPin = true; }   // TOFU
-    e2eLog(machine, '#' + ch.inst, 'passkey prompt (challenge ' + b64uEnc(challenge).slice(0, 12) + '…)');
+    ch.chal = b64uEnc(challenge);                         // this attempt's identity, for err correlation
+    e2eLog(machine, '#' + ch.inst, 'passkey prompt (challenge ' + ch.chal.slice(0, 12) + '…)');
     const assertion = await e2eGetAssertion(machine, challenge);      // Face ID, channel-bound
     hidePasskey();
+    ch.phase = 'auth';
     e2eSendCtlTracked(ch, machine, await build(assertion));          // ClientAuth
     e2eLog(machine, '#' + ch.inst, 'ClientAuth sent (challenge ' + b64uEnc(challenge).slice(0, 12) + '…)');
     const sd = await ch.dSD;                              // ServerDone (key confirmation)
@@ -1725,7 +1744,32 @@ function e2eOnCtl(machine, msg) {
   if (msg.t === 'e2e.shello') ch.dSH.resolve(msg);
   else if (msg.t === 'e2e.resumed') ch.dRes.resolve(msg);
   else if (msg.t === 'e2e.done') ch.dSD.resolve(msg);
-  else if (msg.t === 'e2e.err') { e2eLog(machine, 'worker err "' + (msg.error || '?') + '" → #' + ch.inst + ' (status ' + ch.status + ')'); const e = new Error(msg.error || 'worker error'); ch.dRes.reject(e); ch.dSH.reject(e); ch.dSD.reject(e); if (ch.status !== 'open') ch.status = 'failed'; }
+  else if (msg.t === 'e2e.err') {
+    // A worker error only counts against the attempt it belongs to. Blanket
+    // rejection here (all three deferreds, any error) was the passkey leak: a
+    // replaced attempt's zombie ClientAuth earns a 'no handshake' that landed on
+    // the LIVE channel mid-resume, the resume "failed", the material got burned,
+    // and the user paid a fresh Face ID (2-3/machine/day instead of 1). So:
+    // gate by phase (which deferred is actually being awaited), and when the
+    // worker echoes `for` (the signed challenge / resume id), require it to
+    // match this channel's attempt — otherwise it's a zombie: log and drop.
+    const era = msg.error || 'worker error';
+    const phaseOk = era === 'e2e unavailable'
+      || (era === 'resume' && ch.phase === 'resume')
+      || (era === 'hello' && ch.phase === 'hello')
+      || ((era === 'auth' || era === 'no handshake') && ch.phase === 'auth');
+    const forOk = msg.for == null || msg.for === '' || msg.for === ch.resumeId || msg.for === ch.chal;
+    if (!phaseOk || !forOk) { e2eLog(machine, '#' + ch.inst, 'stray worker err "' + era + '" ignored (phase ' + (ch.phase || '?') + (msg.for ? ', for ' + String(msg.for).slice(0, 12) + '…' : '') + ') — a replaced attempt\'s zombie'); return; }
+    e2eLog(machine, 'worker err "' + era + '" → #' + ch.inst + ' (status ' + ch.status + ')');
+    const e = new Error(era);
+    if (ch.phase === 'resume') ch.dRes.reject(e);
+    else if (ch.phase === 'hello') ch.dSH.reject(e);
+    else ch.dSD.reject(e);
+    // No status flip here: an accepted rejection either falls through to the full
+    // handshake (resume path) or reaches e2eEnsure's outer catch, which is the one
+    // place that marks 'failed' + arms the cooldown. Flipping early let a user tap
+    // REPLACE a channel that was mid-Face-ID — the double-prompt overlap.
+  }
 }
 
 // Decrypt a record (from the JSON path or the binary PTY path) in seq order.
