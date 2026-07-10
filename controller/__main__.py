@@ -108,20 +108,28 @@ def main(argv):
                 brain.forget_conversation(k)
 
             def chat(self, text):
-                brain.conversation_key = _key()
+                tid = threads.current
+                brain.conversation_key = _key(tid)
+                # Record the user turn BEFORE the brain runs: a turn can take minutes,
+                # and any transcript fetch in that window (view re-entry, reload,
+                # another device) must already show the prompt — not lose it until
+                # the reply lands.
+                threads.record("me", text, tid=tid)
+                threads.persist()
                 out = brain.chat(text)
-                threads.record("me", text)
-                threads.record("bot", out.get("reply", ""), out.get("trace"))
+                threads.record("bot", out.get("reply", ""), out.get("trace"), tid=tid)
                 threads.persist()
                 return out
 
             def chat_stream(self, text, emit):
                 """Streaming variant — same bookkeeping as chat(), but the brain fires
                 emit(kind, text) per event so a front-end (Telegram) shows live progress."""
-                brain.conversation_key = _key()
+                tid = threads.current
+                brain.conversation_key = _key(tid)
+                threads.record("me", text, tid=tid)
+                threads.persist()
                 out = brain.chat_stream(text, emit)
-                threads.record("me", text)
-                threads.record("bot", out.get("reply", ""), out.get("trace"))
+                threads.record("bot", out.get("reply", ""), out.get("trace"), tid=tid)
                 threads.persist()
                 return out
 

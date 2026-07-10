@@ -62,6 +62,7 @@ class Threads:
             t = self.threads[tid]
             return {"id": tid, "title": t["title"], "archived": t["archived"],
                     "count": sum(1 for m in t["messages"] if m["who"] == "me"),
+                    "msgs": len(t["messages"]),   # total — lets the UI spot a turn that landed while it wasn't looking
                     "current": tid == self.current}
         live = [row(t) for t in self.order if not self.threads[t]["archived"]]
         arch = [row(t) for t in self.order if self.threads[t]["archived"]]
