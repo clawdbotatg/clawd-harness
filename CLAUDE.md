@@ -190,8 +190,11 @@ user-facing overview; this file orients an agent working **on** the code.
   works even on touch where the terminal is read-only), message box
   (type/dictate/paste images). The app opens on the projects rung; a session
   opens as the live terminal on every device (the transcript view was pulled —
-  `DEEP_VIEW`). Terminal is **read-only on touch** (mobile dictation streams
-  self-revising text that xterm forwards as garbled keystrokes). **Shared-PTY
+  `DEEP_VIEW`). Terminal is **read-only on touch by default** (mobile dictation
+  streams self-revising text that xterm forwards as garbled keystrokes) — the
+  key bar's **⌨ toggle** opts into direct typing (soft keyboard → PTY) for TUI
+  prompts/shells; it resets to read-only on leaving the tty view, and dictation
+  should still go through the composer. **Shared-PTY
   sizing:** one PTY can't render two geometries, so resize frames are size
   *claims* and the server follows a single owner — deliberate acts (opening the
   tty view, resizing the window, typing/sending) claim it; reconnect/refit
@@ -200,7 +203,10 @@ user-facing overview; this file orients an agent working **on** the code.
   `claim_resize` in server.py + the `resize`/`ttySize` rows in
   `docs/WS-PROTOCOL.md`. Don't regress this to last-resize-wins: it's what
   stopped a background desktop tab from yanking the terminal down to/up from
-  phone size mid-use.
+  phone size mid-use. Attaching to a PTY another device sized (`hello` dims ≠
+  ours) renders that device's replay mangled — once our claim is applied the
+  client auto re-subscribes for a clean replay (`staleGeomReplay` in
+  index.html), so no manual reload.
 - **URL routing** — nav state lives in the **hash** (the `?t=` token stays in the
   query): `#/` projects · `#/p/<pid>` sessions · `#/p/<pid>/s/<cid>` transcript ·
   `…/tty` terminal. So a reload (or a shared link) lands back on the same
