@@ -2058,6 +2058,15 @@ function handleJson(m) {
       armHelloWatch(currentCid);
       return;
     }
+    // Every hello is a subscribe ACK with a full ring replay right behind it
+    // (hello-first ordering, server.py subscribe()). Reset HERE — at the replay
+    // boundary — not only in subscribe() at send time: recovery paths duplicate
+    // subscribes (the helloWatch bare re-send, the crossed-cid re-assert above,
+    // a pre-auth queued subscribe flushed + fleetResync's own), and a second
+    // replay painted over an already-painted screen is the "came back to an
+    // overstruck/garbled TTY" bug. Resetting on each hello makes every replay
+    // land on a blank screen no matter how many subscribes raced.
+    term.reset();
     currentCid = m.cid;
     if (m.pid) currentPid = m.pid;
     updateBreadcrumb(m.title || '');
