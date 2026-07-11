@@ -304,23 +304,41 @@ def _keychain_service(config_dir):
     return "Claude Code-credentials-" + hashlib.sha256(nfc.encode()).hexdigest()[:8]
 
 
-def _read_oauth_creds(config_dir):
-    """The credential JSON blob for an account dir: macOS Keychain first, then
-    the Linux-style <dir>/.credentials.json. None if absent/unreadable."""
+def _read_oauth_creds_ex(config_dir):
+    """(blob, definitive) — the credential JSON blob for an account dir:
+    macOS Keychain first, then the Linux-style <dir>/.credentials.json.
+    blob=None + definitive=True means the store POSITIVELY holds no
+    credentials (the keychain answered "no such item" and no file exists);
+    blob=None + definitive=False means we couldn't tell — subprocess spawn
+    failure, fd exhaustion, keychain locked, timeout. Callers must treat
+    the indefinite case as transient, NEVER as a sign-out: the 2026-07-11
+    Errno 24 outage mass-flagged every healthy login "credentials refused"
+    through exactly this ambiguity (root cause v3 in EXPECTATIONS.md)."""
+    definitive = False
     try:
         r = subprocess.run(["security", "find-generic-password",
                             "-s", _keychain_service(config_dir),
                             "-a", os.environ.get("USER", ""), "-w"],
                            capture_output=True, text=True, timeout=10)
         if r.returncode == 0 and r.stdout.strip():
-            return json.loads(r.stdout.strip())
+            return json.loads(r.stdout.strip()), True
+        definitive = r.returncode == 44          # errSecItemNotFound: the
+                                                 # keychain ANSWERED "absent"
     except Exception:
         pass
     path = Path(config_dir or os.path.expanduser("~/.claude")) / ".credentials.json"
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text()), True
+    except FileNotFoundError:
+        return None, definitive
     except (OSError, ValueError):
-        return None
+        return None, False
+
+
+def _read_oauth_creds(config_dir):
+    """The blob alone — for callers whose failure mode is already safe on
+    'unknown' (skip a persist, fail the pre-spawn gate, blank a sig)."""
+    return _read_oauth_creds_ex(config_dir)[0]
 
 
 def _write_oauth_creds(config_dir, blob):
@@ -534,21 +552,33 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
     (pct_used, windows, ident|None) when want_ident, ident fetched from the
     profile endpoint with the same working token; AUTH_FAIL ONLY when
     Anthropic's OAuth service itself rejects the refresh grant (the account
-    truly needs a re-sign-in); None for everything else (network blip,
-    Cloudflare block, endpoint change) — callers keep the last snapshot and
-    the router stays put rather than flapping to a blind guess. NEVER map an
-    infra failure to AUTH_FAIL: that exact misdiagnosis (Cloudflare 1010 read
-    as revocation) caused every 'idle login died' incident before 2026-07-09.
+    truly needs a re-sign-in) or the store POSITIVELY holds no credentials;
+    None for everything else (network blip, Cloudflare block, endpoint
+    change, unreadable credential store) — callers keep the last snapshot
+    and the router stays put rather than flapping to a blind guess. NEVER
+    map an infra failure to AUTH_FAIL: that exact misdiagnosis caused every
+    'idle login died' incident — Cloudflare 1010 read as revocation before
+    2026-07-09, an fd-starved credential read on 2026-07-11 (root cause v3).
     allow_refresh=False = poll with the stored access token only and return
     None when it's expired — for accounts whose grant a live claude process
     may also hold (two consumers of one rotating grant can kill the family).
     `tok_cache` (a mutable dict) keeps a refreshed access token in memory
     across polls (plus the 429 back-off horizon); refreshed tokens are
     written back to the credential store via _persist_refreshed."""
-    oauth = (_read_oauth_creds(config_dir) or {}).get("claudeAiOauth") or {}
+    blob, definitive = _read_oauth_creds_ex(config_dir)
+    oauth = (blob or {}).get("claudeAiOauth") or {}
     access, refresh = oauth.get("accessToken"), oauth.get("refreshToken")
     cached = (tok_cache or {}).get("access")
-    if not (access or cached):
+    if not (access or cached or refresh):
+        # Nothing usable. Only a POSITIVE "no credentials stored" verdict is
+        # a sign-out; an unreadable store is an infra failure (Errno 24 made
+        # the `security` spawn itself fail on 2026-07-11 and this exact spot
+        # flagged all seven healthy logins "refused") — keep the last
+        # snapshot and let the next poll retry.
+        if not definitive:
+            _clog(config_dir, "credential store unreadable — transient; "
+                              "keeping the last snapshot")
+            return None
         return AUTH_FAIL
     # A stored access token we KNOW is expired is junk traffic: it can't
     # answer, and the failed calls feed the endpoint's rate limiter until

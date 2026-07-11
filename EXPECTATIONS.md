@@ -145,6 +145,7 @@ turn ends early and the session heals itself before my next message."**
 |---|---|
 | `548bcd3` | fleet: HarnessLink fd leak — 229 zombie links hit launchd's 256-fd limit (Errno 24), harness down; also the hour every account spuriously flipped "credentials refused" (unreadable Keychain ≠ dead login — see v3's residual) |
 | `07c1edb` | **root cause v3**: the token endpoint 429s curl's DEFAULT User-Agent on every request — send `claude-cli/<version> (external, cli)` (`_claude_ua()`); not one background refresh had succeeded since v2 shipped |
+| (next) | **v3's residual closed:** an unreadable credential store is transient, never a sign-out — `_read_oauth_creds_ex` distinguishes "keychain answered absent" (rc 44 + no file → AUTH_FAIL allowed) from "couldn't ask" (Errno 24, locked, timeout → keep last snapshot); ends the false mass "credentials refused" |
 
 **End-state verified 2026-07-09 afternoon:** all four pools (austingriffith
 20x · Ethereum Foundation 5x · clawd 20x · slop 5x) live with real numbers
@@ -192,13 +193,23 @@ covered by the `Bash(ssh:*)` allow rule) → **hard-reload the h.atg.link tab**
 > the reset-soonest comparison ever runs. Fresh data + wrong pick = policy
 > bug; stale data = poller/refresh bug, and the policy never got a vote.
 >
-> **Known residual (same day, from the fd-exhaustion outage):** when the
-> Keychain read itself fails (e.g. `security` can't spawn — Errno 24),
-> `_fetch_usage` sees "no tokens" and returns AUTH_FAIL — every account
-> flips "credentials refused" at once. That's an infra failure marked as
-> death, against v2's own rule. It self-healed after the restart (creds
-> were fine), but the misread is still in the code: a mass simultaneous
-> "credentials refused" is a machine-health signal, not seven dead logins.
+> **Residual (same day, from the fd-exhaustion outage) — FIXED same day:**
+> when the Keychain read itself failed (`security` couldn't spawn — Errno
+> 24), `_fetch_usage` saw "no tokens" and returned AUTH_FAIL — all seven
+> accounts flipped "credentials refused", one per poll, 04:08–05:45. An
+> infra failure marked as death, against v2's own rule, through a second
+> unguarded path (v2 only guarded the *refresh* leg). Worse, the
+> `refused_sig` gate then locked the false verdict in: the healthy,
+> *unchanged* creds read as "same refused login still there", so only the
+> two accounts whose live claude sessions rotated their tokens (sig
+> changed) self-healed — the other five stayed excluded until the 13:28
+> restart cleared the non-persisted `broken` flags. The fix:
+> `_read_oauth_creds_ex` returns a `definitive` verdict alongside the blob
+> — only "the keychain ANSWERED absent (rc 44) and no credentials file
+> exists" may map to AUTH_FAIL; an unreadable store logs `credential store
+> unreadable — transient` and keeps the last snapshot. Rule of thumb
+> stands: a mass simultaneous "credentials refused" is a machine-health
+> signal, not seven dead logins.
 
 ## Root cause v2 — THE REAL ONE (2026-07-09): Cloudflare, not revocation
 
