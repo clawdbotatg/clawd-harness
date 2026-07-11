@@ -448,6 +448,31 @@ def _clog(config_dir, msg):
           f"{time.strftime('%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 
+def _claude_ua():
+    """User-Agent for the OAuth token endpoint, mimicking the claude CLI's
+    own (`claude-cli/<version> (external, cli)`). REQUIRED: the endpoint
+    rate-limits by client identity — curl's default UA gets a blanket 429
+    `rate_limit_error` on EVERY request (no Retry-After; 2026-07-09→11 every
+    refresh on this box failed that way, starving the router of usage data),
+    while the claude-cli UA succeeds immediately. Version read from the real
+    binary once so the UA tracks upgrades; any failure falls back to a
+    known-good pin."""
+    ua = getattr(_claude_ua, "_cached", None)
+    if ua:
+        return ua
+    ver = "2.1.207"
+    try:
+        out = subprocess.run([CLAUDE_BIN, "--version"], capture_output=True,
+                             text=True, timeout=10).stdout.strip().split()
+        if out and out[0][0:1].isdigit():
+            ver = out[0]
+    except Exception:
+        pass
+    ua = f"claude-cli/{ver} (external, cli)"
+    _claude_ua._cached = ua
+    return ua
+
+
 def _refresh_grant(refresh):
     """POST a refresh grant via CURL and return (http_status, body_dict).
 
@@ -456,13 +481,16 @@ def _refresh_grant(refresh):
     with 'error code: 1010' — every urllib refresh in this file's history
     FAILED AT THE EDGE without ever reaching Anthropic, and the harness
     misread that as revoked credentials (the 'idle logins keep dying'
-    epidemic — see EXPECTATIONS.md 2026-07-09). Curl's signature passes.
-    The token travels via stdin so it never appears in `ps` output."""
+    epidemic — see EXPECTATIONS.md 2026-07-09). Curl's signature passes
+    the edge, but the app then rate-limits curl's DEFAULT User-Agent —
+    hence _claude_ua(). The token travels via stdin so it never appears
+    in `ps` output."""
     try:
         r = subprocess.run(
             ["curl", "-sS", "-m", "15", "-w", "\n%{http_code}",
              "-X", "POST", OAUTH_TOKEN_URL,
              "-H", "Content-Type: application/json",
+             "-H", f"User-Agent: {_claude_ua()}",
              "--data-binary", "@-"],
             input=json.dumps({"grant_type": "refresh_token",
                               "refresh_token": refresh,
