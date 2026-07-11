@@ -961,7 +961,22 @@ class ThreadingHTTPServer(ThreadingMixIn, TCPServer):
         super().handle_error(request, client_address)
 
 
+def raise_fd_limit(target=10240):
+    """systemd defaults the soft NOFILE limit to 1024 — the relay holds an fd per
+    worker + per mobile and is the single point of failure for the whole fleet.
+    Raise the soft limit up front; best-effort (never fatal)."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = target if hard == resource.RLIM_INFINITY else min(target, hard)
+        if soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except Exception:
+        pass
+
+
 def main():
+    raise_fd_limit()
     threading.Thread(target=RELAY.ping_loop, daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     print(f"[relay] listening on ws://{BIND}:{PORT}/ws  (token required)", flush=True)

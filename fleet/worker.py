@@ -251,14 +251,15 @@ class HarnessLink:
         self.worker = worker
         self.mobile_id = mobile_id
         self.sock = None
+        self.rfile = None
         self.wfile = None
         self.lock = threading.Lock()
         self.dead = False
 
     def connect(self):
         url = (f"{self.worker.harness_ws}/ws?t={quote(self.worker.harness_token)}")
-        self.sock, rfile, self.wfile = fleet_ws.client_connect(url)
-        threading.Thread(target=self._reader, args=(rfile,), daemon=True).start()
+        self.sock, self.rfile, self.wfile = fleet_ws.client_connect(url)
+        threading.Thread(target=self._reader, args=(self.rfile,), daemon=True).start()
 
     def _reader(self, rfile):
         try:
@@ -303,16 +304,30 @@ class HarnessLink:
     def send_text(self, frame):
         if self.dead or not self.wfile:
             return
-        fleet_ws.ws_send(self.wfile, self.lock, json.dumps(frame),
-                         opcode=0x1, mask=True)  # clients MUST mask
+        try:
+            fleet_ws.ws_send(self.wfile, self.lock, json.dumps(frame),
+                             opcode=0x1, mask=True)  # clients MUST mask
+        except Exception:
+            self.close()   # a write on a mid-close link must not kill the caller
 
     def close(self):
         self.dead = True
+        # shutdown() first: sock.close() alone does NOT release the fd while the
+        # makefile() rfile/wfile still reference it (CPython defers the real close),
+        # and the blocked reader thread would keep this harness connection alive
+        # forever. That zombie-per-viewer leak once starved the harness of fds
+        # (Errno 24 at launchd's 256 soft limit) and took the machine off the fleet.
         try:
             if self.sock:
-                self.sock.close()
+                self.sock.shutdown(socket.SHUT_RDWR)
         except Exception:
             pass
+        for f in (self.rfile, self.wfile, self.sock):
+            try:
+                if f:
+                    f.close()
+            except Exception:
+                pass
 
 
 class Worker:
@@ -1150,7 +1165,23 @@ class Worker:
             backoff = min(backoff * 2, 30.0)
 
 
+def raise_fd_limit(target=10240):
+    """launchd/systemd default the soft NOFILE limit to 256/1024 — one fd per
+    remote viewer link (plus files, PTYs) hits that fast, and fd exhaustion here
+    or in the harness takes the machine off the fleet. Raise the soft limit up
+    front; best-effort (never fatal)."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = target if hard == resource.RLIM_INFINITY else min(target, hard)
+        if soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except Exception:
+        pass
+
+
 def main():
+    raise_fd_limit()
     ap = argparse.ArgumentParser()
     ap.add_argument("--relay", default=os.environ.get("FLEET_RELAY", "ws://127.0.0.1:8788"))
     ap.add_argument("--token", default=(os.environ.get("FLEET_WORKER_TOKEN")

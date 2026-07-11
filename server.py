@@ -3305,7 +3305,23 @@ def watch_ui():
                 MGR.request_restart(f"{f.name} changed")
 
 
+def raise_fd_limit(target=10240):
+    """launchd defaults the soft NOFILE limit to 256 — with an fd per ws client,
+    transcript tail, PTY, and project scan, a slow client leak (e.g. a buggy fleet
+    worker holding zombie links) starves us into Errno 24 and the machine looks
+    dead. Raise the soft limit up front; best-effort (never fatal)."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = target if hard == resource.RLIM_INFINITY else min(target, hard)
+        if soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except Exception:
+        pass
+
+
 def main():
+    raise_fd_limit()
     MGR.load()
     threading.Thread(target=watch_ui, daemon=True).start()
     threading.Thread(target=MGR.poll_accounts_loop, daemon=True).start()
