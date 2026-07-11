@@ -139,6 +139,13 @@ turn ends early and the session heals itself before my next message."**
 | `c32e2e3` | **routing policy change (Austin):** spend the pool whose weekly window resets soonest — headroom is only the tie-break (`_route_key`; promise 2 rewritten) |
 | `26a8eea` | **rebalance (Austin):** promise 2 applied to RUNNING sessions — the sweep hands an idle session off a healthy pool to the reset-soonest one (≥6 h sooner, cross-pool only, both clocks known); before this a long-lived session pinned its spawn-day choice until it drained |
 
+**2026-07-11** (the day v2's fix turned out to have never worked):
+
+| commit | what |
+|---|---|
+| `548bcd3` | fleet: HarnessLink fd leak — 229 zombie links hit launchd's 256-fd limit (Errno 24), harness down; also the hour every account spuriously flipped "credentials refused" (unreadable Keychain ≠ dead login — see v3's residual) |
+| `07c1edb` | **root cause v3**: the token endpoint 429s curl's DEFAULT User-Agent on every request — send `claude-cli/<version> (external, cli)` (`_claude_ua()`); not one background refresh had succeeded since v2 shipped |
+
 **End-state verified 2026-07-09 afternoon:** all four pools (austingriffith
 20x · Ethereum Foundation 5x · clawd 20x · slop 5x) live with real numbers
 on head, leftclaw, and heart simultaneously — chips identical across
@@ -152,6 +159,46 @@ changes wait for idle sessions before the graceful restart) → the relay box
 needs `ssh ubuntu@174.129.67.164 'cd ~/clawd-harness && git pull'` (now
 covered by the `Bash(ssh:*)` allow rule) → **hard-reload the h.atg.link tab**
 (an open tab never refetches by itself).
+
+## Root cause v3 (2026-07-11): the 429 wall — v2's curl never worked once
+
+> v2 correctly diagnosed the killer (edge blocks misread as revocation) and
+> correctly stopped marking logins dead. But its replacement refresh path was
+> stillborn: **from the moment the curl switch shipped (07-09 08:53) to
+> 07-11, every one of 1,706 background refresh attempts returned HTTP 429**
+> — curl clears Cloudflare's TLS check, then Anthropic's app rate-limits
+> curl's *default User-Agent* with a blanket `rate_limit_error` (JSON body,
+> no Retry-After, permanent). The "transient — next attempt in 10 min" log
+> line was honest about each attempt and wrong about the pattern: a wall of
+> those lines is not decay, it's a client-identity block.
+>
+> **The symptom was ROUTING, not sign-ins** — which is why nobody saw it for
+> two days. No login died (v2's promise held). Instead: 6 of 7 accounts'
+> usage snapshots aged 15–50 h → `_best_account`'s 3×TTL freshness filter
+> quietly shrank the candidate set to the ONE account a live claude session
+> was keeping fresh (sub2) → every new session "won" the austingriffith pool
+> — the one that resets LAST. Promise 2 inverted itself while every card
+> looked plausible. Austin caught it by feel ("you should use the
+> subscription that renews the soonest first!!!!").
+>
+> **The fix (`07c1edb`):** `_refresh_grant` sends
+> `User-Agent: claude-cli/<version> (external, cli)` (version read from the
+> real binary, pinned fallback). Verified on the same grant, same minute:
+> curl's default UA → 429, claude-cli UA → 200.
+>
+> **Debugging rule this buys:** when routing picks a weird pool, check
+> `checkedAt` ages in `.clawd-harness.sessions.json` FIRST. Stale usage
+> doesn't crash routing — it silently collapses the candidate set before
+> the reset-soonest comparison ever runs. Fresh data + wrong pick = policy
+> bug; stale data = poller/refresh bug, and the policy never got a vote.
+>
+> **Known residual (same day, from the fd-exhaustion outage):** when the
+> Keychain read itself fails (e.g. `security` can't spawn — Errno 24),
+> `_fetch_usage` sees "no tokens" and returns AUTH_FAIL — every account
+> flips "credentials refused" at once. That's an infra failure marked as
+> death, against v2's own rule. It self-healed after the restart (creds
+> were fine), but the misread is still in the code: a mass simultaneous
+> "credentials refused" is a machine-health signal, not seven dead logins.
 
 ## Root cause v2 — THE REAL ONE (2026-07-09): Cloudflare, not revocation
 
@@ -284,6 +331,16 @@ creds at spawn regardless — worst case is a stale percentage, not a login
 screen). **A card saying `needs sign-in` without a `refresh REJECTED` line
 is a breach of this statement — point here.**
 
+**Outcome (audited 2026-07-11):** the sign-in claim HELD — no login died,
+no ceremony was needed. But the line this statement cited as proof of
+graceful degradation (`refresh blocked in transit (HTTP 429) — transient`)
+was actually root cause v3 announcing itself: the 429s never decayed,
+because they were a User-Agent block, not a rate limit. "Worst case is a
+stale percentage" understated what stale percentages DO — they starved the
+router and inverted promise 2 for two days (see v3). Lesson for future
+confidence statements: a failure line that is *expected to stop appearing*
+needs a deadline; 1,706 repetitions of "transient" is a diagnosis.
+
 ## Sign-in ledger — what each ceremony bought, verified
 
 ### 2026-07-09: the /login mis-bind, and going to four pools
@@ -388,6 +445,11 @@ is.
    the login in question (empty arg = `~/.claude`).
 3. `grep -i "handoff\|account" ~/Library/Logs/clawd-harness.log | tail -30`
    — did the router try? what did it see?
+3b. **Routing to the wrong pool specifically:** check usage `checkedAt`
+   ages in `.clawd-harness.sessions.json` before reading any routing code —
+   stale snapshots (> ~9 min) silently drop accounts from the candidate
+   set (root cause v3). A wall of `refresh blocked in transit (HTTP 429)`
+   lines = the refresh client is being identity-blocked again.
 4. Note which machine the stuck session was on and which pools that machine
    held at the time (promise 3 is per-machine — "there was headroom on
    another box" is the known limit, not a breach).

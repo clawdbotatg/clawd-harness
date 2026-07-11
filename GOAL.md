@@ -36,6 +36,14 @@ goal.
 
 - **Violated when:** a session sits stuck on a rate-limit message while a
   pool with headroom is signed in **on that same machine**.
+- **Also violated when (added 2026-07-11):** new sessions keep landing on a
+  pool whose weekly reset is LATER than another eligible pool's — silent
+  wrong-routing, no error anywhere. This happened for two days without
+  tripping either clause above (EXPECTATIONS root cause v3: a dead refresh
+  path let usage data go stale, and stale accounts silently drop out of the
+  candidate set). First diagnostic: `checkedAt` ages in
+  `.clawd-harness.sessions.json` — if they aren't all fresh (≲ 9 min), the
+  reset-soonest policy never got a vote.
 
 When either goal is broken: screenshot the 🧠 page, grab
 `~/Library/Logs/clawd-harness.log`, and point the agent at this file and
