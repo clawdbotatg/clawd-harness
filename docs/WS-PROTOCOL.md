@@ -101,7 +101,10 @@ reconnect (i.e. the server restarted).
 { "type":"hello", "cid", "pid", "account", "sessionId", "title", "workdir",
   "busy":bool, "waiting":bool, "tool":<string|null>, "cols":int, "rows":int }
 //    cols/rows = the PTY's CURRENT size (some viewer's claim, or the boot default)
-// 2) then a binary frame: recent PTY bytes (ring buffer snapshot)
+// 2) then a binary frame: recent PTY bytes (ring buffer snapshot). The ring
+//    only reaches back to the last WIDTH change: bytes painted for another
+//    width can't render right anywhere, so the server drops them when a size
+//    claim changes cols (rows-only changes keep the ring).
 // 3) then recent transcript history, each:
 { "type":"transcript", "cid", "event":<event>, "history":true }
 ```

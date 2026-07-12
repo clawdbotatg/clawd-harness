@@ -1313,6 +1313,17 @@ class ClaudeSession:
     def _apply_size(self, cols, rows):
         if (cols, rows) == (self.tty_cols, self.tty_rows):
             return                               # same size → no SIGWINCH, no repaint
+        if cols != self.tty_cols and self.alive:
+            # Bytes painted for another WIDTH can never render right in a
+            # replay — they rewrap into shredded fragments in the scrollback
+            # of whoever attaches next (the mobile scroll-up-garbage bug).
+            # Drop them; claude's SIGWINCH repaint refills a clean frame at
+            # the new width. Rows-only changes (phone keyboard, footer refit)
+            # keep the ring — wrapping is unaffected. Skip if claude exited:
+            # no repaint would follow, and a mangled last screen beats a
+            # blank one.
+            with self.ring_lock:
+                del self.ring[:]
         self.tty_cols, self.tty_rows = cols, rows
         self.resize(cols, rows)
         self._to_subscribers_json({"type": "ttySize", "cid": self.cid,

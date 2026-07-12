@@ -206,7 +206,11 @@ user-facing overview; this file orients an agent working **on** the code.
   phone size mid-use. Attaching to a PTY another device sized (`hello` dims ≠
   ours) renders that device's replay mangled — once our claim is applied the
   client auto re-subscribes for a clean replay (`staleGeomReplay` in
-  index.html), so no manual reload.
+  index.html), so no manual reload. The server also drops the ring buffer
+  whenever a claim changes the PTY *width* (`_apply_size`): bytes painted for
+  another width rewrap into garbage in any replay (the mobile
+  scroll-up-shredded-scrollback bug), so replays only reach back to the last
+  width change — older history lives in the transcript view.
 - **URL routing** — nav state lives in the **hash** (the `?t=` token stays in the
   query): `#/` projects · `#/p/<pid>` sessions · `#/p/<pid>/s/<cid>` transcript ·
   `…/tty` terminal. So a reload (or a shared link) lands back on the same
