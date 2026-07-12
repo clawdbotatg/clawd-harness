@@ -251,19 +251,22 @@ BOUNCE_COOLDOWN = float(os.environ.get("BOUNCE_COOLDOWN", "60"))
 # (incl. same-day resets) from churning respawns.
 SUB_REBALANCE = os.environ.get("SUB_REBALANCE", "1") != "0"
 SUB_REBALANCE_MARGIN = float(os.environ.get("SUB_REBALANCE_MARGIN", "21600"))  # s
-# NEVER SEE A RATE LIMIT: routing avoids pools at HOT (default 80% of the most-
+# NEVER SEE A RATE LIMIT: routing avoids pools at HOT (default 90% of the most-
 # constrained window — usually the fast-burning 5h session window), not just at
-# EXHAUSTED (95). While any cooler pool exists, a hot pool gets no new spawns or
-# rebalances, idle sessions EVACUATE it (sweep), and the on-Stop check moves a
-# session off it preemptively — reset-soonest still picks among the cool pools,
-# so the spend-it-before-it's-forfeited policy is unchanged; it just stops
-# slamming one pool into its session wall. EXHAUSTED remains the last-resort
-# bar: a truly drained session may still flee TO a merely-hot pool (85 beats
-# 100). Final backstop: the CLI's own limit banner, spotted in the PTY stream,
-# triggers an immediate endpoint-confirmed handoff (rescue_limit_wall) instead
-# of waiting out BUSY_STUCK — an eaten prompt is redelivered, and a turn cut
-# mid-flight is resumed with an automatic 'continue' (LIMIT_CONTINUE=0 opts out).
-SUB_HOT = float(os.environ.get("SUB_HOT", "80"))                 # % used
+# EXHAUSTED (95). The number is Austin's: spend the soonest-resetting pool down
+# to ~5–10% left, THEN hop to the next-soonest with headroom — earlier forfeits
+# use-it-or-lose-it capacity; later is wall-flirting. While any cooler pool
+# exists, a hot pool gets no new spawns or rebalances, idle sessions EVACUATE
+# it (sweep), and the on-Stop check moves a session off it preemptively —
+# reset-soonest still picks among the cool pools, so the spend-it-before-it's-
+# forfeited policy is unchanged; it just stops slamming one pool into its
+# session wall. EXHAUSTED remains the last-resort bar: a truly drained session
+# may still flee TO a merely-hot pool (92 beats 100). Final backstop: the CLI's
+# own limit banner, spotted in the PTY stream, triggers an immediate endpoint-
+# confirmed handoff (rescue_limit_wall) instead of waiting out BUSY_STUCK — an
+# eaten prompt is redelivered, and a turn cut mid-flight is resumed with an
+# automatic 'continue' (LIMIT_CONTINUE=0 opts out).
+SUB_HOT = float(os.environ.get("SUB_HOT", "90"))                 # % used
 LIMIT_CONTINUE = os.environ.get("LIMIT_CONTINUE", "1") != "0"
 # The CLI's limit banner, as painted in the PTY ("You've hit your session
 # limit · resets …", or the blocking "Stop and wait for limit to reset" menu).
@@ -2193,8 +2196,15 @@ class SessionManager:
             # Ready accounts due a usage refresh — fetched in PARALLEL so one
             # slow/hung endpoint can't stall the other accounts (or the
             # sign-in watch above) behind a serial chain of 10s timeouts.
+            # A pool nearing the hot bar can cross 90→100 inside one normal
+            # poll under a hard parallel burn — watch the endgame 3× closer
+            # so evacuation fires from headroom data, not the banner tripwire.
+            def _ttl(a):
+                pct = (a.usage or {}).get("pct")
+                near_hot = pct is not None and pct >= SUB_HOT - 15
+                return USAGE_TTL / 3 if near_hot else USAGE_TTL
             due = [a for a in accts if a.ready and not a.broken and
-                   (forced or (now - (a.usage or {}).get("checkedAt", 0) > USAGE_TTL
+                   (forced or (now - (a.usage or {}).get("checkedAt", 0) > _ttl(a)
                                and now >= a.tok.get("no_poll_until", 0)))]
             if due:
                 # An account with live claude sessions: those processes hold

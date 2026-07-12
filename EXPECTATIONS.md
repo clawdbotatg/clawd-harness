@@ -32,9 +32,11 @@ and the fix is verifiable in the log.
 ### 2. New work always lands on the pool whose weekly window resets soonest
 *(Policy changed 2026-07-09 at Austin's direction — it was "most headroom"
 before. "With room" redefined 2026-07-11 evening after the session-wall
-incident: the eligibility bar is now **cool** — < `SUB_HOT` = 80% of the
+incident: the eligibility bar is now **cool** — < `SUB_HOT` = 90% of the
 most-constrained window, which in practice is the fast-burning **5h session
-window** — not < 95. See "the session wall" below.)* Among **cool** pools,
+window** — not < 95. The number is Austin's: spend the soonest-resetting
+pool down to ~5–10% left, then hop. See "the session wall" below.)* Among
+**cool** pools,
 every new session spawns under the one whose **weekly (7d) window resets soonest**, on
 that machine, at that instant (fresh poll, not stale cache; stale = >3×TTL is
 ignored). Rationale, in Austin's words: a 50% pool and a 60% pool are *both
@@ -82,9 +84,12 @@ caps churn. Log signature: `[handoff …] slop → sub2 (rebalance: weekly reset
 **Never see a rate limit (added 2026-07-11 evening, at Austin's direction —
 "what I really really want is to never see a rate limit").** Three layers,
 outermost first:
-1. **Routing avoids HOT pools** (≥ `SUB_HOT` = 80% on the most-constrained
-   window, incl. the 5h session window) while any cooler pool exists — so
-   reset-soonest stops piling every session onto one pool until it walls.
+1. **Routing watches headroom, not banners** (the primary mechanism, per
+   Austin: "look at how much is left; at 5–10% left switch to the next one
+   with headroom that resets soonest"): a pool ≥ `SUB_HOT` = 90% on its
+   most-constrained window (incl. the 5h session window) gets no new work
+   while any cooler pool exists — so reset-soonest stops piling every
+   session onto one pool until it walls.
 2. **Preemptive evacuation:** the sweep moves an idle session off a hot pool
    to a cool one (`pool N% hot — evacuating before the limit wall`), and the
    on-Stop check (live endpoint read) does the same the moment a turn
@@ -181,7 +186,7 @@ I never type around a limit."**
 | `07c1edb` | **root cause v3**: the token endpoint 429s curl's DEFAULT User-Agent on every request — send `claude-cli/<version> (external, cli)` (`_claude_ua()`); not one background refresh had succeeded since v2 shipped |
 | (next) | **v3's residual closed:** an unreadable credential store is transient, never a sign-out — `_read_oauth_creds_ex` distinguishes "keychain answered absent" (rc 44 + no file → AUTH_FAIL allowed) from "couldn't ask" (Errno 24, locked, timeout → keep last snapshot); ends the false mass "credentials refused" |
 | (next) | **bounced-prompt rescue** (the zk-llm-research incident, same evening): a prompt landing on a hard-dead plan used to bounce off the CLI's limit line — no Stop, so no handoff, and the prompt hook re-armed the 10-min `BUSY_STUCK` clock (each retry delayed the rescue further). Now `UserPromptSubmit` on a ≥95% plan spawns `rescue_bounced_prompt`: settle 3 s (a real turn shows hooks and is left alone), confirm ≥100%/AUTH_FAIL against the live endpoint, hand off, wait for the fresh claude's SessionStart, **redeliver the bounced prompt** |
-| (next) | **the session wall / never-see-a-rate-limit** (same evening, ~8pm): reset-soonest concentrated SEVEN sessions on the EF max-**5x** pool (through two dirs — `ef` + `sub3` are the SAME org, as `austinmax`/`clawd`/`sub2` are all the austingriffith org: 7 logins ≈ 4 real pools), blew its 5h **session window**, and every session hit the limit banner at once — one sat 627 s on the "Stop and wait" menu before the sweep reclaimed it. Fix: routing bar moves from 95 to `SUB_HOT` (80) in `_route_key` (reset-soonest picks among COOL pools; a hot pool gets no new work while a cooler one exists); the sweep **evacuates** idle sessions off hot pools; on-Stop handoff moves at ≥80 (to a cool target) not just ≥95; and `_scan_for_limit` watches each PTY for the CLI's limit banner → `rescue_limit_wall` confirms against the endpoint and hands off in seconds, redelivering an eaten prompt or auto-sending "continue" for a turn cut mid-flight (`LIMIT_CONTINUE`) |
+| (next) | **the session wall / never-see-a-rate-limit** (same evening, ~8pm): reset-soonest concentrated SEVEN sessions on the EF max-**5x** pool (through two dirs — `ef` + `sub3` are the SAME org, as `austinmax`/`clawd`/`sub2` are all the austingriffith org: 7 logins ≈ 4 real pools), blew its 5h **session window**, and every session hit the limit banner at once — one sat 627 s on the "Stop and wait" menu before the sweep reclaimed it. Fix: routing bar moves from 95 to `SUB_HOT` (90 — Austin: hop at 5–10% left; shipped at 80, retuned the same night) in `_route_key` (reset-soonest picks among COOL pools; a hot pool gets no new work while a cooler one exists); the sweep **evacuates** idle sessions off hot pools; on-Stop handoff moves at ≥80 (to a cool target) not just ≥95; and `_scan_for_limit` watches each PTY for the CLI's limit banner → `rescue_limit_wall` confirms against the endpoint and hands off in seconds, redelivering an eaten prompt or auto-sending "continue" for a turn cut mid-flight (`LIMIT_CONTINUE`) |
 
 **End-state verified 2026-07-09 afternoon:** all four pools (austingriffith
 20x · Ethereum Foundation 5x · clawd 20x · slop 5x) live with real numbers
