@@ -82,7 +82,7 @@ caps churn. Log signature: `[handoff …] slop → sub2 (rebalance: weekly reset
 59h sooner — spend it before it's forfeited)`.
 
 **Never see a rate limit (added 2026-07-11 evening, at Austin's direction —
-"what I really really want is to never see a rate limit").** Three layers,
+"what I really really want is to never see a rate limit").** Four layers,
 outermost first:
 1. **Routing watches headroom, not banners** (the primary mechanism, per
    Austin: "look at how much is left; at 5–10% left switch to the next one
@@ -101,6 +101,21 @@ outermost first:
    the banner — like this very file — is a no-op on a cool pool) and hands
    off within seconds: an eaten prompt is **redelivered**, and a turn cut
    mid-flight gets an automatic **"continue"** (`LIMIT_CONTINUE=0` opts out).
+   *Honesty note (2026-07-12): this scan has not yet caught a wall in
+   production — the 03:2x incident slipped past it. Layer 4 exists because
+   of that, and logs the PTY evidence needed to fix the scan if it keeps
+   missing.*
+4. **The send watchdog (added 2026-07-12, ~3:20am, after a live miss):**
+   every message the harness delivers must produce a `UserPromptSubmit`
+   hook within ~2 s — but a hard-walled CLI answers with its limit line
+   and fires **no hook at all** (nothing sets `busy`, so even the stuck
+   sweep waits its full 10 min). So `send_message` arms a watchdog: total
+   hook-silence `SEND_WATCHDOG` (10 s) after a delivery IS the bounce
+   signal — no hook dependency, no terminal parsing. It logs the
+   ANSI-stripped PTY tail (`send got NO hook in 10s on <acct> … pty tail:`)
+   and feeds the same endpoint-confirmed rescue: dead pool → handoff +
+   **redeliver the message**; healthy pool → no-op (a wedged-but-unwalled
+   CLI is never respawned blind — that's the frozen-tty runbook's case).
 
 **The two honest caveats:**
 - **Handoff is per-machine.** A session on heart can only switch between
@@ -112,17 +127,20 @@ outermost first:
   turn ends early — the harness can't intercept text inside the child. The
   heal comes from whichever fires first:
   1. the **PTY tripwire** (layer 3 above) — seconds, auto-redeliver /
-     auto-continue included;
+     auto-continue included (not yet observed firing in production — see
+     the honesty note above);
   2. the next **Stop** hook → `maybe_handoff` moves it immediately;
   3. **your next message** — a prompt that lands on a hard-dead plan (≥100%
-     used / login refused) bounces off the CLI's limit line with no Stop, so
-     the prompt hook itself triggers the rescue and **redelivers your
-     bounced message** on the fresh pool (~10–20 s; log: `prompt bounced
-     off dead plan … rescuing now and redelivering`);
+     used / login refused) bounces off the CLI's limit line **with no hook
+     of any kind** (not even `UserPromptSubmit` — proven live 03:2x), so
+     the **send watchdog** (layer 4) catches the silence at ~10 s, confirms
+     against the endpoint, hands off, and **redelivers your bounced
+     message** (~15–25 s total; log: `send got NO hook in 10s …` then
+     `prompt bounced off dead plan … rescuing now and redelivering`);
   4. the stuck-session sweep — a busy-but-hook-silent session on a dead
      plan is reclaimed after `BUSY_STUCK` (10 min) + poll lag. Before
-     2026-07-11 evening this backstop was the COMMON path (627 s stuck was
-     observed in production); it is now the rare last resort.
+     2026-07-11 evening this backstop was the COMMON path (627 s and 881 s
+     stucks observed in production); it is now the rare last resort.
   You should never have to *act* on a banner, only occasionally see one
   flash. When every pool on the machine is genuinely hot there is nowhere
   to hop — that's real exhaustion, not a bug.
@@ -493,6 +511,15 @@ is.
 - Five-hour windows anchor on first use per pool — heavy parallel use can
   drain several pools' 5h windows near-simultaneously; the weekly windows are
   the real budget.
+- **Sessions ping-pong between pools as 5h windows heat and cool** (e.g.
+  `slop → clawd (rebalance: weekly resets 7h sooner)` followed an hour later
+  by `clawd → slop (plan drained)`, repeatedly). That's the
+  spend-to-5–10%-left tuning working: the reset-soonest pool is drained hard,
+  walls or goes hot, sessions evacuate, its window resets, they come back.
+  Every hop is a seamless `--resume` (same cid, same viewers); the churn
+  costs a few seconds of respawn per hop, capped by `HANDOFF_COOLDOWN`
+  (10 min/session). If the hop rate ever bothers, raise
+  `SUB_REBALANCE_MARGIN` or lower `SUB_HOT` — it's tuning, not a bug.
 - A signed-out login shows its **last cached** windows (or a synthetic
   `limited` row) — historical, not live.
 
@@ -508,6 +535,16 @@ is.
    stale snapshots (> ~9 min) silently drop accounts from the candidate
    set (root cause v3). A wall of `refresh blocked in transit (HTTP 429)`
    lines = the refresh client is being identity-blocked again.
+3c. **A rate limit was SEEN (banner flashed / message bounced):** grep the
+   log for which layer caught it, in order — `limit banner in the PTY`
+   (tripwire), `send got NO hook in` (send watchdog; its `pty tail:` dump
+   shows exactly what the terminal displayed — if a real banner is visible
+   in that dump but the tripwire line is absent, the banner regex missed
+   and the dump is the repro), `prompt bounced off dead plan` (rescue ran),
+   `busy but hook-silent … treating as stuck` (only the 10-min sweep caught
+   it — everything faster missed; that's a bug, bring the pty tail). A
+   banner with NONE of these lines within ~30 s = the wall wasn't detected
+   at all — breach, point here.
 4. Note which machine the stuck session was on and which pools that machine
    held at the time (promise 3 is per-machine — "there was headroom on
    another box" is the known limit, not a breach).
