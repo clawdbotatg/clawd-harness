@@ -193,7 +193,6 @@ decision: {best['name']} — same rule as the harness router:
     print(f"\nlaunching claude on '{best['name']}' "
           f"(CLAUDE_CONFIG_DIR={best['config_dir']})\n")
     sys.stdout.flush()  # execve replaces the process; unflushed output is lost
-    os.chdir(os.path.expanduser("~"))
     os.execve(claude, [claude] + claude_args, env)
 
 
