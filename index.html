@@ -734,7 +734,26 @@ term.onRender(bottomJustifyTTY);
 // re-arms the follow. (viewportY is the top line shown; baseY is the top line of
 // the bottom-most scroll position — equal ⇒ we're at the bottom.) A 1-row slop
 // keeps "almost at the bottom" counting as bottom across cell rounding.
+//
+// TOUCH: stick is sampled when a burst ARRIVES, and a busy claude repaints its
+// spinner every ~100ms — so a finger-pan, which starts at zero velocity and
+// takes a couple hundred ms to clear the 1-row slop, always gets caught "at
+// bottom" by the next burst and scrollToBottom()'d back down mid-gesture. (A
+// wheel notch jumps several rows instantly between bursts; a finger can't.)
+// That's the "can't scroll back at all on mobile while it's working" bug.
+// While a finger is on the terminal — plus a short grace for the momentum
+// flick to clear the slop — report not-at-bottom so bursts never yank; the
+// follow re-arms by itself once a gesture actually ends at the bottom.
+let ttyTouchHold = 0;   // Infinity while a finger is down; a timestamp grace after lift
+(() => {
+  const el = document.getElementById('term');
+  const lift = (e) => { ttyTouchHold = (e.touches && e.touches.length) ? Infinity : Date.now() + 450; };
+  el.addEventListener('touchstart', () => { ttyTouchHold = Infinity; }, { passive: true });
+  el.addEventListener('touchend', lift, { passive: true });
+  el.addEventListener('touchcancel', lift, { passive: true });
+})();
 function ttyAtBottom() {
+  if (Date.now() < ttyTouchHold) return false;
   const b = term.buffer && term.buffer.active;
   return !b || (b.baseY - b.viewportY) <= 1;
 }
