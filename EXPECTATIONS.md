@@ -83,15 +83,28 @@ caps churn. Log signature: `[handoff …] slop → sub2 (rebalance: weekly reset
   chips on the 🧠 page are the to-do list for that.
 - **You may glimpse the limit banner once.** If a window dies mid-turn,
   Anthropic prints its limit message inside that claude and the turn ends
-  early — the harness can't intercept text inside the child. On the next Stop
-  (or the stuck-session sweep, within ~a minute) the session hops pools; it
-  does NOT auto-retype the interrupted prompt, so worst case you say
-  "continue" once. Preemptive autoswitch (promise 2) usually moves sessions
-  *before* this point — given somewhere to move to.
+  early — the harness can't intercept text inside the child. It does NOT
+  auto-retype the *interrupted* prompt (the harness can't know it), so worst
+  case you say "continue" once. Preemptive autoswitch (promise 2) usually
+  moves sessions *before* this point — given somewhere to move to.
+  The heal after the banner comes from whichever fires first (added the
+  third on 2026-07-11, after the zk-llm-research bounce):
+  1. the next **Stop** hook → `maybe_handoff` moves it immediately;
+  2. **your next message** — a prompt that lands on a hard-dead plan (≥100%
+     used / login refused) bounces off the CLI's limit line with no Stop, so
+     the prompt hook itself now triggers the rescue: confirm the plan is
+     dead, hand off, and **redeliver your bounced message** on the fresh
+     pool (~10–20 s; log: `prompt bounced off dead plan … rescuing now and
+     redelivering`). Before this, a bounced message actually *re-armed* the
+     stuck-timer below — every retry pushed the rescue further away;
+  3. the stuck-session sweep — a busy-but-hook-silent session on a dead
+     plan is reclaimed after `BUSY_STUCK` (10 min, NOT "~a minute" as an
+     earlier revision of this file claimed) + poll lag.
 
 So the invariant, phrased for pointing at later: **"I have a sub with
 headroom signed into this machine, therefore I can keep working; at worst one
-turn ends early and the session heals itself before my next message."**
+turn ends early, and my next message heals the session and gets redelivered
+on the fresh pool."**
 
 ## What the 🧠 page means (display contract)
 
@@ -146,6 +159,7 @@ turn ends early and the session heals itself before my next message."**
 | `548bcd3` | fleet: HarnessLink fd leak — 229 zombie links hit launchd's 256-fd limit (Errno 24), harness down; also the hour every account spuriously flipped "credentials refused" (unreadable Keychain ≠ dead login — see v3's residual) |
 | `07c1edb` | **root cause v3**: the token endpoint 429s curl's DEFAULT User-Agent on every request — send `claude-cli/<version> (external, cli)` (`_claude_ua()`); not one background refresh had succeeded since v2 shipped |
 | (next) | **v3's residual closed:** an unreadable credential store is transient, never a sign-out — `_read_oauth_creds_ex` distinguishes "keychain answered absent" (rc 44 + no file → AUTH_FAIL allowed) from "couldn't ask" (Errno 24, locked, timeout → keep last snapshot); ends the false mass "credentials refused" |
+| (next) | **bounced-prompt rescue** (the zk-llm-research incident, same evening): a prompt landing on a hard-dead plan used to bounce off the CLI's limit line — no Stop, so no handoff, and the prompt hook re-armed the 10-min `BUSY_STUCK` clock (each retry delayed the rescue further). Now `UserPromptSubmit` on a ≥95% plan spawns `rescue_bounced_prompt`: settle 3 s (a real turn shows hooks and is left alone), confirm ≥100%/AUTH_FAIL against the live endpoint, hand off, wait for the fresh claude's SessionStart, **redeliver the bounced prompt** |
 
 **End-state verified 2026-07-09 afternoon:** all four pools (austingriffith
 20x · Ethereum Foundation 5x · clawd 20x · slop 5x) live with real numbers

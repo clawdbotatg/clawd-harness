@@ -116,7 +116,10 @@ user-facing overview; this file orients an agent working **on** the code.
   record `account`+`config_dir` at spawn so `--resume` finds the right dir —
   but they don't stay pinned: the sweep hands an idle session off to a
   better pool, both as a drain rescue and as a **rebalance** onto the
-  reset-soonest pool (`_rebalance_win`, `SUB_REBALANCE*` knobs).
+  reset-soonest pool (`_rebalance_win`, `SUB_REBALANCE*` knobs); and a
+  prompt that bounces off a hard-dead plan (the CLI's limit line, no Stop)
+  triggers an immediate handoff that **redelivers the bounced prompt**
+  (`rescue_bounced_prompt`, `BOUNCE_*` knobs).
   Deep doc: [`docs/fleet/SUB-ROUTING.md`](docs/fleet/SUB-ROUTING.md); what the
   accounts panel should display + mis-bound-login runbook:
   [`docs/fleet/ACCOUNTS-PANEL.md`](docs/fleet/ACCOUNTS-PANEL.md) (key trap: one

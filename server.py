@@ -232,6 +232,15 @@ HANDOFF_COOLDOWN = float(os.environ.get("HANDOFF_COOLDOWN", "600"))
 # been silent this long is stuck on the limit screen (the eaten turn never
 # emits Stop, so `busy` never clears) — the sweep reclaims and moves it.
 BUSY_STUCK = float(os.environ.get("BUSY_STUCK", "600"))
+# Bounced-prompt rescue: a UserPromptSubmit landing on a HARD-dead plan gets
+# answered by the CLI's limit line and the turn never runs — no Stop, so the
+# on-Stop handoff never fires and the sweep is minutes away (worse, the prompt
+# hook resets last_active, re-arming BUSY_STUCK). So the prompt itself is the
+# trigger: wait SETTLE for a genuinely-running turn to show hooks, confirm the
+# plan is dead against the live endpoint, hand off, and REDELIVER the bounced
+# prompt on the fresh pool. COOLDOWN stops a retype storm from churning respawns.
+BOUNCE_SETTLE   = float(os.environ.get("BOUNCE_SETTLE", "3"))
+BOUNCE_COOLDOWN = float(os.environ.get("BOUNCE_COOLDOWN", "60"))
 # Rebalance = the spend-the-soonest-reset policy applied to sessions ALREADY
 # RUNNING: an idle session sitting on a healthy pool still moves to the
 # router's best pool when that pool's weekly window resets ≥ MARGIN sooner —
@@ -999,6 +1008,9 @@ class ClaudeSession:
         self._live_transcript = None             # live path from hooks; may rotate on compaction
         self.busy = False                        # working (turn in flight) vs idle
         self.waiting = False                      # blocked on an interactive prompt (permission / question)
+        self.hook_count = 0                       # bumps on every hook — "did the turn progress?" probe
+        self.last_bounce_rescue = 0.0             # cooldown anchor for the bounced-prompt rescue
+        self._started_evt = threading.Event()     # set on SessionStart — "the TUI is up"
         self.last_tool = None
         self.digest = ""                          # volatile "what it's doing now" (LLM, refreshed each Stop)
         self.blocked_on = None                    # the open question if it ended asking the human (LLM)
@@ -1121,6 +1133,7 @@ class ClaudeSession:
         slim event out to every client (menu badges), and trigger AI naming."""
         ev = obj.get("hook_event_name", "?")
         self.last_active = time.time()
+        self.hook_count += 1
         # Claude rotates its transcript file on compaction/resume. Main-session
         # lifecycle hooks report the live transcript_path + session_id, so follow
         # them — otherwise the tail strands on the pre-rotation file and the
@@ -1137,6 +1150,16 @@ class ClaudeSession:
             prompt = obj.get("prompt", "")
             data = {"prompt": prompt}
             self._on_prompt(prompt)
+            # If this plan already looks drained, the CLI may answer with its
+            # limit line and never run the turn (no Stop ever comes). Hand the
+            # verdict to the rescue path — it confirms against the live
+            # endpoint and, on a true bounce, hands off + redelivers.
+            acct = self.manager.accounts.get(self.account)
+            if acct and (acct.broken
+                         or (acct.usage or {}).get("pct", 0) >= SUB_EXHAUSTED):
+                threading.Thread(target=self.manager.rescue_bounced_prompt,
+                                 args=(self, prompt, self.hook_count),
+                                 daemon=True).start()
         elif ev == "PreToolUse":
             self.busy = True
             self.last_tool = obj.get("tool_name")
@@ -1177,6 +1200,7 @@ class ClaudeSession:
             data = {"message": obj.get("message", "")}
         elif ev == "SessionStart":
             self.busy = False
+            self._started_evt.set()
             data = {"source": obj.get("source"), "model": obj.get("model")}
         elif ev == "SessionEnd":
             data = {"reason": obj.get("reason")}
@@ -2250,6 +2274,76 @@ class SessionManager:
             return None
         return (f"rebalance: weekly resets {int((cur_r - best_r) // 3600)}h "
                 "sooner — spend it before it's forfeited")
+
+    def rescue_bounced_prompt(self, s, prompt, hooks_at_prompt):
+        """A prompt just landed on a plan that looks drained. If the plan is
+        HARD dead (>=100% used, or the login is refused) the CLI answers with
+        its limit line and the turn never runs — no Stop ever comes, so the
+        on-Stop handoff can't fire and the stuck sweep is BUSY_STUCK away
+        (worse: the prompt hook just reset last_active, re-arming that clock).
+        The user's own message is the strongest "I am waiting" signal there
+        is, so it triggers the rescue: confirm the plan is dead against the
+        live endpoint, hand off to the best pool, and REDELIVER the bounced
+        prompt there. A 95–99% plan can still finish a turn — only >=100 (or
+        AUTH_FAIL) qualifies, and a genuinely-running turn is detected and
+        left alone."""
+        if not SUB_AUTOSWITCH:
+            return
+        time.sleep(BOUNCE_SETTLE)
+        # Progress since the prompt hook (tool hooks, or a Stop that cleared
+        # busy and took the normal maybe_handoff path) = not a bounce.
+        if not s.alive or s.hook_count != hooks_at_prompt or not s.busy:
+            return
+        now = time.time()
+        if now - s.last_bounce_rescue < BOUNCE_COOLDOWN:
+            return
+        acct = self.accounts.get(s.account)
+        cfg = acct.config_dir if acct else (s.config_dir or "")
+        got = _fetch_usage(cfg, acct.tok if acct else None, allow_refresh=False)
+        dead = got == AUTH_FAIL
+        if got and got != AUTH_FAIL:
+            pct, windows = got
+            dead = pct >= 100
+            if acct:
+                with self.lock:
+                    acct.usage = {"pct": round(pct, 1), "windows": windows,
+                                  "checkedAt": time.time()}
+                    acct.broken = False
+        elif got is None and acct:
+            # Endpoint unreachable with the stored token — fall back to the
+            # poll snapshot that flagged this plan (only if it's fresh).
+            u = acct.usage or {}
+            fresh_poll = now - (u.get("checkedAt") or 0) < 600
+            dead = acct.broken or (fresh_poll and u.get("pct", 0) >= 100)
+        if not dead:
+            return
+        best = self.accounts.get(self._best_account() or "")
+        if (not best or best.name == s.account
+                or (acct and acct.org and best.org and acct.org == best.org)
+                or (best.usage or {}).get("pct", 100.0) >= SUB_EXHAUSTED):
+            self.broadcast_accounts()
+            return                               # nowhere better to go — stay put
+        s.last_bounce_rescue = time.time()
+        self.broadcast_accounts()
+        # The eaten turn never emits Stop, so `busy` is a lie here — the same
+        # reclaim the stuck sweep does, without the BUSY_STUCK wait.
+        s.busy = False
+        print(f"[handoff {s.cid[:8]}] prompt bounced off dead plan {s.account} "
+              "— rescuing now and redelivering", flush=True)
+        self._handoff(s, best,
+                      why="prompt bounced off the dead plan; resuming under the fresh one")
+        fresh = self.sessions.get(s.cid)
+        if fresh is s or not fresh or not fresh.alive or not prompt.strip():
+            return                               # handoff declined/failed — nothing to redeliver
+        # Wait for the resumed claude to come up (SessionStart), give the TUI a
+        # beat to finish painting, then retype the bounced message — the user's
+        # send is what heals the session, not what gets lost.
+        fresh._started_evt.wait(20)
+        time.sleep(2)
+        if fresh.alive:
+            print(f"[handoff {s.cid[:8]}] redelivering the bounced prompt "
+                  f"({len(prompt)} chars) under {fresh.account}", flush=True)
+            fresh.send_message(prompt)
 
     def maybe_handoff(self, s):
         """Mid-session account handoff (SUB-ROUTING.md Phase 5): called after
