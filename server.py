@@ -212,14 +212,15 @@ OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"  # UNDOCUMENTE
 OAUTH_BETA      = "oauth-2025-04-20"
 USAGE_TTL       = float(os.environ.get("USAGE_TTL", "180"))     # s between usage polls per account
 # Local routing rule (direct mode; the fleet relay will own this fleet-wide):
-# among pools with room (< EXHAUSTED), spend the one whose WEEKLY window resets
-# soonest — weekly headroom is use-it-or-lose-it, so draining the earliest-
-# resetting pool first forfeits the least capacity; once it resets its clock
-# jumps +7d and it goes to the back of the queue. Headroom (pct) is only the
-# fallback when a reset time is unknown, and the tie-break. Reset order is
-# stable between polls, so a reset-driven switch needs only the DEBOUNCE; a
-# pct-driven one also needs HYSTERESIS points — and an EXHAUSTED active
-# account bypasses both (no loyalty to a dead account).
+# among COOL pools (< SUB_HOT below — was < EXHAUSTED until the 07-11 wall
+# incident), spend the one whose WEEKLY window resets soonest — weekly headroom
+# is use-it-or-lose-it, so draining the earliest-resetting pool first forfeits
+# the least capacity; once it resets its clock jumps +7d and it goes to the
+# back of the queue. Headroom (pct) is only the fallback when a reset time is
+# unknown, and the tie-break. Reset order is stable between polls, so a
+# reset-driven switch needs only the DEBOUNCE; a pct-driven one also needs
+# HYSTERESIS points — and a HOT active account bypasses both when a cool
+# target exists (no loyalty to a pool about to wall).
 SUB_AUTOSWITCH = os.environ.get("SUB_AUTOSWITCH", "1") != "0"
 SUB_HYSTERESIS = float(os.environ.get("SUB_HYSTERESIS", "20"))  # headroom pts
 SUB_DEBOUNCE   = float(os.environ.get("SUB_DEBOUNCE", "7200"))  # seconds
@@ -250,6 +251,31 @@ BOUNCE_COOLDOWN = float(os.environ.get("BOUNCE_COOLDOWN", "60"))
 # (incl. same-day resets) from churning respawns.
 SUB_REBALANCE = os.environ.get("SUB_REBALANCE", "1") != "0"
 SUB_REBALANCE_MARGIN = float(os.environ.get("SUB_REBALANCE_MARGIN", "21600"))  # s
+# NEVER SEE A RATE LIMIT: routing avoids pools at HOT (default 80% of the most-
+# constrained window — usually the fast-burning 5h session window), not just at
+# EXHAUSTED (95). While any cooler pool exists, a hot pool gets no new spawns or
+# rebalances, idle sessions EVACUATE it (sweep), and the on-Stop check moves a
+# session off it preemptively — reset-soonest still picks among the cool pools,
+# so the spend-it-before-it's-forfeited policy is unchanged; it just stops
+# slamming one pool into its session wall. EXHAUSTED remains the last-resort
+# bar: a truly drained session may still flee TO a merely-hot pool (85 beats
+# 100). Final backstop: the CLI's own limit banner, spotted in the PTY stream,
+# triggers an immediate endpoint-confirmed handoff (rescue_limit_wall) instead
+# of waiting out BUSY_STUCK — an eaten prompt is redelivered, and a turn cut
+# mid-flight is resumed with an automatic 'continue' (LIMIT_CONTINUE=0 opts out).
+SUB_HOT = float(os.environ.get("SUB_HOT", "80"))                 # % used
+LIMIT_CONTINUE = os.environ.get("LIMIT_CONTINUE", "1") != "0"
+# The CLI's limit banner, as painted in the PTY ("You've hit your session
+# limit · resets …", or the blocking "Stop and wait for limit to reset" menu).
+# Needles are deliberately narrow, and the rescue re-confirms against the live
+# usage endpoint, so a session merely *displaying* this text (e.g. reading this
+# file) never causes a spurious handoff.
+_PTY_ANSI_RE = re.compile(
+    rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>]")
+_LIMIT_BANNER_RE = re.compile(
+    r"you.?ve hit your [a-z0-9 -]{0,24}limit"    # .? = ' or ’ (the CLI uses either)
+    r"|stop and wait for limit to reset"
+    r"|ask your admin for more usage", re.I)
 # Paths symlinked from ~/.claude into each account dir so every account runs
 # with the user's full extension environment (same list claw-router shares).
 SHARE_PATHS = ["settings.json", "CLAUDE.md", "commands", "rules", "skills",
@@ -1010,6 +1036,10 @@ class ClaudeSession:
         self.waiting = False                      # blocked on an interactive prompt (permission / question)
         self.hook_count = 0                       # bumps on every hook — "did the turn progress?" probe
         self.last_bounce_rescue = 0.0             # cooldown anchor for the bounced-prompt rescue
+        self.last_prompt = ""                     # most recent user prompt — redelivered if a limit wall eats it
+        self.hooks_at_prompt = 0                  # hook_count when it landed — "did that turn ever progress?"
+        self._limit_tail = ""                     # rolling de-ANSI'd PTY text, for the limit-banner scan
+        self._limit_seen_at = 0.0                 # cooldown anchor for banner-triggered rescues
         self._started_evt = threading.Event()     # set on SessionStart — "the TUI is up"
         self.last_tool = None
         self.digest = ""                          # volatile "what it's doing now" (LLM, refreshed each Stop)
@@ -1149,6 +1179,8 @@ class ClaudeSession:
             self.busy = True
             prompt = obj.get("prompt", "")
             data = {"prompt": prompt}
+            self.last_prompt = prompt
+            self.hooks_at_prompt = self.hook_count
             self._on_prompt(prompt)
             # If this plan already looks drained, the CLI may answer with its
             # limit line and never run the turn (no Stop ever comes). Hand the
@@ -1392,6 +1424,7 @@ class ClaudeSession:
                 if len(self.ring) > RING_MAX:
                     del self.ring[:-RING_MAX]
             self._to_subscribers_bytes(chunk)
+            self._scan_for_limit(chunk)
         self.alive = False
         print(f"[session {self.cid[:8]}] PTY closed / claude exited", flush=True)
         # An account handoff replaces this object under the same cid — the
@@ -1399,6 +1432,31 @@ class ClaudeSession:
         if self.manager.sessions.get(self.cid) is self:
             self.manager.broadcast_all({"type": "exit", "cid": self.cid})
             self.manager.broadcast_sessions()
+
+    def _scan_for_limit(self, chunk):
+        """Watch the raw PTY stream for the CLI's own limit banner — the
+        zero-lag 'this pool just walled' signal (the eaten turn's hooks go
+        silent and the next usage poll is minutes out). On a match, hand the
+        verdict to rescue_limit_wall, which CONFIRMS against the live usage
+        endpoint before moving anything — so echoed text (a session merely
+        reading a file that quotes the banner) can never cause a handoff on a
+        healthy pool. This is the one sanctioned exception to 'never parse
+        the terminal's weird text': a needle match, not a parse."""
+        text = _PTY_ANSI_RE.sub(b"", chunk).decode("utf-8", "ignore")
+        text = re.sub(r"\s+", " ", text)
+        tail = (self._limit_tail + " " + text)[-800:]
+        self._limit_tail = tail[-120:]           # keep enough to bridge a chunk split
+        if not _LIMIT_BANNER_RE.search(tail):
+            return
+        self._limit_tail = ""                    # don't re-match this banner from the tail
+        now = time.time()
+        if now - self._limit_seen_at < BOUNCE_COOLDOWN:
+            return
+        self._limit_seen_at = now
+        print(f"[session {self.cid[:8]}] limit banner in the PTY on "
+              f"{self.account} — confirming against the endpoint", flush=True)
+        threading.Thread(target=self.manager.rescue_limit_wall, args=(self,),
+                         daemon=True).start()
 
     # -- read channel: transcript JSONL -> structured events -------------------
     def _find_transcript(self):
@@ -2010,14 +2068,15 @@ class SessionManager:
 
     def _route_key(self, a):
         """Sort key for 'which pool should we spend right now' (lower wins):
-        pools with room before exhausted ones; among those with room, the
-        soonest WEEKLY reset first (use-it-or-lose-it — see the SUB_* comment
-        block); pct is the fallback when no reset is known, and the
+        COOL pools (< SUB_HOT on the most-constrained window — see the
+        never-see-a-rate-limit comment block) before hot ones; among the cool,
+        the soonest WEEKLY reset first (use-it-or-lose-it — see the SUB_*
+        comment block); pct is the fallback when no reset is known, and the
         tie-break."""
         pct = (a.usage or {}).get("pct")
         pct = 100.0 if pct is None else pct
         reset = _weekly_reset(a.usage)
-        return (pct >= SUB_EXHAUSTED, reset is None, reset or 0.0, pct)
+        return (pct >= SUB_HOT, reset is None, reset or 0.0, pct)
 
     def _best_account(self):
         """The ready account the router would spend RIGHT NOW, from cached
@@ -2221,13 +2280,16 @@ class SessionManager:
             return
         now = time.time()
         with self.lock:
-            drained, dead = set(), set()
+            drained, dead, hot, pcts = set(), set(), set(), {}
             for a in self.accounts.values():
                 pct = (a.usage or {}).get("pct", 0)
+                pcts[a.name] = pct
                 if a.broken or pct >= SUB_EXHAUSTED:
                     drained.add(a.name)
                 if a.broken or pct >= 100:
                     dead.add(a.name)             # an in-flight turn CANNOT finish here
+                if a.broken or pct >= SUB_HOT:
+                    hot.add(a.name)              # heating toward the wall — stop feeding it
             sessions = list(self.sessions.values())
         best = self.accounts.get(self._best_account() or "")
         if not best or best.name in drained:
@@ -2248,7 +2310,15 @@ class SessionManager:
                     s.busy = False
                 self._handoff(s, best)
                 continue
-            why = None if s.busy else self._rebalance_win(s.account, best)
+            if s.busy:
+                continue
+            # Preemptive evacuation: an idle session on a heating pool moves to
+            # a COOL best before the wall, not after (never-see-a-rate-limit).
+            if s.account in hot and best.name not in hot:
+                self._handoff(s, best, f"pool {pcts.get(s.account, 0):.0f}% hot "
+                                       "— evacuating before the limit wall")
+                continue
+            why = self._rebalance_win(s.account, best)
             if why:
                 self._handoff(s, best, why)
 
@@ -2345,14 +2415,79 @@ class SessionManager:
                   f"({len(prompt)} chars) under {fresh.account}", flush=True)
             fresh.send_message(prompt)
 
+    def rescue_limit_wall(self, s):
+        """The CLI just painted its limit banner in this session's terminal
+        (_scan_for_limit). That's the zero-lag wall signal — hooks are silent
+        from here and the sweep is BUSY_STUCK away — but PTY text alone is
+        never trusted: confirm against the live endpoint first, so a session
+        merely QUOTING the banner (this repo's own docs contain it) on a
+        healthy pool is a no-op. Confirmed, the session moves immediately;
+        a prompt the wall ate is redelivered, and a turn it cut mid-flight
+        gets an automatic 'continue' (LIMIT_CONTINUE) — the user never
+        babysits a rate limit."""
+        if not SUB_AUTOSWITCH or not s.alive:
+            return
+        now = time.time()
+        if now - s.last_bounce_rescue < BOUNCE_COOLDOWN:
+            return
+        # Claim the cooldown BEFORE the slow confirm — it's the mutual-exclusion
+        # anchor against rescue_bounced_prompt racing this on the same session.
+        s.last_bounce_rescue = now
+        acct = self.accounts.get(s.account)
+        cfg = acct.config_dir if acct else (s.config_dir or "")
+        # allow_refresh=False: this session's own claude holds this grant
+        got = _fetch_usage(cfg, acct.tok if acct else None, allow_refresh=False)
+        walled = got is None or got == AUTH_FAIL  # endpoint mute → believe the banner
+        if got and got != AUTH_FAIL:
+            pct, windows = got
+            walled = pct >= SUB_HOT              # the wall the banner announced
+            if acct:
+                with self.lock:
+                    acct.usage = {"pct": round(pct, 1), "windows": windows,
+                                  "checkedAt": time.time()}
+                    acct.broken = False
+        if not walled:
+            return                               # echoed/stale banner on a cool pool
+        best = self.accounts.get(self._best_account() or "")
+        if (not best or best.name == s.account
+                or (acct and acct.org and best.org and acct.org == best.org)
+                or (best.usage or {}).get("pct", 100.0) >= SUB_EXHAUSTED):
+            self.broadcast_accounts()
+            return                               # nowhere better to go — stay put
+        bounced = s.busy and s.hook_count == s.hooks_at_prompt and s.last_prompt.strip()
+        cut_midturn = s.busy and not bounced
+        self.broadcast_accounts()
+        # The walled turn will never emit Stop — reclaim busy so _handoff runs.
+        s.busy = False
+        self._handoff(s, best, why="limit banner on screen; resuming under the fresh pool")
+        fresh = self.sessions.get(s.cid)
+        if fresh is s or not fresh or not fresh.alive:
+            return                               # handoff declined/failed
+        fresh._started_evt.wait(20)
+        time.sleep(2)
+        if not fresh.alive:
+            return
+        if bounced:
+            print(f"[handoff {s.cid[:8]}] redelivering the walled prompt "
+                  f"({len(s.last_prompt)} chars) under {fresh.account}", flush=True)
+            fresh.send_message(s.last_prompt)
+        elif cut_midturn and LIMIT_CONTINUE:
+            print(f"[handoff {s.cid[:8]}] turn was cut by the wall — "
+                  f"auto-continuing under {fresh.account}", flush=True)
+            fresh.send_message("continue")
+
     def maybe_handoff(self, s):
         """Mid-session account handoff (SUB-ROUTING.md Phase 5): called after
         every Stop. If THIS session's plan is drained (>= SUB_EXHAUSTED used,
-        or its login broke) and a better plan is ready, respawn the session
-        under that plan with --resume — transcript symlinked across, so the
-        conversation continues seamlessly and the user is never asked to do
-        anything. The usage check hits the endpoint directly (the 10-min poll
-        is too slow to catch a window dying mid-conversation)."""
+        or its login broke) — or merely HOT (>= SUB_HOT: the session window is
+        heating toward the wall) — and a better plan is ready, respawn the
+        session under that plan with --resume — transcript symlinked across,
+        so the conversation continues seamlessly and the user is never asked
+        to do anything. A hot-but-alive pool only gives the session up to a
+        COOL target (a lateral hop buys nothing); a drained one flees to
+        anything under SUB_EXHAUSTED. The usage check hits the endpoint
+        directly (the poll is too slow to catch a window dying
+        mid-conversation)."""
         if not SUB_AUTOSWITCH or s.busy or not s.alive:
             return
         if time.time() - s.last_handoff < HANDOFF_COOLDOWN:
@@ -2361,10 +2496,12 @@ class SessionManager:
         cfg = acct.config_dir if acct else (s.config_dir or "")
         # allow_refresh=False: this session's own claude holds this grant
         got = _fetch_usage(cfg, acct.tok if acct else None, allow_refresh=False)
-        drained = got == AUTH_FAIL
+        drained = hot = got == AUTH_FAIL
+        pct = 100.0
         if got and got != AUTH_FAIL:
             pct, windows = got
             drained = pct >= SUB_EXHAUSTED
+            hot = pct >= SUB_HOT
             if acct:
                 with self.lock:
                     acct.usage = {"pct": round(pct, 1), "windows": windows,
@@ -2375,15 +2512,19 @@ class SessionManager:
             with self.lock:
                 acct.broken = True
                 acct.refused_sig = sig
-        if not drained:
+        if not hot:
             return
         best = self.accounts.get(self._best_account() or "")
+        bar = SUB_EXHAUSTED if drained else SUB_HOT
         if (not best or best.name == s.account
-                or (best.usage or {}).get("pct", 100.0) >= SUB_EXHAUSTED):
+                or (acct and acct.org and best.org and acct.org == best.org)
+                or (best.usage or {}).get("pct", 100.0) >= bar):
             self.broadcast_accounts()
             return                               # nowhere better to go — stay put
         self.broadcast_accounts()
-        self._handoff(s, best)
+        why = ("plan drained; resuming under the fresh one" if drained else
+               f"pool {pct:.0f}% hot — moving before the limit wall")
+        self._handoff(s, best, why)
 
     def _handoff(self, s, target, why="plan drained; resuming under the fresh one"):
         """Move one idle session to `target`'s account: link its transcript
@@ -2459,10 +2600,10 @@ class SessionManager:
             return
         cur_k, best_k = self._route_key(cur), self._route_key(best)
         gain = cur_pct - best.usage["pct"]
-        # The exhausted bypass only fires when the TARGET actually has room —
+        # The hot bypass only fires when the TARGET is actually cool —
         # two accounts both over the threshold would otherwise ping-pong every
         # poll (each switch making the other one "best"), debounce ignored.
-        # All-exhausted falls back to the debounced rules below.
+        # All-hot falls back to the debounced rules below.
         exhausted = cur_k[0] and not best_k[0]
         # Did best win on the weekly-reset clock (sooner reset, or a known
         # reset vs an unknown one)? That ordering only changes when a window
@@ -2471,7 +2612,8 @@ class SessionManager:
         if exhausted or ((by_reset or gain >= SUB_HYSTERESIS)
                          and time.time() - self.last_switch_at >= SUB_DEBOUNCE):
             if exhausted:
-                why = "active exhausted"
+                why = ("active exhausted" if cur_pct >= SUB_EXHAUSTED
+                       else f"active pool {cur_pct:.0f}% hot — routing around the wall")
             elif by_reset and not (cur_k[1] or best_k[1]):
                 why = (f"weekly resets {max(1, int((cur_k[2] - best_k[2]) // 3600))}h "
                        "sooner — spend it before it's forfeited")

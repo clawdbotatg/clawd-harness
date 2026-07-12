@@ -110,7 +110,8 @@ user-facing overview; this file orients an agent working **on** the code.
   under the fresh dir and you complete OAuth in its terminal. A poller tracks
   per-account usage via Claude's (undocumented — always degrade) OAuth usage
   endpoint; new sessions spawn under the ACTIVE account, auto-switched to the
-  non-exhausted pool whose WEEKLY window resets soonest (use-it-or-lose-it;
+  COOL (< `SUB_HOT` 80% — a pool nearing its 5h session wall gets no new
+  work) pool whose WEEKLY window resets soonest (use-it-or-lose-it;
   headroom is only the tie-break — see `_route_key`), debounced via `SUB_*`
   env knobs. Sessions
   record `account`+`config_dir` at spawn so `--resume` finds the right dir —
@@ -119,7 +120,11 @@ user-facing overview; this file orients an agent working **on** the code.
   reset-soonest pool (`_rebalance_win`, `SUB_REBALANCE*` knobs); and a
   prompt that bounces off a hard-dead plan (the CLI's limit line, no Stop)
   triggers an immediate handoff that **redelivers the bounced prompt**
-  (`rescue_bounced_prompt`, `BOUNCE_*` knobs).
+  (`rescue_bounced_prompt`, `BOUNCE_*` knobs); and the limit banner itself,
+  spotted in the PTY stream, triggers an endpoint-confirmed handoff in
+  seconds with auto-redeliver / auto-"continue" (`_scan_for_limit` →
+  `rescue_limit_wall`, `LIMIT_CONTINUE`) — the never-see-a-rate-limit
+  contract in `EXPECTATIONS.md`.
   Deep doc: [`docs/fleet/SUB-ROUTING.md`](docs/fleet/SUB-ROUTING.md); what the
   accounts panel should display + mis-bound-login runbook:
   [`docs/fleet/ACCOUNTS-PANEL.md`](docs/fleet/ACCOUNTS-PANEL.md) (key trap: one
