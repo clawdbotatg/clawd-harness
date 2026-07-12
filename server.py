@@ -242,6 +242,13 @@ BUSY_STUCK = float(os.environ.get("BUSY_STUCK", "600"))
 # prompt on the fresh pool. COOLDOWN stops a retype storm from churning respawns.
 BOUNCE_SETTLE   = float(os.environ.get("BOUNCE_SETTLE", "3"))
 BOUNCE_COOLDOWN = float(os.environ.get("BOUNCE_COOLDOWN", "60"))
+# Send watchdog: every delivered message must produce a UserPromptSubmit hook
+# within seconds. A hard-walled CLI answers with its limit line and fires NO
+# hook at all (proven live 2026-07-12 03:2x: send → hook-silent 881s → only
+# the BUSY_STUCK sweep rescued it; both the hook-triggered bounce rescue and
+# the PTY banner scan missed). Hook-silence after a send the harness ITSELF
+# delivered is the bounce signal that needs no hook and no terminal parsing.
+SEND_WATCHDOG = float(os.environ.get("SEND_WATCHDOG", "10"))
 # Rebalance = the spend-the-soonest-reset policy applied to sessions ALREADY
 # RUNNING: an idle session sitting on a healthy pool still moves to the
 # router's best pool when that pool's weekly window resets ≥ MARGIN sooner —
@@ -1400,12 +1407,36 @@ class ClaudeSession:
 
     def send_message(self, text: str):
         """High-level: type a message, let the paste settle, then submit (CR)."""
+        pre_hooks = self.hook_count
         self.write(text.encode("utf-8"))
         # Short one-liners only need to clear the 0.6s burst cliff; big or
         # multi-line pastes take longer to finalize, so keep the full settle.
         big = len(text) > 280 or text.count("\n") >= 1
         time.sleep(SEND_SETTLE if big else SEND_SETTLE_MIN)
         self.write(b"\r")
+        threading.Thread(target=self._send_watchdog, args=(text, pre_hooks),
+                         daemon=True).start()
+
+    def _send_watchdog(self, text, pre_hooks):
+        """We just delivered a message; a healthy CLI answers with a
+        UserPromptSubmit hook in ~1-2s. Total hook silence means the prompt
+        bounced (walled plan — the CLI's limit reply emits NO hook, so
+        neither the hook-triggered rescue nor busy-based sweeps see it) or
+        the CLI is wedged. Log the stripped PTY tail as evidence, then let
+        rescue_bounced_prompt confirm against the live endpoint — on a
+        healthy pool it's a no-op, so a wedged-but-unwalled CLI is left for
+        the wedge runbook, not respawned blind."""
+        time.sleep(SEND_WATCHDOG)
+        if not self.alive or self.hook_count != pre_hooks:
+            return
+        with self.ring_lock:
+            raw = bytes(self.ring[-4000:])
+        tail = _PTY_ANSI_RE.sub(b"", raw).decode("utf-8", "ignore")
+        tail = re.sub(r"\s+", " ", tail)[-300:]
+        print(f"[session {self.cid[:8]}] send got NO hook in "
+              f"{SEND_WATCHDOG:.0f}s on {self.account} — suspecting a walled "
+              f"plan; pty tail: {tail!r}", flush=True)
+        self.manager.rescue_bounced_prompt(self, text, pre_hooks)
 
     # -- read channel: raw PTY bytes -> subscribed clients ---------------------
     def _pump_pty(self):
@@ -2370,9 +2401,11 @@ class SessionManager:
         if not SUB_AUTOSWITCH:
             return
         time.sleep(BOUNCE_SETTLE)
-        # Progress since the prompt hook (tool hooks, or a Stop that cleared
-        # busy and took the normal maybe_handoff path) = not a bounce.
-        if not s.alive or s.hook_count != hooks_at_prompt or not s.busy:
+        # ANY hook since the send (tool hooks, or a Stop that took the normal
+        # maybe_handoff path) = the turn progressed = not a bounce. hook_count
+        # is the whole test — `busy` is NOT required: a bounced send sets no
+        # hooks at all, so nothing ever sets busy (the 2026-07-12 03:2x miss).
+        if not s.alive or s.hook_count != hooks_at_prompt:
             return
         now = time.time()
         if now - s.last_bounce_rescue < BOUNCE_COOLDOWN:
