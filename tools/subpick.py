@@ -17,7 +17,7 @@ Usage data comes from the harness's poller cache (.clawd-harness.sessions.json,
 kept fresh while the harness runs) when it's recent, falling back to a live
 probe per account (same mechanism as usage_probe.py). Zero third-party deps.
 """
-import datetime, json, os, sys
+import datetime, json, os, select, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -141,19 +141,50 @@ def main():
         return 1
     accounts.sort(key=route_key)
 
+    print(f"subscription pick — {datetime.datetime.now().strftime('%a %H:%M')} "
+          f"(hot bar: {SUB_HOT:.0f}%)\n")
     for i, a in enumerate(accounts):
         pct = max(w.get("used") or 0.0 for w in a["windows"])
-        reset = _weekly_reset(a["windows"])
-        when = (datetime.datetime.fromtimestamp(reset).strftime("%a %H:%M")
-                if reset else "?")
-        hot = "HOT" if pct >= SUB_HOT else "   "
+        hot = "HOT " if pct >= SUB_HOT else "cool"
         mark = "->" if i == 0 else "  "
-        print(f"{mark} {a['name']:10s} {hot}  worst {pct:5.1f}%  weekly resets {when}")
+        cells = []
+        for w in a["windows"]:
+            t = _parse_reset(w.get("resets"))
+            when = (" ↻" + datetime.datetime.fromtimestamp(t).strftime("%a %H:%M")
+                    if t else "")
+            cells.append(f"{w.get('label', '?')} {w.get('used') or 0:.0f}%{when}")
+        print(f"{mark} {a['name']:10s} {hot}  " + "   ".join(cells))
 
     best = accounts[0]
     if pick_only:
-        print(f"{best['name']}\t{best['config_dir']}")
+        print(f"\n{best['name']}\t{best['config_dir']}")
         return 0
+
+    reset = _weekly_reset(best["windows"])
+    when = (datetime.datetime.fromtimestamp(reset).strftime("%a %H:%M")
+            if reset else "unknown")
+    print(f"""
+decision: {best['name']} — same rule as the harness router:
+  1. cool pools only (every window under {SUB_HOT:.0f}%): hot/walled pools sink
+  2. of the cool, soonest WEEKLY reset wins ({best['name']} resets {when})
+     — capacity still unspent when that window rolls over is forfeited,
+     so the pool closest to its reset gets spent first (use-it-or-lose-it)
+  3. headroom breaks ties""")
+
+    if sys.stdin.isatty():
+        print(f"\nlaunching claude on '{best['name']}' in 10s — "
+              "Enter = now, Ctrl-C = don't")
+        try:
+            for left in range(10, 0, -1):
+                print(f"\r  {left:2d}… ", end="", flush=True)
+                if select.select([sys.stdin], [], [], 1)[0]:
+                    sys.stdin.readline()
+                    break
+            print("\r        \r", end="")
+        except KeyboardInterrupt:
+            print("\nnot launching — CLAUDE_CONFIG_DIR to use it yourself:\n"
+                  f"  CLAUDE_CONFIG_DIR={best['config_dir']} claude")
+            return 0
 
     claude = usage_probe.subprocess.run(["/usr/bin/which", "claude"], capture_output=True,
                                         text=True).stdout.strip() or \
