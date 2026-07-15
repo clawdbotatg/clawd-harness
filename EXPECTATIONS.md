@@ -212,6 +212,12 @@ I never type around a limit."**
 |---|---|
 | (next) | **the send watchdog**: a live wall on heart (c7bba11c, clawd pool `limited` 100%) beat ALL of the above — the user's send bounced off the CLI's limit reply, which fires **no hook at all**, so the `UserPromptSubmit`-triggered rescue never ran, nothing set `busy`, `_scan_for_limit` matched nothing in the PTY, and the session sat **881 s** until the `BUSY_STUCK` sweep. Fix: `send_message` itself arms a watchdog — total hook-silence `SEND_WATCHDOG` (10 s) after a delivery the harness made IS the bounce signal (no hook needed, no terminal parsing), logs the ANSI-stripped PTY tail (evidence for why the banner scan missed), and feeds the same endpoint-confirmed `rescue_bounced_prompt` (healthy pool = no-op, so a wedged-but-unwalled CLI is never respawned blind). The rescue's `busy` gate is dropped — `hook_count` is the authoritative progress signal |
 
+**2026-07-15** (the login-screen ambush — root cause v3's rule had two more unguarded gates):
+
+| commit | what |
+|---|---|
+| (this) | **the spawn/resume ambush gates**: a fresh spawn on leftclaw (and later a spawn during a routine sub switch) opened onto the full OAuth login screen, then self-healed with no ceremony — the signature of a TRANSIENT verdict, not revocation. Cause: `_has_creds` collapsed `_read_oauth_creds_ex`'s "couldn't read the store" (locked keychain / fd exhaustion / timeout) into "absent", so the **create_session gate** and the **restart resume gate** — two paths v3's fix never reached — marked every account broken and spawned with no `CLAUDE_CONFIG_DIR` login. Fix: `_creds_state()` tri-state (`present`/`absent`/`unknown`); `unknown` spawns/resumes under the recorded account anyway (the claude child reads the keychain itself and usually succeeds where our read failed) and NEVER marks a login broken. `absent` still requires the store to have positively answered empty (keychain rc 44 + no file). Rule restated: **only Anthropic's OAuth service saying 400/401, or a store that answers "empty", may look like a sign-out — a failed READ is always transient** |
+
 **End-state verified 2026-07-09 afternoon:** all four pools (austingriffith
 20x · Ethereum Foundation 5x · clawd 20x · slop 5x) live with real numbers
 on head, leftclaw, and heart simultaneously — chips identical across

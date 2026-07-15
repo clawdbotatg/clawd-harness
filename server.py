@@ -464,6 +464,23 @@ def _has_creds(config_dir):
     return bool(oauth.get("accessToken"))
 
 
+def _creds_state(config_dir):
+    """'present' | 'absent' | 'unknown' — the tri-state the ambush gates need.
+    'absent' ONLY when the store POSITIVELY answered empty (keychain rc 44
+    and no credentials file). A store we couldn't read — locked keychain,
+    subprocess spawn failure, fd exhaustion, timeout — is 'unknown', and per
+    root cause v3 (EXPECTATIONS.md) that must NEVER be treated as signed-out:
+    the failure can be local to THIS process (e.g. Errno 24) while the
+    spawned claude child reads the keychain just fine. Suspected (pending
+    log confirmation) as the path behind the 2026-07-15 leftclaw
+    OAuth-screen ambush: gates that collapsed 'unknown' into 'absent'."""
+    blob, definitive = _read_oauth_creds_ex(config_dir)
+    oauth = (blob or {}).get("claudeAiOauth") or {}
+    if oauth.get("accessToken"):
+        return "present"
+    return "absent" if definitive else "unknown"
+
+
 def _cred_sig(config_dir):
     """Fingerprint of the stored credential blob, '' when there is none.
     Lets the poller tell 'the same refused login is still sitting there'
@@ -1845,11 +1862,20 @@ class SessionManager:
             # entry exists but not ready) is exempt — its login screen is
             # the whole point.
             acct_entry = self.accounts.get(name)
-            if not _has_creds(cfg) and not (acct_entry and not acct_entry.ready):
+            rstate = _creds_state(cfg)
+            if rstate == "unknown":
+                # unreadable store ≠ signed out (root cause v3) — resume
+                # under the recorded account; claude reads the keychain itself
+                print(f"[session {(e.get('cid') or '')[:8]}] credential "
+                      f"store for {name!r} unreadable — transient; resuming "
+                      "under it anyway", flush=True)
+            elif rstate == "absent" \
+                    and not (acct_entry and not acct_entry.ready):
                 alts = sorted([a for a in self.accounts.values()
                                if a.ready and not a.broken],
                               key=lambda a: (a.usage or {}).get("pct", 100.0))
-                alt = next((a for a in alts if _has_creds(a.config_dir)), None)
+                alt = next((a for a in alts
+                            if _creds_state(a.config_dir) != "absent"), None)
                 if acct_entry:
                     acct_entry.broken = True
                 if alt is not None:
@@ -2892,7 +2918,17 @@ class SessionManager:
         # named account dirs it may hold nothing. A signed-out account gets
         # flagged + skipped for the next-best ready one.
         no_creds_anywhere = False
-        if not account and not _has_creds(acct.config_dir if acct else ""):
+        state = "present" if account else \
+            _creds_state(acct.config_dir if acct else "")
+        if state == "unknown":
+            # Credential store unreadable (locked keychain / fd exhaustion /
+            # timeout) — a transient READ failure, not a sign-out. Never mark
+            # anything broken and never reroute off it: the spawned claude
+            # reads the keychain itself and usually succeeds where we could
+            # not (root cause v3's rule, applied to the spawn gate).
+            print(f"[accounts] {name}: credential store unreadable — "
+                  "transient; spawning under it anyway", flush=True)
+        elif state == "absent":
             if acct:
                 acct.broken = True
             print(f"[accounts] {name} is signed out — rerouting this spawn",
@@ -2904,11 +2940,12 @@ class SessionManager:
                     key=lambda x: (x.usage or {}).get("pct", 100.0))
             name, acct = "default", None         # last resort: plain ~/.claude
             for alt in alts:
-                if _has_creds(alt.config_dir):
-                    name, acct = alt.name, alt
-                    break
+                st = _creds_state(alt.config_dir)
+                if st != "absent":               # present, or unreadable-but-
+                    name, acct = alt.name, alt   # probably-there — never mark
+                    break                        # broken on a failed READ
                 alt.broken = True
-            if acct is None and not _has_creds(""):
+            if acct is None and _creds_state("") == "absent":
                 no_creds_anywhere = True
                 print("[accounts] NO plan is signed in on this machine — the "
                       "new session opens Claude's login screen; complete it "
