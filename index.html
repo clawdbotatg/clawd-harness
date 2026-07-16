@@ -1401,8 +1401,21 @@ function handleRelay(m) {
   if (m.type === 'machines') {
     hidePasskey();
     setRelayAuthed();                 // a no-passkey relay hands us `machines` with no authOk — gate opens here
+    const wasOnline = currentMachine ? isMachineOnline(currentMachine) : true;
+    const alreadySynced = resyncedThisSocket;   // if fleetResync() runs below, it re-subscribes — don't double up
     renderMachines(m.machines || []); // populate the roster first…
     fleetResync();                    // …then re-list + re-subscribe over the authed link (once per socket)
+    // A worker↔relay socket flap drops every viewer's harness link on that machine
+    // (worker.py serve_once → _drop_all_links) while OUR socket stays healthy — so
+    // fleetResync (once per socket) never re-runs, pings still pong (the chain is
+    // alive, just unsubscribed), and the tty freezes until a manual reload. The
+    // relay broadcasts this roster on every worker join/leave, so an offline→online
+    // transition of the machine we're viewing IS the flap signal: re-subscribe to
+    // rebuild the link (the fresh replay repaints the screen in place).
+    if (alreadySynced && !wasOnline && currentMachine && currentCid && isMachineOnline(currentMachine)) {
+      const v = currentView();
+      if (v === 'tty' || v === 'transcript') { subscribe(currentCid); sendResize(ttyOwned); armReplayWatchdog(); flushOutbound(); }
+    }
     return;
   }
   if (m.type === 'machineMsg') {
