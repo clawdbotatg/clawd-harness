@@ -302,6 +302,14 @@ _LIMIT_BANNER_RE = re.compile(
     r"you.?ve hit your [a-z0-9 -]{0,24}limit"    # .? = ' or ’ (the CLI uses either)
     r"|stop and wait for limit to reset"
     r"|ask your admin for more usage", re.I)
+# Claude's fresh-onboarding screen (theme picker) — painted only when the
+# config dir's .claude.json lacks hasCompletedOnboarding. On a login-holding
+# dir that screen is ALWAYS wrong (the 07-16 ambushes); _scan_for_onboarding
+# seeds the flag and respawns past it. Scanned only inside the first
+# ONBOARD_SCAN_WINDOW seconds of a launch, so quoted text can't match.
+_ONBOARDING_RE = re.compile(
+    r"choose the text style that looks best with your terminal", re.I)
+ONBOARD_SCAN_WINDOW = float(os.environ.get("ONBOARD_SCAN_WINDOW", "180"))
 # Paths symlinked from ~/.claude into each account dir so every account runs
 # with the user's full extension environment (same list claw-router shares).
 SHARE_PATHS = ["settings.json", "CLAUDE.md", "commands", "rules", "skills",
@@ -495,6 +503,58 @@ def _creds_state(config_dir):
     if oauth.get("accessToken"):
         return "present"
     return "absent" if definitive else "unknown"
+
+
+def _claude_config_file(config_dir):
+    """The .claude.json that gates claude's onboarding for this login:
+    <dir>/.claude.json under CLAUDE_CONFIG_DIR, plain ~/.claude.json for the
+    default account (claude keeps it at HOME level, NOT inside ~/.claude)."""
+    return (Path(config_dir) / ".claude.json") if config_dir \
+        else (Path.home() / ".claude.json")
+
+
+def _ensure_onboarded(config_dir):
+    """Finish a half-completed onboarding before claude can ever paint it.
+
+    A sign-in ceremony closed after the OAuth step but before the theme
+    question leaves a config dir with a VALID login (oauthAccount + keychain
+    grant) and no `hasCompletedOnboarding`. Resumed sessions skip onboarding,
+    so the dir works for days — then the first FRESH spawn routed onto it
+    opens the full theme-picker/onboarding flow (the 2026-07-16 'AI DJ
+    Prototype' / 'Audit Toolchain Scope' ambushes; heart's austinmax dir had
+    carried the latent state since at least 07-13). No credential gate can
+    catch this — the login is healthy; it's the ONBOARDING state that's
+    missing, and only claude reads it.
+
+    So the harness completes the onboarding itself: if the dir holds a login
+    but the flag is missing, seed `hasCompletedOnboarding: true` (the theme
+    is cosmetic — unset renders as the default, exactly like our known-good
+    dirs whose `theme` is null). A dir with NO login (a pending sign-in
+    ceremony) is left strictly alone: its onboarding screen is the point.
+    Returns True iff it seeded."""
+    cfg = _claude_config_file(config_dir)
+    try:
+        data = json.loads(cfg.read_text()) if cfg.exists() else {}
+    except (OSError, ValueError):
+        return False                    # unreadable/foreign file — not ours to rewrite
+    if data.get("hasCompletedOnboarding"):
+        return False
+    if not (data.get("oauthAccount") or _creds_state(config_dir) == "present"):
+        return False                    # no login yet — a real ceremony dir
+    data["hasCompletedOnboarding"] = True
+    tmp = cfg.with_name(cfg.name + ".onboard-seed.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2))
+        os.replace(tmp, cfg)
+    except OSError as e:
+        print(f"[creds {config_dir or '~/.claude'}] onboarding seed WRITE "
+              f"FAILED ({e}) — the next fresh spawn here may show the theme "
+              "picker", flush=True)
+        return False
+    print(f"[creds {config_dir or '~/.claude'}] half-finished onboarding "
+          "completed (hasCompletedOnboarding seeded — login already present, "
+          "theme picker suppressed)", flush=True)
+    return True
 
 
 def _cred_sig(config_dir):
@@ -1083,6 +1143,9 @@ class ClaudeSession:
         self.hooks_at_prompt = 0                  # hook_count when it landed — "did that turn ever progress?"
         self._limit_tail = ""                     # rolling de-ANSI'd PTY text, for the limit-banner scan
         self._limit_seen_at = 0.0                 # cooldown anchor for banner-triggered rescues
+        self._onboard_tail = ""                   # rolling de-ANSI'd PTY text, for the onboarding-screen scan
+        self._onboard_deadline = 0.0              # scan window end; start() arms it, a match disarms it
+        self._onboard_rescues = 0                 # respawns burned on this cid (carried across; caps the loop)
         self._started_evt = threading.Event()     # set on SessionStart — "the TUI is up"
         self.last_tool = None
         self.digest = ""                          # volatile "what it's doing now" (LLM, refreshed each Stop)
@@ -1148,6 +1211,15 @@ class ClaudeSession:
             # CLAUDE_CONFIG_DIR would strand transcripts where our globs
             # (config_dir or ~/.claude) never look.
             env.pop("CLAUDE_CONFIG_DIR", None)
+
+        # Every spawn path (fresh, --resume, handoff, restart) funnels through
+        # here — the one place to guarantee claude never opens onto the
+        # onboarding/theme screen when the dir already holds a login.
+        _ensure_onboarded(self.config_dir)
+        # PTY tripwire window: onboarding paints within the first seconds of
+        # a launch, so only scan the opening stretch (a session later *quoting*
+        # the picker text — like this repo's own sources — never matches).
+        self._onboard_deadline = time.time() + ONBOARD_SCAN_WINDOW
 
         self.settings_path = self._write_hook_settings()
         cmd = [CLAUDE_BIN,
@@ -1492,6 +1564,8 @@ class ClaudeSession:
                     del self.ring[:-RING_MAX]
             self._to_subscribers_bytes(chunk)
             self._scan_for_limit(chunk)
+            if self._onboard_deadline:
+                self._scan_for_onboarding(chunk)
         self.alive = False
         print(f"[session {self.cid[:8]}] PTY closed / claude exited", flush=True)
         # An account handoff replaces this object under the same cid — the
@@ -1523,6 +1597,36 @@ class ClaudeSession:
         print(f"[session {self.cid[:8]}] limit banner in the PTY on "
               f"{self.account} — confirming against the endpoint", flush=True)
         threading.Thread(target=self.manager.rescue_limit_wall, args=(self,),
+                         daemon=True).start()
+
+    def _scan_for_onboarding(self, chunk):
+        """First-launch tripwire: claude paints the theme picker only when
+        its config dir says onboarding never finished — on a login-holding
+        dir that is ALWAYS the half-finished-ceremony ambush (see
+        _ensure_onboarded, which prevents every known case at spawn; this
+        catches one that paints anyway). On a match, rescue_onboarding seeds
+        the flag and respawns the session past the screen. Armed only for
+        the first ONBOARD_SCAN_WINDOW seconds of a launch, so a session
+        later QUOTING the picker text (this repo's own sources do) can
+        never match."""
+        if time.time() >= self._onboard_deadline:
+            self._onboard_deadline = 0.0         # window over — stop scanning entirely
+            self._onboard_tail = ""
+            return
+        text = _PTY_ANSI_RE.sub(b"", chunk).decode("utf-8", "ignore")
+        text = re.sub(r"\s+", " ", text)
+        # Concatenate WITHOUT a joiner (unlike the limit scan): a chunk split
+        # mid-word must still match, and a spurious word-join can't fabricate
+        # this needle's full sentence.
+        tail = (self._onboard_tail + text)[-400:]
+        self._onboard_tail = tail[-120:]         # keep enough to bridge a chunk split
+        if not _ONBOARDING_RE.search(tail):
+            return
+        self._onboard_deadline = 0.0             # one shot per session object
+        self._onboard_tail = ""
+        print(f"[session {self.cid[:8]}] onboarding/theme screen in the PTY "
+              f"on {self.account} — rescuing", flush=True)
+        threading.Thread(target=self.manager.rescue_onboarding, args=(self,),
                          daemon=True).start()
 
     # -- read channel: transcript JSONL -> structured events -------------------
@@ -2623,6 +2727,71 @@ class SessionManager:
             print(f"[handoff {s.cid[:8]}] turn was cut by the wall — "
                   f"auto-continuing under {fresh.account}", flush=True)
             fresh.send_message("continue")
+
+    def rescue_onboarding(self, s):
+        """The CLI painted its first-run onboarding (theme picker) in this
+        session's terminal (_scan_for_onboarding). On a dir that holds a
+        login that screen is always wrong — the half-finished-ceremony
+        ambush (_ensure_onboarded's docstring; EXPECTATIONS.md 2026-07-16).
+        Heal: seed hasCompletedOnboarding, then respawn the SAME session
+        under the SAME account — the fresh claude reads the completed flag
+        and opens straight into the session; a prompt the picker ate is
+        redelivered. A dir with NO login is a real sign-in ceremony whose
+        onboarding is the point — left strictly alone."""
+        if not s.alive:
+            return
+        _ensure_onboarded(s.config_dir)          # no-op if already flagged
+        cfg = _claude_config_file(s.config_dir)
+        try:
+            data = json.loads(cfg.read_text()) if cfg.exists() else {}
+        except (OSError, ValueError):
+            data = {}
+        if not data.get("hasCompletedOnboarding"):
+            print(f"[session {s.cid[:8]}] onboarding on screen but "
+                  f"{s.account} holds no login (or the seed write failed) — "
+                  "a real ceremony, leaving it alone", flush=True)
+            return
+        if s._onboard_rescues >= 2:
+            print(f"[session {s.cid[:8]}] onboarding screen came BACK after "
+                  f"{s._onboard_rescues} respawns — something keeps "
+                  "un-flagging the dir; giving up (pick a theme by hand and "
+                  "bring this log line)", flush=True)
+            return
+        print(f"[session {s.cid[:8]}] onboarding ambush on {s.account} — "
+              "flag seeded; respawning past the screen", flush=True)
+        # A prompt delivered into the picker fires no hooks at all (same
+        # signature as the limit-wall bounce) — remember it for redelivery.
+        bounced = bool(s.last_prompt.strip()) and s.hook_count == s.hooks_at_prompt
+        fresh = ClaudeSession(
+            self, cid=s.cid, pid=s.pid, session_id=s.session_id,
+            resuming=s.resuming, title=s.title, desc=s.desc,
+            prompt_count=s.prompt_count, first_prompt=s.first_prompt,
+            created=s.created, last_active=time.time(),
+            account=s.account, config_dir=s.config_dir)
+        fresh.last_handoff = s.last_handoff
+        fresh._onboard_rescues = s._onboard_rescues + 1
+        with self.lock:
+            if self.sessions.get(s.cid) is not s:
+                return                           # a handoff replaced it mid-rescue
+            self.sessions[s.cid] = fresh
+        s.kill()
+        fresh.start()
+        with s.clients_lock:                     # carry the viewers across
+            viewers = list(s.clients)
+            s.clients.clear()
+        for c in viewers:
+            if c.cid == fresh.cid:
+                fresh.subscribe(c)
+        self.save_registry()
+        self.broadcast_sessions()
+        if bounced:
+            fresh._started_evt.wait(20)
+            time.sleep(2)
+            if fresh.alive:
+                print(f"[session {s.cid[:8]}] redelivering the prompt the "
+                      f"onboarding screen ate ({len(s.last_prompt)} chars)",
+                      flush=True)
+                fresh.send_message(s.last_prompt)
 
     def maybe_handoff(self, s):
         """Mid-session account handoff (SUB-ROUTING.md Phase 5): called after
