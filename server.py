@@ -107,6 +107,13 @@ SEED_SCRUB_RE = re.compile(
     r"|\x1b."                               # any other escape
     r"|[\x00-\x08\x0b-\x1f\x7f]"            # C0 controls except \t \n
 )
+# Scrub OSC 52 (clipboard-write) sequences from ring REPLAYS only. The ring
+# stores every byte a session emits, so a copy made inside claude days ago is
+# replayed verbatim on every subscribe — and the client's OSC 52 handler would
+# re-execute it, silently overwriting the viewer's system clipboard with stale
+# text just for opening the tty view. Live bytes stay untouched (selecting in
+# claude's TUI still copies); only the catch-up snapshot is cleaned.
+OSC52_SCRUB_RE = re.compile(rb"\x1b\]52;[^\x07\x1b]*(?:\x07|\x1b\\)")
 # Settle gap between typing a message and pressing Enter. Claude's TUI treats a
 # fast text+CR burst as a multi-line *paste* (CR becomes a newline, not submit);
 # a pause lets the paste finalize so the CR registers as Enter. <0.6s fails here.
@@ -1784,6 +1791,7 @@ class ClaudeSession:
                           "cols": self.tty_cols, "rows": self.tty_rows})
         with self.ring_lock:
             snapshot = bytes(self.ring)
+        snapshot = OSC52_SCRUB_RE.sub(b"", snapshot)
         if len(snapshot) < SEED_RING_MAX:
             try:
                 seed = self._history_seed_bytes()
