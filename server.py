@@ -313,7 +313,9 @@ _LIMIT_BANNER_RE = re.compile(
 # config dir's .claude.json lacks hasCompletedOnboarding. On a login-holding
 # dir that screen is ALWAYS wrong (the 07-16 ambushes); _scan_for_onboarding
 # seeds the flag and respawns past it. Scanned only inside the first
-# ONBOARD_SCAN_WINDOW seconds of a launch, so quoted text can't match.
+# ONBOARD_SCAN_WINDOW seconds of a FRESH launch — a resume repaints recent
+# conversation, so quoted picker text would false-match there (and resumes
+# skip onboarding regardless, so a resume has nothing real to catch).
 _ONBOARDING_RE = re.compile(
     r"choose the text style that looks best with your terminal", re.I)
 ONBOARD_SCAN_WINDOW = float(os.environ.get("ONBOARD_SCAN_WINDOW", "180"))
@@ -1223,10 +1225,15 @@ class ClaudeSession:
         # here — the one place to guarantee claude never opens onto the
         # onboarding/theme screen when the dir already holds a login.
         _ensure_onboarded(self.config_dir)
-        # PTY tripwire window: onboarding paints within the first seconds of
-        # a launch, so only scan the opening stretch (a session later *quoting*
-        # the picker text — like this repo's own sources — never matches).
-        self._onboard_deadline = time.time() + ONBOARD_SCAN_WINDOW
+        # PTY tripwire: FRESH spawns only. A --resume REPAINTS recent
+        # conversation, so a session that ever quoted the picker text (this
+        # repo's sources; the session that wrote this fix) re-trips the scan
+        # on every resume and gets respawn-cycled (sub2/1951a6f5 2026-07-16).
+        # Resumes can't hit the real ambush anyway — they skip onboarding even
+        # on an unflagged dir (austinmax ran resumed handoffs for days
+        # half-onboarded) — and the _ensure_onboarded seed above covers them.
+        self._onboard_deadline = 0.0 if self.resuming \
+            else time.time() + ONBOARD_SCAN_WINDOW
 
         self.settings_path = self._write_hook_settings()
         cmd = [CLAUDE_BIN,
@@ -1613,9 +1620,11 @@ class ClaudeSession:
         _ensure_onboarded, which prevents every known case at spawn; this
         catches one that paints anyway). On a match, rescue_onboarding seeds
         the flag and respawns the session past the screen. Armed only for
-        the first ONBOARD_SCAN_WINDOW seconds of a launch, so a session
-        later QUOTING the picker text (this repo's own sources do) can
-        never match."""
+        the first ONBOARD_SCAN_WINDOW seconds of a FRESH launch: a resume
+        repaints recent conversation, so a session that QUOTED the picker
+        text (this repo's own sources do) would false-match on every
+        resume — and resumes skip onboarding anyway, so there is nothing
+        real for the scan to catch there."""
         if time.time() >= self._onboard_deadline:
             self._onboard_deadline = 0.0         # window over — stop scanning entirely
             self._onboard_tail = ""
