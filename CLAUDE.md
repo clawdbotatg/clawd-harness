@@ -218,7 +218,13 @@ user-facing overview; this file orients an agent working **on** the code.
   whenever a claim changes the PTY *width* (`_apply_size`): bytes painted for
   another width rewrap into garbage in any replay (the mobile
   scroll-up-shredded-scrollback bug), so replays only reach back to the last
-  width change — older history lives in the transcript view.
+  width change — and a shallow (just-fenced / fresh-boot) replay is preceded by
+  a **transcript-rendered seed**: the recent conversation as soft-wrapped plain
+  text pushed above the visible screen (`_history_seed_bytes` in server.py,
+  `SEED_*` knobs), so scroll-up on a phone shows the session's past instead of
+  an empty buffer. Touch-scroll mechanics are verified end-to-end by
+  `tools/scrollprobe.mjs` (phone-emulated headless Chromium +
+  compositor-synthesized pans; safe — it never subscribes to a session).
 - **URL routing** — nav state lives in the **hash** (the `?t=` token stays in the
   query): `#/` projects · `#/p/<pid>` sessions · `#/p/<pid>/s/<cid>` transcript ·
   `…/tty` terminal. So a reload (or a shared link) lands back on the same

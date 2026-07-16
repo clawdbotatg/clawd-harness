@@ -101,10 +101,15 @@ reconnect (i.e. the server restarted).
 { "type":"hello", "cid", "pid", "account", "sessionId", "title", "workdir",
   "busy":bool, "waiting":bool, "tool":<string|null>, "cols":int, "rows":int }
 //    cols/rows = the PTY's CURRENT size (some viewer's claim, or the boot default)
-// 2) then a binary frame: recent PTY bytes (ring buffer snapshot). The ring
-//    only reaches back to the last WIDTH change: bytes painted for another
-//    width can't render right anywhere, so the server drops them when a size
-//    claim changes cols (rows-only changes keep the ring).
+// 2) then binary frames: recent PTY bytes. The ring buffer only reaches back
+//    to the last WIDTH change: bytes painted for another width can't render
+//    right anywhere, so the server drops them when a size claim changes cols
+//    (rows-only changes keep the ring). When the ring snapshot is SHALLOW
+//    (< SEED_RING_MAX, i.e. just fenced or fresh boot), it is preceded by a
+//    "seed" byte frame: the recent conversation rendered from the transcript
+//    as soft-wrapped plain text + a screenful of newlines, so the terminal
+//    still has scrollback to show above the live screen (this is what makes
+//    scroll-up on a phone show the session's past instead of nothing).
 // 3) then recent transcript history, each:
 { "type":"transcript", "cid", "event":<event>, "history":true }
 ```

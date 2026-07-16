@@ -91,6 +91,22 @@ WORKDIR    = os.path.abspath(os.environ.get("WORKDIR", os.getcwd()))
 COLS       = int(os.environ.get("COLS", "120"))
 ROWS       = int(os.environ.get("ROWS", "34"))
 RING_MAX   = int(os.environ.get("RING_MAX", str(256 * 1024)))  # replay buffer cap
+# A subscribe whose ring replay is this shallow gets the transcript rendered in
+# as seed scrollback first (see _history_seed_bytes) — the ring goes shallow
+# exactly when it can't carry history: a width-change fence (_apply_size) or a
+# fresh boot. Deep rings skip the seed (real painted bytes beat a re-rendering).
+# SEED_RING_MAX=0 disables seeding.
+SEED_RING_MAX = int(os.environ.get("SEED_RING_MAX", "8192"))
+SEED_CHARS    = int(os.environ.get("SEED_CHARS", "12000"))   # cap on rendered seed text
+# Scrub transcript text before it's replayed as terminal bytes: any escape
+# sequence or control char (except \t \n) in a prompt/answer would otherwise
+# execute in the subscriber's terminal instead of displaying.
+SEED_SCRUB_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"    # OSC … BEL/ST
+    r"|\x1b\[[0-9;?]*[ -/]*[@-~]"           # CSI
+    r"|\x1b."                               # any other escape
+    r"|[\x00-\x08\x0b-\x1f\x7f]"            # C0 controls except \t \n
+)
 # Settle gap between typing a message and pressing Enter. Claude's TUI treats a
 # fast text+CR burst as a multi-line *paste* (CR becomes a newline, not submit);
 # a pause lets the paste finalize so the CR registers as Enter. <0.6s fails here.
@@ -1664,6 +1680,13 @@ class ClaudeSession:
                           "cols": self.tty_cols, "rows": self.tty_rows})
         with self.ring_lock:
             snapshot = bytes(self.ring)
+        if len(snapshot) < SEED_RING_MAX:
+            try:
+                seed = self._history_seed_bytes()
+            except Exception:
+                seed = b""            # seeding is best-effort — never block the replay
+            if seed:
+                client.send_bytes(seed)
         if snapshot:
             client.send_bytes(snapshot)
         self._replay_history(client)
@@ -1682,6 +1705,62 @@ class ClaudeSession:
         for ev in events[-limit:]:
             client.send_json({"type": "transcript", "cid": self.cid,
                               "event": ev, "history": True})
+
+    def _history_seed_bytes(self, limit=60):
+        """Rendered-transcript scrollback, sent before a shallow ring replay.
+
+        Raw PTY bytes can't cross a width change — they're painted for one
+        geometry, and _apply_size fences the ring exactly so we never replay
+        them into another (the mobile shredded-scrollback bug). The cost was
+        that a phone attaching to a session got a near-empty replay: nothing
+        above the live screen, so scroll-up found nothing to scroll to.
+        Instead of replaying old-geometry bytes, render the conversation from
+        the transcript as plain SOFT-WRAPPED text — long lines carry no
+        newlines, so xterm wraps them to the client's real width and re-wraps
+        them on any future resize. A screenful of newlines then pushes the
+        whole block above the visible rows: the live repaint that follows uses
+        relative cursor moves, which can never reach scrollback, so it can't
+        chew into the seeded history."""
+        path = self.transcript_path or self._find_transcript()
+        if not path:
+            return b""
+        try:
+            lines = open(path).read().splitlines()
+        except OSError:
+            return b""
+        DIM, RST, MARK = "\x1b[2m", "\x1b[0m", "\x1b[38;5;179m"
+        scrub = lambda s: SEED_SCRUB_RE.sub("", s)
+        parts = []                    # (kind, text); runs of tool-only chips coalesce below
+        for ev in (self._slim_event(l) for l in lines):
+            if not ev:
+                continue
+            role, text = ev.get("role"), scrub(ev.get("text") or "").strip()
+            if role == "user" and text:
+                parts.append(("text", MARK + "❯ " + RST + text))
+            elif role == "command" and text:
+                parts.append(("text", DIM + "❯ " + text + RST))
+            elif role == "assistant":
+                block = [DIM + "· " + scrub(t["name"]) + RST
+                         for t in (ev.get("tools") or []) if t.get("name")]
+                if text:
+                    parts.append(("text", "\n".join(block + [text])))
+                elif block:
+                    # a tool-only event: glue onto a preceding tool-only run so
+                    # long tool sequences read as one compact chip column
+                    if parts and parts[-1][0] == "tools":
+                        parts[-1] = ("tools", parts[-1][1] + "\n" + "\n".join(block))
+                    else:
+                        parts.append(("tools", "\n".join(block)))
+        parts = [t for _, t in parts[-limit:]]
+        while parts and sum(map(len, parts)) > SEED_CHARS:
+            parts.pop(0)
+        if not parts:
+            return b""
+        out = (DIM + "── conversation so far (rendered from the transcript; "
+               "live screen below) ──" + RST + "\n\n"
+               + "\n\n".join(parts) + "\n\n" + DIM + "── live ──" + RST)
+        pad = "\r\n" * max(8, min(60, self.tty_rows or ROWS))
+        return (out.replace("\n", "\r\n") + pad).encode("utf-8", "ignore")
 
     def unsubscribe(self, client):
         with self.clients_lock:
