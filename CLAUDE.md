@@ -238,13 +238,20 @@ user-facing overview; this file orients an agent working **on** the code.
   a link into a specific session (incl. the fleet `#/m/<machine>/p/<projectKey>/s/<cid>`
   form + how notifications construct them): see [`docs/DEEPLINKS.md`](docs/DEEPLINKS.md).**
 
-## Two non-obvious gotchas (baked into server.py — don't regress)
+## Three non-obvious gotchas (baked into server.py — don't regress)
 1. **`SCRUB_ENV`** — scrub `CLAUDECODE` / `CLAUDE_CODE_*` / `ANTHROPIC_API_KEY`
    etc. from the child env, or a nested `claude` runs in embedded mode (no
    transcript written) and bills metered API instead of the subscription.
 2. **`SEND_SETTLE`** — pause between typing text and the `\r`, or claude's TUI
    treats `text`+`\r` as a paste and the `\r` doesn't submit. Short messages use
    `SEND_SETTLE_MIN` (~0.7s); big/multi-line use `SEND_SETTLE` (~1.5s).
+3. **`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`** in the child env — Claude Code
+   can render its TUI in the terminal's *alternate screen* (a server-side
+   rollout: it flips on per-account with no CLI update or harness change).
+   xterm.js has **no scrollback in the alt buffer**, so the ring replay and
+   `_history_seed_bytes` paint into the hidden normal buffer and mobile
+   scroll-up finds nothing — the whole scrollback contract dies silently.
+   Diagnose with an unmatched `\x1b[?1049h` in a session's replay bytes.
 
 ## Known issues / next
 - **Transcript tailer logs `tailing …` repeatedly** (busy-reattach loop, inherited

@@ -1213,6 +1213,14 @@ class ClaudeSession:
         env["LINES"] = str(ROWS)
         for k in SCRUB_ENV:                      # pristine top-level + subscription auth
             env.pop(k, None)
+        # Claude Code can render its whole TUI in the ALTERNATE screen buffer —
+        # a server-side rollout, so it flips on per-account with no CLI update
+        # or harness change (sub2 flipped mid-day 2026-07-16). xterm.js has no
+        # scrollback in the alt buffer, so every scroll path dies silently: the
+        # ring replay and _history_seed_bytes paint into the hidden normal
+        # buffer and a phone's touch pan finds nothing to scroll. Pin inline
+        # rendering — the seed/ring/scrollback contract depends on it.
+        env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] = "1"
         if self.config_dir:                      # non-default subscription account
             env["CLAUDE_CONFIG_DIR"] = self.config_dir
         else:
