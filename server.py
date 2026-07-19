@@ -1102,7 +1102,8 @@ class ClaudeSession:
 
     def __init__(self, manager, cid, session_id, resuming, pid="",
                  title="", desc="", prompt_count=0, first_prompt="", created=0.0,
-                 last_active=0.0, account="default", config_dir=""):
+                 last_active=0.0, account="default", config_dir="",
+                 ceremony=False):
         self.manager = manager
         self.pid = pid                           # owning project id
         self.cid = cid                           # stable console id (ours; survives claude rotation)
@@ -1117,6 +1118,16 @@ class ClaudeSession:
         self.account = account or "default"
         self.config_dir = config_dir
         self.last_handoff = 0.0                  # cooldown anchor for account handoffs
+        # Sign-in ceremony session (the 🧠 panel's add / re-sign-in flow):
+        # its ENTIRE PURPOSE is to sit on a broken/credential-less account
+        # while the human completes OAuth — exactly the state every reactive
+        # rescue (handoff sweep, limit-wall/bounce rescues, onboarding heal)
+        # reads as "dead plan, move it". Those paths must leave it strictly
+        # alone: a handoff would --resume a transcript-less session under
+        # another dir ("no conversation found") and yank the user out
+        # mid-login. The flag is permanent for the session's lifetime and
+        # persisted, so a harness restart mid-ceremony can't strip it.
+        self.ceremony = ceremony
 
         self.title = title
         self.desc = desc
@@ -1167,7 +1178,8 @@ class ClaudeSession:
                 "title": self.title, "desc": self.desc,
                 "prompt_count": self.prompt_count, "first_prompt": self.first_prompt,
                 "created": self.created, "last_active": self.last_active,
-                "account": self.account, "config_dir": self.config_dir}
+                "account": self.account, "config_dir": self.config_dir,
+                "ceremony": self.ceremony}
 
     def workdir(self):
         """Where this session's claude runs — its project's repo path."""
@@ -1324,7 +1336,7 @@ class ClaudeSession:
             # verdict to the rescue path — it confirms against the live
             # endpoint and, on a true bounce, hands off + redelivers.
             acct = self.manager.accounts.get(self.account)
-            if acct and (acct.broken
+            if not self.ceremony and acct and (acct.broken
                          or (acct.usage or {}).get("pct", 0) >= SUB_EXHAUSTED):
                 threading.Thread(target=self.manager.rescue_bounced_prompt,
                                  args=(self, prompt, self.hook_count),
@@ -1554,8 +1566,9 @@ class ClaudeSession:
         healthy pool it's a no-op, so a wedged-but-unwalled CLI is left for
         the wedge runbook, not respawned blind."""
         time.sleep(SEND_WATCHDOG)
-        if not self.alive or self.hook_count != pre_hooks:
-            return
+        if not self.alive or self.hook_count != pre_hooks or self.ceremony:
+            return                               # (ceremony sends — e.g. the auto-typed
+                                                 #  /login — fire no hooks by design)
         with self.ring_lock:
             raw = bytes(self.ring[-4000:])
         tail = _PTY_ANSI_RE.sub(b"", raw).decode("utf-8", "ignore")
@@ -1605,6 +1618,8 @@ class ClaudeSession:
         reading a file that quotes the banner) can never cause a handoff on a
         healthy pool. This is the one sanctioned exception to 'never parse
         the terminal's weird text': a needle match, not a parse."""
+        if self.ceremony:
+            return                               # sign-in ceremony: never rescued
         text = _PTY_ANSI_RE.sub(b"", chunk).decode("utf-8", "ignore")
         text = re.sub(r"\s+", " ", text)
         tail = (self._limit_tail + " " + text)[-800:]
@@ -2078,6 +2093,7 @@ class SessionManager:
                       f"store for {name!r} unreadable — transient; resuming "
                       "under it anyway", flush=True)
             elif rstate == "absent" \
+                    and not e.get("ceremony") \
                     and not (acct_entry and not acct_entry.ready):
                 alts = sorted([a for a in self.accounts.values()
                                if a.ready and not a.broken],
@@ -2111,7 +2127,8 @@ class SessionManager:
                 first_prompt=e.get("first_prompt", ""),
                 created=e.get("created", 0.0),
                 last_active=e.get("last_active", 0.0),
-                account=name, config_dir=cfg)
+                account=name, config_dir=cfg,
+                ceremony=e.get("ceremony", False))
             self.sessions[s.cid] = s
             s.start()
         # No auto-created session: with zero projects there are legitimately zero
@@ -2300,17 +2317,23 @@ class SessionManager:
             slug = _safe_name(name).lower()
         if slug == "default":
             # Re-adopt the machine's plain ~/.claude login (e.g. after a
-            # remove). Already signed in — no ceremony, no session.
+            # remove). Already signed in — no ceremony, no session. An
+            # EXISTING default falls through instead: healthy → the generic
+            # no-op below; BROKEN (the ~/.claude login itself got revoked) →
+            # its re-sign-in ceremony spawns like any other account's.
             with self.lock:
-                if "default" in self.accounts:
-                    return None
-                em, org, oname = _account_identity("")
-                self.accounts["default"] = Account(
-                    "default", "", email=em, org=org, org_name=oname, ready=True)
-            self.save_registry()
-            self.broadcast_accounts()
-            print("[account default] re-adopted the ~/.claude login", flush=True)
-            return None
+                adopted = "default" not in self.accounts
+                if adopted:
+                    em, org, oname = _account_identity("")
+                    self.accounts["default"] = Account(
+                        "default", "", email=em, org=org, org_name=oname,
+                        ready=True)
+            if adopted:
+                self.save_registry()
+                self.broadcast_accounts()
+                print("[account default] re-adopted the ~/.claude login",
+                      flush=True)
+                return None
         with self.lock:
             a = self.accounts.get(slug)
             if a and a.ready and not a.broken:
@@ -2319,16 +2342,35 @@ class SessionManager:
                 a = Account(slug, str(ACCOUNTS_DIR / slug))
                 self.accounts[slug] = a
         try:
-            _link_shared_paths(a.config_dir)
-            _share_projects(a.config_dir)
+            if a.config_dir:                     # default's "" IS ~/.claude —
+                _link_shared_paths(a.config_dir)  # nothing to link into itself
+                _share_projects(a.config_dir)
         except Exception as e:
             print(f"[account {slug}] share links failed: {e}", flush=True)
         self.save_registry()
         self.broadcast_accounts()
-        s = self.create_session(SELF_PID, account=slug)
+        s = self.create_session(SELF_PID, account=slug, ceremony=True)
         if s:
             s.title = f"sign in · {slug}"
             s.desc = "complete the Claude OAuth login in this terminal"
+            # Re-sign-in (the account's dir still holds stale/revoked
+            # credentials): the CLI opens its NORMAL TUI, not the login
+            # screen — the user shouldn't have to remember to type /login,
+            # so type it for them once the TUI is up. A credential-less dir
+            # is left alone: there the CLI boots straight into its own
+            # login/onboarding flow and injected keystrokes would garble it.
+            if _creds_state(a.config_dir) == "present":
+                s.desc = ("/login is being typed for you — complete the "
+                          "Claude OAuth in this terminal")
+                def _autologin(sess=s):
+                    if not sess._started_evt.wait(30):
+                        return
+                    time.sleep(2.0)
+                    if sess.alive and self.sessions.get(sess.cid) is sess:
+                        print(f"[account {slug}] stale login on file — "
+                              "typing /login", flush=True)
+                        sess.send_message("/login")
+                threading.Thread(target=_autologin, daemon=True).start()
             self.broadcast_sessions()
         print(f"[account {slug}] created — sign-in session "
               f"{s.cid[:8] if s else 'FAILED'}", flush=True)
@@ -2570,6 +2612,8 @@ class SessionManager:
         if not best or best.name in drained:
             return
         for s in sessions:
+            if s.ceremony:
+                continue                         # deliberate sign-in — hands off
             if not (s.alive and s.account != best.name
                     and now - s.last_handoff >= HANDOFF_COOLDOWN):
                 continue
@@ -2632,7 +2676,7 @@ class SessionManager:
         prompt there. A 95–99% plan can still finish a turn — only >=100 (or
         AUTH_FAIL) qualifies, and a genuinely-running turn is detected and
         left alone."""
-        if not SUB_AUTOSWITCH:
+        if not SUB_AUTOSWITCH or s.ceremony:     # sign-in ceremony: never rescued
             return
         time.sleep(BOUNCE_SETTLE)
         # ANY hook since the send (tool hooks, or a Stop that took the normal
@@ -2702,7 +2746,7 @@ class SessionManager:
         a prompt the wall ate is redelivered, and a turn it cut mid-flight
         gets an automatic 'continue' (LIMIT_CONTINUE) — the user never
         babysits a rate limit."""
-        if not SUB_AUTOSWITCH or not s.alive:
+        if not SUB_AUTOSWITCH or not s.alive or s.ceremony:
             return
         now = time.time()
         if now - s.last_bounce_rescue < BOUNCE_COOLDOWN:
@@ -2763,7 +2807,7 @@ class SessionManager:
         and opens straight into the session; a prompt the picker ate is
         redelivered. A dir with NO login is a real sign-in ceremony whose
         onboarding is the point — left strictly alone."""
-        if not s.alive:
+        if not s.alive or s.ceremony:            # a ceremony's screens are the point
             return
         _ensure_onboarded(s.config_dir)          # no-op if already flagged
         cfg = _claude_config_file(s.config_dir)
@@ -2830,7 +2874,7 @@ class SessionManager:
         anything under SUB_EXHAUSTED. The usage check hits the endpoint
         directly (the poll is too slow to catch a window dying
         mid-conversation)."""
-        if not SUB_AUTOSWITCH or s.busy or not s.alive:
+        if not SUB_AUTOSWITCH or s.busy or not s.alive or s.ceremony:
             return
         if time.time() - s.last_handoff < HANDOFF_COOLDOWN:
             return
@@ -2873,7 +2917,7 @@ class SessionManager:
         into the target config dir (real-file-wins, never clobber), replace
         the session object under the SAME cid with a --resume respawn, and
         move the viewers over. The old claude gets SIGTERM once we're sure."""
-        if s.busy or not s.alive:                # re-check after the network call
+        if s.busy or not s.alive or s.ceremony:  # re-check after the network call
             return
         s.last_handoff = time.time()
         src = s.transcript_path or s._find_transcript()
@@ -3164,7 +3208,7 @@ class SessionManager:
                 for p in self._ordered_projects()]
 
     # -- session crud ----------------------------------------------------------
-    def create_session(self, pid, account=None):
+    def create_session(self, pid, account=None, ceremony=False):
         if pid not in self.projects:
             return None
         # Routing: an explicit override (e.g. the sign-in ceremony) always
@@ -3228,7 +3272,8 @@ class SessionManager:
         s = ClaudeSession(self, cid=cid, pid=pid, session_id=str(uuid.uuid4()),
                           resuming=False, created=time.time(),
                           account=name,
-                          config_dir=acct.config_dir if acct else "")
+                          config_dir=acct.config_dir if acct else "",
+                          ceremony=ceremony or no_creds_anywhere)
         if no_creds_anywhere:
             s.desc = ("no plan is signed in on this machine yet — complete "
                       "the login in this terminal (once per machine)")

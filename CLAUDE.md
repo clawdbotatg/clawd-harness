@@ -124,7 +124,12 @@ user-facing overview; this file orients an agent working **on** the code.
   spotted in the PTY stream, triggers an endpoint-confirmed handoff in
   seconds with auto-redeliver / auto-"continue" (`_scan_for_limit` →
   `rescue_limit_wall`, `LIMIT_CONTINUE`) — the never-see-a-rate-limit
-  contract in `EXPECTATIONS.md`.
+  contract in `EXPECTATIONS.md`. The one carve-out: **sign-in ceremony
+  sessions** (`ClaudeSession.ceremony` — spawned by the 🧠 panel's add /
+  re-sign-in buttons) deliberately sit on a broken account, so every
+  rescue/handoff path skips them for the session's lifetime; a re-sign-in
+  ceremony also auto-types `/login` once the TUI is up (a stale-creds dir
+  opens the normal TUI, not the login screen).
   Deep doc: [`docs/fleet/SUB-ROUTING.md`](docs/fleet/SUB-ROUTING.md); what the
   accounts panel should display + mis-bound-login runbook:
   [`docs/fleet/ACCOUNTS-PANEL.md`](docs/fleet/ACCOUNTS-PANEL.md) (key trap: one
