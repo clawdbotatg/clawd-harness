@@ -346,7 +346,7 @@ class Conn:
         try:
             fleet_ws.ws_send(self.wfile, self.lock, json.dumps(obj), opcode=0x1)
         except Exception:
-            self.dead = True
+            self._mark_dead()
 
     def send_binary(self, data):
         """Forward a raw binary frame (PTY bytes) unchanged. Servers MUST NOT mask."""
@@ -355,7 +355,7 @@ class Conn:
         try:
             fleet_ws.ws_send(self.wfile, self.lock, data, opcode=0x2)
         except Exception:
-            self.dead = True
+            self._mark_dead()
 
     def ping(self):
         if self.dead:
@@ -363,7 +363,16 @@ class Conn:
         try:
             fleet_ws.ws_send(self.wfile, self.lock, b"", opcode=0x9)
         except Exception:
-            self.dead = True
+            self._mark_dead()
+
+    def _mark_dead(self):
+        """A send failed: this conn is done. Close the socket too, so the handler
+        read thread unblocks (running the drop_* path) and the peer sees FIN
+        instead of an ESTAB socket that has silently stopped carrying frames —
+        a peer with no read timeout would otherwise starve on it forever (the
+        controller did, freezing the PM's world for days)."""
+        self.dead = True
+        self.close()
 
     def close(self):
         """Tear down the underlying socket so a parked read thread unblocks and

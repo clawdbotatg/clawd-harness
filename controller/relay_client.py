@@ -17,6 +17,9 @@ import time
 
 from .wsclient import client_connect, ws_read_message, ws_send
 
+# Relay PING_EVERY is 20s; consider the link wedged after ~3 missed pings.
+READ_TIMEOUT = 75.0
+
 
 class RelayMachine:
     """One fleet machine, driven through the relay. Same surface as HarnessClient."""
@@ -122,6 +125,13 @@ class RelayFleet:
         while not self._stop:
             try:
                 sock, rfile, wfile = client_connect(self._url())
+                # The relay pings every peer every ~20s, so a healthy link is
+                # never silent for long. Without a read timeout, a relay that
+                # goes quiet on us (its send path marked this conn dead but the
+                # TCP socket stayed ESTAB) starves this reader FOREVER and the
+                # whole world freezes at its last snapshot — the PM ran blind
+                # for days exactly this way. ~3 missed pings → tear down, redial.
+                sock.settimeout(READ_TIMEOUT)
                 self._sock, self._wfile, self.connected = sock, wfile, True
                 backoff = 0.5
                 self.send({"type": "list"})
@@ -144,6 +154,12 @@ class RelayFleet:
                         continue
             except Exception:
                 pass
+            try:
+                if self._sock:
+                    self._sock.close()   # don't leak the fd across redials
+            except OSError:
+                pass
+            self._sock, self._wfile = None, None
             self.connected = False
             for mm in self.machines.values():
                 mm.connected = False
