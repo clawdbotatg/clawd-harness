@@ -310,8 +310,10 @@ class Conn:
     _seq = 0
     _seq_lock = threading.Lock()
 
-    def __init__(self, wfile, role, ident, host="", kind="machine"):
+    def __init__(self, wfile, role, ident, host="", kind="machine", peer=""):
         self.wfile = wfile
+        self.peer = peer     # "ip:port" of the raw TCP peer — disambiguates
+                             # same-ident conns (__ctl__) in the logs
         self.lock = threading.Lock()
         self.role = role
         self.ident = ident
@@ -436,7 +438,7 @@ class Relay:
                 old.dead = True  # a reconnect supersedes the stale connection
             self.workers[conn.ident] = conn
             subs = list(self.push_subs)
-        print(f"[relay] worker online: {conn.ident} ({conn.host})", flush=True)
+        print(f"[relay] worker online: {conn.ident} ({conn.host}) [{conn.peer}]", flush=True)
         self.broadcast_roster()
         # Hand the worker the current push subscriptions so it can ring the phone
         # for its sessions (it caches them; new ones arrive via pushSub below).
@@ -447,7 +449,7 @@ class Relay:
         with self.lock:
             if self.workers.get(conn.ident) is conn:
                 del self.workers[conn.ident]
-        print(f"[relay] worker offline: {conn.ident}", flush=True)
+        print(f"[relay] worker offline: {conn.ident} [{conn.peer}]", flush=True)
         self.broadcast_roster()
 
     # ── mobile lifecycle ────────────────────────────────────────────────────
@@ -462,7 +464,7 @@ class Relay:
             # parks forever — only fixed idents like __ctl__ ever collide; a
             # browser gets a fresh m<seq> per dial and never lands here).
             old.close()
-        print(f"[relay] mobile online: {conn.ident}", flush=True)
+        print(f"[relay] mobile online: {conn.ident} [{conn.peer}]", flush=True)
         if conn.mfa_ok:
             conn.send_json({"type": "machines", "machines": self.roster()})
         else:
@@ -498,7 +500,7 @@ class Relay:
             if current:
                 del self.mobiles[conn.ident]
             workers = list(self.workers.values())
-        print(f"[relay] mobile offline: {conn.ident}", flush=True)
+        print(f"[relay] mobile offline: {conn.ident} [{conn.peer}]", flush=True)
         # tell every worker so it can tear down any harness link it opened for
         # this viewer (the proxy worker keeps one harness connection per mobile).
         # Skip if this conn was superseded by a reconnect under the same ident
@@ -921,7 +923,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
-        conn = Conn(self.wfile, role, ident, host, kind)
+        conn = Conn(self.wfile, role, ident, host, kind,
+                    peer="%s:%s" % self.client_address[:2])
         if role == "worker":
             RELAY.add_worker(conn)
         else:
