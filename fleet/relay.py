@@ -47,6 +47,7 @@ import hmac
 import json
 import os
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -310,8 +311,9 @@ class Conn:
     _seq = 0
     _seq_lock = threading.Lock()
 
-    def __init__(self, wfile, role, ident, host="", kind="machine", peer=""):
+    def __init__(self, wfile, role, ident, host="", kind="machine", peer="", sock=None):
         self.wfile = wfile
+        self.sock = sock     # the raw TCP socket, for close() — see below
         self.peer = peer     # "ip:port" of the raw TCP peer — disambiguates
                              # same-ident conns (__ctl__) in the logs
         self.lock = threading.Lock()
@@ -379,9 +381,19 @@ class Conn:
     def close(self):
         """Tear down the underlying socket so a parked read thread unblocks and
         the peer notices it's been dropped (and a real worker reconnects). Used by
-        the staleness reaper on a half-open connection that won't error on its own."""
+        the staleness reaper on a half-open connection that won't error on its own.
+
+        shutdown() on the raw socket, not wfile.close(): the socket fd is shared
+        by the handler's rfile/wfile makefile objects, so closing wfile alone
+        leaves the TCP connection fully open (observed live: a superseded __ctl__
+        conn stayed ESTAB, its peer reading it, through a wfile-only close)."""
         try:
-            self.wfile.close()   # shares the fd with rfile → both ends unblock
+            if self.sock is not None:
+                self.sock.shutdown(socket.SHUT_RDWR)   # both ends unblock now
+        except OSError:
+            pass
+        try:
+            self.wfile.close()
         except Exception:
             pass
 
@@ -924,7 +936,7 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
 
         conn = Conn(self.wfile, role, ident, host, kind,
-                    peer="%s:%s" % self.client_address[:2])
+                    peer="%s:%s" % self.client_address[:2], sock=self.connection)
         if role == "worker":
             RELAY.add_worker(conn)
         else:
