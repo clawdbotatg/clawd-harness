@@ -453,7 +453,15 @@ class Relay:
     # ── mobile lifecycle ────────────────────────────────────────────────────
     def add_mobile(self, conn):
         with self.lock:
+            old = self.mobiles.get(conn.ident)
+            if old and old is not conn:
+                old.dead = True   # a reconnect supersedes the stale connection
             self.mobiles[conn.ident] = conn
+        if old and old is not conn:
+            # Close outside the lock: unblocks the old handler thread (else it
+            # parks forever — only fixed idents like __ctl__ ever collide; a
+            # browser gets a fresh m<seq> per dial and never lands here).
+            old.close()
         print(f"[relay] mobile online: {conn.ident}", flush=True)
         if conn.mfa_ok:
             conn.send_json({"type": "machines", "machines": self.roster()})
@@ -486,12 +494,18 @@ class Relay:
 
     def drop_mobile(self, conn):
         with self.lock:
-            if self.mobiles.get(conn.ident) is conn:
+            current = self.mobiles.get(conn.ident) is conn
+            if current:
                 del self.mobiles[conn.ident]
             workers = list(self.workers.values())
         print(f"[relay] mobile offline: {conn.ident}", flush=True)
         # tell every worker so it can tear down any harness link it opened for
         # this viewer (the proxy worker keeps one harness connection per mobile).
+        # Skip if this conn was superseded by a reconnect under the same ident
+        # (__ctl__): the ident is live again, and mobileGone would tear down the
+        # NEW connection's harness links out from under it.
+        if not current:
+            return
         gone = {"type": "mobileGone", "mobile": conn.ident}
         for w in workers:
             w.send_json(gone)
