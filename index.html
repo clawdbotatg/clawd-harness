@@ -2985,7 +2985,7 @@ function renderAccountsPanel(container, info, mid) {
     if (info.auto && routed) {
       const tag = document.createElement('span');
       tag.className = 'scount swork'; tag.textContent = '▸ next spawn';
-      tag.title = 'most headroom right now — the next new session lands here';
+      tag.title = 'the router\'s pick — the next new session lands here (coolest pool, soonest weekly reset)';
       act.appendChild(tag);
     } else if (!info.auto && routed) {
       const tag = document.createElement('span');
@@ -3244,10 +3244,10 @@ function renderAccountsBody() {
         return (acc && acctIdent(acc)) || n;
       };
       sub.textContent = info.auto
-        ? `new sessions: most headroom → ${disp(info.best || info.active)}`
+        ? `new sessions: soonest reset → ${disp(info.best || info.active)}`
         : `new sessions: ${disp(info.active)} (pinned)`;
       sub.title = info.auto
-        ? 'every new session spawns under whichever plan has the most headroom right now'
+        ? 'every new session spawns under the coolest pool whose weekly window resets soonest (use-it-or-lose-it)'
         : 'auto-routing is off (SUB_AUTOSWITCH=0) — new sessions spawn under the pinned plan';
       hd.appendChild(sub);
     } else if (!online) {

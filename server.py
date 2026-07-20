@@ -234,6 +234,12 @@ OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"     # UNDOCUMENTED
 OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"  # UNDOCUMENTED — degrade gracefully
 OAUTH_BETA      = "oauth-2025-04-20"
 USAGE_TTL       = float(os.environ.get("USAGE_TTL", "180"))     # s between usage polls per account
+# How long a rate-limited (429ing) account's LAST GOOD reading stays routable:
+# while the newest successful poll is younger than this, a 429 keeps the
+# snapshot alive (checkedAt bumped) instead of aging it out of _best_account's
+# freshness filter. Past it, the pool goes blind and drops from routing until
+# a poll succeeds again — old numbers on a pool under active burn are a guess.
+USAGE_RL_TRUST  = float(os.environ.get("USAGE_RL_TRUST", "1800"))
 # Local routing rule (direct mode; the fleet relay will own this fleet-wide):
 # among COOL pools (< SUB_HOT below — was < EXHAUSTED until the 07-11 wall
 # incident), spend the one whose WEEKLY window resets soonest — weekly headroom
@@ -603,6 +609,15 @@ def _link_transcript(session_id, src_cfg, dst_cfg):
 
 
 AUTH_FAIL = "auth"   # _fetch_usage sentinel: credentials are present but refused
+RATE_LIMITED = "rate_limited"  # _fetch_usage sentinel: the usage endpoint 429'd.
+# AMBIGUOUS by itself: a hard-limited plan 429s its usage endpoint, but so does
+# the endpoint's own per-account limiter when the fleet polls too hard (Retry-
+# After: 0, plan nowhere near its wall — the 2026-07-19 'limited 0%' incident,
+# where the fake-100% placeholder this used to return evacuated healthy pools
+# and mis-routed new sessions for hours). So the POLLER treats it as "keep the
+# last good reading + back off", while the rescue paths — which only run with
+# independent evidence of a wall (a bounced prompt, the CLI's limit banner in
+# the PTY) — treat it as corroboration.
 
 
 def _clog(config_dir, msg):
@@ -795,26 +810,25 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
         return AUTH_FAIL                         # refused even after refresh,
                                                  # or no usable token at all
     if code == 429:
-        # A hard-limited plan 429s even its usage endpoint — which is exactly
-        # when routing away matters most. Report it as fully used (not "no
-        # data", which would freeze a stale-green snapshot and blind the
-        # router) so autoswitch/handoff treat it like any exhausted window.
-        # The next successful poll (endpoint recovers ≤ Retry-After) restores
-        # real numbers.
-        try:
-            until = time.time() + max(60.0, float(retry_after))
-        except (TypeError, ValueError):
-            until = time.time() + 1800
+        # Rate-limited — see the RATE_LIMITED sentinel comment for why this is
+        # NOT reported as fully used. Back off exponentially per consecutive
+        # 429 (observed storms send Retry-After: 0, so honoring the header
+        # alone kept re-poking a hot limiter every 60s forever).
+        streak = (tok_cache.get("rl_streak", 0) + 1) if tok_cache is not None else 1
         if tok_cache is not None:
-            # honor Retry-After: re-poking a 429ing endpoint every TTL resets
-            # its limiter and freezes the fake 'limited 0%' card forever
+            tok_cache["rl_streak"] = streak
+        try:
+            base = max(60.0, float(retry_after))
+        except (TypeError, ValueError):
+            base = 60.0
+        until = time.time() + min(1800.0, base * (2 ** min(streak - 1, 5)))
+        if tok_cache is not None:
             tok_cache["no_poll_until"] = until
-        win = [{"key": "rate_limited", "label": "limited", "used": 100.0,
-                "resets": time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
-                                        time.gmtime(until))}]
-        return (100.0, win, None) if want_ident else (100.0, win)
+        return RATE_LIMITED
     if code != 200 or not isinstance(usage, dict):
         return None
+    if tok_cache is not None:
+        tok_cache.pop("rl_streak", None)         # endpoint recovered
     windows, worst = [], 0.0
     for key, label in [("five_hour", "5h"), ("seven_day", "7d"),
                        ("seven_day_opus", "7d opus"),
@@ -2523,16 +2537,30 @@ class SessionManager:
                 with self.lock:
                     live = {s.account or "default"
                             for s in self.sessions.values() if s.alive}
-                with ThreadPoolExecutor(max_workers=min(4, len(due))) as ex:
+                # Same-org logins share one pool AND one endpoint rate
+                # limiter — polling each config dir separately multi-taps the
+                # limiter for identical numbers (three EF seats = 3 hits per
+                # burst, the pattern behind the 07-19 429 storm). Poll ONE
+                # representative per known org and share its reading with the
+                # siblings; never-identified (org-less) accounts poll solo.
+                groups = {}
+                for a in due:
+                    groups.setdefault(a.org or f"~{a.name}", []).append(a)
+                reps = [next((m for m in ms if m.name not in live), ms[0])
+                        for ms in groups.values()]
+                with ThreadPoolExecutor(max_workers=min(4, len(reps))) as ex:
                     got = list(ex.map(
                         lambda a: _fetch_usage(a.config_dir, a.tok,
                                                want_ident=True,
                                                allow_refresh=a.name not in live),
-                        due))
-                for a, res in zip(due, got):
+                        reps))
+                for a, res in zip(reps, got):
+                    sibs = [m for m in groups[a.org or f"~{a.name}"]
+                            if m is not a]
                     if res == AUTH_FAIL:
-                        # login gone/revoked → OUT of routing until re-sign-in;
-                        # the pending watcher above picks it back up
+                        # the rep's OWN login is refused → OUT of routing until
+                        # re-sign-in; siblings hold their own credentials and
+                        # are untouched — one of them fronts the next poll
                         sig = _cred_sig(a.config_dir)
                         with self.lock:
                             a.broken = True
@@ -2540,19 +2568,36 @@ class SessionManager:
                         print(f"[account {a.name}] credentials refused — "
                               "excluded from routing until re-sign-in", flush=True)
                         changed = True
+                    elif res == RATE_LIMITED:
+                        # endpoint 429 ≠ plan exhausted (see the sentinel
+                        # comment): keep the last GOOD reading routable while
+                        # it's young enough to trust, banner the card, and
+                        # spread the back-off horizon to the whole org so a
+                        # sibling doesn't immediately re-poke the hot limiter.
+                        until = a.tok.get("no_poll_until", 0)
+                        with self.lock:
+                            for m in [a] + sibs:
+                                u = m.usage
+                                if u and now - u.get("goodAt",
+                                                     u.get("checkedAt", 0)) \
+                                        < USAGE_RL_TRUST:
+                                    u["checkedAt"] = now
+                                m.error = ("usage endpoint rate-limited — "
+                                           "backing off; real numbers resume "
+                                           "automatically")
+                                m.tok["no_poll_until"] = max(
+                                    m.tok.get("no_poll_until", 0), until)
+                        changed = True
                     elif res:
                         pct, windows, ident = res
-                        limited = bool(windows) \
-                            and windows[0].get("key") == "rate_limited"
                         with self.lock:
                             a.usage = {"pct": round(pct, 1), "windows": windows,
-                                       "checkedAt": now}
-                            # the 'limited' card is a PLACEHOLDER (the usage
-                            # endpoint 429'd) — say so, or a pool that just
-                            # reset looks drained with no explanation
-                            a.error = ("usage endpoint rate-limited — backing "
-                                       "off per Retry-After; real numbers "
-                                       "resume automatically") if limited else ""
+                                       "checkedAt": now, "goodAt": now}
+                            a.error = ""
+                            for m in sibs:
+                                # same pool, same numbers — a copy, not a poll
+                                m.usage = dict(a.usage)
+                                m.error = ""
                             if ident:
                                 # token-bound identity is THE authority: it
                                 # names the pool the numbers above came from,
@@ -2691,14 +2736,18 @@ class SessionManager:
         acct = self.accounts.get(s.account)
         cfg = acct.config_dir if acct else (s.config_dir or "")
         got = _fetch_usage(cfg, acct.tok if acct else None, allow_refresh=False)
-        dead = got == AUTH_FAIL
-        if got and got != AUTH_FAIL:
+        # A 429 here corroborates the bounce: a hard-limited plan 429s its own
+        # usage endpoint, and the prompt's silent death is independent evidence
+        # (unlike the background poller, where a bare 429 proves nothing).
+        dead = got in (AUTH_FAIL, RATE_LIMITED)
+        if got and got not in (AUTH_FAIL, RATE_LIMITED):
             pct, windows = got
             dead = pct >= 100
             if acct:
                 with self.lock:
+                    now2 = time.time()
                     acct.usage = {"pct": round(pct, 1), "windows": windows,
-                                  "checkedAt": time.time()}
+                                  "checkedAt": now2, "goodAt": now2}
                     acct.broken = False
         elif got is None and acct:
             # Endpoint unreachable with the stored token — fall back to the
@@ -2758,14 +2807,17 @@ class SessionManager:
         cfg = acct.config_dir if acct else (s.config_dir or "")
         # allow_refresh=False: this session's own claude holds this grant
         got = _fetch_usage(cfg, acct.tok if acct else None, allow_refresh=False)
-        walled = got is None or got == AUTH_FAIL  # endpoint mute → believe the banner
-        if got and got != AUTH_FAIL:
+        # endpoint mute OR 429 → believe the banner (the PTY text is the
+        # independent evidence a bare poller 429 lacks)
+        walled = got is None or got in (AUTH_FAIL, RATE_LIMITED)
+        if got and got not in (AUTH_FAIL, RATE_LIMITED):
             pct, windows = got
             walled = pct >= SUB_HOT              # the wall the banner announced
             if acct:
                 with self.lock:
+                    now2 = time.time()
                     acct.usage = {"pct": round(pct, 1), "windows": windows,
-                                  "checkedAt": time.time()}
+                                  "checkedAt": now2, "goodAt": now2}
                     acct.broken = False
         if not walled:
             return                               # echoed/stale banner on a cool pool
@@ -2880,19 +2932,32 @@ class SessionManager:
             return
         acct = self.accounts.get(s.account)      # may be None (e.g. removed default)
         cfg = acct.config_dir if acct else (s.config_dir or "")
+        # Respect an active 429 back-off horizon: this check fires after EVERY
+        # Stop, and poking a hot limiter once per turn is a big part of how
+        # the endpoint got rate-limited in the first place. Backed off (or
+        # answered 429), a Stop in hand means the turn RAN — that's evidence
+        # AGAINST a wall — so fall back to the cached reading instead.
+        backed_off = acct and time.time() < acct.tok.get("no_poll_until", 0)
         # allow_refresh=False: this session's own claude holds this grant
-        got = _fetch_usage(cfg, acct.tok if acct else None, allow_refresh=False)
+        got = None if backed_off else _fetch_usage(
+            cfg, acct.tok if acct else None, allow_refresh=False)
         drained = hot = got == AUTH_FAIL
         pct = 100.0
-        if got and got != AUTH_FAIL:
+        if got and got not in (AUTH_FAIL, RATE_LIMITED):
             pct, windows = got
             drained = pct >= SUB_EXHAUSTED
             hot = pct >= SUB_HOT
             if acct:
                 with self.lock:
+                    now2 = time.time()
                     acct.usage = {"pct": round(pct, 1), "windows": windows,
-                                  "checkedAt": time.time()}
+                                  "checkedAt": now2, "goodAt": now2}
                     acct.broken = False
+        elif (backed_off or got == RATE_LIMITED) and acct:
+            u = acct.usage or {}
+            if time.time() - (u.get("checkedAt") or 0) < 3 * USAGE_TTL:
+                pct = u.get("pct", 100.0)
+                drained, hot = pct >= SUB_EXHAUSTED, pct >= SUB_HOT
         elif acct and drained:
             sig = _cred_sig(acct.config_dir)
             with self.lock:
