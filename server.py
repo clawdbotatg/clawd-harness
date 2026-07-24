@@ -253,7 +253,7 @@ USAGE_RL_TRUST  = float(os.environ.get("USAGE_RL_TRUST", "1800"))
 SUB_AUTOSWITCH = os.environ.get("SUB_AUTOSWITCH", "1") != "0"
 SUB_HYSTERESIS = float(os.environ.get("SUB_HYSTERESIS", "20"))  # headroom pts
 SUB_DEBOUNCE   = float(os.environ.get("SUB_DEBOUNCE", "7200"))  # seconds
-SUB_EXHAUSTED  = float(os.environ.get("SUB_EXHAUSTED", "95"))   # % used
+SUB_EXHAUSTED  = float(os.environ.get("SUB_EXHAUSTED", "99"))   # % used
 # Mid-session handoff: an IDLE session whose plan has run dry is respawned
 # under the best plan with --resume (transcript symlinked across). Checked on
 # every Stop; per-session cooldown so a flapping window can't churn respawns.
@@ -287,22 +287,24 @@ SEND_WATCHDOG = float(os.environ.get("SEND_WATCHDOG", "10"))
 # (incl. same-day resets) from churning respawns.
 SUB_REBALANCE = os.environ.get("SUB_REBALANCE", "1") != "0"
 SUB_REBALANCE_MARGIN = float(os.environ.get("SUB_REBALANCE_MARGIN", "21600"))  # s
-# NEVER SEE A RATE LIMIT: routing avoids pools at HOT (default 90% of the most-
+# NEVER SEE A RATE LIMIT: routing avoids pools at HOT (default 97% of the most-
 # constrained window — usually the fast-burning 5h session window), not just at
-# EXHAUSTED (95). The number is Austin's: spend the soonest-resetting pool down
-# to ~5–10% left, THEN hop to the next-soonest with headroom — earlier forfeits
+# EXHAUSTED (99). The number is Austin's: spend the soonest-resetting pool down
+# to ~3% left (retuned from 5–10%, 2026-07-23 — less forfeited headroom, leaning
+# harder on the rescue backstops below), THEN hop to the next-soonest with
+# headroom — earlier forfeits
 # use-it-or-lose-it capacity; later is wall-flirting. While any cooler pool
 # exists, a hot pool gets no new spawns or rebalances, idle sessions EVACUATE
 # it (sweep), and the on-Stop check moves a session off it preemptively —
 # reset-soonest still picks among the cool pools, so the spend-it-before-it's-
 # forfeited policy is unchanged; it just stops slamming one pool into its
 # session wall. EXHAUSTED remains the last-resort bar: a truly drained session
-# may still flee TO a merely-hot pool (92 beats 100). Final backstop: the CLI's
+# may still flee TO a merely-hot pool (98 beats 100). Final backstop: the CLI's
 # own limit banner, spotted in the PTY stream, triggers an immediate endpoint-
 # confirmed handoff (rescue_limit_wall) instead of waiting out BUSY_STUCK — an
 # eaten prompt is redelivered, and a turn cut mid-flight is resumed with an
 # automatic 'continue' (LIMIT_CONTINUE=0 opts out).
-SUB_HOT = float(os.environ.get("SUB_HOT", "90"))                 # % used
+SUB_HOT = float(os.environ.get("SUB_HOT", "97"))                 # % used
 LIMIT_CONTINUE = os.environ.get("LIMIT_CONTINUE", "1") != "0"
 # The CLI's limit banner, as painted in the PTY ("You've hit your session
 # limit · resets …", or the blocking "Stop and wait for limit to reset" menu).

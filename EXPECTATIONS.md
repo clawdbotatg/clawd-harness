@@ -32,10 +32,12 @@ and the fix is verifiable in the log.
 ### 2. New work always lands on the pool whose weekly window resets soonest
 *(Policy changed 2026-07-09 at Austin's direction — it was "most headroom"
 before. "With room" redefined 2026-07-11 evening after the session-wall
-incident: the eligibility bar is now **cool** — < `SUB_HOT` = 90% of the
+incident: the eligibility bar is now **cool** — < `SUB_HOT` = 97% of the
 most-constrained window, which in practice is the fast-burning **5h session
 window** — not < 95. The number is Austin's: spend the soonest-resetting
-pool down to ~5–10% left, then hop. See "the session wall" below.)* Among
+pool down to ~3% left, then hop — retuned from 5–10% on 2026-07-23, again at
+Austin's direction, after the old bar left ~6% of a weekly window to expire
+unspent. See "the session wall" below.)* Among
 **cool** pools,
 every new session spawns under the one whose **weekly (7d) window resets soonest**, on
 that machine, at that instant (fresh poll, not stale cache; stale = >3×TTL is
@@ -43,8 +45,8 @@ ignored). Rationale, in Austin's words: a 50% pool and a 60% pool are *both
 eligible* — weekly headroom is use-it-or-lose-it, so **drain the one that
 resets soonest first**; picking by raw headroom spreads load evenly and
 forfeits capacity at every reset. Once a pool's week resets, its clock jumps
-+7 days and it goes to the back of the queue; once it crosses 95% it drops
-out of eligibility and the next-soonest takes over. Headroom (the
++7 days and it goes to the back of the queue; once it crosses the hot bar
+(`SUB_HOT` 97%) it drops out of eligibility and the next-soonest takes over. Headroom (the
 most-constrained window, incl. model-scoped ones like `7d fable`) is now only
 the **tie-break**, and the fallback when a pool's reset time is unknown.
 Anti-flap: reset order is stable between polls, so a reset-driven switch
@@ -59,7 +61,7 @@ why (`weekly resets Nh sooner — spend it before it's forfeited`).
 ### 3. With headroom on the machine, you are never stuck
 **The guarantee:** if the machine a session runs on holds a working login for
 any pool with headroom, work continues. When a session's pool drains
-(≥ `SUB_EXHAUSTED` = 95% used, or its login breaks, or the usage endpoint
+(≥ `SUB_EXHAUSTED` = 99% used, or its login breaks, or the usage endpoint
 itself 429s — treated as fully used on purpose), the session is respawned
 under the best pool with `--resume`, transcript linked across, same cid, same
 viewers. This is not theoretical: `~/Library/Logs/clawd-harness.log` shows it
@@ -86,7 +88,8 @@ caps churn. Log signature: `[handoff …] slop → sub2 (rebalance: weekly reset
 outermost first:
 1. **Routing watches headroom, not banners** (the primary mechanism, per
    Austin: "look at how much is left; at 5–10% left switch to the next one
-   with headroom that resets soonest"): a pool ≥ `SUB_HOT` = 90% on its
+   with headroom that resets soonest" — retuned to ~3% left 2026-07-23): a
+   pool ≥ `SUB_HOT` = 97% on its
    most-constrained window (incl. the 5h session window) gets no new work
    while any cooler pool exists — so reset-soonest stops piling every
    session onto one pool until it walls.
@@ -231,6 +234,12 @@ account — the manual re-sign-in):
 | commit | what |
 |---|---|
 | (this) | **sign-in ceremony exemption**: the 🧠 panel's "sign in again" spawns its ceremony session pinned to the broken account — exactly the state every rescue reads as "dead plan, move it". `_handoff_sweep` (or a banner/bounce rescue) handed the ceremony off mid-OAuth: `--resume` of a transcript-less session under another dir → the CLI's "no conversation found" — the user was yanked out of `/login` by the very machinery that makes logins rare. Fix: `ClaudeSession.ceremony` (set by `add_account` + the no-creds-anywhere spawn, persisted so a restart mid-ceremony keeps it) — every reactive path (`_handoff_sweep`, `maybe_handoff`, `rescue_bounced_prompt`, `rescue_limit_wall`, `rescue_onboarding`, `_scan_for_limit`, `_send_watchdog`, the prompt-hook bounce trigger, `_handoff` itself, and the boot resume gate) leaves a ceremony session strictly alone for its lifetime. Bonus: a re-sign-in dir still holds stale creds, so the CLI opens its normal TUI — the harness now **types `/login` for you** once SessionStart fires (credential-less dirs are left alone: they boot into the login flow natively); and a broken `default` finally gets a re-sign-in ceremony instead of a silent no-op. Rule: **the ceremony session is the one place a login screen (and a dead plan) is the point — no rescue may touch it** |
+
+**2026-07-23** (tuning, not an incident):
+
+| commit | what |
+|---|---|
+| (this) | **hop point retuned 10% → 3% left (Austin):** `SUB_HOT` 90 → 97, `SUB_EXHAUSTED` 95 → 99 (the drained bar must stay above the hot bar or the flee-to-merely-hot band inverts). Trigger: austingriffith sat HOT at 6% left with its weekly reset 29h out — the old bar forfeited that headroom by design. Trade-off accepted: thinner margin means the endgame poll + banner/bounce/watchdog rescues carry more of the never-see-a-rate-limit load |
 
 **End-state verified 2026-07-09 afternoon:** all four pools (austingriffith
 20x · Ethereum Foundation 5x · clawd 20x · slop 5x) live with real numbers
@@ -534,7 +543,7 @@ is.
 - **Sessions ping-pong between pools as 5h windows heat and cool** (e.g.
   `slop → clawd (rebalance: weekly resets 7h sooner)` followed an hour later
   by `clawd → slop (plan drained)`, repeatedly). That's the
-  spend-to-5–10%-left tuning working: the reset-soonest pool is drained hard,
+  spend-to-~3%-left tuning working: the reset-soonest pool is drained hard,
   walls or goes hot, sessions evacuate, its window resets, they come back.
   Every hop is a seamless `--resume` (same cid, same viewers); the churn
   costs a few seconds of respawn per hop, capped by `HANDOFF_COOLDOWN`

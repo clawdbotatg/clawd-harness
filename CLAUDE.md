@@ -110,7 +110,7 @@ user-facing overview; this file orients an agent working **on** the code.
   under the fresh dir and you complete OAuth in its terminal. A poller tracks
   per-account usage via Claude's (undocumented — always degrade) OAuth usage
   endpoint; new sessions spawn under the ACTIVE account, auto-switched to the
-  COOL (< `SUB_HOT` 90% — hop at 5–10% left; a pool nearing its 5h session
+  COOL (< `SUB_HOT` 97% — hop at ~3% left; a pool nearing its 5h session
   wall gets no new work) pool whose WEEKLY window resets soonest (use-it-or-lose-it;
   headroom is only the tie-break — see `_route_key`), debounced via `SUB_*`
   env knobs. Sessions

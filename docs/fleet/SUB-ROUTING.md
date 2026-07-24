@@ -76,8 +76,8 @@ never interrupted.
   (600s default); snapshots persist so bars render instantly after a restart.
   `{type:"accountsRefresh"}` forces a poll.
 - **Local switch rule** (`SUB_AUTOSWITCH=1` default): switch the ACTIVE
-  account to the one `_route_key` ranks best — among accounts with room
-  (< `SUB_EXHAUSTED` 95%), the soonest weekly reset wins; headroom is the
+  account to the one `_route_key` ranks best — among **cool** accounts
+  (< `SUB_HOT` 97%), the soonest weekly reset wins; headroom is the
   tie-break/fallback. A reset-driven switch needs only the `SUB_DEBOUNCE`
   (2h) since reset order is stable; a headroom-fallback switch also needs
   `SUB_HYSTERESIS` (20 pts). The active account being exhausted (target with
