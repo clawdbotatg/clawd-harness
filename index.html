@@ -1204,6 +1204,18 @@ function probeLiveness(cb, timeoutMs = 1500) {
     if (liveProbe && liveProbe.id === id) { liveProbe = null; cb(false); }
   }, timeoutMs);
   liveProbe = { id, cb, timer };
+  // Fleet WITHOUT an open e2e channel (projects rung, or a channel still
+  // handshaking): hsend would return false with no machine, or queue the ping
+  // into the handshake — either way a perfectly healthy socket reads dead and
+  // wake() tears it down for nothing. Probe the relay hop directly instead
+  // (the relay answers ping pre-auth). With an open channel the ping rides it
+  // end-to-end as before, proving the whole browser→relay→worker→harness chain.
+  const ch = FLEET && currentMachine ? e2eChans[currentMachine] : null;
+  if (FLEET && !(ch && ch.status === 'open')) {
+    try { ws.send(JSON.stringify({ type: 'ping', id })); }
+    catch { clearTimeout(timer); liveProbe = null; cb(false); }
+    return;
+  }
   if (!hsend({ type: 'ping', id })) { clearTimeout(timer); liveProbe = null; cb(false); }
 }
 // The probe went unanswered — the socket is functionally dead even if readyState
@@ -1398,6 +1410,7 @@ function handleRelay(m) {
     return;
   }
   if (m.type === 'pushOk') { reflectNotifyBtn(); return; }
+  if (m.type === 'pong') { onPong(m.id); return; }   // relay-hop liveness pong (probe fell back — no open e2e channel)
   if (m.type === 'machines') {
     hidePasskey();
     setRelayAuthed();                 // a no-passkey relay hands us `machines` with no authOk — gate opens here
@@ -5260,9 +5273,12 @@ window.addEventListener('online', wake);   // wake(), not bare reconnect: connec
 // visible time — nothing when hidden, backgrounded, or already reconnecting.
 setInterval(() => {
   if (document.hidden || !ws || ws.readyState !== 1 || liveProbe || _updating) return;
-  // Fleet: the ping rides the e2e channel (hsend), so only probe when that path
-  // is authed + open — a handshaking channel queues the ping and would read dead.
-  if (FLEET && (!relayAuthed || !currentMachine || !(e2eChans[currentMachine] && e2eChans[currentMachine].status === 'open'))) return;
+  // Fleet: probeLiveness picks the path itself — e2e chain when a channel is
+  // open, the bare relay hop otherwise — so the heartbeat runs on every rung.
+  // (It used to skip entirely without an open e2e channel, which let a visible
+  // page on the projects rung sit on a dead socket + stale roster for hours.)
+  // Pre-auth pages sit at the passkey gate; focus/visibility wakes cover them.
+  if (FLEET && !relayAuthed) return;
   if (Date.now() - lastRx < 25000) return;
   probeLiveness((alive) => { if (!alive) teardownAndReconnect(); }, 4000);
 }, 5000);

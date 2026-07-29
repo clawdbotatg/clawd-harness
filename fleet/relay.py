@@ -22,10 +22,13 @@ Protocol (all JSON text frames):
   mobile→relay:
     (handshake via query: ?role=mobile&t=<token>)
     {type:"list"}                               # ask for the machine roster
+    {type:"ping", id:N}                         # app-level liveness probe (answered pre-auth)
     {type:"toMachine", machine:<id|"*">, msg:{...}}
   relay→mobile:
     {type:"machines", machines:[{id,host,kind,online,lastSeen,stats:{projects,sessions,active,sys?}|null}]}
+        # sent on join/leave AND every PING_EVERY as a JS-visible heartbeat (authed mobiles only)
     {type:"machineMsg", machine:<id>, msg:{...}}
+    {type:"pong", id:N}                         # answer to a mobile ping
     {type:"error", error:"..."}
   relay→worker:
     {type:"task", from:<mobileId>, msg:{...}}
@@ -573,6 +576,13 @@ class Relay:
                 mobile.send_json(self._auth_challenge(mobile, reason="retry"))
             return
 
+        # App-level liveness probe (browser JS can't observe WS protocol pings, so
+        # the page sends its own). Answered pre-auth: a page parked at the passkey
+        # gate needs to unmask a dead-but-OPEN socket too, and a pong leaks nothing.
+        if t == "ping":
+            mobile.send_json({"type": "pong", "id": frame.get("id")})
+            return
+
         # Everything else requires a satisfied (and unexpired) wallet factor.
         if not self._mobile_authed(mobile):
             return
@@ -695,6 +705,13 @@ class Relay:
                 print(f"[relay] worker stale ({int(now - w.last_seen)}s silent), dropping: {w.ident}", flush=True)
                 self.drop_worker(w)   # removes from roster + broadcasts the change
                 w.close()             # unblock its read thread / force a reconnect
+            # Heartbeat roster: WS protocol pings are invisible to browser JS, so a
+            # fleet page idling on the projects rung otherwise hears NOTHING at the
+            # app level and can't tell a quiet link from a dead one (a page can sit
+            # on a stale roster for hours — the "machine vanished while it was up"
+            # bug). A roster every PING_EVERY gives every authed mobile a JS-visible
+            # pulse, and converges any missed join/leave broadcast within one tick.
+            self.broadcast_roster()
 
 
 RELAY = Relay()
