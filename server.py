@@ -197,7 +197,10 @@ HERE       = Path(__file__).resolve().parent
 UPLOAD_DIR = HERE / ".clawd-harness-uploads"            # pasted images land here (absolute paths → cwd-agnostic)
 MAX_UPLOAD = 25 * 1024 * 1024
 EXT_BY_CTYPE = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
-                "image/webp": ".webp"}
+                "image/webp": ".webp",
+                "text/markdown": ".md", "text/plain": ".txt", "text/csv": ".csv",
+                "application/json": ".json", "text/yaml": ".yaml",
+                "text/xml": ".xml", "text/html": ".html"}
 REGISTRY_FILE = HERE / ".clawd-harness.sessions.json"   # persists projects+sessions across restarts
 # Projects = git repos we drive. Each is a subdir here; a session's `claude`
 # runs with cwd = its project's path. Gitignored, so the cloned repos never
@@ -3823,18 +3826,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _handle_upload(self):
-        """Save a pasted/dropped image to the workdir and return its path so the
-        browser can fold it into the next message (claude reads it via Read)."""
+        """Save a pasted/dropped file (image or text-ish doc) to the workdir and
+        return its path so the browser can fold it into the next message (claude
+        reads it via Read). The original filename rides as a `name=` param on the
+        Content-Type header — the one header the fleet bridge (relay → worker)
+        already forwards verbatim, so it needs no fleet protocol change."""
         if not self._token_ok():
             return self.send_error(403, "bad token")
         n = int(self.headers.get("Content-Length", "0"))
         if n <= 0 or n > MAX_UPLOAD:
             return self.send_error(413, "bad size")
-        ctype = self.headers.get("Content-Type", "image/png").split(";")[0].strip()
+        parts = [p.strip() for p in self.headers.get("Content-Type", "image/png").split(";")]
+        ctype = parts[0]
+        fname = ""
+        for p in parts[1:]:
+            if p.lower().startswith("name="):
+                fname = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(p[5:].strip('"')).name).lstrip(".")[:80]
         ext = EXT_BY_CTYPE.get(ctype, ".png")
         data = self.rfile.read(n)
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        name = f"paste-{uuid.uuid4().hex[:8]}{ext}"
+        name = f"paste-{uuid.uuid4().hex[:8]}-{fname}" if fname else f"paste-{uuid.uuid4().hex[:8]}{ext}"
         dest = UPLOAD_DIR / name
         dest.write_bytes(data)
         print(f"[upload] {n} bytes -> {dest}", flush=True)

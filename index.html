@@ -611,9 +611,9 @@
         <button id="micBtn" title="Hold to dictate (speech-to-text)">🎤</button>
       </div>
       <textarea id="box" placeholder="message"></textarea>
-      <input id="imgInput" type="file" accept="image/*" multiple hidden />
+      <input id="imgInput" type="file" accept="image/*,text/*,.md,.markdown,.txt,.csv,.json,.yaml,.yml,.toml,.log,.xml,.html" multiple hidden />
       <div id="actions">
-        <button id="imgBtn" title="Attach an image">🖼</button>
+        <button id="imgBtn" title="Attach an image or text file">🖼</button>
         <button id="send" title="Send message">📤</button>
       </div>
     </div>
@@ -4062,7 +4062,7 @@ document.addEventListener('visibilitychange', () => {
     setTimeout(() => sendResize(true), 120);   // after the refit has re-measured
   }
 });
-// -- image attachments (paste / drop → upload → fold path into message) ------
+// -- attachments: images + text files (paste / drop → upload → fold path into message) ------
 let attachments = [];   // {path, name, url}
 const attachEl = document.getElementById('attachments');
 
@@ -4109,19 +4109,44 @@ async function shrinkImage(file) {
   return file;
 }
 
-async function uploadImage(file) {
+// Text-ish documents (md, csv, json, …) upload through the same pipeline as
+// images — the path gets folded into the message and claude Reads it. Browsers
+// often report an empty file.type for .md, so map by extension first.
+const TEXT_CTYPE = { md:'text/markdown', markdown:'text/markdown', txt:'text/plain',
+                     csv:'text/csv', json:'application/json', yaml:'text/yaml',
+                     yml:'text/yaml', toml:'text/plain', log:'text/plain',
+                     xml:'text/xml', html:'text/html' };
+function fileCtype(f) {   // null → not an accepted type
+  if ((f.type || '').startsWith('image/')) return f.type;
+  const m = /\.([a-z0-9]+)$/i.exec(f.name || '');
+  const byExt = m && TEXT_CTYPE[m[1].toLowerCase()];
+  if (byExt) return byExt;
+  return (f.type || '').startsWith('text/') ? f.type : null;
+}
+
+async function uploadFile(file) {
   if (FLEET && !currentMachine) return;   // fleet: no machine selected → nowhere to upload to
-  const slot = { pending: true, url: URL.createObjectURL(file) };
+  const ctype = fileCtype(file);
+  const isImage = (ctype || '').startsWith('image/');
+  const slot = { pending: true, url: isImage ? URL.createObjectURL(file) : null,
+                 name: file.name };
   attachments.push(slot); renderChips();
   try {
-    file = await shrinkImage(file);
+    if (!ctype) throw new Error(`unsupported type${file.name ? ` (${file.name})` : ''}`);
+    if (isImage) file = await shrinkImage(file);
+    else if (file.size > UPLOAD_SOFT_MAX) throw new Error('file too big (>900KB)');  // fleet edge 413s past ~1MB; text can't downscale
+    // Original filename rides as a `name=` param on Content-Type — the one
+    // header the fleet bridge forwards verbatim (no relay/worker change needed).
+    const safeName = (file.name || '').replace(/[^\w.-]+/g, '_').slice(0, 80);
+    const hdr = (isImage ? (file.type || 'image/png') : ctype)
+                + (safeName ? `; name="${safeName}"` : '');
     // Fleet: the relay forwards the bytes to the current machine's worker, which
     // POSTs to that machine's local harness /upload and returns a path local to
     // it. Direct mode talks straight to the local /upload (no machine param —
     // currentMachine is fleet-only state and stays null here).
     const mq = FLEET ? `&machine=${encodeURIComponent(currentMachine)}` : '';
     const res = await fetch(`/upload?t=${encodeURIComponent(token)}${mq}`, {
-      method: 'POST', headers: { 'Content-Type': file.type || 'image/png' }, body: file });
+      method: 'POST', headers: { 'Content-Type': hdr }, body: file });
     if (!res.ok) throw new Error(`upload failed (${res.status})`);
     const j = await res.json();
     slot.pending = false; slot.path = j.path; slot.name = j.name;
@@ -4134,13 +4159,13 @@ async function uploadImage(file) {
   renderChips();
 }
 
-// Image picker button → hidden <input type=file> → same uploadImage pipeline as
+// File picker button → hidden <input type=file> → same uploadFile pipeline as
 // paste/drop. Reset .value each time so picking the same file twice re-fires.
 const imgBtn = document.getElementById('imgBtn');
 const imgInput = document.getElementById('imgInput');
 imgBtn.onclick = () => imgInput.click();
 imgInput.addEventListener('change', () => {
-  for (const f of imgInput.files) { if (f.type.startsWith('image/')) uploadImage(f); }
+  for (const f of imgInput.files) uploadFile(f);
   imgInput.value = '';
 });
 
@@ -4319,19 +4344,21 @@ function sendMessage() {
 }
 
 box.addEventListener('paste', (e) => {
+  // Only intercept FILE items (Finder-copied files, screenshots) — kind
+  // 'string' is ordinary text pasting into the box and must stay native.
   const items = (e.clipboardData || {}).items || [];
   for (const it of items) {
-    if (it.type && it.type.startsWith('image/')) {
-      const f = it.getAsFile(); if (f) { e.preventDefault(); uploadImage(f); }
+    if (it.kind === 'file') {
+      const f = it.getAsFile(); if (f) { e.preventDefault(); uploadFile(f); }
     }
   }
 });
 ['dragover', 'drop'].forEach(ev => document.addEventListener(ev, (e) => {
   if (ev === 'dragover') { e.preventDefault(); return; }
   e.preventDefault();
-  for (const f of (e.dataTransfer?.files || [])) {
-    if (f.type.startsWith('image/')) uploadImage(f);
-  }
+  // uploadFile rejects unsupported types with a visible error chip — dropping
+  // a .mov shouldn't silently do nothing.
+  for (const f of (e.dataTransfer?.files || [])) uploadFile(f);
 }));
 sendBtn.onclick = sendMessage;
 box.addEventListener('keydown', (e) => {
