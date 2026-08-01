@@ -506,6 +506,25 @@
   #rebootovl .rb-title { font-size:18px; font-weight:600; letter-spacing:.2px; }
   #rebootovl .rb-row { display:flex; align-items:center; gap:10px; }
   #rebootovl .rb-sub { color:var(--dim); font-size:12px; }
+  /* spotlight launcher (Ctrl+Shift+Space): type a project, Enter → new session */
+  #spotlight { position:fixed; inset:0; z-index:65; background:rgba(0,0,0,.6);
+               display:flex; align-items:flex-start; justify-content:center; padding:16vh 16px 0;
+               backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }
+  #spotlight[hidden] { display:none; }
+  .spotcard { width:min(560px,100%); background:var(--panel); border:1px solid var(--edge);
+              border-top:2px solid var(--accent); border-radius:12px; overflow:hidden;
+              box-shadow:0 12px 48px rgba(0,0,0,.55); }
+  .spotcard input { display:block; width:100%; background:var(--raised); color:var(--ink);
+              border:0; border-bottom:1px solid var(--edge); padding:14px 16px;
+              font-family:var(--mono); font-size:16px; }
+  .spotcard input:focus { outline:none; }
+  #spotlist { max-height:46vh; overflow-y:auto; }
+  .spotrow { display:flex; align-items:center; gap:10px; padding:10px 16px; cursor:pointer;
+             font-family:var(--mono); font-size:13px; color:var(--ink); }
+  .spotrow .sname { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .spotrow .smeta2 { color:var(--dim); font-size:11px; white-space:nowrap; }
+  .spotrow.sel { background:var(--accent-bg); color:var(--accent); }
+  .spotempty { padding:12px 16px; color:var(--dim); font-size:12px; font-family:var(--mono); }
 </style>
 </head>
 <body>
@@ -535,6 +554,10 @@
     <img class="rb-logo" src="logo-ui.png" alt="clawd-harness" />
     <div class="rb-title" id="rebootlbl">Updating…</div>
     <div class="rb-row"><span class="rb-spin big"></span><span class="rb-sub" id="rebootsub">reconnecting automatically</span></div>
+  </div></div>
+  <div id="spotlight" hidden><div class="spotcard">
+    <input id="spotinput" placeholder="jump to project · Enter → new session" autocomplete="off" spellcheck="false" autocapitalize="off" />
+    <div id="spotlist"></div>
   </div></div>
   <div id="machinesmodal" hidden>
     <div class="qrcard machinescard">
@@ -4927,11 +4950,78 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowRight') navFwd(); else navBack();
 });
 
+// -- spotlight (Ctrl+Shift+Space) ---------------------------------------------
+// A launcher over the same rows the projects rung filters: type a substring of a
+// project name, pick with ↑/↓ (or click), and Enter opens that project AND spawns
+// a fresh session in it — the whole projects → filter → open → ＋ dance in one
+// keystroke. Skips rows you couldn't click on the rung (cloning / error / every
+// host offline).
+const spotEl = document.getElementById('spotlight');
+const spotInput = document.getElementById('spotinput');
+const spotListEl = document.getElementById('spotlist');
+const SPOT_MAX = 12;
+let spotSel = 0;
+function spotMatches() {
+  const q = spotInput.value.trim().toLowerCase();
+  return projectRows()
+    .filter(p => p.status !== 'cloning' && p.status !== 'error' && p.online !== false)
+    .filter(p => !q || (p.name || '').toLowerCase().includes(q))
+    .slice(0, SPOT_MAX);
+}
+function renderSpotlight() {
+  const rows = spotMatches();
+  if (spotSel >= rows.length) spotSel = Math.max(0, rows.length - 1);
+  spotListEl.innerHTML = '';
+  if (!rows.length) {
+    const d = document.createElement('div');
+    d.className = 'spotempty'; d.textContent = 'no matching project';
+    spotListEl.appendChild(d);
+    return;
+  }
+  rows.forEach((p, i) => {
+    const r = document.createElement('div');
+    r.className = 'spotrow' + (i === spotSel ? ' sel' : '');
+    const nm = document.createElement('span'); nm.className = 'sname'; nm.textContent = p.name;
+    const mt = document.createElement('span'); mt.className = 'smeta2';
+    mt.textContent = [p.pinned ? 'this app'
+                               : (FLEET && p.machineName ? p.machineName.replace(/^clawd-/, '') : ''),
+                      `${p.sessionCount || 0} sess`].filter(Boolean).join(' · ');
+    r.appendChild(nm); r.appendChild(mt);
+    r.onclick = () => spotLaunch(p);
+    r.onmousemove = () => { if (spotSel !== i) { spotSel = i; renderSpotlight(); } };
+    spotListEl.appendChild(r);
+    if (i === spotSel) r.scrollIntoView({ block: 'nearest' });
+  });
+}
+function openSpotlight() {
+  spotInput.value = ''; spotSel = 0;
+  spotEl.hidden = false;
+  renderSpotlight();
+  spotInput.focus();
+}
+function closeSpotlight() { spotEl.hidden = true; spotInput.blur(); }
+function spotLaunch(p) {
+  closeSpotlight();
+  selectProject(p.id);   // fleet: resolves + attaches the host machine; direct: sets currentPid
+  newSession();          // spawn — the server's focus reply drops us into the fresh terminal
+}
+spotInput.addEventListener('input', () => { spotSel = 0; renderSpotlight(); });
+spotInput.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') { spotSel++; renderSpotlight(); }
+  else if (e.key === 'ArrowUp') { spotSel = Math.max(0, spotSel - 1); renderSpotlight(); }
+  else if (e.key === 'Enter') { const rows = spotMatches(); if (rows[spotSel]) spotLaunch(rows[spotSel]); }
+  else if (e.key === 'Escape') closeSpotlight();
+  else return;
+  e.preventDefault(); e.stopPropagation();
+});
+spotEl.addEventListener('mousedown', (e) => { if (e.target === spotEl) closeSpotlight(); });
+
 // Ctrl+Shift navigation, usable from inside the live terminal too: ←/→ flip
 // through sessions (the rail roster) when you're in one, else walk levels; ↑/↓
 // explicitly climb/dive the abstraction stack; P jumps to the projects rung; W
-// closes the focused session, N spawns a new one. Capture phase + stopPropagation
-// so the keys never reach xterm's textarea (it would send them to the PTY).
+// closes the focused session, N spawns a new one; Space toggles the spotlight
+// launcher. Capture phase + stopPropagation so the keys never reach xterm's
+// textarea (it would send them to the PTY).
 // On macOS Ctrl+Shift+W is free (browser close-window is Cmd+Shift+W).
 window.addEventListener('keydown', (e) => {
   if (!e.ctrlKey || !e.shiftKey || e.metaKey || e.altKey) return;
@@ -4943,6 +5033,7 @@ window.addEventListener('keydown', (e) => {
   else if (e.code === 'KeyP') gotoProjects();
   else if (e.code === 'KeyW') closeCurrentSession();
   else if (e.code === 'KeyN') newSession();   // spawn a session + focus the box to start typing
+  else if (e.code === 'Space') { if (spotEl.hidden) openSpotlight(); else closeSpotlight(); }
   else handled = false;
   if (handled) { e.preventDefault(); e.stopPropagation(); }
 }, true);
