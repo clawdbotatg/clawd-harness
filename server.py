@@ -180,6 +180,28 @@ DIGEST_SYS_PROMPT = ("You summarize the live state of a software-engineering "
                      '{"digest": "<max 12 words: what it is doing right now>", '
                      '"blocked_on": "<if it is waiting on a human decision, the '
                      'question in <=12 words; else empty string>"}.')
+# Project *emoji codes*: every project gets a short 1–3 emoji badge (AI-picked
+# from its README / files / commits) shown on its card, the sessions rung, and
+# every session tab — so a glance at the tab strip tells you which project each
+# session belongs to. Generated lazily by emoji_sweep(): a brand-new repo is
+# left to "mature" (enough files/commits to say something about itself) before
+# its first badge, then the badge refreshes on a slow cadence so it tracks what
+# the project has become. Same optional BANKR gateway as naming — unconfigured
+# means no badges, nothing breaks.
+EMOJI_SYS_PROMPT = ("You assign a short emoji code to a software project — a visual "
+                    "badge that identifies it at a glance in a tab strip. Given the "
+                    "project's name, file listing, README and recent commits, reply "
+                    'with ONLY compact JSON and nothing else: {"emoji": "<1 to 3 '
+                    'emoji>"}. Pick emoji that evoke the project\'s PURPOSE/domain '
+                    "(not generic coding symbols like 💻 or a bare 📁). Use 2–3 emoji "
+                    "when needed to be distinctive. You are given a list of emoji "
+                    "codes already taken by sibling projects — your answer MUST NOT "
+                    "duplicate any of them. No letters, digits or words — emoji only.")
+EMOJI_REFRESH_S    = float(os.environ.get("EMOJI_REFRESH_S", str(7 * 86400)))  # re-badge cadence (projects evolve)
+EMOJI_SCAN_EVERY   = float(os.environ.get("EMOJI_SCAN_EVERY", "60"))     # sweep throttle on the ~1s watch loop
+EMOJI_RETRY_S      = float(os.environ.get("EMOJI_RETRY_S", "1800"))      # immature/failed → back off before retrying
+EMOJI_MIN_FILES    = int(os.environ.get("EMOJI_MIN_FILES", "3"))         # maturity: this many tracked files…
+EMOJI_MIN_README   = int(os.environ.get("EMOJI_MIN_README", "120"))      # …or a README with this many bytes
 
 # Env vars that, when inherited, put a spawned `claude` into a nested/embedded
 # mode (e.g. it stops writing a normal session transcript). We scrub them so the
@@ -1098,7 +1120,8 @@ class Project:
     ClaudeSessions launch in. `status` tracks an async clone/create."""
 
     def __init__(self, pid, name, path, repo_url="", status="ready",
-                 error="", created=0.0, pinned=False, kind="gh"):
+                 error="", created=0.0, pinned=False, kind="gh",
+                 emoji="", emoji_at=0.0):
         self.pid = pid
         self.name = name
         self.path = path                         # abs path to the repo
@@ -1112,11 +1135,15 @@ class Project:
         self.miss_since = 0.0                    # local liveness: path first seen missing (in-memory only)
         self.created = created or time.time()
         self.pinned = pinned                     # the harness-itself project: top of list, not removable
+        self.emoji = emoji                       # AI-picked 1–3 emoji identity badge
+        self.emoji_at = emoji_at                 # when it was last generated (drives refresh)
+        self.emoji_retry_at = 0.0                # backoff anchor after immature/failed generation (in-memory only)
 
     def to_registry(self):
         return {"pid": self.pid, "name": self.name, "path": self.path,
                 "repo_url": self.repo_url, "status": self.status,
-                "created": self.created, "kind": self.kind}
+                "created": self.created, "kind": self.kind,
+                "emoji": self.emoji, "emoji_at": self.emoji_at}
 
     def meta(self, session_count=0, busy_count=0, waiting_count=0, last_touched=0.0):
         return {"pid": self.pid, "name": self.name, "path": self.path,
@@ -1124,7 +1151,8 @@ class Project:
                 "error": self.error, "sessionCount": session_count,
                 "busyCount": busy_count, "waitingCount": waiting_count,
                 "created": self.created, "pinned": self.pinned,
-                "kind": self.kind, "lastTouched": last_touched}
+                "kind": self.kind, "lastTouched": last_touched,
+                "emoji": self.emoji}
 
 
 # ── PTY-backed Claude session ─────────────────────────────────────────────────
@@ -2073,12 +2101,18 @@ class SessionManager:
                         name=e.get("name") or os.path.basename(e["path"]),
                         path=e["path"], repo_url=repo_url,
                         status=e.get("status", "ready") if e.get("status") != "cloning" else "ready",
-                        created=e.get("created", 0.0), kind=kind)
+                        created=e.get("created", 0.0), kind=kind,
+                        emoji=e.get("emoji", ""), emoji_at=e.get("emoji_at", 0.0))
             if missing:
                 p.status, p.error, p.error_at = "error", "folder missing", time.time()
             self.projects[p.pid] = p
         self._discover_projects()                # adopt repos dropped into projects/ by hand
         self._ensure_self_project()              # always offer the harness itself, pinned
+        # the pinned self-project is re-injected (not stored in "projects"), so
+        # its badge rides a dedicated registry key — else it'd re-roll every boot
+        se = reg.get("self_emoji") or {}
+        self.projects[SELF_PID].emoji = se.get("emoji", "")
+        self.projects[SELF_PID].emoji_at = se.get("emoji_at", 0.0)
 
         for e in reg.get("accounts", []):
             if not e.get("name"):
@@ -2328,6 +2362,53 @@ class SessionManager:
                     changed = True
         return changed
 
+    def emoji_sweep(self):
+        """Assign / refresh each project's emoji identity badge (see
+        EMOJI_SYS_PROMPT). Rides the ~1s watch loop but self-throttles to
+        EMOJI_SCAN_EVERY and badges at most ONE project per pass in a
+        background thread — cheap and steady, never a thundering herd. A
+        too-young repo is skipped (with backoff) until it has matured enough
+        to say something about itself; a badged project re-rolls every
+        EMOJI_REFRESH_S so the badge tracks what the project becomes. No-op
+        when the naming gateway is unconfigured."""
+        if not (BANKR_API_KEY and BANKR_BASE_URL):
+            return
+        now = time.time()
+        if (now - getattr(self, "_emoji_scan_at", 0.0) < EMOJI_SCAN_EVERY
+                or getattr(self, "_emoji_busy", False)):
+            return
+        self._emoji_scan_at = now
+        with self.lock:
+            cand = next((p for p in self._ordered_projects()
+                         if p.status == "ready" and now >= p.emoji_retry_at
+                         and (not p.emoji or now - p.emoji_at > EMOJI_REFRESH_S)),
+                        None)
+            if not cand:
+                return
+            taken = [p.emoji for p in self.projects.values()
+                     if p.emoji and p.pid != cand.pid]
+            titles = [s.title for s in self._ordered()
+                      if s.pid == cand.pid and s.title]
+        self._emoji_busy = True
+        threading.Thread(target=self._emoji_generate,
+                         args=(cand, taken, titles), daemon=True).start()
+
+    def _emoji_generate(self, project, taken, titles):
+        try:
+            ctx = _emoji_context(project, titles)
+            code = generate_project_emoji(ctx, taken) if ctx else ""
+            if not code:                         # immature repo or failed call — back off
+                project.emoji_retry_at = time.time() + EMOJI_RETRY_S
+                return
+            if code != project.emoji:
+                print(f"[emoji] {project.name} → {code}", flush=True)
+            project.emoji, project.emoji_at = code, time.time()
+            project.emoji_retry_at = 0.0
+            self.save_registry()
+            self.broadcast_projects()
+        finally:
+            self._emoji_busy = False
+
     def _ensure_self_project(self):
         """Always present the harness's own repo as a pinned project so you can
         open a session and live-edit the running app. Path = HERE (outside
@@ -2348,8 +2429,11 @@ class SessionManager:
 
     def save_registry(self):
         with self.lock:
+            selfp = self.projects.get(SELF_PID)
             data = {"projects": [p.to_registry() for p in self._ordered_projects()
                                  if not p.pinned],   # self project is re-injected, not stored
+                    "self_emoji": {"emoji": selfp.emoji,      # …except its badge
+                                   "emoji_at": selfp.emoji_at} if selfp else {},
                     "sessions": [s.to_registry() for s in self._ordered()],
                     "accounts": [a.to_registry() for a in self._ordered_accounts()],
                     "active_account": self.active_account,
@@ -3648,6 +3732,104 @@ def generate_digest(transcript_text):
     return (parsed.get("digest"), parsed.get("blocked_on"))
 
 
+# ── project emoji codes (1–3 emoji identity badge via the same gateway) ───────
+def _clean_emoji(raw):
+    """Sanitize a model-emitted emoji code: strip anything that isn't emoji
+    machinery (letters, digits, punctuation, whitespace — models love to add
+    prose), cap it at a tab-friendly width. Returns "" when nothing survives."""
+    if not isinstance(raw, str):
+        return ""
+    JOINERS = {"\u200d", "\ufe0f", "\u20e3"}  # ZWJ / VS16 / keycap — glue, not glyphs
+    kept = [c for c in raw.strip()
+            if c in JOINERS or ord(c) >= 0x2190]  # arrows block onward = symbols/emoji; ASCII+latin drop out
+    # cap: at most 4 visible glyph units (a flag is two regional indicators but
+    # reads as one — close enough) and 12 codepoints total (ZWJ families are long)
+    out, visible = [], 0
+    for c in kept:
+        if len(out) >= 12:
+            break
+        if c not in JOINERS:
+            visible += 1
+            if visible > 4:
+                break
+        out.append(c)
+    while out and out[-1] in JOINERS:            # never end on dangling glue…
+        out.pop()
+    while out and out[0] in JOINERS:             # …or start on it (a keycap whose digit we stripped)
+        out.pop(0)
+    return "".join(out)
+
+
+def _emoji_context(project, session_titles=()):
+    """What the model sees when badging a project: name, remote, README head,
+    file listing, recent commit subjects, plus this project's session titles
+    (often the sharpest signal of what actually happens in it). Returns None
+    while the repo is too thin to say anything about itself — the sweep retries
+    once it has matured. Local (private) projects still get badged: the context
+    is built here and only ever leaves as an LLM prompt, same as session naming."""
+    path = project.path
+    def run(*cmd):
+        try:
+            r = subprocess.run(cmd, cwd=path, capture_output=True, text=True,
+                               timeout=5)
+            return r.stdout if r.returncode == 0 else ""
+        except Exception:
+            return ""
+    files = [l for l in run("git", "ls-files").splitlines() if l.strip()]
+    if not files:                                # non-git local folder → directory listing
+        try:
+            files = sorted(os.listdir(path))[:200]
+        except OSError:
+            files = []
+    readme = ""
+    for cand in ("README.md", "readme.md", "README.rst", "README.txt", "README"):
+        try:
+            readme = (Path(path) / cand).read_text(errors="replace")[:1500]
+            break
+        except OSError:
+            continue
+    # Maturity gate: a just-created repo (bare README stub, no real files) says
+    # nothing yet — let it grow before spending a badge on it.
+    if len(files) < EMOJI_MIN_FILES and len(readme) < EMOJI_MIN_README:
+        return None
+    log = run("git", "log", "--oneline", "-12", "--no-color")
+    parts = [f"Project name: {project.name}"]
+    if project.repo_url:
+        parts.append(f"Repo: {project.repo_url}")
+    if readme:
+        parts.append("README (head):\n" + readme)
+    if files:
+        parts.append("Files:\n" + "\n".join(files[:80]))
+    if log:
+        parts.append("Recent commits:\n" + log[:800])
+    titles = [t for t in session_titles if t][:8]
+    if titles:
+        parts.append("Recent session titles in this project:\n" + "\n".join(titles))
+    return "\n\n".join(parts)[:6000]
+
+
+def generate_project_emoji(context_text, taken=()):
+    """Return a sanitized 1–3 emoji code for a project, or "" if the gateway is
+    unconfigured / the call fails / nothing usable comes back. `taken` = codes
+    already worn by sibling projects; the model is told to avoid them and a
+    collision gets one stricter retry."""
+    avoid = [t for t in taken if t]
+    for attempt in (0, 1):
+        text = context_text
+        if avoid:
+            text += ("\n\nAlready taken (do NOT reuse any of these): "
+                     + " , ".join(avoid))
+        if attempt:
+            text += "\nYour previous answer collided with a taken code — pick something clearly different."
+        parsed = _llm_json(EMOJI_SYS_PROMPT, text)
+        code = _clean_emoji((parsed or {}).get("emoji", ""))
+        if code and code not in avoid:
+            return code
+        if not code:
+            return ""                            # gateway off / junk reply — don't burn a retry
+    return code                                  # collided twice — accept; refresh will re-roll later
+
+
 def _strip_noise(text):
     """Drop harness boilerplate that shouldn't show as a user message."""
     text = re.sub(r"<local-command-caveat>[\s\S]*?</local-command-caveat>", "", text)
@@ -4209,6 +4391,7 @@ def watch_ui():
         time.sleep(1.0)
         if MGR.reconcile_projects():             # project list follows disk
             MGR.broadcast_projects()
+        MGR.emoji_sweep()                        # self-throttled; badges one project at a time
         for f in WATCH_FILES:
             try: m = f.stat().st_mtime
             except OSError: continue

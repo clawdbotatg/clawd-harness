@@ -154,9 +154,12 @@ no-op that would leave the previous session's stream flowing (that's how
 ```jsonc
 { "pid", "name", "path", "repoUrl", "status":"ready|cloning|error",
   "error", "sessionCount":int, "busyCount":int, "waitingCount":int,
-  "created":float, "pinned":bool, "kind":"gh|local" }
+  "created":float, "pinned":bool, "kind":"gh|local", "lastTouched":float,
+  "emoji":str }
 // kind absent (old server) ⇒ "gh". kind:"local" always has repoUrl:"" —
 // enforced in the Project constructor, a local can never carry a remote URL.
+// emoji = the project's AI-picked 1–3 emoji identity badge; "" until the
+// server's emoji_sweep has badged it (or when the naming gateway is off).
 ```
 
 ### sessionMeta

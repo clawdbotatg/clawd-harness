@@ -89,6 +89,8 @@
   #sessionbar .stab .sdot.blocked { background:var(--err); animation:pulse 1.1s ease-in-out infinite; }   /* needs-you: turn ended asking the human */
   #sessionbar .stab .sdot.dead { background:var(--err); }
   #sessionbar .stab .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* project emoji badge: never shrinks — the title ellipsizes, the badge stays legible */
+  .pemoji { flex:0 0 auto; white-space:nowrap; }
   /* PM chip: just the face — session status shows as border color only
      (green idle · accent+pulse working · red ended/needs-you) */
   #status { font-size:15px; line-height:1; padding:3px 7px; border:1px solid var(--edge);
@@ -2474,6 +2476,30 @@ function projectName(pid) {
   const p = projectList.find(p => p.pid === pid);
   return p ? p.name : '';
 }
+// -- project emoji badges (AI-picked identity codes; '' until generated) ------
+function projectEmojiByPid(pid) {
+  const p = (projectList || []).find(p => p.pid === pid);
+  return (p && p.emoji) || '';
+}
+// Badge for a session row/tab — fleet sessions resolve through their host
+// machine's cached project list (the tab strip spans projects AND machines,
+// which is exactly where the badge earns its keep).
+function sessionEmoji(s) {
+  if (!s) return '';
+  if (FLEET && s._machine) {
+    const p = (((perMachine[s._machine] || {}).projectList) || []).find(p => p.pid === s.pid);
+    return (p && p.emoji) || '';
+  }
+  return projectEmojiByPid(s.pid);
+}
+// Badge for the OPEN project (breadcrumb / sessions-rung header).
+function currentProjectEmoji() {
+  if (FLEET) {
+    const g = currentProjectKey && unifiedProjects.get(currentProjectKey);
+    return (g && g.emoji) || '';
+  }
+  return projectEmojiByPid(currentPid);
+}
 
 function updateBreadcrumb(title) {        // called when we (re)subscribe to a session
   if (title != null) currentTitle = title;
@@ -2496,7 +2522,10 @@ function refreshBreadcrumb(view) {
   let crumb = '';
   if (view !== 'projects') {
     const pn = projectName(currentPid);
-    if (pn) crumb = pn;
+    if (pn) {
+      const pe = currentProjectEmoji();
+      crumb = (pe ? pe + ' ' : '') + pn;
+    }
   }
   meta.textContent = crumb;
   // Show the AI session name above the message box, but only when a specific
@@ -2514,7 +2543,8 @@ function refreshBreadcrumb(view) {
     const proj = projectName(currentPid);
     if (proj) {
       const p = document.createElement('span'); p.className = 'sd-project';
-      p.textContent = (currentProjectIsLocal() ? '🔒 ' : '') + proj + ' ';
+      const pe = currentProjectEmoji();
+      p.textContent = (currentProjectIsLocal() ? '🔒 ' : '') + (pe ? pe + ' ' : '') + proj + ' ';
       descEl.appendChild(p);
     }
     const t = document.createElement('span'); t.className = 'sd-title'; t.textContent = title;
@@ -2550,9 +2580,16 @@ function renderSessionBar(view) {
     tab.onclick = () => focusSession(s);   // may cross project/machine; cancels any queued new-session send
     const dot = document.createElement('span');
     dot.className = 'sdot' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : '');
+    tab.appendChild(dot);
+    const em = sessionEmoji(s);          // project badge: which project this tab belongs to
+    if (em) {
+      const pe = document.createElement('span');
+      pe.className = 'pemoji'; pe.textContent = em;
+      tab.appendChild(pe);
+    }
     const lbl = document.createElement('span');
     lbl.className = 'lbl'; lbl.textContent = s.title || 'new session';
-    tab.appendChild(dot); tab.appendChild(lbl);
+    tab.appendChild(lbl);
     bar.appendChild(tab);
   });
   bar.hidden = false;
@@ -2609,9 +2646,10 @@ function mergeProjects() {
     for (const p of (perMachine[mid].projectList || [])) {
       const key = projectKey(p, mid);
       let g = map.get(key);
-      if (!g) { g = { key, name: p.name || '', repoUrl: p.repoUrl || '', kind: p.kind || 'gh', path: p.path || '', pinned: false, lastTouched: 0, machines: [] }; map.set(key, g); }
+      if (!g) { g = { key, name: p.name || '', repoUrl: p.repoUrl || '', kind: p.kind || 'gh', path: p.path || '', pinned: false, lastTouched: 0, emoji: '', machines: [] }; map.set(key, g); }
       if (!g.name && p.name) g.name = p.name;
       if (!g.repoUrl && p.repoUrl) g.repoUrl = p.repoUrl;
+      if (!g.emoji && p.emoji) g.emoji = p.emoji;   // same repo badged on N boxes: first badge wins
       if (p.pinned) g.pinned = true;
       if ((p.lastTouched || 0) > g.lastTouched) g.lastTouched = p.lastTouched || 0;  // warmth = warmest machine
       g.machines.push({ machineId: mid, pid: p.pid, online,
@@ -2700,7 +2738,7 @@ function projectRows() {
   let rows;
   if (!FLEET) {
     rows = projectList.map(p => ({ id: p.pid, name: p.name, repoUrl: p.repoUrl,
-      kind: p.kind || 'gh', path: p.path || '',
+      kind: p.kind || 'gh', path: p.path || '', emoji: p.emoji || '',
       pinned: p.pinned, sessionCount: p.sessionCount || 0, busyCount: p.busyCount || 0,
       waitingCount: p.waitingCount || 0, status: p.status, error: p.error,
       lastTouched: p.lastTouched || 0, machineCount: 1, online: true }));
@@ -2708,7 +2746,7 @@ function projectRows() {
     rows = [...unifiedProjects.values()].map(g => {
       const def = pickMachineEntry(g);               // counts reflect the machine you'd open (default-machine semantics)
       return { id: g.key, name: g.name, repoUrl: g.repoUrl, pinned: g.pinned,
-        kind: g.kind || 'gh', path: g.path || '',
+        kind: g.kind || 'gh', path: g.path || '', emoji: g.emoji || '',
         sessionCount: def ? def.sessionCount : 0, busyCount: def ? def.busyCount : 0,
         waitingCount: def ? def.waitingCount : 0, status: def ? def.status : '', error: '',
         lastTouched: g.lastTouched || 0,
@@ -3527,7 +3565,8 @@ function renderProjectRung() {
     const sdot = document.createElement('span');
     sdot.className = 'sdot' + (busyP ? ' cloning' : errP ? ' err' : offline ? ' dead' : '');
     const title = document.createElement('span');
-    title.className = 'stitle'; title.textContent = p.name;
+    title.className = 'stitle';
+    title.textContent = (p.emoji ? p.emoji + ' ' : '') + p.name;
     row.appendChild(sdot); row.appendChild(title);
     if (p.pinned) {
       const tag = document.createElement('span');
@@ -3884,7 +3923,8 @@ function renderSessions() {
   const label = document.createElement('div');
   label.className = 'menutitle';
   const pn = projectName(currentPid);
-  label.textContent = (pn ? pn + ' · ' : '') + `sessions · ${list.length}`;
+  const pe = currentProjectEmoji();
+  label.textContent = (pn ? (pe ? pe + ' ' : '') + pn + ' · ' : '') + `sessions · ${list.length}`;
   sessionsEl.appendChild(label);
 
   // ＋ new session — with a machine picker when the project spans more than one
