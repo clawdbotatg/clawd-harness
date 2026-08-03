@@ -2684,13 +2684,15 @@ function renderSessionBar(view) {
     // the AI's 1-2 word tab handle when it exists; full title until then
     lbl.className = 'lbl'; lbl.textContent = s.tab || s.title || 'new session';
     tab.appendChild(lbl);
-    // the honest stamp: how long since this session was last touched — a bar
-    // full of 5d/7d tabs after a reboot is now self-evidently a stale snapshot
-    const age = fmtAge(s.lastActive);
+    // the honest stamp: how long since YOU last prompted this session.
+    // promptedAt moves only on a human prompt — lastActive (the fallback for
+    // sessions that predate the field) is bumped by every hook, including the
+    // SessionStart a restart fires, which is how all tabs once read 0s at once.
+    const age = fmtAge(s.promptedAt || s.lastActive);
     if (age) {
       const ag = document.createElement('span');
       ag.className = 'age'; ag.textContent = age;
-      ag.title = 'last activity ' + age + ' ago';
+      ag.title = 'last prompted ' + age + ' ago';
       tab.appendChild(ag);
     }
     bar.appendChild(tab);

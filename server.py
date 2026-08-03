@@ -1166,8 +1166,8 @@ class ClaudeSession:
 
     def __init__(self, manager, cid, session_id, resuming, pid="",
                  title="", desc="", tab="", prompt_count=0, first_prompt="",
-                 created=0.0, last_active=0.0, account="default", config_dir="",
-                 ceremony=False):
+                 created=0.0, last_active=0.0, prompted_at=0.0,
+                 account="default", config_dir="", ceremony=False):
         self.manager = manager
         self.pid = pid                           # owning project id
         self.cid = cid                           # stable console id (ours; survives claude rotation)
@@ -1199,6 +1199,10 @@ class ClaudeSession:
         self.prompt_count = prompt_count
         self.first_prompt = first_prompt
         self.last_active = last_active or self.created   # warmth: drives project sort
+        # When the HUMAN last prompted this session — the tab-strip age. Distinct
+        # from last_active, which every hook (incl. resume's SessionStart) bumps:
+        # a harness restart must NOT reset every tab's age to 0s.
+        self.prompted_at = prompted_at
 
         self.master_fd = None
         self.os_pid = None                       # claude's process pid (not the project pid)
@@ -1243,6 +1247,7 @@ class ClaudeSession:
                 "title": self.title, "desc": self.desc, "tab": self.tab,
                 "prompt_count": self.prompt_count, "first_prompt": self.first_prompt,
                 "created": self.created, "last_active": self.last_active,
+                "prompted_at": self.prompted_at,
                 "account": self.account, "config_dir": self.config_dir,
                 "ceremony": self.ceremony}
 
@@ -1275,6 +1280,7 @@ class ClaudeSession:
                 "sessionId": self.session_id,
                 "promptCount": self.prompt_count,
                 "lastActive": self.last_active,
+                "promptedAt": self.prompted_at,
                 "created": self.created,
                 "alive": self.alive,
                 "account": self.account}
@@ -1378,6 +1384,8 @@ class ClaudeSession:
         slim event out to every client (menu badges), and trigger AI naming."""
         ev = obj.get("hook_event_name", "?")
         self.last_active = time.time()
+        if ev == "UserPromptSubmit":
+            self.prompted_at = time.time()   # the human prompted — the tab age anchor
         self.hook_count += 1
         # Claude rotates its transcript file on compaction/resume. Main-session
         # lifecycle hooks report the live transcript_path + session_id, so follow
@@ -1613,6 +1621,7 @@ class ClaudeSession:
 
     def send_message(self, text: str):
         """High-level: type a message, let the paste settle, then submit (CR)."""
+        self.prompted_at = time.time()   # belt-and-braces: a bounced prompt fires no hook
         pre_hooks = self.hook_count
         self.write(text.encode("utf-8"))
         # Short one-liners only need to clear the 0.6s burst cliff; big or
@@ -2221,6 +2230,7 @@ class SessionManager:
                 first_prompt=e.get("first_prompt", ""),
                 created=e.get("created", 0.0),
                 last_active=e.get("last_active", 0.0),
+                prompted_at=e.get("prompted_at", 0.0),
                 account=name, config_dir=cfg,
                 ceremony=e.get("ceremony", False))
             self.sessions[s.cid] = s
@@ -3058,6 +3068,7 @@ class SessionManager:
             resuming=s.resuming, title=s.title, desc=s.desc, tab=s.tab,
             prompt_count=s.prompt_count, first_prompt=s.first_prompt,
             created=s.created, last_active=time.time(),
+            prompted_at=s.prompted_at,
             account=s.account, config_dir=s.config_dir)
         fresh.last_handoff = s.last_handoff
         fresh._onboard_rescues = s._onboard_rescues + 1
@@ -3179,7 +3190,7 @@ class SessionManager:
             self, cid=s.cid, pid=s.pid, session_id=s.session_id, resuming=True,
             title=s.title, desc=s.desc, tab=s.tab, prompt_count=s.prompt_count,
             first_prompt=s.first_prompt, created=s.created,
-            last_active=time.time(),
+            last_active=time.time(), prompted_at=s.prompted_at,
             account=target.name, config_dir=target.config_dir)
         fresh.last_handoff = s.last_handoff
         with self.lock:

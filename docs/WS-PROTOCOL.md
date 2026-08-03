@@ -166,6 +166,8 @@ no-op that would leave the previous session's stream flowing (that's how
 ```jsonc
 { "cid", "pid", "title", "desc", "tab", "named":bool, "busy":bool, "waiting":bool,
   // tab = AI 1-2 word label for the tab strip ("" until the namer runs; UI falls back to title)
+  // promptedAt = epoch of the last HUMAN prompt (tab-strip age; 0 for pre-field sessions —
+  // consumers fall back to lastActive, which every hook bumps incl. restart resumes)
   "tool":<str|null>, "status":"blocked|working|idle", "digest":str,
   "blocked_on":str, "sessionId", "promptCount":int,
   "lastActive":float, "created":float, "alive":bool, "account":str }
