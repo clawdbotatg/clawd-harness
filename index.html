@@ -321,15 +321,18 @@
   .scard .swait { color:#ffce9e; border-color:var(--err); background:rgba(214,77,42,.12);
                   animation:pulse 1.1s ease-in-out infinite; }
   .scard .serror { color:var(--err); font-size:12px; word-break:break-word; }
-  #addProject, .madd { display:flex; flex-direction:column; gap:8px; border:1px dashed var(--edge);
+  #addProject { display:flex; flex-direction:column; gap:8px; border:1px dashed var(--edge);
                 padding:12px 14px; }
-  #addProject input, .madd input { background:var(--raised); color:var(--ink); border:1px solid var(--edge);
+  #addProject input { background:var(--raised); color:var(--ink); border:1px solid var(--edge);
                       padding:9px 11px; font:inherit; }
-  @media (pointer: coarse) { #addProject input, .madd input { font-size:18px; } }
-  #addProject input:focus, .madd input:focus { outline:none; border-color:var(--accent); }
-  #addProject .arow, .madd .arow { display:flex; gap:8px; }
-  #addProject .arow button, .madd .arow button { flex:1; font-size:13px; padding:8px 10px; }
-  #addProject .ahint, .madd .ahint { color:var(--dim); font-size:11px; }
+  @media (pointer: coarse) { #addProject input { font-size:18px; } }
+  #addProject input:focus, #addProject select:focus { outline:none; border-color:var(--accent); }
+  #addProject select { background:var(--raised); color:var(--ink); border:1px solid var(--edge);
+                       padding:8px 10px; font:inherit; font-size:13px; }
+  #addProject select.mfiltered { color:var(--accent); border-color:var(--accent-dim); }
+  #addProject .arow { display:flex; gap:8px; }
+  #addProject .arow button { flex:1; font-size:13px; padding:8px 10px; }
+  #addProject .ahint { color:var(--dim); font-size:11px; }
   /* 🧠 subscriptions — a full page, not a modal */
   #accountsmodal { position:fixed; inset:0; background:var(--bg); z-index:50;
                    display:flex; flex-direction:column; }
@@ -396,13 +399,6 @@
                 border:1px solid var(--edge); padding:9px 11px; font-size:13px; }
   .aadd input:focus { outline:none; border-color:var(--accent); }
   .aadd button { font-size:13px; padding:9px 12px; white-space:nowrap; }
-  /* per-machine add-project: a slim toggle that unfolds the clone/create form
-     inside the machine's roster card (the only place to target a SPECIFIC host) */
-  .madd { margin-top:8px; padding:10px 12px; }
-  .maddtoggle { margin-top:8px; align-self:flex-start; background:transparent;
-                border:1px dashed var(--edge); color:var(--dim); font:inherit;
-                font-size:12px; padding:5px 10px; cursor:pointer; }
-  .maddtoggle:hover { color:var(--accent); border-color:var(--accent); }
   /* "default for new repos" toggle on a machine card: a checkbox that pins the
      global clone target so the projects rung stops auto-picking the first host */
   .cdefault { margin-top:8px; display:flex; align-items:center; gap:7px;
@@ -912,6 +908,8 @@ let unifiedProjects = new Map();// projectKey -> { key, name, repoUrl, pinned, m
 let currentProjectKey = null;   // identity key of the open project (fleet); direct mode leaves this null
 let newSessionMachine = null;   // fleet: which of the open project's machines a new session spawns on (the ＋ selector)
 let projectFilter = '';         // live filter text in the projects add/search box
+let projMachine = '';           // fleet: machine picked in the projects-rung select ('' = default/all —
+                                // show every machine's projects, create/clone on the default host)
 let gotSessions = false;        // have we received the first sessions snapshot?
 let pendingNav = null;          // nav state parsed from the URL, awaiting server data
 let pendingNewFocus = false;    // a `new` we issued — its focus should switch us in
@@ -2188,11 +2186,6 @@ function handleJson(m) {
 const machinesEl = document.getElementById('machinelist');
 const machinesBtn = document.getElementById('machinesBtn');
 
-// Open-state for the per-machine add-project form. renderMachines re-runs on every
-// roster heartbeat (~1s), so we stash which machine's form is unfolded + its draft
-// text/caret and restore them after the rebuild (mirrors the projects-rung filter).
-let machineAdd = { id: null, value: '', start: null, end: null, focused: false };
-
 // ── Web Push: "ring me when a session needs me" ──────────────────────────────
 // A header bell opts you in. iOS only allows this for an INSTALLED PWA (Add to
 // Home Screen) and only from a user gesture — so the button is gated on feature
@@ -2302,48 +2295,6 @@ function renderSysStats(sys) {
   return wrap;
 }
 
-// Per-machine add-project affordance: a slim toggle that unfolds a clone/create
-// form scoped to ONE host. Open-state + draft text live in `machineAdd` so the ~1s
-// roster re-render doesn't collapse it or drop what you're typing.
-function renderMachineAdd(machineId) {
-  const open = machineAdd.id === machineId;
-  const wrap = document.createElement('div');
-  const toggle = document.createElement('button');
-  toggle.className = 'maddtoggle';
-  toggle.textContent = open ? '× close' : '＋ add project';
-  toggle.onclick = () => {
-    if (machineAdd.id === machineId) machineAdd = { id: null, value: '', start: null, end: null, focused: false };
-    else machineAdd = { id: machineId, value: '', start: null, end: null, focused: true };
-    renderMachines(machineList);
-  };
-  wrap.appendChild(toggle);
-  if (!open) return wrap;
-
-  const form = document.createElement('div');
-  form.className = 'madd';
-  const inp = document.createElement('input');
-  inp.placeholder = 'new repo name · or git URL to clone';
-  inp.value = machineAdd.value;
-  inp.addEventListener('input', () => {
-    machineAdd.value = inp.value;
-    machineAdd.start = inp.selectionStart; machineAdd.end = inp.selectionEnd;
-  });
-  inp.addEventListener('focus', () => { machineAdd.focused = true; });
-  inp.addEventListener('blur', () => { machineAdd.focused = false; });
-  const arow = document.createElement('div'); arow.className = 'arow';
-  const createBtn = document.createElement('button'); createBtn.textContent = '＋ create';
-  const cloneBtn = document.createElement('button'); cloneBtn.textContent = '⤓ clone URL';
-  const done = () => { machineAdd = { id: null, value: '', start: null, end: null, focused: false }; renderMachines(machineList); };
-  createBtn.onclick = () => { createProjectOnMachine(machineId, inp.value); done(); };
-  cloneBtn.onclick = () => { cloneProjectOnMachine(machineId, inp.value); done(); };
-  arow.append(createBtn, cloneBtn);
-  const hint = document.createElement('div'); hint.className = 'ahint';
-  hint.textContent = 'create = new empty repo · clone = pull an existing git URL — onto this machine';
-  form.append(inp, arow, hint);
-  wrap.appendChild(form);
-  return wrap;
-}
-
 function renderMachines(list) {
   machineList = list;
   machinesEl.innerHTML = '';
@@ -2426,10 +2377,6 @@ function renderMachines(list) {
       def.append(cb, txt);
       card.appendChild(def);
     }
-    // Add-project: clone or create a repo directly ONTO this host. The roster is
-    // the only place you target a specific machine (the projects rung picks the
-    // default for you). Online machines only — an offline box can't clone.
-    if (m.online) card.appendChild(renderMachineAdd(m.id));
     machinesEl.appendChild(card);
   });
   // Roster changed: connect any newly-online machine and re-merge (online flags
@@ -2439,15 +2386,6 @@ function renderMachines(list) {
   renderProjectRung();
   refreshBreadcrumb();
   resolvePendingNav();        // a URL we restored from may resolve now that the roster is in
-  // Restore focus + caret to an open add-project form so a roster heartbeat mid-type
-  // doesn't yank you out of the box.
-  if (machineAdd.id && machineAdd.focused) {
-    const inp = machinesEl.querySelector('.madd input');
-    if (inp) {
-      inp.focus();
-      if (machineAdd.start != null) try { inp.setSelectionRange(machineAdd.start, machineAdd.end); } catch {}
-    }
-  }
 }
 
 // -- projects (top rung) ----------------------------------------------------
@@ -2633,6 +2571,16 @@ function setDefaultMachine(key, id) { const d = loadDefaults(); d[key] = id; try
 const CLONE_DEFAULT_KEY = 'cc_clone_default';
 function cloneDefaultMachine() { try { return localStorage.getItem(CLONE_DEFAULT_KEY) || null; } catch { return null; } }
 function setCloneDefaultMachine(id) { try { id ? localStorage.setItem(CLONE_DEFAULT_KEY, id) : localStorage.removeItem(CLONE_DEFAULT_KEY); } catch {} }
+// The host a create/clone from the projects rung would land on with no machine
+// picked — mirrors ensureTargetMachine's resolution order, read-only (labels the
+// select's 'default/all' option so the target is visible before you click).
+function defaultCreateMachine() {
+  const pref = cloneDefaultMachine();
+  if (pref && isMachineOnline(pref)) return pref;
+  if (currentMachine && isMachineOnline(currentMachine)) return currentMachine;
+  const on = machineList.find(m => m.online && m.kind !== 'relay');
+  return on ? on.id : null;
+}
 function pickMachineEntry(g) {
   if (!g || !g.machines.length) return null;
   const online = g.machines.filter(m => m.online);
@@ -2660,7 +2608,8 @@ function projectRows() {
         waitingCount: def ? def.waitingCount : 0, status: def ? def.status : '', error: '',
         lastTouched: g.lastTouched || 0,
         machineCount: g.machines.length, online: g.machines.some(m => m.online),
-        machineName: def ? def.machineId : '' };
+        machineName: def ? def.machineId : '',
+        machineIds: g.machines.map(m => m.machineId) };
     });
   }
   // Pinned (the harness itself) first, then warmest first — whichever project
@@ -2728,7 +2677,10 @@ function attachMachine(machineId) {
 // drop onto its sessions rung.
 function resolveProject(key) {
   const g = unifiedProjects.get(key);
-  const entry = pickMachineEntry(g);
+  // A machine filter on the projects rung is an explicit "this box" — open the
+  // project's copy there when it has one online, else fall back to the default.
+  const filtered = (projMachine && g) ? g.machines.find(m => m.machineId === projMachine && m.online) : null;
+  const entry = filtered || pickMachineEntry(g);
   if (!entry) { setView('projects'); return; }
   currentProjectKey = key;
   newSessionMachine = null;            // ＋ selector re-defaults to this project's default
@@ -3360,11 +3312,50 @@ function renderProjectRung() {
   const inp = document.createElement('input');
   inp.placeholder = 'filter projects · or type a name / git URL and click create/clone';
   inp.value = projectFilter;
+  // Fleet: a machine select that scopes BOTH halves of the row — it filters the
+  // list to that box's projects AND targets create/clone at it. 'default/all'
+  // shows everything and creates on the default host (the roster checkbox, else
+  // auto-pick). This is the one place to aim a new repo at a specific machine.
+  let msel = null;
+  if (FLEET) {
+    msel = document.createElement('select');
+    const workers = machineList.filter(m => m.kind !== 'relay');
+    if (projMachine && !workers.some(m => m.id === projMachine)) projMachine = '';  // picked box left the roster
+    const defName = defaultCreateMachine();
+    const all = document.createElement('option');
+    all.value = '';
+    all.textContent = 'default/all' + (defName ? ` · new repos → ${defName.replace(/^clawd-/, '')}` : '');
+    msel.appendChild(all);
+    workers.forEach(m => {
+      const o = document.createElement('option');
+      o.value = m.id;
+      o.textContent = `🖥️ ${m.id.replace(/^clawd-/, '')}` + (m.online ? '' : ' · offline');
+      msel.appendChild(o);
+    });
+    msel.value = projMachine;
+    msel.className = projMachine ? 'mfiltered' : '';
+    msel.title = 'filter projects by machine · create/clone lands on the selected machine';
+    msel.onchange = () => {
+      projMachine = msel.value;
+      msel.className = projMachine ? 'mfiltered' : '';
+      applyProjectFilter();
+    };
+  }
   const arow = document.createElement('div'); arow.className = 'arow';
   const createBtn = document.createElement('button'); createBtn.textContent = '＋ create';
   const cloneBtn = document.createElement('button'); cloneBtn.textContent = '⤓ clone URL';
-  createBtn.onclick = () => { createProject(inp.value); inp.value = ''; projectFilter = ''; applyProjectFilter(); };
-  cloneBtn.onclick = () => { addProjectFromUrl(inp.value); inp.value = ''; projectFilter = ''; applyProjectFilter(); };
+  const submit = (kind) => {
+    const val = inp.value;
+    if (FLEET && projMachine) {
+      if (!isMachineOnline(projMachine)) { meta.textContent = `${projMachine} is offline`; return; }
+      if (kind === 'create') createProjectOnMachine(projMachine, val);
+      else cloneProjectOnMachine(projMachine, val);
+    } else if (kind === 'create') createProject(val);
+    else addProjectFromUrl(val);
+    inp.value = ''; projectFilter = ''; applyProjectFilter();
+  };
+  createBtn.onclick = () => submit('create');
+  cloneBtn.onclick = () => submit('clone');
   inp.addEventListener('input', () => { projectFilter = inp.value; applyProjectFilter(); });
   inp.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
@@ -3372,8 +3363,10 @@ function renderProjectRung() {
     const matches = filteredProjects();
     if (matches.length === 1) selectProject(matches[0].id);  // narrowed to one → open it
   });
+  add.appendChild(inp);
+  if (msel) add.appendChild(msel);
   arow.appendChild(createBtn); arow.appendChild(cloneBtn);
-  add.appendChild(inp); add.appendChild(arow);
+  add.appendChild(arow);
   projectsEl.appendChild(add);
 
   rows.forEach(p => {
@@ -3465,13 +3458,17 @@ function renderProjectRung() {
   }
 }
 
-// rows matching the live filter (case-insensitive substring on name). Empty
-// filter → everything. Drives both the Enter-to-open and the visual hide below.
+// Does a row survive the live filters? Text = case-insensitive substring on name;
+// machine (fleet) = the project has a copy on the selected box. Both must pass.
+function projectFilterHit(p, q) {
+  if (FLEET && projMachine && !(p && (p.machineIds || []).includes(projMachine))) return false;
+  return !q || (p && (p.name || '').toLowerCase().includes(q));
+}
+// rows matching the live filters. Empty filter + default/all → everything.
+// Drives both the Enter-to-open and the visual hide below.
 function filteredProjects() {
   const q = projectFilter.trim().toLowerCase();
-  const rows = projectRows();
-  if (!q) return rows;
-  return rows.filter(p => (p.name || '').toLowerCase().includes(q));
+  return projectRows().filter(p => projectFilterHit(p, q));
 }
 // show/hide the rendered cards to match the filter without rebuilding the DOM
 // (keeps input focus while typing).
@@ -3480,8 +3477,7 @@ function applyProjectFilter() {
   const rows = projectRows();
   projectsEl.querySelectorAll('.scard').forEach(card => {
     const p = rows.find(x => String(x.id) === card.dataset.id);
-    const hit = !q || (p && (p.name || '').toLowerCase().includes(q));
-    card.style.display = hit ? '' : 'none';
+    card.style.display = projectFilterHit(p, q) ? '' : 'none';
   });
 }
 
