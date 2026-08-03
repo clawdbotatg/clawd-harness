@@ -63,6 +63,8 @@ viewer** (each with its own `client.cid`).
 | `close` | `cid` | Kill that session (SIGTERM) and detach viewers. Files on disk untouched. |
 | `createProject` | `name` | Create a new public GitHub repo under `GH_OWNER` and adopt it (async; status broadcasts via `projects`). |
 | `addProject` | `repoUrl` | Clone a repo and adopt it (async). Input normalized: full URL as-is; `owner/repo` and bare `repo` resolved against github.com. |
+| `addLocalProject` | `path` | Register an EXISTING folder anywhere on the machine's disk (absolute or `~` path) as a **private local project** (`kind:"local"`): sessions run inside it like any project, but the harness never runs gh/git-remote operations on it and never stores/broadcasts a repo URL. Synchronous — the project appears `ready` immediately. Rejected (with an `error` frame to the sender) for: non-directories, `/` or `~` itself, paths under `projects/` (auto-managed) or the harness's own dir (the pinned self-project). Re-adding the same resolved path is a no-op. |
+| `removeProject` | `pid` | Detach a `kind:"local"` project: drop its registry entry and close its sessions. **Never touches the folder on disk.** Silently ignored for gh projects (they keep the delete-the-folder contract below) and the pinned self-project. |
 | `input` | `data`, `cid?` | Raw keystrokes → PTY. `data` is a UTF-8 string (incl. escape seqs for TUI menus). Falls back to `client.cid` if `cid` omitted. |
 | `send` | `text`, `cid?` | High-level: type `text`, wait for the paste to settle, then submit `\r`. Use this to "send a message/prompt". |
 | `resize` | `cols`, `rows`, `cid?`, `claim?` | A size CLAIM, not a command — one PTY serves many differently-sized viewers, so the server sizes it to a single OWNER. `claim:true` (a deliberate act on that device: opening the tty view, resizing the window) takes ownership; without it the size only applies if the sender already owns the PTY (or nobody does). `input`/`send` from a sized viewer also takes ownership (you drive it, it fits you). `cols`/`rows` of `0` releases the claim (viewer left the tty view / went hidden) — ownership falls back to the most recently sized remaining viewer. Applied changes broadcast `ttySize`. Pre-policy servers treat every frame as an unconditional resize, so old/new mixes degrade to the last-write-wins behavior. |
@@ -74,11 +76,22 @@ viewer** (each with its own `client.cid`).
 TUI's paste-vs-submit timing (`SEND_SETTLE`). `input` is for raw control
 (arrow keys, escape sequences to drive `claude`'s menus).
 
-**No `removeProject`:** disk is the source of truth for the project list. The
-server reconciles the in-memory set against the repos in `projects/` every ~1s
-(and on boot) — a new repo dir is adopted, a vanished one is dropped (its now
-cwd-less sessions killed), and the change is broadcast via `projects`. To remove
-a project, delete its folder on disk; there is no wire message for it.
+**Removal is kind-dependent.** For gh projects, disk is the source of truth:
+the server reconciles the in-memory set against the repos in `projects/` every
+~1s (and on boot) — a new repo dir is adopted, a vanished one is dropped (its
+now cwd-less sessions killed), and the change is broadcast via `projects`. To
+remove a gh project, delete its folder on disk; `removeProject` is ignored for
+them. `kind:"local"` projects are the inverse: they exist only in the registry
+(their paths live outside `projects/`, invisible to the disk reconcile), are
+removed only via `removeProject`, and are **never auto-dropped** — a missing
+local path flips the project to `status:"error"` (`"folder missing"`) after
+~30s of continuous absence (`LOCAL_GONE`) and heals back to `ready` when the
+path returns (network-volume blips survive; sessions keep running throughout).
+
+**Mixed versions:** `kind` is absent from old servers — consumers treat absent
+as `"gh"`. An old UI/worker keys a local project as `name:<name>` instead of
+`local:<machine>:<path>` (see DEEPLINKS.md) — cards render, deep links may not
+resolve; degrades, doesn't break.
 
 ---
 
@@ -141,7 +154,9 @@ no-op that would leave the previous session's stream flowing (that's how
 ```jsonc
 { "pid", "name", "path", "repoUrl", "status":"ready|cloning|error",
   "error", "sessionCount":int, "busyCount":int, "waitingCount":int,
-  "created":float, "pinned":bool }
+  "created":float, "pinned":bool, "kind":"gh|local" }
+// kind absent (old server) ⇒ "gh". kind:"local" always has repoUrl:"" —
+// enforced in the Project constructor, a local can never carry a remote URL.
 ```
 
 ### sessionMeta

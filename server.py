@@ -212,6 +212,15 @@ GH_OWNER     = os.environ.get("GH_OWNER", "clawdbotatg")
 # disk the reconcile loop used to leave it forever, permanently blocking a
 # retry of the same repo name.
 ERROR_LINGER = float(os.environ.get("ERROR_LINGER", "45"))
+# Local (kind="local") projects: how long a registered folder must be
+# continuously missing before its card flips to error. Locals are never
+# auto-dropped (a network volume blip must not forget an explicitly-added
+# project) — the error heals when the path returns; only removeProject forgets.
+LOCAL_GONE = float(os.environ.get("LOCAL_GONE", "30"))
+# ...and how often the liveness stat runs: os.path.isdir on a dead network
+# mount can hang, and reconcile shares the ~1s watch loop with UI reload /
+# restart watching — so locals are only statted every few seconds.
+LOCAL_SCAN_EVERY = float(os.environ.get("LOCAL_SCAN_EVERY", "5"))
 # The harness always offers *itself* as a pinned project (path = HERE, outside
 # PROJECTS_DIR) so you can open a session and live-edit the app you're running.
 # Stable sentinel pid so its sessions resume across restarts; never persisted to
@@ -1089,21 +1098,25 @@ class Project:
     ClaudeSessions launch in. `status` tracks an async clone/create."""
 
     def __init__(self, pid, name, path, repo_url="", status="ready",
-                 error="", created=0.0, pinned=False):
+                 error="", created=0.0, pinned=False, kind="gh"):
         self.pid = pid
         self.name = name
         self.path = path                         # abs path to the repo
-        self.repo_url = _scrub_url_creds(repo_url)  # never store/broadcast embedded creds
+        self.kind = kind if kind in ("gh", "local") else "gh"
+        # local = a private folder registered in place: it must never carry a
+        # remote URL, no matter which code path constructs it
+        self.repo_url = "" if self.kind == "local" else _scrub_url_creds(repo_url)
         self.status = status                     # ready | cloning | error
         self.error = error
         self.error_at = 0.0                      # when status flipped to error (in-memory only)
+        self.miss_since = 0.0                    # local liveness: path first seen missing (in-memory only)
         self.created = created or time.time()
         self.pinned = pinned                     # the harness-itself project: top of list, not removable
 
     def to_registry(self):
         return {"pid": self.pid, "name": self.name, "path": self.path,
                 "repo_url": self.repo_url, "status": self.status,
-                "created": self.created}
+                "created": self.created, "kind": self.kind}
 
     def meta(self, session_count=0, busy_count=0, waiting_count=0, last_touched=0.0):
         return {"pid": self.pid, "name": self.name, "path": self.path,
@@ -1111,7 +1124,7 @@ class Project:
                 "error": self.error, "sessionCount": session_count,
                 "busyCount": busy_count, "waitingCount": waiting_count,
                 "created": self.created, "pinned": self.pinned,
-                "lastTouched": last_touched}
+                "kind": self.kind, "lastTouched": last_touched}
 
 
 # ── PTY-backed Claude session ─────────────────────────────────────────────────
@@ -2039,18 +2052,30 @@ class SessionManager:
         PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
         reg = self._read_registry()
         for e in reg.get("projects", []):
-            if not e.get("path") or not os.path.isdir(e["path"]):
+            kind = e.get("kind", "gh")
+            missing = not e.get("path") or not os.path.isdir(e["path"])
+            if missing and kind != "local":
                 continue                         # repo dir gone — drop the entry
+            if missing and not e.get("path"):
+                continue                         # local with no path at all — unusable
+            # A local whose folder is missing at boot is KEPT as an error entry
+            # (a network volume may simply not be mounted yet) — the reconcile
+            # liveness pass heals it when the path returns; only the explicit
+            # removeProject verb forgets a local.
             # Backfill the origin URL when the registry stored an empty one (legacy
             # entries adopted before this backfill existed). Every machine reporting
             # its canonical repo URL is what lets the fleet view merge the same repo
             # across boxes into one card instead of splitting name-only vs. URL keys.
-            repo_url = e.get("repo_url", "") or _git_remote_url(e["path"])
+            # Locals are exempt: private folders never report a remote.
+            repo_url = ("" if kind == "local"
+                        else e.get("repo_url", "") or _git_remote_url(e["path"]))
             p = Project(pid=e.get("pid") or str(uuid.uuid4()),
                         name=e.get("name") or os.path.basename(e["path"]),
                         path=e["path"], repo_url=repo_url,
                         status=e.get("status", "ready") if e.get("status") != "cloning" else "ready",
-                        created=e.get("created", 0.0))
+                        created=e.get("created", 0.0), kind=kind)
+            if missing:
+                p.status, p.error, p.error_at = "error", "folder missing", time.time()
             self.projects[p.pid] = p
         self._discover_projects()                # adopt repos dropped into projects/ by hand
         self._ensure_self_project()              # always offer the harness itself, pinned
@@ -2088,6 +2113,14 @@ class SessionManager:
             pid = e.get("pid")
             if pid not in known:
                 continue                         # orphaned session — its project is gone
+            proj = self.projects.get(pid)
+            if proj is not None and proj.kind == "local" and proj.status == "error":
+                # local folder missing at boot: the project entry survives (it
+                # heals when the path returns) but a session can't — Popen on a
+                # dead cwd would crash the boot
+                print(f"[session {(e.get('cid') or '')[:8]}] local folder "
+                      f"missing ({proj.path}) — session not resumed", flush=True)
+                continue
             cfg = e.get("config_dir", "")
             name = e.get("account", "default")
             if cfg and not os.path.isdir(cfg):
@@ -2249,10 +2282,50 @@ class SessionManager:
             for cid in cids:
                 self.close(cid, _broadcast=False)
             changed = True
+        if self._reconcile_locals():
+            changed = True
         if self._discover_projects():
             changed = True
         if changed:
             self.save_registry()
+        return changed
+
+    def _reconcile_locals(self):
+        """Liveness for kind="local" projects (invisible to the disk passes
+        above — their paths live outside PROJECTS_DIR). Never auto-drops: a
+        path continuously missing for LOCAL_GONE flips the card to error
+        (blocks new sessions; existing ones keep running), and heals back to
+        ready when it returns. Throttled to every LOCAL_SCAN_EVERY seconds —
+        a stat on a dead network mount can hang, and this shares the ~1s
+        watch loop. Returns True if any status changed."""
+        now = time.time()
+        if now - getattr(self, "_local_scan_at", 0.0) < LOCAL_SCAN_EVERY:
+            return False
+        self._local_scan_at = now
+        with self.lock:
+            locals_ = [p for p in self.projects.values() if p.kind == "local"]
+        changed = False
+        for p in locals_:
+            try:
+                present = os.path.isdir(p.path)
+            except OSError:
+                present = False
+            if present:
+                p.miss_since = 0.0
+                if p.status == "error":
+                    p.status, p.error = "ready", ""
+                    print(f"[project {p.name}] local folder returned → healed",
+                          flush=True)
+                    changed = True
+            else:
+                if not p.miss_since:
+                    p.miss_since = now
+                elif p.status == "ready" and now - p.miss_since > LOCAL_GONE:
+                    p.status, p.error, p.error_at = "error", "folder missing", now
+                    print(f"[project {p.name}] local folder missing "
+                          f"({p.path}) → error (kept; heals if it returns)",
+                          flush=True)
+                    changed = True
         return changed
 
     def _ensure_self_project(self):
@@ -3187,6 +3260,61 @@ class SessionManager:
                          daemon=True).start()
         return p
 
+    def add_local_project(self, raw):
+        """Register an existing folder anywhere on this machine's disk as a
+        PRIVATE local project (kind="local"): sessions run inside it like any
+        project, but the harness never runs gh/git-remote operations on it and
+        never stores/broadcasts a repo URL for it. Lives only in the registry
+        (it can't be disk-discovered); removed via removeProject, never by the
+        disk reconcile. Returns (project, "") or (None, error)."""
+        raw = (raw or "").strip()
+        if not raw:
+            return None, "empty path"
+        path = os.path.realpath(os.path.expanduser(raw))
+        if not os.path.isdir(path):
+            return None, f"not a directory: {path}"
+        home = os.path.realpath(os.path.expanduser("~"))
+        if path in ("/", home):
+            return None, "refusing to register / or your home folder itself"
+        pdir = os.path.realpath(str(PROJECTS_DIR))
+        if path == pdir or path.startswith(pdir + os.sep):
+            return None, "that's inside projects/ — it's already auto-managed"
+        here = os.path.realpath(str(HERE))
+        if path == here or path.startswith(here + os.sep):
+            return None, "that's the harness itself (the pinned project)"
+        with self.lock:
+            for p in self.projects.values():
+                if os.path.realpath(p.path) == path:
+                    return p, ""                 # already registered → reuse
+        name = self._unique_project_name(os.path.basename(path))
+        p = Project(pid=str(uuid.uuid4()), name=name, path=path,
+                    status="ready", created=time.time(), kind="local")
+        with self.lock:
+            self.projects[p.pid] = p
+        self.save_registry()
+        self.broadcast_projects()
+        print(f"[project {name}] local folder registered ({path})", flush=True)
+        return p, ""
+
+    def remove_project(self, pid):
+        """Detach a LOCAL project: drop the registry entry and close its
+        sessions. Never touches the folder on disk, and only applies to
+        kind="local" — gh projects keep the delete-the-folder contract."""
+        with self.lock:
+            p = self.projects.get(pid)
+            if not p or p.kind != "local" or p.pinned:
+                return False
+            self.projects.pop(pid, None)
+            cids = [c for c, s in self.sessions.items() if s.pid == pid]
+        for cid in cids:
+            self.close(cid, _broadcast=False)
+        print(f"[project {p.name}] local project detached "
+              f"(folder untouched: {p.path})", flush=True)
+        self.save_registry()
+        self.broadcast_projects()
+        self.broadcast_sessions()
+        return True
+
     def _provision(self, project, cmd, kind):
         """Run a clone/create in PROJECTS_DIR, then flip the project's status."""
         try:
@@ -3281,6 +3409,9 @@ class SessionManager:
     def create_session(self, pid, account=None, ceremony=False):
         if pid not in self.projects:
             return None
+        proj = self.projects[pid]
+        if proj.kind == "local" and proj.status == "error":
+            return None                          # folder missing — Popen on a dead cwd would fail
         # Routing: an explicit override (e.g. the sign-in ceremony) always
         # wins; otherwise, with auto-routing on, each new session picks the
         # account with the MOST HEADROOM at this moment (per-spawn — not a
@@ -3982,6 +4113,13 @@ class Handler(BaseHTTPRequestHandler):
             MGR.create_project(frame.get("name", ""))
         elif t == "addProject":
             MGR.add_project(frame.get("repoUrl", ""))
+        elif t == "addLocalProject":
+            _, lerr = MGR.add_local_project(frame.get("path", ""))
+            if lerr:
+                client.send_json({"type": "error",
+                                  "error": f"addLocalProject: {lerr}"})
+        elif t == "removeProject":
+            MGR.remove_project(frame.get("pid"))
         elif t == "restart":
             MGR.request_restart(frame.get("reason") or "manual")
         elif t == "restartCancel":

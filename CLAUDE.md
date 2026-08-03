@@ -98,10 +98,20 @@ user-facing overview; this file orients an agent working **on** the code.
   `repo` name are resolved against `github.com` (bare → `GH_OWNER`), so typing
   `slop-computer-live` clones `github.com/clawdbotatg/slop-computer-live`.
   **Creation needs `gh` authenticated in the server's environment** (cloning a
-  public URL does not). **There is no in-app "remove":** to drop a project you
-  delete its repo folder under `projects/` yourself and the reconcile loop
-  follows within ~1s (the pinned self-project lives outside `projects/`, so it's
-  never touched).
+  public URL does not). **There is no in-app "remove" for gh projects:** to drop
+  one you delete its repo folder under `projects/` yourself and the reconcile
+  loop follows within ~1s (the pinned self-project lives outside `projects/`, so
+  it's never touched). **Third kind: local private projects** (`kind:"local"`,
+  violet in the UI vs the amber that means clawdbotatg repo) — an existing
+  folder anywhere on the machine's disk, registered via `addLocalProject{path}`
+  (the 📁 button). Lives only in the registry (invisible to the disk reconcile),
+  detached via `removeProject{pid}` (the card's ⏏ — never touches the folder),
+  and never auto-dropped: a missing path flips it to error after `LOCAL_GONE`
+  (~30s) and heals when the path returns. Privacy is a **harness-level
+  guarantee**: no gh/git-remote operations ever run against it, `repoUrl` is
+  forced `""` in the Project ctor, and its path leaves the machine only inside
+  E2E fleet frames. (The session inside it is still a full `claude` agent — the
+  guarantee is about the harness, not a sandbox.)
 - **Accounts (subscription routing):** the harness can hold N Claude
   subscription logins at once — each account = a config dir under
   `~/.clawd-accounts/<name>` (`CLAUDE_CONFIG_DIR` isolates the credential

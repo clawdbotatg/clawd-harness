@@ -26,7 +26,10 @@
      rounded "cards". structure is drawn with rules, not decoration. */
   :root { --bg:#000000; --panel:#0a0a0a; --raised:#101010; --edge:#262626; --edge-hi:#3b3b3b;
           --ink:#d9d7cf; --dim:#79726a; --accent:#e8a13a; --accent-dim:#6d5220; --accent-bg:#171002;
-          --ok:#5fa563; --err:#d6564b; --tool:#9c8f54; --mono:ui-monospace,"SF Mono",Menlo,Monaco,"Courier New",monospace; }
+          --ok:#5fa563; --err:#d6564b; --tool:#9c8f54; --mono:ui-monospace,"SF Mono",Menlo,Monaco,"Courier New",monospace;
+          /* local (private folder) projects: violet where clawdbotatg repos are amber,
+             so you always know which world a card/session belongs to */
+          --local:#a78bfa; --local-dim:#4c3a78; --local-bg:#120c1e; }
   * { box-sizing:border-box; }
   ::selection { background:var(--accent); color:#000; }
   html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
@@ -78,6 +81,9 @@
                       max-width:170px; }
   #sessionbar .stab:hover { border-color:var(--edge-hi); color:var(--ink); }
   #sessionbar .stab.active { border-color:var(--accent); color:var(--accent); background:var(--accent-bg); }
+  /* session lives in a local (private folder) project → violet, not amber */
+  #sessionbar .stab.local { border-color:var(--local-dim); }
+  #sessionbar .stab.local.active { border-color:var(--local); color:var(--local); background:var(--local-bg); }
   #sessionbar .stab .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }   /* square LED, matches sessions page */
   #sessionbar .stab .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
   #sessionbar .stab .sdot.blocked { background:var(--err); animation:pulse 1.1s ease-in-out infinite; }   /* needs-you: turn ended asking the human */
@@ -209,6 +215,7 @@
   #sessiondesc:empty { display:none; }
   #sessiondesc .sd-project { color:#fff; font-weight:600; }
   #sessiondesc .sd-title { color:var(--accent); font-weight:600; }
+  #sessiondesc.local .sd-title { color:var(--local); }
   #sessiondesc .sd-desc { color:var(--dim); font-weight:400; }
   @media (pointer: coarse) { #sessiondesc { font-size:5px; } }
   .inputrow { display:flex; gap:8px; align-items:flex-end; }
@@ -410,6 +417,12 @@
            cursor:pointer; display:flex; flex-direction:column; gap:4px; position:relative; }
   .scard:hover { border-color:var(--edge-hi); }
   .scard.active { border-color:var(--accent); background:#0e0e0e; }
+  /* local (private folder) project — and every session card inside one */
+  .scard.local { border-color:var(--local-dim); }
+  .scard.local:hover { border-color:var(--local); }
+  .scard.local.active { border-color:var(--local); background:#0e0c14; }
+  .scount.slocal { color:var(--local); border-color:var(--local-dim); background:var(--local-bg); }
+  .scard.local .row { padding-right:20px; }   /* room for the ⏏ eject in the corner */
   .scard .row { display:flex; align-items:center; gap:9px; }
   .scard .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }   /* square LED */
   .scard .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
@@ -984,7 +997,7 @@ function needsYouSessions() {
     for (const s of (pm.sessionList || [])) {
       if (!s.waiting || s.alive === false) continue;
       const p = projById[s.pid];
-      const key = p ? projectKey(p) : null;
+      const key = p ? projectKey(p, mid) : null;
       if (!key) continue;
       // The actual ask (what it's blocked on) — the harness LLM fills blocked_on
       // when a session ends waiting on a human ("Paste your Alchemy key"); digest
@@ -2428,10 +2441,12 @@ function refreshBreadcrumb(view) {
   // Show "short title: long desc" when AI naming has produced a one-line summary,
   // otherwise just the short title. The two parts are styled distinctly.
   descEl.textContent = '';
+  descEl.classList.toggle('local', inSession && currentProjectIsLocal());
   if (inSession && title) {
     const proj = projectName(currentPid);
     if (proj) {
-      const p = document.createElement('span'); p.className = 'sd-project'; p.textContent = proj + ' ';
+      const p = document.createElement('span'); p.className = 'sd-project';
+      p.textContent = (currentProjectIsLocal() ? '🔒 ' : '') + proj + ' ';
       descEl.appendChild(p);
     }
     const t = document.createElement('span'); t.className = 'sd-title'; t.textContent = title;
@@ -2461,7 +2476,8 @@ function renderSessionBar(view) {
   bar.innerHTML = '';
   sorted.forEach(s => {
     const tab = document.createElement('button');
-    tab.className = 'stab' + (s.cid === currentCid ? ' active' : '');
+    tab.className = 'stab' + (s.cid === currentCid ? ' active' : '') +
+                    (sessionIsLocal(s) ? ' local' : '');
     tab.title = s.title || 'new session';
     tab.onclick = () => focusSession(s);   // may cross project/machine; cancels any queued new-session send
     const dot = document.createElement('span');
@@ -2493,8 +2509,27 @@ function normRepo(url) {
   s = s.replace(/\/+$/, '');                             // drop trailing slash(es)
   return s.toLowerCase();
 }
-function projectKey(p) { return normRepo(p.repoUrl) || ('name:' + (p.name || '')); }
+// Local (private folder) projects key machine-qualified: the same path on two
+// boxes is two different folders, and a `local:` prefix keeps them out of the
+// name↔URL folding below. Mirrored by _project_key in fleet/worker.py.
+function projectKey(p, mid) {
+  if (p.kind === 'local') return 'local:' + (mid || '') + ':' + (p.path || p.name || '');
+  return normRepo(p.repoUrl) || ('name:' + (p.name || ''));
+}
 function isMachineOnline(id) { return machineList.some(m => m.id === id && m.online); }
+// Is the project a session belongs to a local (private folder) one? Drives the
+// violet accent on session cards/tabs so you always know which world you're in.
+function sessionIsLocal(s) {
+  if (!s) return false;
+  if (s._pkey) return s._pkey.startsWith('local:');
+  const p = (projectList || []).find(p => p.pid === s.pid);
+  return !!p && p.kind === 'local';
+}
+function currentProjectIsLocal() {
+  if (FLEET) return (currentProjectKey || '').startsWith('local:');
+  const p = (projectList || []).find(p => p.pid === currentPid);
+  return !!p && p.kind === 'local';
+}
 
 // Rebuild `unifiedProjects` from every machine's cached project list. Counts come
 // straight from each projectMeta (sessionCount/busy/waiting), so this needs only
@@ -2504,9 +2539,9 @@ function mergeProjects() {
   for (const mid of Object.keys(perMachine)) {
     const online = isMachineOnline(mid);
     for (const p of (perMachine[mid].projectList || [])) {
-      const key = projectKey(p);
+      const key = projectKey(p, mid);
       let g = map.get(key);
-      if (!g) { g = { key, name: p.name || '', repoUrl: p.repoUrl || '', pinned: false, lastTouched: 0, machines: [] }; map.set(key, g); }
+      if (!g) { g = { key, name: p.name || '', repoUrl: p.repoUrl || '', kind: p.kind || 'gh', path: p.path || '', pinned: false, lastTouched: 0, machines: [] }; map.set(key, g); }
       if (!g.name && p.name) g.name = p.name;
       if (!g.repoUrl && p.repoUrl) g.repoUrl = p.repoUrl;
       if (p.pinned) g.pinned = true;
@@ -2597,6 +2632,7 @@ function projectRows() {
   let rows;
   if (!FLEET) {
     rows = projectList.map(p => ({ id: p.pid, name: p.name, repoUrl: p.repoUrl,
+      kind: p.kind || 'gh', path: p.path || '',
       pinned: p.pinned, sessionCount: p.sessionCount || 0, busyCount: p.busyCount || 0,
       waitingCount: p.waitingCount || 0, status: p.status, error: p.error,
       lastTouched: p.lastTouched || 0, machineCount: 1, online: true }));
@@ -2604,11 +2640,13 @@ function projectRows() {
     rows = [...unifiedProjects.values()].map(g => {
       const def = pickMachineEntry(g);               // counts reflect the machine you'd open (default-machine semantics)
       return { id: g.key, name: g.name, repoUrl: g.repoUrl, pinned: g.pinned,
+        kind: g.kind || 'gh', path: g.path || '',
         sessionCount: def ? def.sessionCount : 0, busyCount: def ? def.busyCount : 0,
         waitingCount: def ? def.waitingCount : 0, status: def ? def.status : '', error: '',
         lastTouched: g.lastTouched || 0,
         machineCount: g.machines.length, online: g.machines.some(m => m.online),
         machineName: def ? def.machineId : '',
+        machinePid: def ? def.pid : null,
         machineIds: g.machines.map(m => m.machineId) };
     });
   }
@@ -2747,6 +2785,26 @@ function cloneProjectOnMachine(machineId, url) {
   if (!url || !isMachineOnline(machineId)) return;
   hsendTo(machineId, { type: 'addProject', repoUrl: url });
   meta.textContent = `cloning onto ${machineId}…`;
+}
+// Register an existing folder (an absolute or ~ path on the machine's disk) as a
+// PRIVATE local project — the harness never touches GitHub/git remotes for it.
+function addLocalProject(path) {
+  path = (path || '').trim();
+  if (!path || !ensureTargetMachine()) return;
+  hsend({ type: 'addLocalProject', path });
+}
+function addLocalProjectOnMachine(machineId, path) {
+  path = (path || '').trim();
+  if (!path || !isMachineOnline(machineId)) return;
+  hsendTo(machineId, { type: 'addLocalProject', path });
+  meta.textContent = `adding local folder on ${machineId}…`;
+}
+// Detach a LOCAL project (server refuses the verb for gh projects). The folder on
+// disk is never touched — this only forgets the registry entry + closes sessions.
+function removeLocalProject(machineId, pid, name) {
+  if (!confirm(`Detach "${name}"? The folder on disk is not touched.`)) return;
+  if (FLEET && machineId) hsendTo(machineId, { type: 'removeProject', pid });
+  else hsend({ type: 'removeProject', pid });
 }
 // -- accounts: subscription logins + usage-aware routing (the 🧠 overlay) -----
 // Each harness broadcasts an `accounts` frame (logins, per-window usage, which
@@ -3318,7 +3376,7 @@ function renderProjectRung() {
   const add = document.createElement('div');
   add.id = 'addProject';
   const inp = document.createElement('input');
-  inp.placeholder = 'filter projects · or type a name / git URL and click create/clone';
+  inp.placeholder = 'filter projects · or type a name / git URL / local path and click a button';
   inp.value = projectFilter;
   // Fleet: a machine select that scopes BOTH halves of the row — it filters the
   // list to that box's projects AND targets create/clone at it. 'default/all'
@@ -3352,18 +3410,28 @@ function renderProjectRung() {
   const arow = document.createElement('div'); arow.className = 'arow';
   const createBtn = document.createElement('button'); createBtn.textContent = '＋ create';
   const cloneBtn = document.createElement('button'); cloneBtn.textContent = '⤓ clone URL';
+  const localBtn = document.createElement('button'); localBtn.textContent = '📁 local path';
+  localBtn.title = 'register an existing folder on the machine — private, never touches GitHub';
   const submit = (kind) => {
     const val = inp.value;
+    if (FLEET && kind === 'local' && !projMachine) {
+      // a path is machine-specific — never guess a default host for it
+      meta.textContent = 'pick a machine in the dropdown first — a local path lives on one box';
+      return;
+    }
     if (FLEET && projMachine) {
       if (!isMachineOnline(projMachine)) { meta.textContent = `${projMachine} is offline`; return; }
       if (kind === 'create') createProjectOnMachine(projMachine, val);
+      else if (kind === 'local') addLocalProjectOnMachine(projMachine, val);
       else cloneProjectOnMachine(projMachine, val);
     } else if (kind === 'create') createProject(val);
+    else if (kind === 'local') addLocalProject(val);
     else addProjectFromUrl(val);
     inp.value = ''; projectFilter = ''; applyProjectFilter();
   };
   createBtn.onclick = () => submit('create');
   cloneBtn.onclick = () => submit('clone');
+  localBtn.onclick = () => submit('local');
   inp.addEventListener('input', () => { projectFilter = inp.value; applyProjectFilter(); });
   inp.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
@@ -3373,7 +3441,7 @@ function renderProjectRung() {
   });
   add.appendChild(inp);
   if (msel) add.appendChild(msel);
-  arow.appendChild(createBtn); arow.appendChild(cloneBtn);
+  arow.appendChild(createBtn); arow.appendChild(cloneBtn); arow.appendChild(localBtn);
   add.appendChild(arow);
   projectsEl.appendChild(add);
 
@@ -3382,7 +3450,8 @@ function renderProjectRung() {
     const offline = FLEET && !p.online;         // every machine hosting this project is offline
     const card = document.createElement('div');
     card.className = 'scard' + (p.id === selId ? ' active' : '') +
-                     (busyP ? ' cloning' : errP ? ' error' : '') + (offline ? ' offline' : '');
+                     (busyP ? ' cloning' : errP ? ' error' : '') + (offline ? ' offline' : '') +
+                     (p.kind === 'local' ? ' local' : '');
     card.dataset.id = p.id;
     if (!busyP && !errP && !offline) card.onclick = () => selectProject(p.id);
 
@@ -3395,6 +3464,12 @@ function renderProjectRung() {
     if (p.pinned) {
       const tag = document.createElement('span');
       tag.className = 'scount'; tag.textContent = 'this app'; tag.title = 'the running harness — live-editable';
+      row.appendChild(tag);
+    }
+    if (p.kind === 'local') {
+      const tag = document.createElement('span');
+      tag.className = 'scount slocal'; tag.textContent = '🔒 local';
+      tag.title = 'local folder — private, never touches GitHub or any git remote';
       row.appendChild(tag);
     }
     if (p.machineCount > 1) {                    // multi-machine project: surface the fan-out
@@ -3429,10 +3504,23 @@ function renderProjectRung() {
     row.appendChild(count);
     card.appendChild(row);
 
-    if (p.repoUrl) {
+    const sub = p.kind === 'local' ? p.path : p.repoUrl;   // a local's identity is its path
+    if (sub) {
       const desc = document.createElement('div');
-      desc.className = 'sdesc'; desc.textContent = p.repoUrl;
+      desc.className = 'sdesc'; desc.textContent = sub;
       card.appendChild(desc);
+    }
+    if (p.kind === 'local' && !busyP) {
+      // eject: detach the registry entry (folder untouched) — locals only;
+      // gh projects keep the delete-the-folder contract
+      const ej = document.createElement('button');
+      ej.className = 'sclose'; ej.textContent = '⏏';
+      ej.title = 'detach this local project (the folder on disk is not touched)';
+      ej.onclick = (e) => {
+        e.stopPropagation();
+        removeLocalProject(FLEET ? p.machineName : null, FLEET ? p.machinePid : p.id, p.name);
+      };
+      card.appendChild(ej);
     }
     if (busyP) {
       const sm = document.createElement('div');
@@ -3560,7 +3648,7 @@ function projectKeyForSession(machineId, pid) {
   const pm = perMachine[machineId];
   if (!pm) return null;
   const p = (pm.projectList || []).find(p => p.pid === pid);
-  return p ? projectKey(p) : null;
+  return p ? projectKey(p, machineId) : null;
 }
 
 // EVERY alive-or-dead session the UI knows about, across all projects (and, in
@@ -3777,9 +3865,11 @@ function renderSessions() {
     sessionsEl.appendChild(add);
   }
 
+  const localProj = currentProjectIsLocal();
   list.forEach(s => {
     const card = document.createElement('div');
-    card.className = 'scard' + (s.cid === currentCid ? ' active' : '');
+    card.className = 'scard' + (s.cid === currentCid ? ' active' : '') +
+                     (localProj ? ' local' : '');
     card.dataset.cid = s.cid;
     card.onclick = () => { pendingSendText = null; openSession(s.cid); };  // manual open cancels a queued new-session send
 
@@ -4987,7 +5077,8 @@ function renderSpotlight() {
     r.className = 'spotrow' + (i === spotSel ? ' sel' : '');
     const nm = document.createElement('span'); nm.className = 'sname'; nm.textContent = p.name;
     const mt = document.createElement('span'); mt.className = 'smeta2';
-    mt.textContent = [p.pinned ? 'this app'
+    mt.textContent = [p.kind === 'local' ? '🔒 local' : '',
+                      p.pinned ? 'this app'
                                : (FLEET && p.machineName ? p.machineName.replace(/^clawd-/, '') : ''),
                       `${p.sessionCount || 0} sess`].filter(Boolean).join(' · ');
     r.appendChild(nm); r.appendChild(mt);

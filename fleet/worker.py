@@ -453,9 +453,12 @@ class Worker:
         return s.lower()
 
     def _project_key(self, pid):
-        """The unified projectKey the fleet UI routes on: normalized repo, else
-        name:<name> (mirror of index.html projectKey())."""
+        """The unified projectKey the fleet UI routes on: local (private
+        folder) projects are machine-qualified `local:<machine>:<path>`, else
+        normalized repo, else name:<name> (mirror of index.html projectKey())."""
         p = self._projects_meta.get(pid) or {}
+        if p.get("kind") == "local":
+            return f"local:{self.machine}:{p.get('path') or p.get('name') or ''}"
         return self._norm_repo(p.get("repoUrl")) or ("name:" + (p.get("name") or ""))
 
     def _push_payload(self, cid):
@@ -978,7 +981,9 @@ class Worker:
                     # cache pid → name/repoUrl so a notification can build the
                     # unified projectKey the UI routes on (see _project_key).
                     self._projects_meta = {p.get("pid"): {"name": p.get("name"),
-                                                          "repoUrl": p.get("repoUrl")}
+                                                          "repoUrl": p.get("repoUrl"),
+                                                          "kind": p.get("kind"),
+                                                          "path": p.get("path")}
                                            for p in projs if p.get("pid")}
                 elif t == "sessions":
                     sess = frame.get("sessions") or []

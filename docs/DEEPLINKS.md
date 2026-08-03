@@ -52,7 +52,15 @@ the machine.** (The prefix is optional in the grammar only for backward compat.)
 
 ### projectKey — how to compute it
 
-`projectKey = normRepo(repoUrl)  ||  "name:" + name`
+```
+projectKey = kind == "local" ? "local:" + machineId + ":" + path
+           : normRepo(repoUrl) || "name:" + name
+```
+
+**Local (private folder) projects** (`kind:"local"` in projectMeta) key
+machine-qualified: the same path on two machines is two different folders, so
+they must never unify into one card, and the `local:` prefix keeps them out of
+the name↔URL basename folding. They have no `repoUrl` by contract.
 
 `normRepo` canonicalizes the git remote so the same repo unifies across machines:
 
