@@ -1280,6 +1280,7 @@ function teardownAndReconnect() {
 // which is exactly the case where the socket died invisibly — so rx-silence,
 // not hiddenAt, is the tiebreaker.
 function wake() {
+  sweepStaleLists();   // stale per-machine lists re-pull silently, whatever the socket verdict below
   const awayMs = hiddenAt ? Date.now() - hiddenAt : 0;
   if (!ws || ws.readyState > 1) { scheduleReconnect(0); return; }
   const quietMs = lastRx ? Date.now() - lastRx : Infinity;
@@ -1449,9 +1450,18 @@ function handleRelay(m) {
     hidePasskey();
     setRelayAuthed();                 // a no-passkey relay hands us `machines` with no authOk — gate opens here
     const wasOnline = currentMachine ? isMachineOnline(currentMachine) : true;
+    const prevOnline = {};            // per-machine, for the offline→online re-list below
+    machineList.forEach(x => { prevOnline[x.id] = x.online; });
     const alreadySynced = resyncedThisSocket;   // if fleetResync() runs below, it re-subscribes — don't double up
     renderMachines(m.machines || []); // populate the roster first…
     fleetResync();                    // …then re-list + re-subscribe over the authed link (once per socket)
+    // ANY machine coming back online (worker flap/restart) gets its lists
+    // re-pulled — the tty re-subscribe below only heals the machine being
+    // viewed; the others' cached session lists used to stay frozen.
+    if (alreadySynced)
+      (m.machines || []).forEach(x => {
+        if (x.online && prevOnline[x.id] === false) scheduleRelist(x.id, 2000);
+      });
     // A worker↔relay socket flap drops every viewer's harness link on that machine
     // (worker.py serve_once → _drop_all_links) while OUR socket stays healthy — so
     // fleetResync (once per socket) never re-runs, pings still pong (the chain is
@@ -1885,6 +1895,55 @@ function e2eOnRecord(machine, rec) {
   }).catch(() => {});
 }
 
+// ---- list freshness ---------------------------------------------------------
+// Liveness of the relay path ≠ freshness of a machine's project/session lists.
+// Three holes this closes (the "top bar shows a days-old snapshot" bug):
+//  1. a harness deploy-restart kills the worker's per-viewer harness links while
+//     the worker↔relay socket stays up — no roster flap, and the once-per-socket
+//     fleetResync never re-runs, so nothing ever re-sent `list`;
+//  2. a worker flap comes back online but only the viewed tty re-subscribes
+//     (9fd75ba) — every OTHER machine's cached lists stayed frozen;
+//  3. a page waking from a long pocket trusts whatever cache it holds.
+// Re-list on the link-death error frame, on any offline→online transition, and
+// on wake() when a machine's list is stale — always SILENTLY: only over an open
+// e2e channel or unexpired resume material, never an uninvited passkey ceremony
+// (a background Face ID prompt is the storm pattern — see e2eFailUntil).
+const relistState = {};                 // machineId -> { timer, attempt }
+const LIST_STALE_MS = 3 * 60 * 1000;    // wake(): older than this → re-list
+function canRelistSilently(machine) {
+  const ch = e2eChans[machine];
+  return (ch && ch.status === 'open') || !!e2eLoadResume(machine);
+}
+function scheduleRelist(machine, delay) {
+  const st = relistState[machine] || (relistState[machine] = { timer: null, attempt: 0 });
+  if (st.timer) return;                 // one pending retry per machine
+  st.timer = setTimeout(() => {
+    st.timer = null;
+    if (st.attempt >= 8) { st.attempt = 0; return; }   // give up — wake()'s sweep re-arms later
+    st.attempt++;
+    if (isMachineOnline(machine) && canRelistSilently(machine)) {
+      e2eEnsure(machine, { auto: true, reason: 'relist' })
+        .then(() => e2eSendFrame(machine, { type: 'list' })).catch(() => {});
+    }
+    // keep retrying (backoff, cap 30s) until a fresh `sessions` frame lands —
+    // relistSatisfied() below clears the chain the moment one does
+    scheduleRelist(machine, Math.min(30000, 1500 * Math.pow(2, st.attempt)));
+  }, delay == null ? 1500 : delay);
+}
+function relistSatisfied(machine) {
+  const st = relistState[machine];
+  if (st) { clearTimeout(st.timer); st.timer = null; st.attempt = 0; }
+}
+function sweepStaleLists() {
+  if (!FLEET || !relayAuthed) return;
+  for (const m of machineList) {
+    if (!m.online || m.kind === 'relay') continue;
+    const pm = perMachine[m.id];
+    const fresh = pm && pm.sessionsAt && Date.now() - pm.sessionsAt < LIST_STALE_MS;
+    if (!fresh && canRelistSilently(m.id)) scheduleRelist(m.id, 0);
+  }
+}
+
 // Fleet-mode demux for a decrypted harness frame tagged with its source machine.
 // `projects`/`sessions` from ANY machine update that machine's cache (and the merge);
 // every other frame (focus/hello/transcript/hook/exit/…) only matters for the machine
@@ -1908,6 +1967,8 @@ function handleMachineJson(machine, m) {
     const pm = perMachine[machine] || (perMachine[machine] = {});
     pm.sessionList = m.sessions || [];
     pm.gotSessions = true;
+    pm.sessionsAt = Date.now();          // freshness stamp for wake()'s stale sweep
+    relistSatisfied(machine);            // a pending re-list chain got its answer
     if (machine === currentMachine) {
       sessionList = pm.sessionList; gotSessions = true;
       renderSessions();
@@ -1933,6 +1994,13 @@ function handleMachineJson(machine, m) {
     renderSessions();                  // 🔑 card badges name the plan, not the folder label
     refreshSessionTag();               // 🔑 tag names the plan, not the folder label
     return;
+  }
+  if (m.type === 'error' && /harness link closed|no local harness/i.test(m.error || '')) {
+    // The worker's local harness connection died — the deploy/graceful-restart
+    // signature: the worker↔relay socket stays up so nothing else flaps. Re-list
+    // (with retries) so this machine's lists refresh the moment the harness is
+    // back, instead of the top bar silently freezing on the last snapshot.
+    scheduleRelist(machine);
   }
   if (machine !== currentMachine) return;   // all other frames act only on the viewed machine
   handleJson(m);
