@@ -3291,6 +3291,14 @@ function renderProjects(list) {
 // Render the project rung from normalized rows (unified across machines in fleet
 // mode, 1:1 with the local harness in direct mode).
 function renderProjectRung() {
+  // The machine select can't survive the rebuild below: replacing the element
+  // snaps its native dropdown shut mid-pick (and the fleet roster heartbeat
+  // re-renders this rung ~1s, so it WILL fire while the menu is open). While
+  // the select holds focus, leave the DOM alone — filtering still tracks live
+  // via applyProjectFilter (it re-reads projectRows()), and card contents catch
+  // up on the first render after blur.
+  if (document.activeElement && document.activeElement.tagName === 'SELECT' &&
+      projectsEl.contains(document.activeElement)) { applyProjectFilter(); return; }
   const rows = projectRows();
   const selId = selectedProjectId();
   // Preserve the filter box's focus + caret across the rebuild: fleet broadcasts a
@@ -3452,7 +3460,7 @@ function renderProjectRung() {
   // straight away. Desktop-only — autofocus on touch would pop the soft keyboard.
   // Don't steal focus while typing elsewhere or off this rung.
   else if (!isTouch && currentView() === 'projects' && document.activeElement !== inp &&
-      !(document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName))) {
+      !(document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName))) {
     inp.focus();
     const n = inp.value.length; try { inp.setSelectionRange(n, n); } catch {}
   }
