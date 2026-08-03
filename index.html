@@ -88,7 +88,8 @@
   #sessionbar .stab .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
   #sessionbar .stab .sdot.blocked { background:var(--err); animation:pulse 1.1s ease-in-out infinite; }   /* needs-you: turn ended asking the human */
   #sessionbar .stab .sdot.dead { background:var(--err); }
-  #sessionbar .stab .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #sessionbar .stab .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+                           font-size:11px; }
   #sessionbar .stab .age { flex:0 0 auto; margin-left:2px; font-size:10px; color:var(--dim); }
   #sessionbar .stab.active .age { color:inherit; opacity:.75; }
   #sessionbar .stab.moff { opacity:.5; }   /* host machine off the roster — cached tab, kept visible */
@@ -2555,6 +2556,31 @@ function sessionEmoji(s) {
   }
   return projectEmojiByPid(s.pid);
 }
+// Shortest-unique-prefix for the tab strip's emoji badges: every project owns a
+// 1-3 emoji code, but a tab only needs enough of it to be unambiguous against
+// the OTHER projects currently in the strip — 🐈 alone when no other project
+// starts with 🐈, two emoji when one does. Grapheme-aware (ZWJ sequences and
+// variation selectors are one glyph, not one codepoint).
+function emojiGraphemes(e) {
+  try { return [...new Intl.Segmenter().segment(e || '')].map(x => x.segment); }
+  catch { return Array.from(e || ''); }
+}
+function emojiPrefixMap(codes) {
+  const split = new Map();
+  for (const c of new Set(codes.filter(Boolean))) split.set(c, emojiGraphemes(c));
+  const out = new Map();
+  for (const [c, g] of split) {
+    let need = 1;
+    for (const [c2, g2] of split) {
+      if (c2 === c) continue;
+      let common = 0;
+      while (common < g.length && common < g2.length && g[common] === g2[common]) common++;
+      need = Math.max(need, Math.min(common + 1, g.length));
+    }
+    out.set(c, g.slice(0, need).join(''));
+  }
+  return out;
+}
 // Badge for the OPEN project (breadcrumb / sessions-rung header).
 function currentProjectEmoji() {
   if (FLEET) {
@@ -2635,6 +2661,7 @@ function renderSessionBar(view) {
     return;
   }
   bar.innerHTML = '';
+  const emShort = emojiPrefixMap(sorted.map(sessionEmoji));   // 🐈 not 🐈🚀🔧 when 🐈 already says it
   sorted.forEach(s => {
     const tab = document.createElement('button');
     const mOff = FLEET && s._machine && !isMachineOnline(s._machine);   // cached tab — host not on the roster right now
@@ -2649,11 +2676,13 @@ function renderSessionBar(view) {
     const em = sessionEmoji(s);          // project badge: which project this tab belongs to
     if (em) {
       const pe = document.createElement('span');
-      pe.className = 'pemoji'; pe.textContent = em;
+      pe.className = 'pemoji'; pe.textContent = emShort.get(em) || em;
+      pe.title = em;                     // hover shows the full project code
       tab.appendChild(pe);
     }
     const lbl = document.createElement('span');
-    lbl.className = 'lbl'; lbl.textContent = s.title || 'new session';
+    // the AI's 1-2 word tab handle when it exists; full title until then
+    lbl.className = 'lbl'; lbl.textContent = s.tab || s.title || 'new session';
     tab.appendChild(lbl);
     // the honest stamp: how long since this session was last touched — a bar
     // full of 5d/7d tabs after a reboot is now self-evidently a stale snapshot

@@ -164,7 +164,8 @@ no-op that would leave the previous session's stream flowing (that's how
 
 ### sessionMeta
 ```jsonc
-{ "cid", "pid", "title", "desc", "named":bool, "busy":bool, "waiting":bool,
+{ "cid", "pid", "title", "desc", "tab", "named":bool, "busy":bool, "waiting":bool,
+  // tab = AI 1-2 word label for the tab strip ("" until the namer runs; UI falls back to title)
   "tool":<str|null>, "status":"blocked|working|idle", "digest":str,
   "blocked_on":str, "sessionId", "promptCount":int,
   "lastActive":float, "created":float, "alive":bool, "account":str }

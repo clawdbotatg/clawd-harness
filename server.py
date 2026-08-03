@@ -160,14 +160,18 @@ def name_at_prompt(count):
 # same prompt the app uses (single source of truth; no drift).
 NAME_SYS_PROMPT = ("You name software-engineering sessions. Given a transcript, "
                    "reply with ONLY compact JSON and nothing else: "
-                   '{"title": "<max 5 words>", "desc": "<max 12 words>"}. '
+                   '{"title": "<max 5 words>", "desc": "<max 12 words>", '
+                   '"tab": "<1-2 words>"}. '
                    "Name the session by its MAIN objective — the overarching task "
                    "it was set up to accomplish, usually established in the opening "
                    "messages. Treat later one-off questions or tangents (a passing "
                    "pricing/how-to/model question) as side-quests: do NOT let them "
                    "redefine the name unless the session's whole focus has clearly "
                    "and durably shifted to a new task. "
-                   "The title is a terse label; the desc is a one-line summary.")
+                   "The title is a terse label; the desc is a one-line summary; "
+                   "the tab is the tightest possible handle for a narrow browser "
+                   "tab — one or two words that still identify the task (e.g. "
+                   '"local projects", "tab ages", "router port").')
 # The *digest* is the volatile companion to the (stable) title/desc: a one-line
 # "what is this session doing right now", refreshed on every Stop so a controller
 # (or the GUI) can read live session state without re-parsing a transcript. See
@@ -1161,8 +1165,8 @@ class ClaudeSession:
     clients currently *subscribed* to it. Owned by a SessionManager."""
 
     def __init__(self, manager, cid, session_id, resuming, pid="",
-                 title="", desc="", prompt_count=0, first_prompt="", created=0.0,
-                 last_active=0.0, account="default", config_dir="",
+                 title="", desc="", tab="", prompt_count=0, first_prompt="",
+                 created=0.0, last_active=0.0, account="default", config_dir="",
                  ceremony=False):
         self.manager = manager
         self.pid = pid                           # owning project id
@@ -1191,6 +1195,7 @@ class ClaudeSession:
 
         self.title = title
         self.desc = desc
+        self.tab = tab                           # 1-2 word label for the tab strip (AI, like title/desc)
         self.prompt_count = prompt_count
         self.first_prompt = first_prompt
         self.last_active = last_active or self.created   # warmth: drives project sort
@@ -1235,7 +1240,7 @@ class ClaudeSession:
     # -- registry shape --------------------------------------------------------
     def to_registry(self):
         return {"cid": self.cid, "pid": self.pid, "session_id": self.session_id,
-                "title": self.title, "desc": self.desc,
+                "title": self.title, "desc": self.desc, "tab": self.tab,
                 "prompt_count": self.prompt_count, "first_prompt": self.first_prompt,
                 "created": self.created, "last_active": self.last_active,
                 "account": self.account, "config_dir": self.config_dir,
@@ -1261,6 +1266,7 @@ class ClaudeSession:
         return {"cid": self.cid, "pid": self.pid,
                 "title": self.title or self._fallback_title(),
                 "desc": self.desc or "",
+                "tab": self.tab or "",
                 "named": bool(self.title),
                 "busy": self.busy, "waiting": self.waiting, "tool": self.last_tool,
                 "status": status,
@@ -1470,10 +1476,11 @@ class ClaudeSession:
         text = seed_text or self._transcript_text_for_naming()
         if not text:
             return
-        title, desc = generate_name(text)
+        title, desc, tab = generate_name(text)
         if title:
             self.title = title[:60]
             self.desc = (desc or "")[:120]
+            self.tab = (tab or "")[:24]
             print(f"[name {self.cid[:8]}] {self.title!r} — {self.desc!r}", flush=True)
             self.manager.save_registry()
             self.manager.broadcast_sessions()
@@ -2209,6 +2216,7 @@ class SessionManager:
                 self, cid=e.get("cid") or str(uuid.uuid4()), pid=pid,
                 session_id=sid or str(uuid.uuid4()), resuming=resuming,
                 title=e.get("title", ""), desc=e.get("desc", ""),
+                tab=e.get("tab", ""),
                 prompt_count=e.get("prompt_count", 0),
                 first_prompt=e.get("first_prompt", ""),
                 created=e.get("created", 0.0),
@@ -3047,7 +3055,7 @@ class SessionManager:
         bounced = bool(s.last_prompt.strip()) and s.hook_count == s.hooks_at_prompt
         fresh = ClaudeSession(
             self, cid=s.cid, pid=s.pid, session_id=s.session_id,
-            resuming=s.resuming, title=s.title, desc=s.desc,
+            resuming=s.resuming, title=s.title, desc=s.desc, tab=s.tab,
             prompt_count=s.prompt_count, first_prompt=s.first_prompt,
             created=s.created, last_active=time.time(),
             account=s.account, config_dir=s.config_dir)
@@ -3169,7 +3177,7 @@ class SessionManager:
               f"({why})", flush=True)
         fresh = ClaudeSession(
             self, cid=s.cid, pid=s.pid, session_id=s.session_id, resuming=True,
-            title=s.title, desc=s.desc, prompt_count=s.prompt_count,
+            title=s.title, desc=s.desc, tab=s.tab, prompt_count=s.prompt_count,
             first_prompt=s.first_prompt, created=s.created,
             last_active=time.time(),
             account=target.name, config_dir=target.config_dir)
@@ -3714,12 +3722,12 @@ def _llm_json(sys_prompt, user_text, max_tokens=120):
 
 
 def generate_name(transcript_text):
-    """Return (title, desc) for a coding session, or (None, None) if naming is
-    unconfigured or the call fails."""
+    """Return (title, desc, tab) for a coding session, or (None, None, None)
+    if naming is unconfigured or the call fails."""
     parsed = _llm_json(NAME_SYS_PROMPT, transcript_text)
     if not parsed:
-        return (None, None)
-    return (parsed.get("title"), parsed.get("desc"))
+        return (None, None, None)
+    return (parsed.get("title"), parsed.get("desc"), parsed.get("tab"))
 
 
 def generate_digest(transcript_text):
