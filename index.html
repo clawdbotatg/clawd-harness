@@ -3879,10 +3879,13 @@ function allSessions() {
 
 // The unified roster in rail order — importance bucket (needs-you → working →
 // idle → dead), then recency. Shared by the rail, session-cycling, and the boot
-// default-landing so all three agree on "first = most important".
+// default-landing so all three agree on "first = most important". Recency is
+// the SAME clock the tab age stamp shows (last human prompt, not last hook) —
+// sorting by lastActive while displaying promptedAt made the bar look unsorted.
 function sortedSessions() {
   const rank = s => !s.alive ? 3 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : 2;
-  return allSessions().slice().sort((a, b) => rank(a) - rank(b) || (b.lastActive || 0) - (a.lastActive || 0));
+  const warmth = s => s.promptedAt || s.lastActive || 0;
+  return allSessions().slice().sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
 }
 
 // Focus a session from the all-sessions rail — it may live in a different project
