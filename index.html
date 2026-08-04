@@ -126,9 +126,20 @@
               opacity:.55; transition:opacity .12s, color .12s, border-color .12s; }
   #closeBtn:hover { opacity:1; color:var(--err); border-color:var(--err); }
   #closeBtn.show { display:block; }
+  /* 📌 pin — parks the open session on the pin board (out of the tab strip,
+     claude stays alive) so a "go test this later" to-do stops looking like
+     active work. Sits beside the close-✕; same quiet chrome. */
+  #pinBtn { position:absolute; top:6px; right:46px; z-index:20; display:none;
+            width:30px; height:30px; line-height:28px; text-align:center; padding:0;
+            font-size:15px; cursor:pointer; border-radius:6px;
+            background:var(--bg); color:var(--dim); border:1px solid var(--edge);
+            opacity:.55; transition:opacity .12s, color .12s, border-color .12s; }
+  #pinBtn:hover { opacity:1; color:var(--accent); border-color:var(--accent); }
+  #pinBtn.show { display:block; }
+  #pinBtn.pinned { opacity:.9; color:var(--accent); border-color:var(--accent-dim); }
   /* quiet grey tag beside the close-✕: the session's 🔑 subscription account
      (when not the default login) and — fleet mode — which box it lives on */
-  #machineTag { position:absolute; top:6px; right:46px; z-index:20; display:none;
+  #machineTag { position:absolute; top:6px; right:84px; z-index:20; display:none;
                 height:30px; line-height:30px; font-size:11px; color:var(--dim);
                 opacity:.7; pointer-events:none; user-select:none; }
   #machineTag.show { display:block; }
@@ -318,10 +329,35 @@
     #brand { display:none; }
   }
   /* projects (top rung) + sessions (next rung): both are scrollable card lists */
-  #menu, #projects, #machines { flex:1; background:var(--bg); }
-  #sessions, #projectlist, #machinelist { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
+  #menu, #projects, #machines, #pinsview { flex:1; background:var(--bg); }
+  #sessions, #projectlist, #machinelist, #pinboard { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
               padding:14px; display:flex; flex-direction:column; gap:9px;
               width:100%; max-width:780px; align-self:center; }
+  /* 📌 pin board: parked "check on this later" sessions. Cards reuse .scard;
+     each carries its own one-line prompt row so you can poke a to-do without
+     restoring it to the tab strip. */
+  .pincard { cursor:pointer; }
+  .pincard .pinproj { color:var(--dim); font-size:11px; font-family:var(--mono); flex:0 0 auto; }
+  .pincard .punpin { position:absolute; top:8px; right:9px; background:transparent;
+                     border:1px solid var(--edge); border-radius:4px; color:var(--dim);
+                     font-size:11px; cursor:pointer; padding:3px 8px; line-height:1.3;
+                     font-family:var(--mono); white-space:nowrap; }
+  .pincard .punpin:hover { color:var(--accent); border-color:var(--accent-dim); background:var(--raised); }
+  .pincard .row { padding-right:76px; }   /* room for the ↩ restore button in the corner */
+  .pincard .pinrow { display:flex; gap:6px; margin-top:5px; }
+  .pincard .pinrow input { flex:1; min-width:0; background:var(--bg); color:var(--ink);
+                     border:1px solid var(--edge); border-radius:4px; padding:6px 9px;
+                     font-family:var(--mono); font-size:12px; }
+  .pincard .pinrow input:focus { outline:none; border-color:var(--accent-dim); }
+  .pincard .pinrow button { background:transparent; border:1px solid var(--edge); border-radius:4px;
+                     color:var(--dim); font-size:13px; cursor:pointer; padding:4px 10px; }
+  .pincard .pinrow button:hover { color:var(--accent); border-color:var(--accent-dim); }
+  .pinempty { color:var(--dim); font-size:12px; font-family:var(--mono); padding:10px 2px;
+              line-height:1.6; }
+  /* sessions rung: quiet reminder that some of this project's sessions are parked */
+  .pinnednote { border:1px dashed var(--edge); padding:8px 14px; background:transparent;
+                color:var(--dim); cursor:pointer; font-family:var(--mono); font-size:12px; text-align:left; }
+  .pinnednote:hover { color:var(--accent); border-color:var(--accent-dim); }
   /* project cards reuse .scard; status colors + an add-project row */
   .scard.cloning, .scard.error { cursor:default; }
   .scard.cloning { opacity:.75; }
@@ -552,6 +588,7 @@
     <span class="spacer"></span>
     <button id="projectsBtn" title="All projects"><span class="bico">▦</span><span class="blbl"> projects</span></button>
     <button id="menuBtn" title="Sessions in this project"><span class="bico">≡</span><span class="blbl"> sessions</span></button>
+    <button id="pinsBtn" title="Pin board — sessions parked to check on later"><span class="bico">📌</span><span class="blbl"> pins</span></button>
     <button id="reloadBtn" title="Reload (recover a blank screen)"><span class="bico">⟳</span></button>
     <button id="machinesBtn" title="Fleet machines"><span class="bico">🖥️</span></button>
     <button id="accountsBtn" title="Claude subscription accounts — headroom & sign-in"><span class="bico">🧠</span></button>
@@ -611,6 +648,7 @@
   </div>
   <main>
     <span id="machineTag"></span>
+    <button id="pinBtn" title="Pin this session — park it on the 📌 board (out of the tabs) to check on later">📌</button>
     <button id="closeBtn" title="Close this session (done with this job)">✕</button>
     <section class="col hidden" id="projects">
       <div id="projectlist"></div>
@@ -626,6 +664,9 @@
     </section>
     <section class="col hidden" id="pm">
       <div id="pmfeed"></div>
+    </section>
+    <section class="col hidden" id="pinsview">
+      <div id="pinboard"></div>
     </section>
   </main>
   <footer>
@@ -2049,6 +2090,7 @@ function handleMachineJson(machine, m) {
       refreshBreadcrumb();
     }
     renderNeedsBar();                    // any machine's blocked sessions → the needs-you bar
+    renderPinsUI();                      // any machine's pins → the 📌 count/board
     return;
   }
   if (m.type === 'accounts') {
@@ -2241,6 +2283,7 @@ function handleJson(m) {
     renderSessions();
     refreshBreadcrumb();                  // a renamed session updates the crumb live
     refreshSessionTag();                  // account may have just landed for the open session
+    renderPinsUI();                       // 📌 count/board tracks pin state live
     resolvePendingNav();                  // …or a session
   } else if (m.type === 'accounts') {
     accountsInfo = m;                     // subscription logins + headroom (direct mode)
@@ -2602,6 +2645,14 @@ function refreshBreadcrumb(view) {
   // PM view: a fixed crumb; its threads ride the #sessionbar like sessions do.
   if (view === 'pm') {
     meta.textContent = 'fleet pm';
+    document.getElementById('sessiondesc').textContent = '';
+    renderSessionBar(view);
+    return;
+  }
+  // 📌 pin board: fixed crumb; the active-session tab strip stays visible so
+  // hopping back into live work is one tap.
+  if (view === 'pins') {
+    meta.textContent = '📌 pinned';
     document.getElementById('sessiondesc').textContent = '';
     renderSessionBar(view);
     return;
@@ -3885,7 +3936,15 @@ function allSessions() {
 function sortedSessions() {
   const rank = s => !s.alive ? 3 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : 2;
   const warmth = s => s.promptedAt || s.lastActive || 0;
-  return allSessions().slice().sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
+  // 📌 pinned sessions are parked to-dos, not active work — they live on the pin
+  // board only, so the tab strip, rail cycling and the boot landing all skip them.
+  return allSessions().filter(s => !s.pinned).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
+}
+
+// The pin board's roster: every 📌 parked session across all projects (and, in
+// fleet, machines) — newest pin first, so what you just parked sits on top.
+function pinnedSessions() {
+  return allSessions().filter(s => s.pinned).sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
 }
 
 // Focus a session from the all-sessions rail — it may live in a different project
@@ -4025,7 +4084,9 @@ function renderSessions() {
   // Sessions for this project across EVERY machine that hosts it, each tagged with
   // its `_machine` — no more "pick one machine to view". A multi-machine project
   // now shows one merged list; each card badges the host it's on.
-  const list = projectSessions();
+  const everything = projectSessions();
+  const list = everything.filter(s => !s.pinned);   // 📌 parked ones live on the pin board, not here
+  const pinnedHere = everything.length - list.length;
   const multi = FLEET && (() => { const g = unifiedProjects.get(currentProjectKey); return g && g.machines.length > 1; })();
   sessionsEl.innerHTML = '';
   const label = document.createElement('div');
@@ -4079,6 +4140,16 @@ function renderSessions() {
     add.id = 'newSession'; add.textContent = '＋  new session';
     add.onclick = () => newSession();
     sessionsEl.appendChild(add);
+  }
+
+  // some of this project's sessions are parked on the 📌 board — say so, quietly
+  if (pinnedHere) {
+    const note = document.createElement('button');
+    note.className = 'pinnednote';
+    note.textContent = `📌 ${pinnedHere} pinned on the board`;
+    note.title = 'open the pin board';
+    note.onclick = () => navTo('pins');
+    sessionsEl.appendChild(note);
   }
 
   const localProj = currentProjectIsLocal();
@@ -4141,6 +4212,152 @@ function renderSessions() {
 
     sessionsEl.appendChild(card);
   });
+}
+
+// ── 📌 pin board ──────────────────────────────────────────────────────────────
+// Parked "go test this / check on it later" sessions. Pinning is pure metadata
+// (the claude underneath keeps running) — a pinned session leaves the tab strip
+// and the sessions rung and lives here instead, until you restore it.
+function sendPin(cid, on) {
+  const mid = FLEET ? machineForCid(cid) : null;   // pin on the host that owns it
+  if (mid) hsendTo(mid, { type: 'pin', cid, on });
+  else hsend({ type: 'pin', cid, on });
+}
+
+// Prompt a pinned session in place — the frame carries the cid explicitly, so no
+// subscribe/view switch is needed and the session stays parked on the board.
+function promptPinned(s, text) {
+  const mid = FLEET ? (s._machine || machineForCid(s.cid)) : null;
+  const frame = { type: 'send', cid: s.cid, text };
+  if (mid) hsendTo(mid, frame); else hsend(frame);
+}
+
+// Project label for a card that may live on another machine (the local
+// projectList only knows the attached machine's pids).
+function sessionProjectName(s) {
+  if (FLEET && s._machine) {
+    const p = (((perMachine[s._machine] || {}).projectList) || []).find(p => p.pid === s.pid);
+    return p ? p.name : '';
+  }
+  return projectName(s.pid);
+}
+
+function renderPinBoard() {
+  const board = document.getElementById('pinboard');
+  const list = pinnedSessions();
+  board.innerHTML = '';
+  const label = document.createElement('div');
+  label.className = 'menutitle';
+  label.textContent = `📌 pin board · ${list.length}`;
+  board.appendChild(label);
+  if (!list.length) {
+    const e = document.createElement('div');
+    e.className = 'pinempty';
+    e.textContent = 'nothing pinned. open a session and hit the 📌 (top right, next to ✕) ' +
+                    'to park it here — out of the tabs — until you’re ready to pick it back up.';
+    board.appendChild(e);
+    return;
+  }
+  list.forEach(s => {
+    const card = document.createElement('div');
+    card.className = 'scard pincard' + (sessionIsLocal(s) ? ' local' : '');
+    card.title = 'open this session (it stays pinned)';
+    card.onclick = () => { pendingSendText = null; focusSession(s); };
+
+    const row = document.createElement('div'); row.className = 'row';
+    const sdot = document.createElement('span');
+    sdot.className = 'sdot' + (!s.alive ? ' dead' : s.waiting ? ' blocked' : s.busy ? ' busy' : '');
+    row.appendChild(sdot);
+    const pn = sessionProjectName(s), pe = sessionEmoji(s);
+    if (pn || pe) {                       // which project this to-do belongs to
+      const pj = document.createElement('span');
+      pj.className = 'pinproj'; pj.textContent = (pe ? pe + ' ' : '') + pn;
+      row.appendChild(pj);
+    }
+    const title = document.createElement('span');
+    title.className = 'stitle'; title.textContent = s.title || 'new session';
+    row.appendChild(title);
+    card.appendChild(row);
+
+    if (s.desc) {
+      const desc = document.createElement('div');
+      desc.className = 'sdesc'; desc.textContent = s.desc;
+      card.appendChild(desc);
+    }
+    if (s.digest && s.digest !== s.desc) {
+      const dig = document.createElement('div');
+      dig.className = 'sdig'; dig.textContent = '› ' + s.digest;
+      card.appendChild(dig);
+    }
+    if (s.blocked_on) {
+      const blk = document.createElement('div');
+      blk.className = 'sblock'; blk.textContent = '⏳ ' + s.blocked_on;
+      card.appendChild(blk);
+    }
+    const sm = document.createElement('div');
+    sm.className = 'smeta';
+    const state = !s.alive ? 'ended' : s.waiting ? 'needs you' :
+                  s.busy ? (s.tool ? `running ${s.tool}` : 'working…') : 'idle';
+    const pinAge = fmtAge(s.pinned);
+    sm.textContent = `${s.promptCount || 0} msg · ${state}` +
+                     (pinAge ? ` · pinned ${pinAge} ago` : '');
+    card.appendChild(sm);
+
+    // ↩ restore — back into the active tab strip
+    const un = document.createElement('button');
+    un.className = 'punpin'; un.textContent = '↩ tabs';
+    un.title = 'unpin — put this session back into the active session tabs';
+    un.onclick = (e) => { e.stopPropagation(); sendPin(s.cid, false); };
+    card.appendChild(un);
+
+    // prompt it right here — stays pinned, no view switch
+    const prow = document.createElement('div'); prow.className = 'pinrow';
+    prow.onclick = (e) => e.stopPropagation();
+    const inp = document.createElement('input');
+    inp.placeholder = 'prompt it (stays pinned)…';
+    const fire = () => {
+      const text = inp.value.trim();
+      if (!text) return;
+      promptPinned(s, text);
+      inp.value = ''; inp.placeholder = 'sent ✓';
+      setTimeout(() => { inp.placeholder = 'prompt it (stays pinned)…'; }, 1500);
+    };
+    inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); fire(); } };
+    const go = document.createElement('button');
+    go.textContent = '📤'; go.title = 'send to this session';
+    go.onclick = (e) => { e.stopPropagation(); fire(); };
+    prow.append(inp, go);
+    card.appendChild(prow);
+
+    board.appendChild(card);
+  });
+}
+
+// Repaint everything 📌: the header button's count, the in-session pin toggle,
+// and — when it's the open view — the board itself. Called on every sessions
+// frame (any machine) and on view changes.
+function renderPinsUI() {
+  const n = pinnedSessions().length;
+  const lbl = pinsBtn.querySelector('.blbl');
+  if (lbl) lbl.textContent = n ? ` pins · ${n}` : ' pins';
+  updatePinBtn();
+  if (currentView() === 'pins') renderPinBoard();
+}
+
+// The in-session 📌 toggle beside the close-✕: pins the open session (and jumps
+// to the board so you see where it went); on an already-pinned session it
+// restores it to the tabs instead.
+function updatePinBtn() {
+  const v = currentView();
+  const inSession = (v === 'tty' || v === 'transcript') && !!currentCid;
+  pinBtn.classList.toggle('show', inSession);
+  if (!inSession) return;
+  const s = allSessions().find(x => x.cid === currentCid);
+  const pinned = !!(s && s.pinned);
+  pinBtn.classList.toggle('pinned', pinned);
+  pinBtn.title = pinned
+    ? 'Unpin — put this session back into the active session tabs'
+    : 'Pin this session — park it on the 📌 board (out of the tabs) to check on later';
 }
 
 function setBusy(busy, label) {
@@ -4956,6 +5173,9 @@ const menuPanel = document.getElementById('menu');
 const leftPanel = document.getElementById('left');
 const rightPanel = document.getElementById('right');
 const pmPanel = document.getElementById('pm');
+const pinsPanel = document.getElementById('pinsview');
+const pinsBtn = document.getElementById('pinsBtn');
+const pinBtn = document.getElementById('pinBtn');
 const pmfeed = document.getElementById('pmfeed');
 const menuBtn = document.getElementById('menuBtn');
 const projectsBtn = document.getElementById('projectsBtn');
@@ -4985,7 +5205,7 @@ function refreshSessionTag() {
 }
 function setView(view) {
   const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects',
-        pm = view === 'pm';
+        pm = view === 'pm', pins = view === 'pins';
   // Leaving the terminal view: stop claiming the PTY size (read BEFORE the
   // panel toggles below change what currentView() reports).
   if (!tty && currentCid && currentView() === 'tty') releaseResize();
@@ -4994,20 +5214,24 @@ function setView(view) {
   leftPanel.classList.toggle('hidden', !tty);
   rightPanel.classList.toggle('hidden', !(view === 'transcript'));
   pmPanel.classList.toggle('hidden', !pm);
+  pinsPanel.classList.toggle('hidden', !pins);
   document.getElementById('keys').style.display = (tty && isTouch) ? '' : 'none';  // key bar only for touch (the desktop terminal takes these keys natively)
   if (!tty && kbdMode) setKbdMode(false);   // ⌨ typing mode is per-visit: back to the safe read-only default off the tty view
   const inSession = (tty || view === 'transcript') && !!currentCid;
   closeBtn.classList.toggle('show', inSession);  // big close-✕ only when a session is open
+  updatePinBtn();       // 📌 toggle rides beside it, state mirrors the open session
   refreshSessionTag();  // 🔑 account + machine tag beside the close-✕
-  // Composer is hidden on the projects rung (nothing to talk to). On the sessions
-  // list it stays, but a message there starts a new session rather than going to a
-  // session you're not viewing — say so in the placeholder. The PM view keeps the
-  // composer (it talks to the current PM thread).
-  composer.style.display = projects ? 'none' : '';
+  // Composer is hidden on the projects rung (nothing to talk to) and the pin
+  // board (every card carries its own prompt row). On the sessions list it
+  // stays, but a message there starts a new session rather than going to a
+  // session you're not viewing — say so in the placeholder. The PM view keeps
+  // the composer (it talks to the current PM thread).
+  composer.style.display = (projects || pins) ? 'none' : '';
   box.placeholder = pm ? 'message → fleet PM' : sessions ? 'message → new session' : 'message';
   syncComposer();              // each level has its own draft — swap the box to this one's
   menuBtn.classList.toggle('on', sessions);
   projectsBtn.classList.toggle('on', projects);
+  pinsBtn.classList.toggle('on', pins);
   statusEl.classList.toggle('pmopen', pm);
   try { localStorage.setItem('cc_view', view); } catch {}
   refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
@@ -5020,6 +5244,7 @@ function setView(view) {
   else if (sessions && !isTouch) box.focus();   // landing on sessions: composer ready so you can type a new prompt straight away
   else if (view === 'transcript') feed.scrollTop = feed.scrollHeight;
   else if (pm) { renderPmFeed(); pmfeed.scrollTop = pmfeed.scrollHeight; }
+  else if (pins) renderPinBoard();
   if (typeof renderNeedsBar === 'function') renderNeedsBar();   // depth changed → re-filter the bar
 }
 // the toggle button hops between the two deep views; projects/sessions have their own entries.
@@ -5027,6 +5252,16 @@ function setView(view) {
 const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; setView(v); };
 menuBtn.onclick = () => { if (currentPid) navTo('sessions'); else navTo('projects'); };
 projectsBtn.onclick = () => navTo('projects');
+pinsBtn.onclick = () => navTo('pins');           // 📌 the board of parked to-dos
+// In-session 📌: park the open session on the board (and follow it there so you
+// see where it went); if it's already pinned, restore it to the tabs instead.
+pinBtn.onclick = () => {
+  if (!currentCid) return;
+  const s = allSessions().find(x => x.cid === currentCid);
+  const on = !(s && s.pinned);
+  sendPin(currentCid, on);
+  if (on) navTo('pins');
+};
 document.getElementById('reloadBtn').onclick = () => location.reload();   // manual escape hatch — draft + hash survive a reload
 machinesBtn.onclick = () => openMachines();          // 🖥️ roster overlay (no longer a rung)
 document.getElementById('brand').onclick = () => navTo('projects');
@@ -5044,6 +5279,7 @@ setTimeout(() => { if (bootLanding && pendingNav && isHomeRoute(pendingNav)) lan
 let viewBeforeQuestion = null;
 function currentView() {
   if (!pmPanel.classList.contains('hidden')) return 'pm';
+  if (!pinsPanel.classList.contains('hidden')) return 'pins';
   if (!projectsPanel.classList.contains('hidden')) return 'projects';
   if (!menuPanel.classList.contains('hidden')) return 'sessions';
   if (!leftPanel.classList.contains('hidden')) return 'tty';
@@ -5059,6 +5295,7 @@ function parseHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   const nav = { view: 'projects', key: null, cid: null, machine: null };
   if (parts[0] === 'pm') { nav.view = 'pm'; return nav; }   // Fleet PM (its own top-level view)
+  if (parts[0] === 'pins') { nav.view = 'pins'; return nav; }   // 📌 pin board (top-level, like pm)
   // Optional machine prefix (#/m/<machine>/…) — disambiguates a project that
   // exists on several machines so a deep link lands on the RIGHT host, not the
   // project's default pick. Written by syncUrl in fleet mode + by notifications.
@@ -5077,6 +5314,7 @@ function syncUrl() {
   if (pendingNav) return;          // mid-restore: don't write until the URL's state is applied
   const v = currentView();
   if (v === 'pm') { const h = '#/pm'; if (h !== location.hash) { lastWrittenHash = h; location.hash = h; } return; }
+  if (v === 'pins') { const h = '#/pins'; if (h !== location.hash) { lastWrittenHash = h; location.hash = h; } return; }
   let h = '#/';
   const pkey = FLEET ? currentProjectKey : currentPid;
   if (pkey && v !== 'projects') {
@@ -5111,6 +5349,7 @@ function resolvePendingNav() {
   const nav = pendingNav;
   if (!nav) return;
   if (nav.view === 'pm') { pendingNav = null; openPM(); return; }   // PM is harness-data-independent
+  if (nav.view === 'pins') { pendingNav = null; setView('pins'); return; }   // board fills as session frames land
   if (FLEET) { resolvePendingNavFleet(nav); return; }
   if (isHomeRoute(nav)) { if (gotSessions) landHome(); return; }    // wait for the roster, then land on the warmest session
   // -- direct mode: key is the local pid --------------------------------------

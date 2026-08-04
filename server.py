@@ -1167,7 +1167,8 @@ class ClaudeSession:
     def __init__(self, manager, cid, session_id, resuming, pid="",
                  title="", desc="", tab="", prompt_count=0, first_prompt="",
                  created=0.0, last_active=0.0, prompted_at=0.0,
-                 account="default", config_dir="", ceremony=False):
+                 account="default", config_dir="", ceremony=False,
+                 pinned=0.0):
         self.manager = manager
         self.pid = pid                           # owning project id
         self.cid = cid                           # stable console id (ours; survives claude rotation)
@@ -1192,6 +1193,12 @@ class ClaudeSession:
         # mid-login. The flag is permanent for the session's lifetime and
         # persisted, so a harness restart mid-ceremony can't strip it.
         self.ceremony = ceremony
+        # 📌 parked on the pin board ("test this later"): timestamp when pinned,
+        # 0.0 = not pinned. A pinned session stays fully alive (its claude keeps
+        # running and can still be prompted) — the flag only tells the UI to
+        # move it off the active tab strip onto the pin board. Persisted so a
+        # restart doesn't dump every parked to-do back into the tabs.
+        self.pinned = pinned
 
         self.title = title
         self.desc = desc
@@ -1249,7 +1256,7 @@ class ClaudeSession:
                 "created": self.created, "last_active": self.last_active,
                 "prompted_at": self.prompted_at,
                 "account": self.account, "config_dir": self.config_dir,
-                "ceremony": self.ceremony}
+                "ceremony": self.ceremony, "pinned": self.pinned}
 
     def workdir(self):
         """Where this session's claude runs — its project's repo path."""
@@ -1283,7 +1290,8 @@ class ClaudeSession:
                 "promptedAt": self.prompted_at,
                 "created": self.created,
                 "alive": self.alive,
-                "account": self.account}
+                "account": self.account,
+                "pinned": self.pinned}
 
     # -- lifecycle -------------------------------------------------------------
     def start(self):
@@ -2232,7 +2240,8 @@ class SessionManager:
                 last_active=e.get("last_active", 0.0),
                 prompted_at=e.get("prompted_at", 0.0),
                 account=name, config_dir=cfg,
-                ceremony=e.get("ceremony", False))
+                ceremony=e.get("ceremony", False),
+                pinned=e.get("pinned", 0.0))
             self.sessions[s.cid] = s
             s.start()
         # No auto-created session: with zero projects there are legitimately zero
@@ -3592,6 +3601,19 @@ class SessionManager:
         with self.lock:
             return self.sessions.get(cid)
 
+    def pin(self, cid, on):
+        """📌 park a session on the pin board (or restore it). Pure metadata —
+        the claude process is untouched, so a pinned to-do can still be
+        prompted from the board and picks up exactly where it left off."""
+        s = self.get(cid)
+        if not s:
+            return
+        s.pinned = time.time() if on else 0.0
+        print(f"[session {cid[:8]}] {'pinned 📌' if on else 'unpinned'}",
+              flush=True)
+        self.save_registry()
+        self.broadcast_sessions()
+
     def close(self, cid, _broadcast=True):
         with self.lock:
             s = self.sessions.pop(cid, None)
@@ -4310,6 +4332,8 @@ class Handler(BaseHTTPRequestHandler):
             MGR.refresh_accounts()
         elif t == "close":
             MGR.close(frame.get("cid"))
+        elif t == "pin":
+            MGR.pin(frame.get("cid"), bool(frame.get("on", True)))
         elif t == "createProject":
             MGR.create_project(frame.get("name", ""))
         elif t == "addProject":

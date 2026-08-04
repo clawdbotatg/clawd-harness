@@ -61,6 +61,7 @@ viewer** (each with its own `client.cid`).
 | `accountRemove` | `name` | Drop an account from the routing roster. Logs nothing out (config dir + Keychain credential stay; running sessions keep their recorded dir). Refused when it would leave no ready account; removing the ACTIVE account re-routes new spawns to the most headroom. `default` stays removed (it's only re-injected on an empty roster; `accountAdd` with name `default` re-adopts it, sans ceremony). Broadcasts `accounts`. |
 | `accountsRefresh` | — | Poll every account's usage now (instead of waiting out the TTL). Broadcasts `accounts` on change. |
 | `close` | `cid` | Kill that session (SIGTERM) and detach viewers. Files on disk untouched. |
+| `pin` | `cid`, `on?` | 📌 park a session on the pin board (`on:true`, the default) or restore it to the tabs (`on:false`). Pure metadata — the claude process is untouched and can still be prompted via `send`; the UI keeps pinned sessions off the tab strip/sessions rung and shows them on the board instead. Persisted (survives restarts); broadcasts `sessions`. |
 | `createProject` | `name` | Create a new public GitHub repo under `GH_OWNER` and adopt it (async; status broadcasts via `projects`). |
 | `addProject` | `repoUrl` | Clone a repo and adopt it (async). Input normalized: full URL as-is; `owner/repo` and bare `repo` resolved against github.com. |
 | `addLocalProject` | `path` | Register an EXISTING folder anywhere on the machine's disk (absolute or `~` path) as a **private local project** (`kind:"local"`): sessions run inside it like any project, but the harness never runs gh/git-remote operations on it and never stores/broadcasts a repo URL. Synchronous — the project appears `ready` immediately. Rejected (with an `error` frame to the sender) for: non-directories, `/` or `~` itself, paths under `projects/` (auto-managed) or the harness's own dir (the pinned self-project). Re-adding the same resolved path is a no-op. |
@@ -170,7 +171,10 @@ no-op that would leave the previous session's stream flowing (that's how
   // consumers fall back to lastActive, which every hook bumps incl. restart resumes)
   "tool":<str|null>, "status":"blocked|working|idle", "digest":str,
   "blocked_on":str, "sessionId", "promptCount":int,
-  "lastActive":float, "created":float, "alive":bool, "account":str }
+  "lastActive":float, "created":float, "alive":bool, "account":str,
+  "pinned":float }
+  // pinned = epoch when the session was 📌 parked on the pin board (see the `pin`
+  // op); 0.0 = not pinned. Pinned sessions stay fully alive/promptable.
 ```
 - `waiting` = the session is blocked on an interactive TUI prompt (a permission
   request, `AskUserQuestion`, or `ExitPlanMode`) and needs a human answer — it
