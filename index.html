@@ -337,7 +337,8 @@
      each carries its own one-line prompt row so you can poke a to-do without
      restoring it to the tab strip. */
   .pincard { cursor:pointer; }
-  .pincard .pinproj { color:var(--dim); font-size:11px; font-family:var(--mono); flex:0 0 auto; }
+  /* bright yellow so which PROJECT a parked to-do belongs to reads at a glance */
+  .pincard .pinproj { color:#ffd84d; font-size:11px; font-family:var(--mono); flex:0 0 auto; }
   .pincard .punpin { position:absolute; top:8px; right:9px; background:transparent;
                      border:1px solid var(--edge); border-radius:4px; color:var(--dim);
                      font-size:11px; cursor:pointer; padding:3px 8px; line-height:1.3;
