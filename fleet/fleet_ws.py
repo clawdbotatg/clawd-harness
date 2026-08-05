@@ -19,6 +19,7 @@ import os
 import socket
 import ssl
 import struct
+import time
 from urllib.parse import urlparse
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -47,16 +48,42 @@ def ws_send(wfile, lock, data, opcode=0x1, mask=False):
         wfile.flush()
 
 
+# How long a link may keep answering "no data yet" (a None read) before we
+# declare it dead. A live link's would-block resolves in milliseconds; a dying
+# TLS link that only ever returns None gets cut here instead of hanging.
+_WANT_READ_WINDOW = 5.0
+
+
 def _read_exact(rfile, n):
-    """Read exactly n bytes, or return None on EOF/short read. A buffered
-    socket read can also return None (not just b"") when the fd dies under
-    us — e.g. the TLS link breaking mid-read surfaces as an EAGAIN that the
-    io layer converts to None. Both mean the same thing here: link's gone."""
+    """Read exactly n bytes; None only when the link is actually gone.
+
+    A buffered read over a TLS socket that has a timeout set (the worker
+    uplink) can return None — or a short read — on a *live* link: the SSL
+    layer's transient want-read leaks through the io stack as would-block.
+    Treating that as EOF made every worker close a healthy uplink mid-traffic
+    (packet captures showed the first FIN leaving our side with peer data
+    still queued — the fleet-wide reconnect flapping). So: retry Nones for a
+    bounded window and accumulate short reads; only a clean EOF (b"") or a
+    link that stays unreadable past the window is fatal. A socket timeout
+    still raises through to the caller's silent-link watchdog."""
     if not n:
         return b""
-    buf = rfile.read(n)
-    if buf is None or len(buf) < n:
-        return None
+    buf = b""
+    deadline = None
+    while len(buf) < n:
+        chunk = rfile.read(n - len(buf))
+        if chunk:
+            buf += chunk
+            deadline = None
+            continue
+        if chunk == b"":   # true EOF — the peer closed
+            return None
+        now = time.monotonic()
+        if deadline is None:
+            deadline = now + _WANT_READ_WINDOW
+        elif now > deadline:
+            return None
+        time.sleep(0.02)
     return buf
 
 
