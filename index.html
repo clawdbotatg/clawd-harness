@@ -165,49 +165,46 @@
   #ttystat.idle    .dot { background:var(--ok); }
   #ttystat.dead    .dot { background:var(--err); }
   #ttystat.dead    { color:var(--err); border-color:var(--err); }
-  /* Splash card: a ~3s "you are here" reminder that covers the tty on every
-     deliberate session entry (tab click / swipe / deep-link) while the replay
-     paints underneath — project, title, AI desc, live-state tldr, vitals.
-     Tap to dismiss early; the composer below stays usable the whole time. */
+  /* Splash: RSVP-style flash reading on session entry. ONE line of big text,
+     always in the same spot, hard-cut through three frames — project name →
+     session title → AI description — then everything hides. Color codes the
+     frame (white = project, amber = title, dim = description) so after a few
+     uses the brain reads the color before the words. Tap to dismiss early;
+     the composer below stays usable the whole time. */
   #splash { position:absolute; inset:0; z-index:30; background:var(--bg);
             display:flex; align-items:center; justify-content:center;
             padding:20px 16px; cursor:pointer;
-            opacity:1; transition:opacity .35s ease; }
+            opacity:1; transition:opacity .2s ease; }
   #splash[hidden] { display:none; }
   #splash.fade { opacity:0; pointer-events:none; }
-  /* The card scales with the window: clamp(phone floor, viewport-driven, big-desktop
-     ceiling) on every size, so a 27" window reads from across the room while a
-     phone keeps roughly the original compact card. */
-  .splashcard { max-width:clamp(560px, 62vw, 980px); width:100%; display:flex; flex-direction:column;
-                gap:clamp(12px, 1.6vw, 26px); text-align:left; animation:splashin .18s ease-out; }
-  @keyframes splashin { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
-  .splashcard .sp-proj { color:var(--ink); font-size:clamp(16px, 2.4vw, 36px); text-transform:uppercase;
-                         letter-spacing:.12em; font-weight:600; }
-  .splashcard .sp-proj .sp-mach { color:var(--accent); text-transform:none; letter-spacing:normal; }
-  .splashcard .sp-title { color:var(--ink); font-size:clamp(22px, 3.8vw, 56px); line-height:1.25; font-weight:600; }
-  .splashcard .sp-desc { color:var(--dim); font-size:clamp(14px, 2vw, 30px); line-height:1.5; }
-  /* The "what is going on RIGHT NOW" line — the flash-card payload: a colored
-     state word + the live digest sentence, big enough to be the second thing
-     your eye lands on after the title. Color = state at a glance. */
-  .splashcard .sp-now { font-size:clamp(15px, 2.1vw, 31px); line-height:1.45; color:var(--ink);
-                        margin-top:clamp(4px, .6vw, 10px); }
-  .splashcard .sp-now .dot { display:inline-block; width:.55em; height:.55em; border-radius:.15em;
-                             margin-right:.5em; background:var(--dim); }
-  .splashcard .sp-now .state { font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
-  .splashcard .sp-now.working .dot { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
-  .splashcard .sp-now.working .state { color:var(--accent); }
-  .splashcard .sp-now.agent .dot { background:var(--local); animation:pulse 1.1s ease-in-out infinite; }
-  .splashcard .sp-now.agent .state { color:var(--local); }
-  .splashcard .sp-now.waiting .dot { background:var(--accent); }
-  .splashcard .sp-now.waiting { color:var(--accent); }
-  .splashcard .sp-now.waiting .state { color:var(--accent); }
-  .splashcard .sp-now.idle .dot { background:var(--ok); }
-  .splashcard .sp-now.idle .state { color:var(--ok); }
-  .splashcard .sp-now.dead .dot { background:var(--err); }
-  .splashcard .sp-now.dead .state { color:var(--err); }
-  /* One quiet plain-text line for everything else — no boxes, no chip grid
-     (that read as a dashboard, not a flash card). */
-  .splashcard .sp-meta { color:var(--dim); font-size:clamp(12px, 1.4vw, 20px); }
+  .rsvp { max-width:88%; text-align:center; font-weight:600; line-height:1.35;
+          font-size:clamp(26px, 4.6vw, 64px); overflow-wrap:break-word; }
+  .rsvp.f-proj  { color:var(--ink); }
+  .rsvp.f-proj .f-mach { color:var(--local); }   /* which box it's on, in its own hue */
+  .rsvp.f-title { color:var(--accent); }
+  .rsvp.f-desc  { color:var(--dim); font-weight:500; font-size:clamp(22px, 3.6vw, 52px); }
+  /* Fixed chrome around the flashing line: the colored state box up top
+     (working / agent running / needs you / idle — same hues as #ttystat) and
+     one quiet meta line at the bottom. Both hold still for the whole show. */
+  #splash .sp-stat { position:absolute; top:clamp(30px, 10vh, 110px); left:0; right:0;
+                     display:flex; align-items:center; justify-content:center; gap:10px;
+                     font-size:clamp(13px, 1.6vw, 22px); font-weight:600;
+                     text-transform:uppercase; letter-spacing:.1em; color:var(--dim); }
+  #splash .sp-stat .dot { width:clamp(14px, 1.6vw, 22px); height:clamp(14px, 1.6vw, 22px);
+                          border-radius:5px; background:var(--dim); flex:0 0 auto; }
+  #splash .sp-stat.working { color:var(--accent); }
+  #splash .sp-stat.working .dot { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
+  #splash .sp-stat.agent { color:var(--local); }
+  #splash .sp-stat.agent .dot { background:var(--local); animation:pulse 1.1s ease-in-out infinite; }
+  #splash .sp-stat.waiting { color:var(--accent); }
+  #splash .sp-stat.waiting .dot { background:var(--accent); }
+  #splash .sp-stat.idle { color:var(--ok); }
+  #splash .sp-stat.idle .dot { background:var(--ok); }
+  #splash .sp-stat.dead { color:var(--err); }
+  #splash .sp-stat.dead .dot { background:var(--err); }
+  #splash .sp-meta { position:absolute; bottom:clamp(26px, 9vh, 100px); left:16px; right:16px;
+                     text-align:center; color:var(--dim); font-size:clamp(12px, 1.5vw, 20px);
+                     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   #term { flex:1; min-height:0; padding:6px 4px 0 8px; background:#000; touch-action:pan-y;
           overflow:hidden; }
   /* bottom-justify the TTY: the xterm grid fills #term (so the PTY size claude sees is the
@@ -4050,17 +4047,17 @@ function subscribe(cid, opts) {
 // needs-you bar's styling).
 function shortMachine(id) { return (id || '').replace(/^clawd-/, ''); }
 
-// -- splash card --------------------------------------------------------------
-// A ~3s "you are here" overlay covering the tty on every DELIBERATE session
-// entry (tab click, swipe cycle, deep-link, dive-in). It paints instantly from
-// metadata the client already holds — project, session title, AI desc, the
-// live-state digest, and a vitals row (model / context fill / status / plan /
-// machine) — while the terminal replay loads underneath, then fades away. Tap
+// -- splash: RSVP flash-read on session entry ---------------------------------
+// Covers the tty on every DELIBERATE entry (tab click, swipe cycle, deep-link,
+// dive-in) while the replay paints underneath. One big line of text, always in
+// the same spot, hard-cut through three color-coded frames — project (ink) →
+// session title (amber) → AI desc (dim) — then everything hides (~2s total).
+// A colored state box (top) and a one-line meta strip (bottom) hold still for
+// the whole show. Paints instantly from metadata the client already holds. Tap
 // dismisses early; the composer below is never covered, so typing works the
 // whole time. Reconnect re-subscribes and the auto-surfaced-question path
 // never call this — only real navigation does.
 const splashEl = document.getElementById('splash');
-const SPLASH_MS = 2100;                                  // quick read, not a lingering dashboard
 let splashTimers = [], splashCid = null, splashShownAt = 0;
 // One shared read of "what is this session doing right now" — feeds both the
 // splash's NOW line and the persistent #ttystat activity box. `agent` = a turn
@@ -4085,49 +4082,7 @@ function splashProjectName(s, machine) {
   }
   return projectName(s.pid);
 }
-function paintSplash(s) {
-  const machine = FLEET ? (s._machine || currentMachine) : null;
-  const card = document.createElement('div'); card.className = 'splashcard';
-  const add = (cls, text) => {
-    if (!text) return;
-    const d = document.createElement('div'); d.className = cls; d.textContent = text;
-    card.appendChild(d);
-  };
-  const proj = document.createElement('div'); proj.className = 'sp-proj';
-  const em = sessionEmoji(s);
-  proj.textContent = (em ? em + '  ' : '') + (splashProjectName(s, machine) || '');
-  if (machine) {
-    const mm = document.createElement('span'); mm.className = 'sp-mach';
-    mm.textContent = '  ·  ' + shortMachine(machine);
-    proj.appendChild(mm);
-  }
-  if (proj.textContent.trim()) card.appendChild(proj);
-  add('sp-title', s.title || 'untitled session');
-  add('sp-desc', s.desc);
-  // The NOW line — state word + what's actually happening, colored by state.
-  // A blocked session leads with its open question; otherwise the digest.
-  const st = sessionState(s);
-  const now = document.createElement('div'); now.className = 'sp-now ' + st.key;
-  const dot = document.createElement('span'); dot.className = 'dot'; now.appendChild(dot);
-  const sw = document.createElement('span'); sw.className = 'state'; sw.textContent = st.word; now.appendChild(sw);
-  const what = s.blocked_on || s.digest || '';
-  if (what) now.appendChild(document.createTextNode(' — ' + what));
-  card.appendChild(now);
-  // Everything else is one quiet line, not a chip grid.
-  const bits = [];
-  const model = prettyModel(s.model);
-  if (model) bits.push(model);
-  if (s.ctxTokens > 0)                                   // 200k window assumed
-    bits.push('ctx ' + Math.min(100, Math.round(s.ctxTokens / 2000)) + '%');
-  if (s.account && s.account !== 'default')
-    bits.push('🔑 ' + acctDisplay(machine || 'local', s.account));
-  const age = fmtAge(s.promptedAt || s.lastActive);
-  if (age) bits.push((s.promptCount || 0) + ' prompts · ' + age + ' ago');
-  add('sp-meta', bits.join('  ·  '));
-  splashEl.replaceChildren(card);
-  return card;
-}
-// -- tty activity box: the persistent, glanceable version of the NOW line -----
+// -- tty activity box: the persistent, glanceable "is it doing anything" ------
 const ttystatEl = document.getElementById('ttystat');
 const ttystatLabel = document.getElementById('ttystatlabel');
 function updateTtyStat() {
@@ -4138,6 +4093,9 @@ function updateTtyStat() {
   ttystatLabel.textContent = st.word;
   ttystatEl.hidden = false;
 }
+// RSVP frame duration: scaled to how much there is to read, hard floor/ceiling
+// so a one-word project name doesn't blink past and a long desc doesn't park.
+const frameMs = t => Math.min(1100, 360 + t.trim().split(/\s+/).length * 95);
 function maybeSplash(cid) {
   if (!cid) return;
   const s = allSessions().find(x => x.cid === cid);
@@ -4145,11 +4103,51 @@ function maybeSplash(cid) {
   if (!s.promptCount && !s.desc) return;                 // brand-new: nothing to say yet
   if (cid === splashCid && Date.now() - splashShownAt < 5000) return;  // double-fire guard
   splashCid = cid; splashShownAt = Date.now();
-  paintSplash(s);
-  splashEl.hidden = false; splashEl.classList.remove('fade');
   for (const t of splashTimers) clearTimeout(t);
-  splashTimers = [setTimeout(() => splashEl.classList.add('fade'), SPLASH_MS),
-                  setTimeout(() => hideSplash(true), SPLASH_MS + 400)];
+  splashTimers = [];
+  const machine = FLEET ? (s._machine || currentMachine) : null;
+  // Static chrome, fixed for the whole show: the colored state box up top…
+  const st = sessionState(s);
+  const stat = document.createElement('div'); stat.className = 'sp-stat ' + st.key;
+  const dot = document.createElement('span'); dot.className = 'dot'; stat.appendChild(dot);
+  stat.appendChild(document.createTextNode(st.word));
+  // …and one quiet meta line at the bottom.
+  const bits = [];
+  const model = prettyModel(s.model);
+  if (model) bits.push(model);
+  if (s.ctxTokens > 0)                                   // 200k window assumed
+    bits.push('ctx ' + Math.min(100, Math.round(s.ctxTokens / 2000)) + '%');
+  if (s.account && s.account !== 'default')
+    bits.push('🔑 ' + acctDisplay(machine || 'local', s.account));
+  const age = fmtAge(s.promptedAt || s.lastActive);
+  if (age) bits.push((s.promptCount || 0) + ' prompts · ' + age + ' ago');
+  const meta = document.createElement('div'); meta.className = 'sp-meta';
+  meta.textContent = bits.join('  ·  ');
+  const line = document.createElement('div'); line.className = 'rsvp';
+  splashEl.replaceChildren(stat, line, meta);
+  splashEl.hidden = false; splashEl.classList.remove('fade');
+  // The flash frames — hard cuts, same spot: project → title → description.
+  const em = sessionEmoji(s);
+  const proj = splashProjectName(s, machine);
+  const frames = [];
+  if (em || proj) frames.push({ cls: 'f-proj', text: (em ? em + ' ' : '') + (proj || ''),
+                                mach: machine ? shortMachine(machine) : '' });
+  frames.push({ cls: 'f-title', text: s.title || 'untitled session' });
+  if (s.desc) frames.push({ cls: 'f-desc', text: s.desc });
+  let at = 0;
+  for (const f of frames) {
+    splashTimers.push(setTimeout(() => {
+      line.className = 'rsvp ' + f.cls;
+      line.textContent = f.text;
+      if (f.mach) {                       // which box it's on, riding the project frame
+        const mm = document.createElement('span'); mm.className = 'f-mach';
+        mm.textContent = ' · ' + f.mach; line.appendChild(mm);
+      }
+    }, at));
+    at += frameMs(f.text);
+  }
+  splashTimers.push(setTimeout(() => splashEl.classList.add('fade'), at),
+                    setTimeout(() => hideSplash(true), at + 220));
 }
 function hideSplash(focus) {
   for (const t of splashTimers) clearTimeout(t);
@@ -4160,11 +4158,6 @@ function hideSplash(focus) {
   if (focus && !isTouch && currentView() === 'tty') box.focus();
 }
 splashEl.onclick = () => hideSplash(true);               // read it? tap it away
-function refreshSplash() {   // fresher metadata landed while the card is up → repaint in place
-  if (splashEl.hidden || !splashCid) return;
-  const s = allSessions().find(x => x.cid === splashCid);
-  if (s) { const card = paintSplash(s); card.style.animation = 'none'; }  // no re-entry animation
-}
 
 // Every session for the OPEN project, gathered across all the machines that host
 // it (fleet) — each entry tagged with `_machine` so a card can badge it and
@@ -4352,8 +4345,7 @@ function highlightCard(cid) {
 
 let sessionsRepaintDeferred = false; // a broadcast landed while the machine picker had focus
 function renderSessions() {
-  refreshSplash();   // fresher session metadata → repaint an on-screen splash card
-  updateTtyStat();   // …and the tty activity box (a sessions frame follows every hook)
+  updateTtyStat();   // activity box tracks live state (a sessions frame follows every hook)
   // A repaint tears down sessionsEl wholesale, which destroys the machine
   // <select> mid-pick (closes the native dropdown, steals focus). While focus
   // is inside the picker row, defer metadata-driven repaints; the row's
