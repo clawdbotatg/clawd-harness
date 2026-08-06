@@ -39,6 +39,7 @@ import json
 import os
 import pty
 import hmac
+import inspect
 import re
 import secrets
 import select
@@ -1272,6 +1273,26 @@ class ClaudeSession:
                 "account": self.account, "config_dir": self.config_dir,
                 "ceremony": self.ceremony, "pinned": self.pinned}
 
+    def clone_for_respawn(self, **overrides):
+        """A fresh session object for an in-place respawn under the SAME cid
+        (account handoff, onboarding heal). Kwargs are derived from the
+        constructor signature, so EVERY durable field rides across
+        automatically — a hand-copied field list here is exactly how 📌 pins
+        (and before them, other session state) kept getting silently reset:
+        each new persisted field had to be remembered in every respawn site,
+        and one miss meant the next rebalance sweep wiped it and
+        save_registry() made the loss permanent. Pass overrides only for what
+        the respawn actually changes (account, config_dir, resuming, …).
+        tools/test_respawn_clone.py holds the invariant."""
+        kw = {n: getattr(self, n)
+              for n in inspect.signature(ClaudeSession.__init__).parameters
+              if n not in ("self", "manager")}
+        kw.update(overrides)
+        fresh = ClaudeSession(self.manager, **kw)
+        fresh.last_handoff = self.last_handoff
+        fresh._onboard_rescues = self._onboard_rescues
+        return fresh
+
     def workdir(self):
         """Where this session's claude runs — its project's repo path."""
         proj = self.manager.projects.get(self.pid)
@@ -2461,8 +2482,22 @@ class SessionManager:
 
     def _read_registry(self):
         try:
-            data = json.loads(REGISTRY_FILE.read_text())
-        except (OSError, ValueError):
+            raw = REGISTRY_FILE.read_text()
+        except OSError:
+            return {}
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            # A corrupt registry is evidence AND possibly hand-recoverable —
+            # move it aside so the next save_registry() can't silently pave
+            # over it with an empty state.
+            try:
+                REGISTRY_FILE.rename(
+                    REGISTRY_FILE.with_name(REGISTRY_FILE.name + ".corrupt"))
+                print("[registry] sessions.json is corrupt — moved aside to "
+                      ".corrupt, starting empty", flush=True)
+            except OSError:
+                pass
             return {}
         if isinstance(data, dict):
             return data
@@ -2479,8 +2514,14 @@ class SessionManager:
                     "accounts": [a.to_registry() for a in self._ordered_accounts()],
                     "active_account": self.active_account,
                     "last_switch_at": self.last_switch_at}
+        # Atomic write: a crash/power-cut mid-write must never leave a
+        # truncated registry — _read_registry would fall back to {} and the
+        # very next save would pave the wreckage over with an empty state
+        # (the "ALL my tabs rolled back" catastrophe).
         try:
-            REGISTRY_FILE.write_text(json.dumps(data, indent=2))
+            tmp = REGISTRY_FILE.with_name(REGISTRY_FILE.name + ".tmp")
+            tmp.write_text(json.dumps(data, indent=2))
+            os.replace(tmp, REGISTRY_FILE)
         except OSError:
             pass
 
@@ -3086,14 +3127,7 @@ class SessionManager:
         # A prompt delivered into the picker fires no hooks at all (same
         # signature as the limit-wall bounce) — remember it for redelivery.
         bounced = bool(s.last_prompt.strip()) and s.hook_count == s.hooks_at_prompt
-        fresh = ClaudeSession(
-            self, cid=s.cid, pid=s.pid, session_id=s.session_id,
-            resuming=s.resuming, title=s.title, desc=s.desc, tab=s.tab,
-            prompt_count=s.prompt_count, first_prompt=s.first_prompt,
-            created=s.created, last_active=time.time(),
-            prompted_at=s.prompted_at,
-            account=s.account, config_dir=s.config_dir)
-        fresh.last_handoff = s.last_handoff
+        fresh = s.clone_for_respawn(last_active=time.time())
         fresh._onboard_rescues = s._onboard_rescues + 1
         with self.lock:
             if self.sessions.get(s.cid) is not s:
@@ -3209,13 +3243,9 @@ class SessionManager:
                 return
         print(f"[handoff {s.cid[:8]}] {s.account} → {target.name} "
               f"({why})", flush=True)
-        fresh = ClaudeSession(
-            self, cid=s.cid, pid=s.pid, session_id=s.session_id, resuming=True,
-            title=s.title, desc=s.desc, tab=s.tab, prompt_count=s.prompt_count,
-            first_prompt=s.first_prompt, created=s.created,
-            last_active=time.time(), prompted_at=s.prompted_at,
+        fresh = s.clone_for_respawn(
+            resuming=True, last_active=time.time(),
             account=target.name, config_dir=target.config_dir)
-        fresh.last_handoff = s.last_handoff
         with self.lock:
             self.sessions[s.cid] = fresh
         s.kill()                                 # SIGTERM the drained claude (exit broadcast suppressed)

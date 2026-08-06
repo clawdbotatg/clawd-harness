@@ -7,6 +7,8 @@
 # local session id (legacy single-session) + multi-session registry
 .clawd-harness.session
 .clawd-harness.sessions.json
+.clawd-harness.sessions.json.tmp
+.clawd-harness.sessions.json.corrupt
 # first-party prompt log (quick-chip ranking data) — local usage, may hold anything
 .clawd-harness.prompts.jsonl
 # generated; embed the token in curl URLs (one per session)
