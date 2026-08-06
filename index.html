@@ -182,6 +182,20 @@
   .rsvp.f-mach  { color:var(--local); }    /* machine word: violet (fleet) */
   .rsvp.f-title { color:var(--accent); }   /* session-title words: amber */
   .rsvp.f-desc  { color:var(--dim); font-weight:500; }  /* description words: grey */
+  /* Locked lines: once a stream finishes flashing, its full text clicks into
+     place above the flash zone and stays for the rest of the show — so while
+     the desc words are still flying past, the project + title sit fixed above
+     them. Anchored to grow upward so the flashing word never moves. */
+  #splash .sp-lock { position:absolute; left:16px; right:16px; bottom:68%;
+                     display:flex; flex-direction:column; align-items:center;
+                     justify-content:flex-end; gap:clamp(4px, .8vh, 12px); pointer-events:none; }
+  #splash .sp-lock .lock { font-size:clamp(18px, 2.6vw, 40px); font-weight:600; line-height:1.25;
+                           white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+                           max-width:100%; animation:lockin .18s ease-out; }
+  @keyframes lockin { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+  #splash .sp-lock .f-proj  { color:var(--ink); }
+  #splash .sp-lock .f-mach  { color:var(--local); }
+  #splash .sp-lock .f-title { color:var(--accent); }
   /* Fixed chrome around the flashing line: the colored state box up top
      (working / agent running / needs you / idle — same hues as #ttystat) and
      one quiet meta line at the bottom. Both hold still for the whole show. */
@@ -4120,32 +4134,52 @@ function maybeSplash(cid) {
   if (age) bits.push((s.promptCount || 0) + ' prompts · ' + age + ' ago');
   const meta = document.createElement('div'); meta.className = 'sp-meta';
   meta.textContent = bits.join('  ·  ');
+  const lockEl = document.createElement('div'); lockEl.className = 'sp-lock';
   const line = document.createElement('div'); line.className = 'rsvp';
-  splashEl.replaceChildren(stat, line, meta);
+  splashEl.replaceChildren(stat, lockEl, line, meta);
   splashEl.hidden = false; splashEl.classList.remove('fade');
   // The flash: ONE WORD at a time, huge, same spot, hard cuts. Color says
   // which stream the word belongs to — project white, title amber, desc dim
-  // (machine rides after the project in violet, fleet only).
-  const words = [];
-  const feedWords = (text, cls, ms) => {
-    for (const w of (text || '').trim().split(/[\s]+/)) if (w) words.push({ w, cls, ms });
-  };
-  for (const w of splashProjectName(s, machine).split(/[-_\s]+/))
-    if (w) words.push({ w, cls: 'f-proj', ms: 250 });
-  if (machine) words.push({ w: shortMachine(machine), cls: 'f-mach', ms: 250 });
-  feedWords(s.title || 'untitled session', 'f-title', 250);
-  feedWords(s.desc, 'f-desc', 200);
+  // (machine rides after the project in violet, fleet only). When a stream
+  // finishes flashing, its full line LOCKS IN above the flash zone and stays,
+  // so by the time the desc is flying past, project + title sit fixed above.
+  const wordify = (text, cls, ms, splitter) =>
+    (text || '').trim().split(splitter || /\s+/).filter(Boolean).map(w => ({ w, cls, ms }));
+  const proj = splashProjectName(s, machine);
+  const streams = [];
+  const projWords = wordify(proj, 'f-proj', 250, /[-_\s]+/)
+    .concat(machine ? [{ w: shortMachine(machine), cls: 'f-mach', ms: 250 }] : []);
+  if (projWords.length)
+    streams.push({ words: projWords,
+                   lock: [{ text: proj, cls: 'f-proj' }]
+                     .concat(machine ? [{ text: ' · ' + shortMachine(machine), cls: 'f-mach' }] : []) });
+  streams.push({ words: wordify(s.title || 'untitled session', 'f-title', 250),
+                 lock: [{ text: s.title || 'untitled session', cls: 'f-title' }] });
+  if (s.desc) streams.push({ words: wordify(s.desc, 'f-desc', 200), lock: null });
   // Size each word to fill most of the width (monospace: ~.62em per char),
   // capped by height so short words don't become billboards.
   const W = splashEl.clientWidth || innerWidth, H = splashEl.clientHeight || innerHeight;
   let at = 0;
-  for (const f of words) {
-    splashTimers.push(setTimeout(() => {
-      line.className = 'rsvp ' + f.cls;
-      line.style.fontSize = Math.max(24, Math.min(H * 0.30, (W * 0.82) / (0.62 * f.w.length))) + 'px';
-      line.textContent = f.w;
-    }, at));
-    at += f.ms + (f.w.length > 8 ? 60 : 0);   // a beat longer on long words
+  for (const stream of streams) {
+    for (const f of stream.words) {
+      splashTimers.push(setTimeout(() => {
+        line.className = 'rsvp ' + f.cls;
+        line.style.fontSize = Math.max(24, Math.min(H * 0.30, (W * 0.82) / (0.62 * f.w.length))) + 'px';
+        line.textContent = f.w;
+      }, at));
+      at += f.ms + (f.w.length > 8 ? 60 : 0);   // a beat longer on long words
+    }
+    if (stream.lock) {
+      const parts = stream.lock;
+      splashTimers.push(setTimeout(() => {
+        const d = document.createElement('div'); d.className = 'lock';
+        for (const p of parts) {
+          const sp = document.createElement('span'); sp.className = p.cls;
+          sp.textContent = p.text; d.appendChild(sp);
+        }
+        lockEl.appendChild(d);
+      }, at));
+    }
   }
   splashTimers.push(setTimeout(() => splashEl.classList.add('fade'), at),
                     setTimeout(() => hideSplash(true), at + 220));
