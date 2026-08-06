@@ -9,7 +9,7 @@ Counts how often each short prompt is actually sent, from two sources:
      store (backfill; includes CLI sessions the harness never saw).
 
 Run it, eyeball the ranking, then reorder/extend the QUICK_PROMPTS array
-by hand (least→most used: the LAST entry renders farthest right).
+by hand (most→least used: the FIRST entry renders farthest left).
 Cadence: every few months — see CLAUDE.md.
 
 Usage: python3 tools/mine_quick_prompts.py [--max-len 60] [--top 40]

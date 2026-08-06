@@ -249,15 +249,20 @@
   #quickchips button:hover { border-color:var(--accent); color:var(--accent); }
   #quickchips button:active { background:var(--accent); color:#000; }
   @media (pointer: coarse) { #quickchips button { padding:5px 9px; font-size:12px; } }
-  /* Skinny screens: chips don't fit beside the session name — wrap onto their own
-     full-width row below it. The first-chip auto margin right-aligns the strip
-     when it fits (auto margins collapse to 0 on overflow, so scrolling still
-     starts from the left and the scrollLeft pin shows the most-used right end). */
+  /* Hover hint: what a chip will send. A body-level fixed singleton (JS places
+     it above the hovered chip) — inside #quickchips the overflow clip would
+     cut it off. Hidden until a chip is hovered; never on touch. */
+  #chiptip { display:none; position:fixed; z-index:99; max-width:300px;
+             background:var(--raised); border:1px solid var(--accent); color:var(--ink);
+             padding:6px 9px; font-size:12px; font-family:var(--mono);
+             pointer-events:none; }
+  /* Skinny screens: chips don't fit beside the session name — wrap onto their
+     own full-width row below it. Most-used is the leftmost chip, so the natural
+     left scroll anchor keeps it visible and overflow hides the least-used tail. */
   @media (max-width: 720px) {
     #descrow.insession { flex-wrap: wrap; }
     #sessiondesc { flex-basis: 100%; }
     #quickchips { flex: 1 1 100%; }
-    #quickchips > button:first-child { margin-left: auto; }
   }
   .inputrow { display:flex; gap:8px; align-items:flex-end; }
   #keys { display:flex; flex-wrap:wrap; gap:6px; }
@@ -2710,13 +2715,6 @@ function refreshBreadcrumb(view) {
   // Quick-prompt chips ride this row — visible whenever a session is open,
   // even before AI naming has produced a title (sessiondesc may be empty).
   document.getElementById('descrow').classList.toggle('insession', inSession);
-  // When the strip is too narrow for every chip, it must be the LEAST-used ones
-  // (the left end) that scroll out of view — pin the scroll to the right end.
-  // scrollWidth is 0 while hidden, so do it after the class flip has shown it.
-  if (inSession) {
-    const qc = document.getElementById('quickchips');
-    qc.scrollLeft = qc.scrollWidth;
-  }
   const title = (live && live.title) || currentTitle || '';
   const longDesc = (live && live.desc) || '';
   // Show "short title: long desc" when AI naming has produced a one-line summary,
@@ -4993,26 +4991,43 @@ function sendMessage() {
 
 // ── quick-prompt chips ────────────────────────────────────────────────────────
 // One-tap sends of the things you actually say most, mined from the transcript
-// store (tools/mine_quick_prompts.py). Ordered least→most used: the LAST entry
-// renders farthest right (closest to the send button / your thumb). Re-mine the
-// ranking every few months, and add custom entries freely — it's just this array.
+// store (tools/mine_quick_prompts.py). Ordered most→least used: the FIRST entry
+// renders farthest left, and when the strip overflows it's the least-used tail
+// that scrolls out of view. Re-mine the ranking every few months, and add
+// custom entries freely — it's just this array. Hover a chip for what it sends.
 const QUICK_PROMPTS = [
-  { e: '📑', label: 'doc',       text: 'document everything as if you are handing this knowledge off to another agent or a future you' },
-  { e: '🧒', label: 'eli5',      text: 'eli5' },
-  { e: '🗜️', label: 'compact',   text: '/compact' },
-  { e: '📦', label: 'ship',      text: 'commit and push' },
-  { e: '🔁', label: 'keep going', text: 'keep going' },
-  { e: '✅', label: 'go',        text: 'yes, go' },
-  { e: '➡️', label: 'next?',     text: 'okay what is next?' },
   { e: '📋', label: 'tldr',      text: 'tldr' },
+  { e: '➡️', label: 'next?',     text: 'okay what is next?' },
+  { e: '✅', label: 'go',        text: 'yes, go' },
+  { e: '🔁', label: 'keep going', text: 'keep going' },
+  { e: '📦', label: 'ship',      text: 'commit and push' },
+  { e: '🗜️', label: 'compact',   text: '/compact' },
+  { e: '🧒', label: 'eli5',      text: 'eli5' },
+  { e: '📑', label: 'doc',       text: 'document everything as if you are handing this knowledge off to another agent or a future you' },
 ];
+// Custom hover hint (a fixed-position singleton, so the strip's overflow-x
+// clipping can't eat it — a ::after inside the scroll container would be cut
+// off, and the native title tooltip is slow and easy to miss).
+const chipTip = document.createElement('div'); chipTip.id = 'chiptip';
+document.body.appendChild(chipTip);
+function showChipTip(btn, text) {
+  if (isTouch) return;                        // hover is a fine-pointer thing
+  chipTip.textContent = text;
+  chipTip.style.display = 'block';
+  const r = btn.getBoundingClientRect();
+  const x = Math.min(Math.max(6, r.left), innerWidth - chipTip.offsetWidth - 6);
+  chipTip.style.left = x + 'px';
+  chipTip.style.top = (r.top - chipTip.offsetHeight - 6) + 'px';
+}
+function hideChipTip() { chipTip.style.display = 'none'; }
 {
   const chipsEl = document.getElementById('quickchips');
   for (const q of QUICK_PROMPTS) {
     const b = document.createElement('button');
     b.textContent = q.e + ' ' + q.label;
-    b.title = 'send: ' + q.text;
-    b.onclick = () => sendQuick(q.text);
+    b.onclick = () => { hideChipTip(); sendQuick(q.text); };
+    b.onmouseenter = () => showChipTip(b, q.text);
+    b.onmouseleave = hideChipTip;
     chipsEl.appendChild(b);
   }
 }

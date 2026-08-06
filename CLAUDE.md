@@ -207,8 +207,9 @@ user-facing overview; this file orients an agent working **on** the code.
   a key.
 - **Quick-prompt chips:** the one-tap buttons on the session-name line above the
   composer (`QUICK_PROMPTS` array in index.html) — the things the user actually
-  says most ("tldr", "okay what is next?", "yes, go", …), ordered least→most
-  used so the most-used renders farthest right. Every browser send is also
+  says most ("tldr", "okay what is next?", "yes, go", …), ordered most→least
+  used (most-used farthest left; hover shows what a chip sends). Every browser
+  send is also
   appended to the gitignored `.clawd-harness.prompts.jsonl` (`log_prompt` in
   server.py; `via:"quick"` marks chip taps apart from typed prompts). **Re-mine
   the ranking every few months**: `python3 tools/mine_quick_prompts.py` (reads
