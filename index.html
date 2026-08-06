@@ -182,9 +182,6 @@
   .rsvp.f-mach  { color:var(--local); }    /* machine word: violet (fleet) */
   .rsvp.f-title { color:var(--accent); }   /* session-title words: amber */
   .rsvp.f-desc  { color:var(--dim); font-weight:500; }  /* description words: grey */
-  /* end-of-show payoff: the whole desc sentence, in place of the flash word */
-  .rsvp.f-whole { white-space:normal; font-size:clamp(22px, 3.2vw, 48px);
-                  line-height:1.35; max-width:88%; }
   /* Locked lines: once a stream finishes flashing, its full text clicks into
      place above the flash zone and stays for the rest of the show — so while
      the desc words are still flying past, the project + title sit fixed above
@@ -4186,15 +4183,10 @@ function maybeSplash(cid) {
       }, at));
     }
   }
-  // The payoff: when the last desc word lands, the flash zone resolves into
-  // the WHOLE description sentence right where the words were flying (title +
-  // project still locked above), holds for half a second, then everything hides.
-  splashTimers.push(setTimeout(() => {
-    if (s.desc) { line.className = 'rsvp f-desc f-whole'; line.style.fontSize = ''; line.textContent = s.desc; }
-    else line.textContent = '';
-  }, at),
-                    setTimeout(() => splashEl.classList.add('fade'), at + 500),
-                    setTimeout(() => hideSplash(true), at + 720));
+  // Last word done → gone. (A hold-the-whole-card beat was tried and cut:
+  // it read as staring at a leftover screen, not extra comprehension.)
+  splashTimers.push(setTimeout(() => splashEl.classList.add('fade'), at),
+                    setTimeout(() => hideSplash(true), at + 220));
 }
 function hideSplash(focus) {
   for (const t of splashTimers) clearTimeout(t);
