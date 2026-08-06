@@ -205,6 +205,16 @@ user-facing overview; this file orients an agent working **on** the code.
   last run 2026-06, next ≈2026-09.** The script reuses `server.NAME_SYS_PROMPT`
   and the `.clawd-harness.env` creds, so it never drifts from the app or hardcodes
   a key.
+- **Quick-prompt chips:** the one-tap buttons on the session-name line above the
+  composer (`QUICK_PROMPTS` array in index.html) — the things the user actually
+  says most ("tldr", "okay what is next?", "yes, go", …), ordered least→most
+  used so the most-used renders farthest right. Every browser send is also
+  appended to the gitignored `.clawd-harness.prompts.jsonl` (`log_prompt` in
+  server.py; `via:"quick"` marks chip taps apart from typed prompts). **Re-mine
+  the ranking every few months**: `python3 tools/mine_quick_prompts.py` (reads
+  send log + transcript store, ranks candidates), then reorder/extend the array
+  by hand — custom chips are welcome, it's just an array edit. Last mined
+  2026-08.
 - **index.html** — single page. A 4-level swipe stack — **projects → sessions →
   transcript → tty** (`LEVELS`); swipe right climbs out, left dives in. Projects
   page = card list + an add row (name → create repo, git URL → clone). Sessions

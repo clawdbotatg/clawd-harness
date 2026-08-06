@@ -228,6 +228,20 @@ EXT_BY_CTYPE = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
                 "application/json": ".json", "text/yaml": ".yaml",
                 "text/xml": ".xml", "text/html": ".html"}
 REGISTRY_FILE = HERE / ".clawd-harness.sessions.json"   # persists projects+sessions across restarts
+# Every browser-initiated send is appended here (gitignored) — first-party data
+# for ranking the UI's quick-prompt chips (QUICK_PROMPTS in index.html; mined by
+# tools/mine_quick_prompts.py). `via:"quick"` marks a chip tap vs typed text.
+PROMPTS_LOG = HERE / ".clawd-harness.prompts.jsonl"
+
+def log_prompt(s, text, via=""):
+    """Best-effort append of a user send to PROMPTS_LOG — never break a send."""
+    try:
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+               "cid": s.cid, "pid": s.pid, "via": via or "typed", "text": text}
+        with open(PROMPTS_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 # Projects = git repos we drive. Each is a subdir here; a session's `claude`
 # runs with cwd = its project's path. Gitignored, so the cloned repos never
 # enter the harness repo. The GitHub owner new repos are created under.
@@ -4360,6 +4374,7 @@ class Handler(BaseHTTPRequestHandler):
                 txt = frame.get("text", "")
                 print(f"[ws {s.cid[:8]}] send: {txt[:60]!r}", flush=True)
                 s.bump_owner(client)
+                log_prompt(s, txt, frame.get("via", ""))
                 s.send_message(txt)
             elif t == "resize":
                 s.claim_resize(client, frame.get("cols"), frame.get("rows"),
