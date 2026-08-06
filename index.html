@@ -171,52 +171,41 @@
      frame (white = project, amber = title, dim = description) so after a few
      uses the brain reads the color before the words. Tap to dismiss early;
      the composer below stays usable the whole time. */
-  #splash { position:absolute; inset:0; z-index:30; background:var(--bg);
+  #splash { position:absolute; inset:0; z-index:30; background:transparent;
             display:flex; align-items:center; justify-content:center;
-            padding:20px 16px; cursor:pointer;
+            padding:20px 16px; pointer-events:none;
             opacity:1; transition:opacity .2s ease; }
   #splash[hidden] { display:none; }
-  #splash.fade { opacity:0; pointer-events:none; }
-  .rsvp { text-align:center; font-weight:700; line-height:1.1; white-space:nowrap; }
+  #splash.fade { opacity:0; }
+  /* The floating quick-read box: black island centered over the LIVE tty, so
+     the terminal stays readable around it and the composer stays typable the
+     whole time. Lock rows are pre-reserved (visibility:hidden) so the box
+     never changes size and the flashing word never moves. */
+  #splash .sp-box { pointer-events:auto; cursor:pointer; background:var(--bg);
+                    border:1px solid var(--edge); border-radius:10px;
+                    box-shadow:0 10px 50px rgba(0,0,0,.75);
+                    padding:clamp(16px, 2.6vh, 30px) clamp(18px, 2.6vw, 40px);
+                    width:min(78%, 900px); display:flex; flex-direction:column;
+                    align-items:center; gap:clamp(8px, 1.4vh, 16px); }
+  .rsvp { width:100%; text-align:center; font-weight:700; line-height:1.15; white-space:nowrap; }
   .rsvp.f-proj  { color:var(--ink); }      /* project words: white */
   .rsvp.f-mach  { color:var(--local); }    /* machine word: violet (fleet) */
   .rsvp.f-title { color:var(--accent); }   /* session-title words: amber */
   .rsvp.f-desc  { color:var(--dim); font-weight:500; }  /* description words: grey */
   /* Locked lines: once a stream finishes flashing, its full text clicks into
-     place above the flash zone and stays for the rest of the show — so while
-     the desc words are still flying past, the project + title sit fixed above
-     them. Anchored to grow upward so the flashing word never moves. */
-  #splash .sp-lock { position:absolute; left:16px; right:16px; bottom:68%;
-                     display:flex; flex-direction:column; align-items:center;
-                     justify-content:flex-end; gap:clamp(4px, .8vh, 12px); pointer-events:none; }
-  #splash .sp-lock .lock { font-size:clamp(18px, 2.6vw, 40px); font-weight:600; line-height:1.25;
+     place above the flashing word and stays for the rest of the show. */
+  #splash .sp-lock { display:flex; flex-direction:column; align-items:center;
+                     gap:clamp(3px, .6vh, 8px); max-width:100%; }
+  #splash .sp-lock:empty { display:none; }
+  #splash .sp-lock .lock { font-size:clamp(15px, 1.9vw, 28px); font-weight:600; line-height:1.25;
                            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-                           max-width:100%; animation:lockin .18s ease-out; }
+                           max-width:100%; }
+  #splash .sp-lock .lock.on { animation:lockin .18s ease-out; }
   @keyframes lockin { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
   #splash .sp-lock .f-proj  { color:var(--ink); }
   #splash .sp-lock .f-mach  { color:var(--local); }
   #splash .sp-lock .f-title { color:var(--accent); }
-  /* Fixed chrome around the flashing line: the colored state box up top
-     (working / agent running / needs you / idle — same hues as #ttystat) and
-     one quiet meta line at the bottom. Both hold still for the whole show. */
-  #splash .sp-stat { position:absolute; top:clamp(12px, 3vh, 34px); left:0; right:0;
-                     display:flex; align-items:center; justify-content:center; gap:10px;
-                     font-size:clamp(13px, 1.6vw, 22px); font-weight:600;
-                     text-transform:uppercase; letter-spacing:.1em; color:var(--dim); }
-  #splash .sp-stat .dot { width:clamp(14px, 1.6vw, 22px); height:clamp(14px, 1.6vw, 22px);
-                          border-radius:5px; background:var(--dim); flex:0 0 auto; }
-  #splash .sp-stat.working { color:var(--accent); }
-  #splash .sp-stat.working .dot { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
-  #splash .sp-stat.agent { color:var(--local); }
-  #splash .sp-stat.agent .dot { background:var(--local); animation:pulse 1.1s ease-in-out infinite; }
-  #splash .sp-stat.waiting { color:var(--accent); }
-  #splash .sp-stat.waiting .dot { background:var(--accent); }
-  #splash .sp-stat.idle { color:var(--ok); }
-  #splash .sp-stat.idle .dot { background:var(--ok); }
-  #splash .sp-stat.dead { color:var(--err); }
-  #splash .sp-stat.dead .dot { background:var(--err); }
-  #splash .sp-meta { position:absolute; bottom:clamp(26px, 9vh, 100px); left:16px; right:16px;
-                     text-align:center; color:var(--dim); font-size:clamp(12px, 1.5vw, 20px);
+  #splash .sp-meta { color:var(--dim); font-size:clamp(11px, 1.3vw, 16px); max-width:100%;
                      white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   #term { flex:1; min-height:0; padding:6px 4px 0 8px; background:#000; touch-action:pan-y;
           overflow:hidden; }
@@ -4126,12 +4115,7 @@ function maybeSplash(cid) {
   for (const t of splashTimers) clearTimeout(t);
   splashTimers = [];
   const machine = FLEET ? (s._machine || currentMachine) : null;
-  // Static chrome, fixed for the whole show: the colored state box up top…
-  const st = sessionState(s);
-  const stat = document.createElement('div'); stat.className = 'sp-stat ' + st.key;
-  const dot = document.createElement('span'); dot.className = 'dot'; stat.appendChild(dot);
-  stat.appendChild(document.createTextNode(st.word));
-  // …and one quiet meta line at the bottom.
+  // One quiet meta line at the foot of the box.
   const bits = [];
   const model = prettyModel(s.model);
   if (model) bits.push(model);
@@ -4143,15 +4127,12 @@ function maybeSplash(cid) {
   if (age) bits.push((s.promptCount || 0) + ' prompts · ' + age + ' ago');
   const meta = document.createElement('div'); meta.className = 'sp-meta';
   meta.textContent = bits.join('  ·  ');
-  const lockEl = document.createElement('div'); lockEl.className = 'sp-lock';
-  const line = document.createElement('div'); line.className = 'rsvp';
-  splashEl.replaceChildren(stat, lockEl, line, meta);
-  splashEl.hidden = false; splashEl.classList.remove('fade');
-  // The flash: ONE WORD at a time, huge, same spot, hard cuts. Color says
-  // which stream the word belongs to — project white, title amber, desc dim
+  // The flash: ONE WORD at a time in a black island floating over the LIVE
+  // tty (terminal readable around it, composer typable). Color says which
+  // stream the word belongs to — project white, title amber, desc dim
   // (machine rides after the project in violet, fleet only). When a stream
-  // finishes flashing, its full line LOCKS IN above the flash zone and stays,
-  // so by the time the desc is flying past, project + title sit fixed above.
+  // finishes flashing, its full line LOCKS IN above the flashing word and
+  // stays; lock rows are pre-reserved invisibly so the box never resizes.
   const wordify = (text, cls, ms, splitter) =>
     (text || '').trim().split(splitter || /\s+/).filter(Boolean).map(w => ({ w, cls, ms }));
   const proj = splashProjectName(s, machine);
@@ -4165,12 +4146,31 @@ function maybeSplash(cid) {
   streams.push({ words: wordify(s.title || 'untitled session', 'f-title', 250),
                  lock: [{ text: s.title || 'untitled session', cls: 'f-title' }] });
   if (s.desc) streams.push({ words: wordify(s.desc, 'f-desc', 200), lock: null });
-  // ONE font size for the whole show, fitted to the longest word (monospace:
-  // ~.62em per char), height-capped — so the words flip through the same spot
-  // at the same size and the eye never has to re-adjust.
-  const W = splashEl.clientWidth || innerWidth, H = splashEl.clientHeight || innerHeight;
+  const lockEl = document.createElement('div'); lockEl.className = 'sp-lock';
+  for (const stream of streams) {
+    if (!stream.lock) continue;
+    const d = document.createElement('div'); d.className = 'lock';
+    d.style.visibility = 'hidden';                       // reserve the row now
+    for (const p of stream.lock) {
+      const sp = document.createElement('span'); sp.className = p.cls;
+      sp.textContent = p.text; d.appendChild(sp);
+    }
+    lockEl.appendChild(d);
+    stream.lockRow = d;
+  }
+  const line = document.createElement('div'); line.className = 'rsvp';
+  const boxEl = document.createElement('div'); boxEl.className = 'sp-box';
+  boxEl.append(lockEl, line, meta);
+  splashEl.replaceChildren(boxEl);
+  splashEl.hidden = false; splashEl.classList.remove('fade');
+  // ONE font size for the whole show, fitted to the longest word within the
+  // box's inner width (monospace: ~.62em per char), height-capped — the words
+  // flip through the same spot at the same size.
+  const W = line.clientWidth || splashEl.clientWidth * 0.7 || innerWidth * 0.7;
+  const H = splashEl.clientHeight || innerHeight;
   const maxLen = Math.max(...streams.flatMap(x => x.words.map(f => f.w.length)), 1);
-  line.style.fontSize = Math.max(24, Math.min(H * 0.30, (W * 0.82) / (0.62 * maxLen))) + 'px';
+  line.style.fontSize = Math.max(22, Math.min(H * 0.22, (W * 0.95) / (0.62 * maxLen))) + 'px';
+  line.style.minHeight = '1.2em';                        // hold the row before the first word lands
   let at = 0;
   for (const stream of streams) {
     for (const f of stream.words) {
@@ -4180,15 +4180,10 @@ function maybeSplash(cid) {
       }, at));
       at += f.ms + (f.w.length > 8 ? 60 : 0);   // a beat longer on long words
     }
-    if (stream.lock) {
-      const parts = stream.lock;
+    if (stream.lockRow) {
+      const row = stream.lockRow;
       splashTimers.push(setTimeout(() => {
-        const d = document.createElement('div'); d.className = 'lock';
-        for (const p of parts) {
-          const sp = document.createElement('span'); sp.className = p.cls;
-          sp.textContent = p.text; d.appendChild(sp);
-        }
-        lockEl.appendChild(d);
+        row.style.visibility = ''; row.classList.add('on');
       }, at));
     }
   }
