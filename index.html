@@ -144,9 +144,37 @@
                 opacity:.7; pointer-events:none; user-select:none; }
   #machineTag.show { display:block; }
   .col { display:flex; flex-direction:column; min-width:0; min-height:0; }
-  #left  { flex:1; }
+  #left  { flex:1; position:relative; }   /* anchors the #splash overlay */
   #right { flex:1; background:var(--bg); }
   .col.hidden { display:none; }
+  /* Splash card: a ~3s "you are here" reminder that covers the tty on every
+     deliberate session entry (tab click / swipe / deep-link) while the replay
+     paints underneath — project, title, AI desc, live-state tldr, vitals.
+     Tap to dismiss early; the composer below stays usable the whole time. */
+  #splash { position:absolute; inset:0; z-index:30; background:var(--bg);
+            display:flex; align-items:center; justify-content:center;
+            padding:20px 16px; cursor:pointer;
+            opacity:1; transition:opacity .35s ease; }
+  #splash[hidden] { display:none; }
+  #splash.fade { opacity:0; pointer-events:none; }
+  .splashcard { max-width:560px; width:100%; display:flex; flex-direction:column;
+                gap:12px; text-align:left; animation:splashin .18s ease-out; }
+  @keyframes splashin { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+  .splashcard .sp-proj { color:var(--dim); font-size:12px; text-transform:uppercase;
+                         letter-spacing:.14em; }
+  .splashcard .sp-proj .sp-mach { color:var(--accent); text-transform:none; letter-spacing:normal; }
+  .splashcard .sp-title { color:var(--ink); font-size:22px; line-height:1.3; font-weight:600; }
+  .splashcard .sp-desc { color:var(--dim); font-size:14px; line-height:1.5; }
+  .splashcard .sp-digest { color:var(--ink); font-size:13px; line-height:1.5;
+                           border-left:2px solid var(--edge-hi); padding-left:10px; opacity:.85; }
+  .splashcard .sp-digest.asking { border-left-color:var(--accent); color:var(--accent); }
+  .splashcard .sp-vitals { display:flex; flex-wrap:wrap; gap:6px; margin-top:2px; }
+  .splashcard .sp-vitals span { border:1px solid var(--edge); border-radius:5px;
+                                padding:3px 9px; font-size:11px; color:var(--dim);
+                                background:var(--panel); white-space:nowrap; }
+  .splashcard .sp-vitals .sp-busy { color:var(--accent); border-color:var(--accent-dim); }
+  .splashcard .sp-vitals .sp-wait { color:#000; background:var(--accent); border-color:var(--accent); }
+  .splashcard .sp-vitals .sp-dead { color:var(--err); border-color:var(--err); }
   #term { flex:1; min-height:0; padding:6px 4px 0 8px; background:#000; touch-action:pan-y;
           overflow:hidden; }
   /* bottom-justify the TTY: the xterm grid fills #term (so the PTY size claude sees is the
@@ -689,6 +717,7 @@
     </section>
     <section class="col" id="left">
       <div id="term"></div>
+      <div id="splash" hidden></div>
     </section>
     <section class="col hidden" id="right">
       <div id="feed"></div>
@@ -3986,6 +4015,101 @@ function subscribe(cid, opts) {
 // needs-you bar's styling).
 function shortMachine(id) { return (id || '').replace(/^clawd-/, ''); }
 
+// -- splash card --------------------------------------------------------------
+// A ~3s "you are here" overlay covering the tty on every DELIBERATE session
+// entry (tab click, swipe cycle, deep-link, dive-in). It paints instantly from
+// metadata the client already holds — project, session title, AI desc, the
+// live-state digest, and a vitals row (model / context fill / status / plan /
+// machine) — while the terminal replay loads underneath, then fades away. Tap
+// dismisses early; the composer below is never covered, so typing works the
+// whole time. Reconnect re-subscribes and the auto-surfaced-question path
+// never call this — only real navigation does.
+const splashEl = document.getElementById('splash');
+const SPLASH_MS = 3000;
+let splashTimers = [], splashCid = null, splashShownAt = 0;
+function prettyModel(m) {
+  // 'claude-sonnet-4-5-20250929' → 'sonnet 4.5'
+  return (m || '').replace(/^claude-/, '').replace(/-\d{8}$/, '')
+                  .replace(/(\d)-(\d)/g, '$1.$2').replace(/-/g, ' ');
+}
+function splashProjectName(s, machine) {
+  if (FLEET && machine) {
+    const p = (((perMachine[machine] || {}).projectList) || []).find(p => p.pid === s.pid);
+    return p ? p.name : '';
+  }
+  return projectName(s.pid);
+}
+function paintSplash(s) {
+  const machine = FLEET ? (s._machine || currentMachine) : null;
+  const card = document.createElement('div'); card.className = 'splashcard';
+  const add = (cls, text) => {
+    if (!text) return;
+    const d = document.createElement('div'); d.className = cls; d.textContent = text;
+    card.appendChild(d);
+  };
+  const proj = document.createElement('div'); proj.className = 'sp-proj';
+  const em = sessionEmoji(s);
+  proj.textContent = (em ? em + '  ' : '') + (splashProjectName(s, machine) || '');
+  if (machine) {
+    const mm = document.createElement('span'); mm.className = 'sp-mach';
+    mm.textContent = '  ·  ' + shortMachine(machine);
+    proj.appendChild(mm);
+  }
+  if (proj.textContent.trim()) card.appendChild(proj);
+  add('sp-title', s.title || 'untitled session');
+  add('sp-desc', s.desc);
+  const ask = s.blocked_on || '';
+  add('sp-digest' + (ask ? ' asking' : ''), ask ? '🙋 ' + ask : (s.digest || ''));
+  const vit = document.createElement('div'); vit.className = 'sp-vitals';
+  const chip = (text, cls) => {
+    const c = document.createElement('span'); if (cls) c.className = cls;
+    c.textContent = text; vit.appendChild(c);
+  };
+  const model = prettyModel(s.model);
+  if (model) chip(model);
+  if (s.ctxTokens > 0)                                   // 200k window assumed
+    chip('ctx ' + Math.min(100, Math.round(s.ctxTokens / 2000)) + '% · '
+         + Math.round(s.ctxTokens / 1000) + 'k');
+  if (!s.alive) chip('dead', 'sp-dead');
+  else if (s.waiting || s.status === 'blocked') chip('needs you', 'sp-wait');
+  else if (s.busy) chip('working…', 'sp-busy');
+  else chip('idle');
+  if (s.account && s.account !== 'default')
+    chip('🔑 ' + acctDisplay(machine || 'local', s.account));
+  const age = fmtAge(s.promptedAt || s.lastActive);
+  if (age) chip((s.promptCount || 0) + ' prompts · ' + age + ' ago');
+  card.appendChild(vit);
+  splashEl.replaceChildren(card);
+  return card;
+}
+function maybeSplash(cid) {
+  if (!cid) return;
+  const s = allSessions().find(x => x.cid === cid);
+  if (!s) return;
+  if (!s.promptCount && !s.desc) return;                 // brand-new: nothing to say yet
+  if (cid === splashCid && Date.now() - splashShownAt < 5000) return;  // double-fire guard
+  splashCid = cid; splashShownAt = Date.now();
+  paintSplash(s);
+  splashEl.hidden = false; splashEl.classList.remove('fade');
+  for (const t of splashTimers) clearTimeout(t);
+  splashTimers = [setTimeout(() => splashEl.classList.add('fade'), SPLASH_MS),
+                  setTimeout(() => hideSplash(true), SPLASH_MS + 400)];
+}
+function hideSplash(focus) {
+  for (const t of splashTimers) clearTimeout(t);
+  splashTimers = [];
+  if (splashEl.hidden) return;
+  splashEl.hidden = true; splashEl.classList.remove('fade');
+  // the card's whole point ends in "start prompting" — hand focus to the composer
+  if (focus && !isTouch && currentView() === 'tty') box.focus();
+}
+splashEl.onclick = () => hideSplash(true);               // read it? tap it away
+function refreshSplash() {   // fresher metadata landed while the card is up → repaint in place
+  if (splashEl.hidden || !splashCid) return;
+  const s = allSessions().find(x => x.cid === splashCid);
+  if (s) { const card = paintSplash(s); card.style.animation = 'none'; }  // no re-entry animation
+}
+
 // Every session for the OPEN project, gathered across all the machines that host
 // it (fleet) — each entry tagged with `_machine` so a card can badge it and
 // open/close/new can target the right host. Direct mode is just the local list.
@@ -4058,6 +4182,7 @@ function focusSession(s) {
   if (s.pid) currentPid = s.pid;   // keep the breadcrumb/`new` in this session's project
   subscribe(s.cid);
   setView(currentView() === 'transcript' ? 'transcript' : DEEP_VIEW);
+  maybeSplash(s.cid);              // "you are here" card while the replay paints
   if (!isTouch) box.focus();
 }
 
@@ -4097,6 +4222,7 @@ function openSession(cid) {
   if (s && s.pid) currentPid = s.pid;       // keep the breadcrumb/`new` in this project
   subscribe(cid);
   setView(DEEP_VIEW);                        // desktop → terminal, touch → transcript
+  maybeSplash(cid);                          // "you are here" card while the replay paints
   if (!isTouch) box.focus();                // desktop: ready to type immediately (skip on touch — don't pop the keyboard)
 }
 
@@ -4170,6 +4296,7 @@ function highlightCard(cid) {
 
 let sessionsRepaintDeferred = false; // a broadcast landed while the machine picker had focus
 function renderSessions() {
+  refreshSplash();   // fresher session metadata → repaint an on-screen splash card
   // A repaint tears down sessionsEl wholesale, which destroys the machine
   // <select> mid-pick (closes the native dropdown, steals focus). While focus
   // is inside the picker row, defer metadata-driven repaints; the row's
@@ -5354,6 +5481,7 @@ function setView(view) {
   // Leaving the terminal view: stop claiming the PTY size (read BEFORE the
   // panel toggles below change what currentView() reports).
   if (!tty && currentCid && currentView() === 'tty') releaseResize();
+  if (!tty) hideSplash();          // splash lives on the tty — climbing out ends it
   projectsPanel.classList.toggle('hidden', !projects);
   menuPanel.classList.toggle('hidden', !sessions);
   leftPanel.classList.toggle('hidden', !tty);
@@ -5514,6 +5642,7 @@ function resolvePendingNav() {
     }
     currentPid = s.pid;
     subscribe(nav.cid);
+    if (nav.view === 'tty') maybeSplash(nav.cid);   // deep-link landing → "you are here"
   }
   pendingNav = null;
   setView(nav.view);
@@ -5561,6 +5690,7 @@ function resolvePendingNavFleet(nav) {
   if (!s) { pendingNav = null; setView('sessions'); return; }   // session gone
   currentPid = s.pid;
   subscribe(nav.cid);
+  if (nav.view === 'tty') maybeSplash(nav.cid);     // deep-link landing → "you are here"
   pendingNav = null;
   setView(nav.view);
 }
@@ -5616,6 +5746,7 @@ function stepLevel(dir) {
     }
   }
   if (next !== currentView()) { viewBeforeQuestion = null; setView(next); }  // manual nav cancels auto-return
+  if (dir > 0 && next === 'tty' && currentCid) maybeSplash(currentCid);      // dove into a session → "you are here"
 }
 const goDeeper    = () => stepLevel(+1);   // dive in
 const goShallower = () => stepLevel(-1);   // climb out

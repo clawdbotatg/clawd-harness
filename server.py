@@ -1183,7 +1183,7 @@ class ClaudeSession:
                  title="", desc="", tab="", prompt_count=0, first_prompt="",
                  created=0.0, last_active=0.0, prompted_at=0.0,
                  account="default", config_dir="", ceremony=False,
-                 pinned=0.0):
+                 pinned=0.0, model="", ctx_tokens=0):
         self.manager = manager
         self.pid = pid                           # owning project id
         self.cid = cid                           # stable console id (ours; survives claude rotation)
@@ -1218,6 +1218,11 @@ class ClaudeSession:
         self.title = title
         self.desc = desc
         self.tab = tab                           # 1-2 word label for the tab strip (AI, like title/desc)
+        # Splash-card hints: which model is answering (transcript assistant
+        # lines are the only place the CLI states it) and the latest turn's
+        # input-side token total — "how full is the context window".
+        self.model = model
+        self.ctx_tokens = ctx_tokens
         self.prompt_count = prompt_count
         self.first_prompt = first_prompt
         self.last_active = last_active or self.created   # warmth: drives project sort
@@ -1271,7 +1276,8 @@ class ClaudeSession:
                 "created": self.created, "last_active": self.last_active,
                 "prompted_at": self.prompted_at,
                 "account": self.account, "config_dir": self.config_dir,
-                "ceremony": self.ceremony, "pinned": self.pinned}
+                "ceremony": self.ceremony, "pinned": self.pinned,
+                "model": self.model, "ctx_tokens": self.ctx_tokens}
 
     def clone_for_respawn(self, **overrides):
         """A fresh session object for an in-place respawn under the SAME cid
@@ -1326,7 +1332,9 @@ class ClaudeSession:
                 "created": self.created,
                 "alive": self.alive,
                 "account": self.account,
-                "pinned": self.pinned}
+                "pinned": self.pinned,
+                "model": self.model,
+                "ctxTokens": self.ctx_tokens}
 
     # -- lifecycle -------------------------------------------------------------
     def start(self):
@@ -1499,6 +1507,8 @@ class ClaudeSession:
         elif ev == "SessionStart":
             self.busy = False
             self._started_evt.set()
+            if obj.get("model"):        # earliest model signal, before any reply
+                self.model = obj["model"]
             data = {"source": obj.get("source"), "model": obj.get("model")}
         elif ev == "SessionEnd":
             data = {"reason": obj.get("reason")}
@@ -1894,7 +1904,20 @@ class ClaudeSession:
                 return {"role": "tool_result", "results": tr}
             return None
         if t == "assistant":
-            content = (obj.get("message") or {}).get("content") or []
+            msg = obj.get("message") or {}
+            # Side effect: keep the splash-card hints fresh. Assistant lines
+            # carry the answering model and a usage block whose input-side sum
+            # is the turn's whole context — the "how full is the window" number.
+            # ("<synthetic>" tags CLI-generated error text, not a real model.)
+            if msg.get("model") and "<" not in msg["model"]:
+                self.model = msg["model"]
+            u = msg.get("usage") or {}
+            tok = sum(u.get(k) or 0 for k in
+                      ("input_tokens", "cache_read_input_tokens",
+                       "cache_creation_input_tokens"))
+            if tok:
+                self.ctx_tokens = tok
+            content = msg.get("content") or []
             text = _collect_text(content)
             tools = _collect_tool_uses(content)
             out = {"role": "assistant"}
@@ -2276,7 +2299,8 @@ class SessionManager:
                 prompted_at=e.get("prompted_at", 0.0),
                 account=name, config_dir=cfg,
                 ceremony=e.get("ceremony", False),
-                pinned=e.get("pinned", 0.0))
+                pinned=e.get("pinned", 0.0),
+                model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0))
             self.sessions[s.cid] = s
             s.start()
         # No auto-created session: with zero projects there are legitimately zero
