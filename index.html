@@ -4156,15 +4156,17 @@ function maybeSplash(cid) {
   streams.push({ words: wordify(s.title || 'untitled session', 'f-title', 250),
                  lock: [{ text: s.title || 'untitled session', cls: 'f-title' }] });
   if (s.desc) streams.push({ words: wordify(s.desc, 'f-desc', 200), lock: null });
-  // Size each word to fill most of the width (monospace: ~.62em per char),
-  // capped by height so short words don't become billboards.
+  // ONE font size for the whole show, fitted to the longest word (monospace:
+  // ~.62em per char), height-capped — so the words flip through the same spot
+  // at the same size and the eye never has to re-adjust.
   const W = splashEl.clientWidth || innerWidth, H = splashEl.clientHeight || innerHeight;
+  const maxLen = Math.max(...streams.flatMap(x => x.words.map(f => f.w.length)), 1);
+  line.style.fontSize = Math.max(24, Math.min(H * 0.30, (W * 0.82) / (0.62 * maxLen))) + 'px';
   let at = 0;
   for (const stream of streams) {
     for (const f of stream.words) {
       splashTimers.push(setTimeout(() => {
         line.className = 'rsvp ' + f.cls;
-        line.style.fontSize = Math.max(24, Math.min(H * 0.30, (W * 0.82) / (0.62 * f.w.length))) + 'px';
         line.textContent = f.w;
       }, at));
       at += f.ms + (f.w.length > 8 ? 60 : 0);   // a beat longer on long words
