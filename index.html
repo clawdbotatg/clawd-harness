@@ -177,12 +177,11 @@
             opacity:1; transition:opacity .2s ease; }
   #splash[hidden] { display:none; }
   #splash.fade { opacity:0; pointer-events:none; }
-  .rsvp { max-width:88%; text-align:center; font-weight:600; line-height:1.35;
-          font-size:clamp(26px, 4.6vw, 64px); overflow-wrap:break-word; }
-  .rsvp.f-proj  { color:var(--ink); }
-  .rsvp.f-proj .f-mach { color:var(--local); }   /* which box it's on, in its own hue */
-  .rsvp.f-title { color:var(--accent); }
-  .rsvp.f-desc  { color:var(--dim); font-weight:500; font-size:clamp(22px, 3.6vw, 52px); }
+  .rsvp { text-align:center; font-weight:700; line-height:1.1; white-space:nowrap; }
+  .rsvp.f-proj  { color:var(--ink); }      /* project words: white */
+  .rsvp.f-mach  { color:var(--local); }    /* machine word: violet (fleet) */
+  .rsvp.f-title { color:var(--accent); }   /* session-title words: amber */
+  .rsvp.f-desc  { color:var(--dim); font-weight:500; }  /* description words: grey */
   /* Fixed chrome around the flashing line: the colored state box up top
      (working / agent running / needs you / idle — same hues as #ttystat) and
      one quiet meta line at the bottom. Both hold still for the whole show. */
@@ -4049,14 +4048,15 @@ function shortMachine(id) { return (id || '').replace(/^clawd-/, ''); }
 
 // -- splash: RSVP flash-read on session entry ---------------------------------
 // Covers the tty on every DELIBERATE entry (tab click, swipe cycle, deep-link,
-// dive-in) while the replay paints underneath. One big line of text, always in
-// the same spot, hard-cut through three color-coded frames — project (ink) →
-// session title (amber) → AI desc (dim) — then everything hides (~2s total).
-// A colored state box (top) and a one-line meta strip (bottom) hold still for
-// the whole show. Paints instantly from metadata the client already holds. Tap
-// dismisses early; the composer below is never covered, so typing works the
-// whole time. Reconnect re-subscribes and the auto-surfaced-question path
-// never call this — only real navigation does.
+// dive-in) while the replay paints underneath. ONE WORD at a time, huge (sized
+// to fill most of the window's width), always in the same spot, hard cuts —
+// project words in white, machine in violet, session-title words in amber,
+// desc words in grey — then everything hides (~200-250ms/word). A colored
+// state box (top) and a one-line meta strip (bottom) hold still for the whole
+// show. Paints instantly from metadata the client already holds. Tap dismisses
+// early; the composer below is never covered, so typing works the whole time.
+// Reconnect re-subscribes and the auto-surfaced-question path never call this
+// — only real navigation does.
 const splashEl = document.getElementById('splash');
 let splashTimers = [], splashCid = null, splashShownAt = 0;
 // One shared read of "what is this session doing right now" — feeds both the
@@ -4093,9 +4093,6 @@ function updateTtyStat() {
   ttystatLabel.textContent = st.word;
   ttystatEl.hidden = false;
 }
-// RSVP frame duration: scaled to how much there is to read, hard floor/ceiling
-// so a one-word project name doesn't blink past and a long desc doesn't park.
-const frameMs = t => Math.min(1100, 360 + t.trim().split(/\s+/).length * 95);
 function maybeSplash(cid) {
   if (!cid) return;
   const s = allSessions().find(x => x.cid === cid);
@@ -4126,25 +4123,29 @@ function maybeSplash(cid) {
   const line = document.createElement('div'); line.className = 'rsvp';
   splashEl.replaceChildren(stat, line, meta);
   splashEl.hidden = false; splashEl.classList.remove('fade');
-  // The flash frames — hard cuts, same spot: project → title → description.
-  const em = sessionEmoji(s);
-  const proj = splashProjectName(s, machine);
-  const frames = [];
-  if (em || proj) frames.push({ cls: 'f-proj', text: (em ? em + ' ' : '') + (proj || ''),
-                                mach: machine ? shortMachine(machine) : '' });
-  frames.push({ cls: 'f-title', text: s.title || 'untitled session' });
-  if (s.desc) frames.push({ cls: 'f-desc', text: s.desc });
+  // The flash: ONE WORD at a time, huge, same spot, hard cuts. Color says
+  // which stream the word belongs to — project white, title amber, desc dim
+  // (machine rides after the project in violet, fleet only).
+  const words = [];
+  const feedWords = (text, cls, ms) => {
+    for (const w of (text || '').trim().split(/[\s]+/)) if (w) words.push({ w, cls, ms });
+  };
+  for (const w of splashProjectName(s, machine).split(/[-_\s]+/))
+    if (w) words.push({ w, cls: 'f-proj', ms: 250 });
+  if (machine) words.push({ w: shortMachine(machine), cls: 'f-mach', ms: 250 });
+  feedWords(s.title || 'untitled session', 'f-title', 250);
+  feedWords(s.desc, 'f-desc', 200);
+  // Size each word to fill most of the width (monospace: ~.62em per char),
+  // capped by height so short words don't become billboards.
+  const W = splashEl.clientWidth || innerWidth, H = splashEl.clientHeight || innerHeight;
   let at = 0;
-  for (const f of frames) {
+  for (const f of words) {
     splashTimers.push(setTimeout(() => {
       line.className = 'rsvp ' + f.cls;
-      line.textContent = f.text;
-      if (f.mach) {                       // which box it's on, riding the project frame
-        const mm = document.createElement('span'); mm.className = 'f-mach';
-        mm.textContent = ' · ' + f.mach; line.appendChild(mm);
-      }
+      line.style.fontSize = Math.max(24, Math.min(H * 0.30, (W * 0.82) / (0.62 * f.w.length))) + 'px';
+      line.textContent = f.w;
     }, at));
-    at += frameMs(f.text);
+    at += f.ms + (f.w.length > 8 ? 60 : 0);   // a beat longer on long words
   }
   splashTimers.push(setTimeout(() => splashEl.classList.add('fade'), at),
                     setTimeout(() => hideSplash(true), at + 220));
