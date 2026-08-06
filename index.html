@@ -29,7 +29,10 @@
           --ok:#5fa563; --err:#d6564b; --tool:#9c8f54; --mono:ui-monospace,"SF Mono",Menlo,Monaco,"Courier New",monospace;
           /* local (private folder) projects: violet where clawdbotatg repos are amber,
              so you always know which world a card/session belongs to */
-          --local:#a78bfa; --local-dim:#4c3a78; --local-bg:#120c1e; }
+          --local:#a78bfa; --local-dim:#4c3a78; --local-bg:#120c1e;
+          /* cyan = background work: the turn ended but claude still has
+             background shells/agents running (status "background") */
+          --bgwork:#56b6c2; --bgwork-dim:#2b5a62; }
   * { box-sizing:border-box; }
   ::selection { background:var(--accent); color:#000; }
   html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
@@ -86,6 +89,7 @@
   #sessionbar .stab.local.active { border-color:var(--local); color:var(--local); background:var(--local-bg); }
   #sessionbar .stab .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }   /* square LED, matches sessions page */
   #sessionbar .stab .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
+  #sessionbar .stab .sdot.bgwork { background:var(--bgwork); animation:pulse 2.4s ease-in-out infinite; }   /* slow cyan pulse: humming in the background */
   #sessionbar .stab .sdot.blocked { background:var(--err); animation:pulse 1.1s ease-in-out infinite; }   /* needs-you: turn ended asking the human */
   #sessionbar .stab .sdot.dead { background:var(--err); }
   #sessionbar .stab .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
@@ -149,7 +153,8 @@
   .col.hidden { display:none; }
   /* tty activity box: an always-on glanceable answer to "is this session doing
      anything right now?" — amber pulse = turn in flight, violet pulse = a
-     subagent (Task/Agent tool) is running, solid amber = blocked on you,
+     subagent (Task/Agent tool) is running, slow cyan pulse = the turn ended
+     but background shells/agents are still running, solid amber = blocked on you,
      green = idle, red = dead. Lives at the head of the session-name row above
      the composer (never occludes the terminal). */
   #ttystat { display:flex; align-items:center; gap:7px; padding:3px 9px; border-radius:6px;
@@ -160,6 +165,8 @@
   #ttystat.working .dot { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
   #ttystat.agent   .dot { background:var(--local);  animation:pulse 1.1s ease-in-out infinite; }
   #ttystat.agent   { color:var(--local); border-color:var(--local-dim); }
+  #ttystat.bgwork  .dot { background:var(--bgwork); animation:pulse 2.4s ease-in-out infinite; }
+  #ttystat.bgwork  { color:var(--bgwork); border-color:var(--bgwork-dim); }
   #ttystat.waiting .dot { background:var(--accent); }
   #ttystat.waiting { color:var(--accent); border-color:var(--accent-dim); }
   #ttystat.idle    .dot { background:var(--ok); }
@@ -559,6 +566,7 @@
   .scard .row { display:flex; align-items:center; gap:9px; }
   .scard .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }   /* square LED */
   .scard .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
+  .scard .sdot.bgwork { background:var(--bgwork); animation:pulse 2.4s ease-in-out infinite; }
   .scard .sdot.blocked { background:var(--err); animation:pulse 1.1s ease-in-out infinite; }
   .scard .sdot.dead { background:var(--err); }
   .scard .stitle { font-weight:600; font-size:13px; flex:1; min-width:0;
@@ -763,7 +771,7 @@
   </main>
   <footer>
     <div id="descrow">
-      <div id="ttystat" hidden title="Is this session doing anything right now? amber = working, violet = a subagent is running, green = idle, red = dead"><span class="dot"></span><span id="ttystatlabel"></span></div>
+      <div id="ttystat" hidden title="Is this session doing anything right now? amber = working, violet = a subagent is running, cyan = background shells/agents still running, green = idle, red = dead"><span class="dot"></span><span id="ttystatlabel"></span></div>
       <div id="sessiondesc" title="AI-generated name for this session"></div>
       <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."></div>
     </div>
@@ -2835,7 +2843,7 @@ function renderSessionBar(view) {
                 (mOff ? ` — ${s._machine} is offline (cached tab; opens when it returns)` : '');
     tab.onclick = () => focusSession(s);   // may cross project/machine; cancels any queued new-session send
     const dot = document.createElement('span');
-    dot.className = 'sdot' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : '');
+    dot.className = 'sdot' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '');
     tab.appendChild(dot);
     const em = sessionEmoji(s);          // project badge: which project this tab belongs to
     if (em) {
@@ -4080,6 +4088,10 @@ function sessionState(s) {
   if (s.waiting || s.status === 'blocked') return { key: 'waiting', word: 'needs you' };
   if (s.busy && /^(Task|Agent)$/.test(s.tool || '')) return { key: 'agent', word: 'agent running' };
   if (s.busy) return { key: 'working', word: 'working' + (s.tool ? ' · ' + s.tool : '') };
+  // turn is over but claude still has background work running (server reads
+  // claude's own status file — see poll_bg in server.py): cyan, not green
+  if (s.bg) return { key: 'bgwork', word: s.bg === 'shell' ? 'background · shell running'
+                                                          : 'background · agents running' };
   return { key: 'idle', word: 'idle' };
 }
 function prettyModel(m) {
@@ -4241,12 +4253,12 @@ function allSessions() {
 }
 
 // The unified roster in rail order — importance bucket (needs-you → working →
-// idle → dead), then recency. Shared by the rail, session-cycling, and the boot
+// background → idle → dead), then recency. Shared by the rail, session-cycling, and the boot
 // default-landing so all three agree on "first = most important". Recency is
 // the SAME clock the tab age stamp shows (last human prompt, not last hook) —
 // sorting by lastActive while displaying promptedAt made the bar look unsorted.
 function sortedSessions() {
-  const rank = s => !s.alive ? 3 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : 2;
+  const rank = s => !s.alive ? 4 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : s.bg ? 2 : 3;
   const warmth = s => s.promptedAt || s.lastActive || 0;
   // 📌 pinned sessions are parked to-dos, not active work — they live on the pin
   // board only, so the tab strip, rail cycling and the boot landing all skip them.
@@ -4477,7 +4489,7 @@ function renderSessions() {
 
     const row = document.createElement('div'); row.className = 'row';
     const sdot = document.createElement('span');
-    sdot.className = 'sdot' + (!s.alive ? ' dead' : s.waiting ? ' blocked' : s.busy ? ' busy' : '');
+    sdot.className = 'sdot' + (!s.alive ? ' dead' : s.waiting ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '');
     const title = document.createElement('span');
     title.className = 'stitle'; title.textContent = s.title || 'new session';
     row.appendChild(sdot); row.appendChild(title);
@@ -4581,7 +4593,7 @@ function renderPinBoard() {
 
     const row = document.createElement('div'); row.className = 'row';
     const sdot = document.createElement('span');
-    sdot.className = 'sdot' + (!s.alive ? ' dead' : s.waiting ? ' blocked' : s.busy ? ' busy' : '');
+    sdot.className = 'sdot' + (!s.alive ? ' dead' : s.waiting ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '');
     row.appendChild(sdot);
     const pn = sessionProjectName(s), pe = sessionEmoji(s);
     if (pn || pe) {                       // which project this to-do belongs to

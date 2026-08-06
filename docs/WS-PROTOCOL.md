@@ -169,7 +169,7 @@ no-op that would leave the previous session's stream flowing (that's how
   // tab = AI 1-2 word label for the tab strip ("" until the namer runs; UI falls back to title)
   // promptedAt = epoch of the last HUMAN prompt (tab-strip age; 0 for pre-field sessions —
   // consumers fall back to lastActive, which every hook bumps incl. restart resumes)
-  "tool":<str|null>, "status":"blocked|working|idle", "digest":str,
+  "tool":<str|null>, "status":"blocked|working|background|idle", "bg":"shell|agent|", "digest":str,
   "blocked_on":str, "sessionId", "promptCount":int,
   "lastActive":float, "created":float, "alive":bool, "account":str,
   "pinned":float }
@@ -184,7 +184,17 @@ no-op that would leave the previous session's stream flowing (that's how
   exclusive) so a blocked session reads as "needs you", not "working".
 - `status` = the deterministic, LLM-free roll-up of `busy`/`waiting` for a
   controller's attention queue: `blocked` (needs a human now) > `working` (turn
-  in flight) > `idle`.
+  in flight) > `background` (turn over, but claude still has background work
+  running) > `idle`.
+- `bg` = what that background work is: `"shell"` (a `run_in_background` shell
+  is still running) or `"agent"` (background subagents keep claude internally
+  busy between turns); `""` when there is none. Detected by reading the status
+  claude itself publishes to `<config_dir>/sessions/<pid>.json` (undocumented —
+  the harness degrades to `""` if the file/field ever disappears). Jobs the
+  session's claude deliberately detached (`nohup … & disown`) are invisible
+  even to claude and are NOT reflected here. `bg` is only ever set while
+  `busy` is false; UIs should treat it as "quietly working — don't disturb,
+  but don't call it idle."
 - `digest` = a volatile one-line "what this session is doing right now" (LLM,
   refreshed on every `Stop` — see naming below). `""` until the first turn ends
   or if naming is unconfigured. The *stable* label is `title`/`desc`; the digest

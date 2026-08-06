@@ -1253,6 +1253,8 @@ class ClaudeSession:
         self._live_transcript = None             # live path from hooks; may rotate on compaction
         self.busy = False                        # working (turn in flight) vs idle
         self.waiting = False                      # blocked on an interactive prompt (permission / question)
+        self.bg = ""                              # background work while idle: "shell" | "agent" | "" (poll_bg)
+        self._bg_pending = ""                     # debounce: bg candidate seen on the previous sweep
         self.hook_count = 0                       # bumps on every hook — "did the turn progress?" probe
         self.last_bounce_rescue = 0.0             # cooldown anchor for the bounced-prompt rescue
         self.last_prompt = ""                     # most recent user prompt — redelivered if a limit wall eats it
@@ -1314,15 +1316,19 @@ class ClaudeSession:
     def meta(self):
         """Menu-level snapshot broadcast to every client."""
         # Deterministic, LLM-free status for the controller's attention queue:
-        # blocked (needs a human now) > working (turn in flight) > idle.
-        status = "blocked" if self.waiting else ("working" if self.busy else "idle")
+        # blocked (needs a human now) > working (turn in flight) > background
+        # (turn ended but claude still has background shells/agents running —
+        # see poll_bg) > idle.
+        status = "blocked" if self.waiting else \
+                 ("working" if self.busy else
+                  ("background" if self.bg else "idle"))
         return {"cid": self.cid, "pid": self.pid,
                 "title": self.title or self._fallback_title(),
                 "desc": self.desc or "",
                 "tab": self.tab or "",
                 "named": bool(self.title),
                 "busy": self.busy, "waiting": self.waiting, "tool": self.last_tool,
-                "status": status,
+                "status": status, "bg": self.bg,
                 "digest": self.digest or "",
                 "blocked_on": self.blocked_on or "",
                 "sessionId": self.session_id,
@@ -1335,6 +1341,43 @@ class ClaudeSession:
                 "pinned": self.pinned,
                 "model": self.model,
                 "ctxTokens": self.ctx_tokens}
+
+    def _bg_probe(self):
+        """One read-only look at claude's status file → "shell" | "agent" | "".
+        No state change — safe to call from any thread (the handoff guards use
+        it fresh, skipping poll_bg's UI debounce)."""
+        if not (self.alive and self.os_pid and not self.busy):
+            return ""
+        base = self.config_dir or os.path.expanduser("~/.claude")
+        try:
+            with open(os.path.join(base, "sessions",
+                                   f"{self.os_pid}.json")) as f:
+                st = (json.load(f) or {}).get("status")
+        except Exception:
+            return ""
+        return {"shell": "shell", "busy": "agent"}.get(st, "")
+
+    def poll_bg(self):
+        """Detect background work our Stop-driven `busy` can't see. Claude
+        publishes its own live status to <config_dir>/sessions/<pid>.json
+        (undocumented — always degrade): "shell" = a run_in_background shell
+        is still running after the turn ended; "busy" while OUR busy is False
+        = background agents (delegatedActive keeps claude "busy" between
+        turns). Truly-disowned jobs (nohup … & disown) are invisible even to
+        claude itself — out of scope. Turning ON needs two consecutive sweeps
+        agreeing (claude flips the file to idle at ~the same moment the Stop
+        hook fires, so a single racy read would flash a phantom 'background'
+        at every turn end); turning OFF is immediate. Returns True when
+        self.bg changed (caller broadcasts)."""
+        bg = self._bg_probe()
+        if bg and bg != self.bg and self._bg_pending != bg:
+            self._bg_pending = bg                # first sighting — arm only
+            return False
+        self._bg_pending = ""
+        if bg != self.bg:
+            self.bg = bg
+            return True
+        return False
 
     # -- lifecycle -------------------------------------------------------------
     def start(self):
@@ -2944,6 +2987,12 @@ class SessionManager:
                 continue
             if s.busy:
                 continue
+            if s.bg or s._bg_probe():
+                # Idle-looking but background shells/agents are still running —
+                # a respawn would kill them. Preemptive moves (evacuation,
+                # rebalance) aren't worth that; only the drained rescue above
+                # may still take the session.
+                continue
             # Preemptive evacuation: an idle session on a heating pool moves to
             # a COOL best before the wall, not after (never-see-a-rate-limit).
             if s.account in hot and best.name not in hot:
@@ -3235,6 +3284,8 @@ class SessionManager:
             self.broadcast_accounts()
             return                               # nowhere better to go — stay put
         self.broadcast_accounts()
+        if not drained and (s.bg or s._bg_probe()):
+            return                               # hot-move is optional; don't kill live background work
         why = ("plan drained; resuming under the fresh one" if drained else
                f"pool {pct:.0f}% hot — moving before the limit wall")
         self._handoff(s, best, why)
@@ -4504,6 +4555,10 @@ def watch_ui():
         if MGR.reconcile_projects():             # project list follows disk
             MGR.broadcast_projects()
         MGR.emoji_sweep()                        # self-throttled; badges one project at a time
+        # Background-work sweep: does claude have shells/agents still running
+        # behind an idle prompt? (poll_bg reads claude's own status file.)
+        if any([s.poll_bg() for s in list(MGR.sessions.values())]):
+            MGR.broadcast_sessions()
         for f in WATCH_FILES:
             try: m = f.stat().st_mtime
             except OSError: continue

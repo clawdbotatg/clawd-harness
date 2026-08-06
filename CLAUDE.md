@@ -174,7 +174,16 @@ user-facing overview; this file orients an agent working **on** the code.
 - **Hooks → turn signal:** injected via `claude --settings <generated>` →
   each hook `curl`s stdin to `POST /hook` → broadcasts `hook` events
   (Stop / UserPromptSubmit / Pre+PostToolUse / SessionStart+End). Drives the
-  working/idle pill. **Stop** carries `last_assistant_message`.
+  working/idle pill. **Stop** carries `last_assistant_message`. Stop alone
+  overstates idleness: claude can end the turn with background shells
+  (`run_in_background`) or background agents still running. `poll_bg` (watch_ui
+  sweep) reads the status claude itself publishes to
+  `<config_dir>/sessions/<pid>.json` — `"shell"` = bg shell; `"busy"` while our
+  Stop said idle = bg agents (`delegatedActive`) — and surfaces it as session
+  `status:"background"` + `bg:"shell"|"agent"` (cyan in the UI). Undocumented
+  file, so degrade to `""` on any read failure; truly-disowned `nohup` jobs are
+  invisible even to claude. bg also vetoes *optional* account moves
+  (hot-evacuation/rebalance) so a respawn never kills live background work.
 - **Images:** `POST /upload` saves to `.clawd-harness-uploads/`; the path is folded
   into the message and claude `Read`s it (vision works by file path).
 - **AI session naming:** optional. Set `BANKR_API_KEY` + `BANKR_BASE_URL` +
