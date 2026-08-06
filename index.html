@@ -147,6 +147,24 @@
   #left  { flex:1; position:relative; }   /* anchors the #splash overlay */
   #right { flex:1; background:var(--bg); }
   .col.hidden { display:none; }
+  /* tty activity box: an always-on glanceable answer to "is this session doing
+     anything right now?" — amber pulse = turn in flight, violet pulse = a
+     subagent (Task/Agent tool) is running, solid amber = blocked on you,
+     green = idle, red = dead. Lives at the head of the session-name row above
+     the composer (never occludes the terminal). */
+  #ttystat { display:flex; align-items:center; gap:7px; padding:3px 9px; border-radius:6px;
+             background:var(--raised); border:1px solid var(--edge); font-size:11px;
+             color:var(--dim); font-family:var(--mono); flex:0 0 auto; white-space:nowrap; }
+  #ttystat[hidden] { display:none; }
+  #ttystat .dot { width:10px; height:10px; border-radius:3px; background:var(--dim); flex:0 0 auto; }
+  #ttystat.working .dot { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
+  #ttystat.agent   .dot { background:var(--local);  animation:pulse 1.1s ease-in-out infinite; }
+  #ttystat.agent   { color:var(--local); border-color:var(--local-dim); }
+  #ttystat.waiting .dot { background:var(--accent); }
+  #ttystat.waiting { color:var(--accent); border-color:var(--accent-dim); }
+  #ttystat.idle    .dot { background:var(--ok); }
+  #ttystat.dead    .dot { background:var(--err); }
+  #ttystat.dead    { color:var(--err); border-color:var(--err); }
   /* Splash card: a ~3s "you are here" reminder that covers the tty on every
      deliberate session entry (tab click / swipe / deep-link) while the replay
      paints underneath — project, title, AI desc, live-state tldr, vitals.
@@ -157,24 +175,39 @@
             opacity:1; transition:opacity .35s ease; }
   #splash[hidden] { display:none; }
   #splash.fade { opacity:0; pointer-events:none; }
-  .splashcard { max-width:560px; width:100%; display:flex; flex-direction:column;
-                gap:12px; text-align:left; animation:splashin .18s ease-out; }
+  /* The card scales with the window: clamp(phone floor, viewport-driven, big-desktop
+     ceiling) on every size, so a 27" window reads from across the room while a
+     phone keeps roughly the original compact card. */
+  .splashcard { max-width:clamp(560px, 62vw, 980px); width:100%; display:flex; flex-direction:column;
+                gap:clamp(12px, 1.6vw, 26px); text-align:left; animation:splashin .18s ease-out; }
   @keyframes splashin { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
-  .splashcard .sp-proj { color:var(--dim); font-size:12px; text-transform:uppercase;
-                         letter-spacing:.14em; }
+  .splashcard .sp-proj { color:var(--ink); font-size:clamp(16px, 2.4vw, 36px); text-transform:uppercase;
+                         letter-spacing:.12em; font-weight:600; }
   .splashcard .sp-proj .sp-mach { color:var(--accent); text-transform:none; letter-spacing:normal; }
-  .splashcard .sp-title { color:var(--ink); font-size:22px; line-height:1.3; font-weight:600; }
-  .splashcard .sp-desc { color:var(--dim); font-size:14px; line-height:1.5; }
-  .splashcard .sp-digest { color:var(--ink); font-size:13px; line-height:1.5;
-                           border-left:2px solid var(--edge-hi); padding-left:10px; opacity:.85; }
-  .splashcard .sp-digest.asking { border-left-color:var(--accent); color:var(--accent); }
-  .splashcard .sp-vitals { display:flex; flex-wrap:wrap; gap:6px; margin-top:2px; }
-  .splashcard .sp-vitals span { border:1px solid var(--edge); border-radius:5px;
-                                padding:3px 9px; font-size:11px; color:var(--dim);
-                                background:var(--panel); white-space:nowrap; }
-  .splashcard .sp-vitals .sp-busy { color:var(--accent); border-color:var(--accent-dim); }
-  .splashcard .sp-vitals .sp-wait { color:#000; background:var(--accent); border-color:var(--accent); }
-  .splashcard .sp-vitals .sp-dead { color:var(--err); border-color:var(--err); }
+  .splashcard .sp-title { color:var(--ink); font-size:clamp(22px, 3.8vw, 56px); line-height:1.25; font-weight:600; }
+  .splashcard .sp-desc { color:var(--dim); font-size:clamp(14px, 2vw, 30px); line-height:1.5; }
+  /* The "what is going on RIGHT NOW" line — the flash-card payload: a colored
+     state word + the live digest sentence, big enough to be the second thing
+     your eye lands on after the title. Color = state at a glance. */
+  .splashcard .sp-now { font-size:clamp(15px, 2.1vw, 31px); line-height:1.45; color:var(--ink);
+                        margin-top:clamp(4px, .6vw, 10px); }
+  .splashcard .sp-now .dot { display:inline-block; width:.55em; height:.55em; border-radius:.15em;
+                             margin-right:.5em; background:var(--dim); }
+  .splashcard .sp-now .state { font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
+  .splashcard .sp-now.working .dot { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
+  .splashcard .sp-now.working .state { color:var(--accent); }
+  .splashcard .sp-now.agent .dot { background:var(--local); animation:pulse 1.1s ease-in-out infinite; }
+  .splashcard .sp-now.agent .state { color:var(--local); }
+  .splashcard .sp-now.waiting .dot { background:var(--accent); }
+  .splashcard .sp-now.waiting { color:var(--accent); }
+  .splashcard .sp-now.waiting .state { color:var(--accent); }
+  .splashcard .sp-now.idle .dot { background:var(--ok); }
+  .splashcard .sp-now.idle .state { color:var(--ok); }
+  .splashcard .sp-now.dead .dot { background:var(--err); }
+  .splashcard .sp-now.dead .state { color:var(--err); }
+  /* One quiet plain-text line for everything else — no boxes, no chip grid
+     (that read as a dashboard, not a flash card). */
+  .splashcard .sp-meta { color:var(--dim); font-size:clamp(12px, 1.4vw, 20px); }
   #term { flex:1; min-height:0; padding:6px 4px 0 8px; background:#000; touch-action:pan-y;
           overflow:hidden; }
   /* bottom-justify the TTY: the xterm grid fills #term (so the PTY size claude sees is the
@@ -731,6 +764,7 @@
   </main>
   <footer>
     <div id="descrow">
+      <div id="ttystat" hidden title="Is this session doing anything right now? amber = working, violet = a subagent is running, green = idle, red = dead"><span class="dot"></span><span id="ttystatlabel"></span></div>
       <div id="sessiondesc" title="AI-generated name for this session"></div>
       <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."></div>
     </div>
@@ -4004,6 +4038,7 @@ function subscribe(cid, opts) {
   hideThinking();
   if (activeType) { activeType.finish(); activeType = null; }
   highlightCard(cid);
+  updateTtyStat();             // activity box tracks the session we just switched to
   syncComposer();              // load this session's own draft (bring back text from before a reload)
   hsend({ type: 'subscribe', cid });
   armHelloWatch(cid);          // hello = the subscribe ACK; re-send if it never lands
@@ -4025,8 +4060,19 @@ function shortMachine(id) { return (id || '').replace(/^clawd-/, ''); }
 // whole time. Reconnect re-subscribes and the auto-surfaced-question path
 // never call this — only real navigation does.
 const splashEl = document.getElementById('splash');
-const SPLASH_MS = 3000;
+const SPLASH_MS = 2100;                                  // quick read, not a lingering dashboard
 let splashTimers = [], splashCid = null, splashShownAt = 0;
+// One shared read of "what is this session doing right now" — feeds both the
+// splash's NOW line and the persistent #ttystat activity box. `agent` = a turn
+// is in flight AND its current tool is a subagent (Task/Agent) — i.e. work is
+// delegated to a background agent rather than the session's own hands.
+function sessionState(s) {
+  if (!s.alive) return { key: 'dead', word: 'dead' };
+  if (s.waiting || s.status === 'blocked') return { key: 'waiting', word: 'needs you' };
+  if (s.busy && /^(Task|Agent)$/.test(s.tool || '')) return { key: 'agent', word: 'agent running' };
+  if (s.busy) return { key: 'working', word: 'working' + (s.tool ? ' · ' + s.tool : '') };
+  return { key: 'idle', word: 'idle' };
+}
 function prettyModel(m) {
   // 'claude-sonnet-4-5-20250929' → 'sonnet 4.5'
   return (m || '').replace(/^claude-/, '').replace(/-\d{8}$/, '')
@@ -4058,29 +4104,39 @@ function paintSplash(s) {
   if (proj.textContent.trim()) card.appendChild(proj);
   add('sp-title', s.title || 'untitled session');
   add('sp-desc', s.desc);
-  const ask = s.blocked_on || '';
-  add('sp-digest' + (ask ? ' asking' : ''), ask ? '🙋 ' + ask : (s.digest || ''));
-  const vit = document.createElement('div'); vit.className = 'sp-vitals';
-  const chip = (text, cls) => {
-    const c = document.createElement('span'); if (cls) c.className = cls;
-    c.textContent = text; vit.appendChild(c);
-  };
+  // The NOW line — state word + what's actually happening, colored by state.
+  // A blocked session leads with its open question; otherwise the digest.
+  const st = sessionState(s);
+  const now = document.createElement('div'); now.className = 'sp-now ' + st.key;
+  const dot = document.createElement('span'); dot.className = 'dot'; now.appendChild(dot);
+  const sw = document.createElement('span'); sw.className = 'state'; sw.textContent = st.word; now.appendChild(sw);
+  const what = s.blocked_on || s.digest || '';
+  if (what) now.appendChild(document.createTextNode(' — ' + what));
+  card.appendChild(now);
+  // Everything else is one quiet line, not a chip grid.
+  const bits = [];
   const model = prettyModel(s.model);
-  if (model) chip(model);
+  if (model) bits.push(model);
   if (s.ctxTokens > 0)                                   // 200k window assumed
-    chip('ctx ' + Math.min(100, Math.round(s.ctxTokens / 2000)) + '% · '
-         + Math.round(s.ctxTokens / 1000) + 'k');
-  if (!s.alive) chip('dead', 'sp-dead');
-  else if (s.waiting || s.status === 'blocked') chip('needs you', 'sp-wait');
-  else if (s.busy) chip('working…', 'sp-busy');
-  else chip('idle');
+    bits.push('ctx ' + Math.min(100, Math.round(s.ctxTokens / 2000)) + '%');
   if (s.account && s.account !== 'default')
-    chip('🔑 ' + acctDisplay(machine || 'local', s.account));
+    bits.push('🔑 ' + acctDisplay(machine || 'local', s.account));
   const age = fmtAge(s.promptedAt || s.lastActive);
-  if (age) chip((s.promptCount || 0) + ' prompts · ' + age + ' ago');
-  card.appendChild(vit);
+  if (age) bits.push((s.promptCount || 0) + ' prompts · ' + age + ' ago');
+  add('sp-meta', bits.join('  ·  '));
   splashEl.replaceChildren(card);
   return card;
+}
+// -- tty activity box: the persistent, glanceable version of the NOW line -----
+const ttystatEl = document.getElementById('ttystat');
+const ttystatLabel = document.getElementById('ttystatlabel');
+function updateTtyStat() {
+  const s = currentCid && allSessions().find(x => x.cid === currentCid);
+  if (!s) { ttystatEl.hidden = true; return; }
+  const st = sessionState(s);
+  ttystatEl.className = st.key;
+  ttystatLabel.textContent = st.word;
+  ttystatEl.hidden = false;
 }
 function maybeSplash(cid) {
   if (!cid) return;
@@ -4297,6 +4353,7 @@ function highlightCard(cid) {
 let sessionsRepaintDeferred = false; // a broadcast landed while the machine picker had focus
 function renderSessions() {
   refreshSplash();   // fresher session metadata → repaint an on-screen splash card
+  updateTtyStat();   // …and the tty activity box (a sessions frame follows every hook)
   // A repaint tears down sessionsEl wholesale, which destroys the machine
   // <select> mid-pick (closes the native dropdown, steals focus). While focus
   // is inside the picker row, defer metadata-driven repaints; the row's
