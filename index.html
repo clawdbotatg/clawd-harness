@@ -2462,12 +2462,21 @@ function handleJson(m) {
       }
     }
   } else if (m.type === 'transcript') {
+    // A user prompt visible in the transcript IS delivery confirmation — including
+    // the history replay after a reload, which is exactly when the UserPromptSubmit
+    // hook frame may have fired into a dead socket and never cleared the outbox.
+    // History events go through the last-one-wins debounce (armHistoryConfirm);
+    // live ones are genuinely new arrivals and confirm immediately.
+    if (m.event && (m.event.role === 'user' || m.event.role === 'command')) {
+      if (m.history) armHistoryConfirm(m.cid, m.event.text);
+      else landedConfirmsOutbox(m.cid, m.event.text);
+    }
     if (m.cid && m.cid !== currentCid) return;        // belongs to a backgrounded session
     renderEvent(m.event, !m.history);   // live events type out; history replay renders instantly
   } else if (m.type === 'hook') {
     // claude received the prompt → the outbox copy did its job; drop it (any session,
     // even one you've navigated away from, so it can't resurface as stale text later).
-    if (m.event === 'UserPromptSubmit') clearOutbox(m.cid);
+    if (m.event === 'UserPromptSubmit') outboxDelivered(m.cid);
     if (m.cid === currentCid) handleHook(m);          // drive the pill only for the viewed session
     // (menu badges update via the sessions broadcast that follows each hook)
   } else if (m.type === 'exit') {
@@ -5097,6 +5106,46 @@ function currentDraftId() {
 const outboxKey = (cid) => 'cc_outbox:' + (cid || '_');
 function stashOutbox(cid, text) { try { if (cid && text) sessionStorage.setItem(outboxKey(cid), text); } catch {} }
 function clearOutbox(cid) { try { sessionStorage.removeItem(outboxKey(cid)); } catch {} }
+// The prompt for `cid` is confirmed inside claude: drop the outbox copy, and if it
+// had already been restored into the composer (a reload or a quick view-hop raced
+// the confirmation), take it back out of the box and the per-cid draft too — but
+// only an EXACT copy, so an edit the user made on top is never destroyed.
+function outboxDelivered(cid) {
+  let stash = '';
+  try { stash = sessionStorage.getItem(outboxKey(cid)) || ''; } catch {}
+  clearOutbox(cid);
+  if (!stash) return;
+  const st = stash.trim();
+  try {  // a context switch may have promoted the restored stash into the draft — scrub the exact copy
+    if ((localStorage.getItem(draftKey(cid)) || '').trim() === st) localStorage.removeItem(draftKey(cid));
+  } catch {}
+  if (activeDraftId === cid && box.value.trim() === st) { box.value = ''; autosizeBox(); }
+}
+// A user/command event landed in session `cid`'s transcript. If it's OUR unconfirmed
+// send, that's delivery proof even when the UserPromptSubmit hook frame was lost to a
+// reload. startsWith covers image sends (paths appended to the typed text) and light
+// server-side rewrites.
+function landedConfirmsOutbox(cid, landed) {
+  let stash = '';
+  try { stash = sessionStorage.getItem(outboxKey(cid)) || ''; } catch {}
+  if (!stash) return;
+  const lt = (landed || '').trim(), st = stash.trim();
+  if (lt === st || (st && lt.startsWith(st))) outboxDelivered(cid);
+}
+// History replay guard: only the LAST replayed user event may confirm delivery.
+// The replay is ~150 events deep and can contain OLD prompts whose text equals the
+// stash (quick-chips repeat: "keep going" ×N) — matching any of them would drop a
+// genuinely-lost send. If our prompt WAS delivered it is the most recent user
+// message, i.e. the last user event of the burst. Debounced last-one-wins: each
+// history user event overwrites the candidate; when the burst goes quiet, judge it.
+const histConfirm = {};   // cid → { text, timer }
+function armHistoryConfirm(cid, text) {
+  try { if (!sessionStorage.getItem(outboxKey(cid))) return; } catch {}
+  const h = histConfirm[cid] || (histConfirm[cid] = {});
+  h.text = text;
+  clearTimeout(h.timer);
+  h.timer = setTimeout(() => { delete histConfirm[cid]; landedConfirmsOutbox(cid, h.text); }, 800);
+}
 // Text typed on the sessions list (no session yet) — survives reload before the
 // new session even exists; recovered into the new-session composer. Per-tab too
 // (sessionStorage), for the same reason as the outbox above.
