@@ -292,9 +292,10 @@ SELF_PID = "self"
 # NOTE: an account dir's absolute path keys its Keychain item — never move it.
 ACCOUNTS_DIR = Path(os.environ.get("CLAWD_ACCOUNTS_DIR",
                                    str(Path.home() / ".clawd-accounts")))
-# Claude Code's production OAuth client id (public; used only for token refresh)
-OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+# NOTE: the harness deliberately has NO token-endpoint client anymore — all
+# rotation goes through the real claude CLI (_ping_rotate). Families rotated
+# only by direct token-endpoint calls were server-side expired ~4 weeks after
+# /login (2026-08-07 postmortem: sub3, sub4).
 OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"     # UNDOCUMENTED — degrade gracefully
 OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"  # UNDOCUMENTED — degrade gracefully
 OAUTH_BETA      = "oauth-2025-04-20"
@@ -498,77 +499,6 @@ def _read_oauth_creds(config_dir):
     return _read_oauth_creds_ex(config_dir)[0]
 
 
-def _write_oauth_creds(config_dir, blob):
-    """Write the credential blob back to wherever it currently lives —
-    the macOS Keychain when the Keychain holds this account, else the
-    Linux-style .credentials.json (atomic replace, 0600). Best-effort bool;
-    never creates a store that didn't exist (no shadowing claude's own)."""
-    payload = json.dumps(blob)
-    try:
-        r = subprocess.run(["security", "find-generic-password",
-                            "-s", _keychain_service(config_dir),
-                            "-a", os.environ.get("USER", "")],
-                           capture_output=True, timeout=10)
-        in_keychain = r.returncode == 0
-    except Exception:
-        in_keychain = False
-    if in_keychain:
-        try:
-            r = subprocess.run(["security", "add-generic-password", "-U",
-                                "-a", os.environ.get("USER", ""),
-                                "-s", _keychain_service(config_dir),
-                                "-w", payload],
-                               capture_output=True, text=True, timeout=10)
-            return r.returncode == 0
-        except Exception:
-            return False
-    path = Path(config_dir or os.path.expanduser("~/.claude")) / ".credentials.json"
-    if not path.exists():
-        return False
-    try:
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(payload)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-        return True
-    except OSError:
-        return False
-
-
-def _persist_refreshed(config_dir, consumed_refresh, resp):
-    """After a refresh-grant call, write the new token(s) back to the
-    credential store. If Anthropic ROTATES refresh tokens on use, the grant
-    we just consumed is dead and discarding its replacement kills the login
-    the next time anyone tries to refresh — the prime suspect for idle
-    accounts dying over and over while the busy one survived (claude itself
-    persists its own refreshes; the poller used to throw them away — see
-    EXPECTATIONS.md). Skips the write when the store changed under us
-    (claude rotated concurrently — its blob is newer than what we consumed)."""
-    fresh_access = resp.get("access_token")
-    if not fresh_access:
-        return
-    blob = _read_oauth_creds(config_dir) or {}
-    oa = blob.get("claudeAiOauth")
-    if not isinstance(oa, dict) or (oa.get("refreshToken") or "") != consumed_refresh:
-        # store moved on — leave it be, but say so: this is the signature of
-        # a concurrent rotation race (claude and the poller consuming the
-        # same grant), which silent-skipping would hide from a post-mortem
-        _clog(config_dir, "SKIPPED persisting a refresh — the store rotated "
-                          "concurrently (another consumer of this grant beat us)")
-        return
-    oa["accessToken"] = fresh_access
-    if isinstance(resp.get("expires_in"), (int, float)):
-        oa["expiresAt"] = int((time.time() + resp["expires_in"]) * 1000)
-    rotated = bool(resp.get("refresh_token")) \
-        and resp["refresh_token"] != consumed_refresh
-    if rotated:
-        oa["refreshToken"] = resp["refresh_token"]
-    ok = _write_oauth_creds(config_dir, blob)
-    _clog(config_dir, "refreshed access token persisted"
-          + (" — refresh token ROTATED and persisted" if rotated else "")
-          + ("" if ok else " — WRITE FAILED (login will die at next refresh!)"))
-
-
 def _has_creds(config_dir):
     """True iff a usable credential blob exists for this account dir RIGHT
     NOW. The pre-spawn gate: a session must never open onto a login screen."""
@@ -701,31 +631,6 @@ def _clog(config_dir, msg):
           f"{time.strftime('%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 
-def _claude_ua():
-    """User-Agent for the OAuth token endpoint, mimicking the claude CLI's
-    own (`claude-cli/<version> (external, cli)`). REQUIRED: the endpoint
-    rate-limits by client identity — curl's default UA gets a blanket 429
-    `rate_limit_error` on EVERY request (no Retry-After; 2026-07-09→11 every
-    refresh on this box failed that way, starving the router of usage data),
-    while the claude-cli UA succeeds immediately. Version read from the real
-    binary once so the UA tracks upgrades; any failure falls back to a
-    known-good pin."""
-    ua = getattr(_claude_ua, "_cached", None)
-    if ua:
-        return ua
-    ver = "2.1.207"
-    try:
-        out = subprocess.run([CLAUDE_BIN, "--version"], capture_output=True,
-                             text=True, timeout=10).stdout.strip().split()
-        if out and out[0][0:1].isdigit():
-            ver = out[0]
-    except Exception:
-        pass
-    ua = f"claude-cli/{ver} (external, cli)"
-    _claude_ua._cached = ua
-    return ua
-
-
 def _live_claude_dirs():
     """Config dirs of every claude process running on this host — OURS OR
     NOT (a hand-launched terminal claude counts). Any such process holds,
@@ -759,38 +664,38 @@ def _norm_config_dir(config_dir):
         (config_dir or "~/.claude").rstrip("/")))
 
 
-def _refresh_grant(refresh):
-    """POST a refresh grant via CURL and return (http_status, body_dict).
-
-    Curl, not urllib, ON PURPOSE: the token endpoint (platform.claude.com)
-    sits behind Cloudflare bot protection that 403s Python's TLS signature
-    with 'error code: 1010' — every urllib refresh in this file's history
-    FAILED AT THE EDGE without ever reaching Anthropic, and the harness
-    misread that as revoked credentials (the 'idle logins keep dying'
-    epidemic — see EXPECTATIONS.md 2026-07-09). Curl's signature passes
-    the edge, but the app then rate-limits curl's DEFAULT User-Agent —
-    hence _claude_ua(). The token travels via stdin so it never appears
-    in `ps` output."""
+def _ping_rotate(config_dir):
+    """Rotate an idle account's OAuth tokens by letting the REAL client do
+    it: a minimal `claude -p` under the config dir refreshes and persists
+    its own store entry exactly like interactive use, and holds nothing in
+    memory afterwards (the process exits). This RETIRED the hand-rolled
+    curl refresh grant (2026-08-07): families rotated only by the bare
+    token endpoint were server-side expired ~4 weeks after /login even
+    though every rotation 'succeeded' — see the call site in _fetch_usage.
+    (Historical lore from the curl era, kept for future archaeologists:
+    platform.claude.com sits behind Cloudflare bot protection that 403s
+    Python's urllib TLS signature with 'error code: 1010', and the app
+    layer blanket-429s curl's default User-Agent — any future direct call
+    to the token endpoint must be curl with claude-cli's own UA string.)
+    True iff the ping exited 0. Caller must hold the per-account refresh
+    flock; the same env scrub as session spawn keeps the child on the
+    subscription and out of embedded mode. For the default account
+    CLAUDE_CONFIG_DIR must be UNSET (the 2026-07-09 trap: shells on this
+    host export it pointing at a harness account)."""
+    env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    else:
+        env.pop("CLAUDE_CONFIG_DIR", None)
     try:
         r = subprocess.run(
-            ["curl", "-sS", "-m", "15", "-w", "\n%{http_code}",
-             "-X", "POST", OAUTH_TOKEN_URL,
-             "-H", "Content-Type: application/json",
-             "-H", f"User-Agent: {_claude_ua()}",
-             "--data-binary", "@-"],
-            input=json.dumps({"grant_type": "refresh_token",
-                              "refresh_token": refresh,
-                              "client_id": OAUTH_CLIENT_ID}),
-            capture_output=True, text=True, timeout=25)
-        body_txt, _, status_txt = (r.stdout or "").rpartition("\n")
-        status = int(status_txt) if status_txt.strip().isdigit() else None
-        try:
-            body = json.loads(body_txt)
-        except ValueError:
-            body = {}
-        return status, body
+            [CLAUDE_BIN, "-p", "--output-format", "text",
+             "reply with the single word OK"],
+            env=env, stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, timeout=90, cwd=os.path.expanduser("~"))
+        return r.returncode == 0
     except Exception:
-        return None, {}
+        return False
 
 
 def _fetch_profile(tok):
@@ -831,8 +736,8 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
     None when it's expired — for accounts whose grant a live claude process
     may also hold (two consumers of one rotating grant can kill the family).
     `tok_cache` (a mutable dict) keeps a refreshed access token in memory
-    across polls (plus the 429 back-off horizon); refreshed tokens are
-    written back to the credential store via _persist_refreshed."""
+    across polls (plus the 429 back-off horizon); rotation happens via
+    _ping_rotate — the real client persists its own tokens to the store."""
     blob, definitive = _read_oauth_creds_ex(config_dir)
     oauth = (blob or {}).get("claudeAiOauth") or {}
     access, refresh = oauth.get("accessToken"), oauth.get("refreshToken")
@@ -914,34 +819,45 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
                     if tok_cache is not None:
                         tok_cache["access"] = a2
             if code != 200:
-                rstatus, tokresp = _refresh_grant(refresh)
-                fresh = tokresp.get("access_token")
-                if fresh:
-                    if tok_cache is not None:
-                        tok_cache["access"] = fresh
-                    # write the new token(s) back — a consumed grant's rotated
-                    # replacement must never be discarded
-                    _persist_refreshed(config_dir, refresh, tokresp)
-                    code, usage, retry_after = call(fresh)
-                    if code == 200:
-                        good = fresh
-                elif rstatus in (400, 401):
-                    # the OAuth service itself rejected the grant — the one and
-                    # only signal that a re-sign-in is genuinely needed
-                    _clog(config_dir, f"refresh REJECTED by the OAuth service "
-                                      f"(HTTP {rstatus} {json.dumps(tokresp)[:120]}) "
-                                      "— this login needs a re-sign-in")
-                    return AUTH_FAIL
-                else:
-                    # edge block / rate limit / outage — NOT a dead login. Back
-                    # off here too: retrying a 429ing token endpoint every 15s
-                    # poller cycle keeps its limiter hot and the refresh never
-                    # succeeds.
+                # Rotate via the REAL client, never a hand-rolled refresh
+                # grant (2026-08-07): idle logins whose families only ever
+                # saw the bare token endpoint died with invalid_grant
+                # "Refresh token expired" ~4 weeks after /login, one per
+                # day in login order (sub3 08-06, sub4 08-07, on rotations
+                # this code had "persisted" successfully hours earlier),
+                # while logins with real claude traffic (default,
+                # austinmax) sailed past 30 days. The ping persists its
+                # own rotation to the store; re-read it for the token.
+                if _ping_rotate(config_dir):
+                    blob3, _ = _read_oauth_creds_ex(config_dir)
+                    oa3 = (blob3 or {}).get("claudeAiOauth") or {}
+                    fresh = oa3.get("accessToken")
+                    if fresh:
+                        if tok_cache is not None:
+                            tok_cache["access"] = fresh
+                        code, usage, retry_after = call(fresh)
+                        if code == 200:
+                            good = fresh
+                if code != 200:
+                    # Ping failed or its token was still refused. A blob the
+                    # store positively holds WITHOUT tokens is claude's own
+                    # wipe — its refresh was rejected, the one true
+                    # re-sign-in signal. Anything else (network, endpoint
+                    # outage, locked keychain) is transient: back off so a
+                    # hot limiter isn't re-poked every poller cycle.
+                    blob3, definitive3 = _read_oauth_creds_ex(config_dir)
+                    oa3 = (blob3 or {}).get("claudeAiOauth") or {}
+                    if definitive3 and not (oa3.get("accessToken")
+                                            or oa3.get("refreshToken")):
+                        _clog(config_dir, "refresh ping failed and the client "
+                                          "wiped the blob — this login needs "
+                                          "a re-sign-in")
+                        return AUTH_FAIL
                     if tok_cache is not None:
                         tok_cache["no_poll_until"] = time.time() + 600
-                    _clog(config_dir, f"refresh blocked in transit "
-                                      f"(HTTP {rstatus}) — transient; keeping "
-                                      "the last snapshot, next attempt in 10 min")
+                    _clog(config_dir, "refresh ping failed but the credential "
+                                      "is intact — transient; keeping the last "
+                                      "snapshot, next attempt in 10 min")
                     return None
         finally:
             lockf.close()                        # closing releases the flock
