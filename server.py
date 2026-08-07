@@ -340,6 +340,12 @@ SEND_WATCHDOG = float(os.environ.get("SEND_WATCHDOG", "10"))
 # (incl. same-day resets) from churning respawns.
 SUB_REBALANCE = os.environ.get("SUB_REBALANCE", "1") != "0"
 SUB_REBALANCE_MARGIN = float(os.environ.get("SUB_REBALANCE_MARGIN", "21600"))  # s
+# After a session's claude exits, its final token rotation may still be
+# settling (or, if it was killed mid-refresh, stranded server-side) — the
+# poller must not consume that account's refresh grant until the dust
+# settles. Replaying a superseded refresh token REVOKES THE WHOLE FAMILY
+# (how sub3 died 2026-08-06; ef/sub2 died the same way via VM custody).
+SUB_REFRESH_EXIT_GRACE = float(os.environ.get("SUB_REFRESH_EXIT_GRACE", "900"))  # s
 # NEVER SEE A RATE LIMIT: routing avoids pools at HOT (default 97% of the most-
 # constrained window — usually the fast-burning 5h session window), not just at
 # EXHAUSTED (99). The number is Austin's: spend the soonest-resetting pool down
@@ -708,6 +714,39 @@ def _claude_ua():
     return ua
 
 
+def _live_claude_dirs():
+    """Config dirs of every claude process running on this host — OURS OR
+    NOT (a hand-launched terminal claude counts). Any such process holds,
+    and lazily renews, that account's rotating refresh grant; a second
+    consumer replaying the same grant trips OAuth reuse detection and
+    revokes the whole token family. A claude with no CLAUDE_CONFIG_DIR in
+    its env is on the default account (~/.claude). Empty set on any scan
+    failure — the flock and exit-grace guards still stand behind this."""
+    dirs = set()
+    try:
+        out = subprocess.run(["ps", "axeww", "-o", "pid=,command="],
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return dirs
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2:
+            continue
+        exe = parts[1].split(None, 1)[0]
+        if os.path.basename(exe) != "claude":
+            continue
+        m = re.search(r"CLAUDE_CONFIG_DIR=(\S+)", parts[1])
+        d = m.group(1) if m else "~/.claude"
+        dirs.add(os.path.normpath(os.path.expanduser(d.rstrip("/"))))
+    return dirs
+
+
+def _norm_config_dir(config_dir):
+    """One spelling for an account's config dir ('' = default ~/.claude)."""
+    return os.path.normpath(os.path.expanduser(
+        (config_dir or "~/.claude").rstrip("/")))
+
+
 def _refresh_grant(refresh):
     """POST a refresh grant via CURL and return (http_status, body_dict).
 
@@ -833,34 +872,67 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
         return None                              # stale, not dead: a live claude
                                                  # owns this grant and will renew it
     if needs_auth and refresh:
-        rstatus, tokresp = _refresh_grant(refresh)
-        fresh = tokresp.get("access_token")
-        if fresh:
-            if tok_cache is not None:
-                tok_cache["access"] = fresh
-            # write the new token(s) back — a consumed grant's rotated
-            # replacement must never be discarded
-            _persist_refreshed(config_dir, refresh, tokresp)
-            code, usage, retry_after = call(fresh)
-            if code == 200:
-                good = fresh
-        elif rstatus in (400, 401):
-            # the OAuth service itself rejected the grant — the one and only
-            # signal that a re-sign-in is genuinely needed
-            _clog(config_dir, f"refresh REJECTED by the OAuth service "
-                              f"(HTTP {rstatus} {json.dumps(tokresp)[:120]}) "
-                              "— this login needs a re-sign-in")
-            return AUTH_FAIL
-        else:
-            # edge block / rate limit / outage — NOT a dead login. Back off
-            # here too: retrying a 429ing token endpoint every 15s poller
-            # cycle keeps its limiter hot and the refresh never succeeds.
-            if tok_cache is not None:
-                tok_cache["no_poll_until"] = time.time() + 600
-            _clog(config_dir, f"refresh blocked in transit (HTTP {rstatus}) "
-                              "— transient; keeping the last snapshot, "
-                              "next attempt in 10 min")
+        # Cross-process refresh lock (same path cont's keepalive takes):
+        # exactly one deliberate refresher per grant at a time. A busy lock
+        # means someone else is rotating this grant RIGHT NOW — defer; their
+        # rotation lands in the store for our next poll. Racing them would
+        # replay a superseded refresh token and revoke the family.
+        lock_path = os.path.join(_norm_config_dir(config_dir), ".refresh.lock")
+        try:
+            lockf = open(lock_path, "w")
+            fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            _clog(config_dir, "refresh deferred — another process holds the "
+                              "refresh lock; keeping the last snapshot")
             return None
+        try:
+            # Double-check under the lock: a sibling may have rotated while
+            # we decided. Re-read the store and use ITS tokens — a now-valid
+            # access token means no refresh is needed at all, and if we do
+            # refresh, we must consume the lineage tip, not our snapshot.
+            blob2, _ = _read_oauth_creds_ex(config_dir)
+            oa2 = (blob2 or {}).get("claudeAiOauth") or {}
+            a2, e2 = oa2.get("accessToken"), oa2.get("expiresAt")
+            refresh = oa2.get("refreshToken") or refresh
+            if a2 and a2 not in tries and isinstance(e2, (int, float)) \
+                    and e2 / 1000 > time.time() + 60:
+                code, usage, retry_after = call(a2)
+                if code == 200:
+                    good = a2
+                    if tok_cache is not None:
+                        tok_cache["access"] = a2
+            if code != 200:
+                rstatus, tokresp = _refresh_grant(refresh)
+                fresh = tokresp.get("access_token")
+                if fresh:
+                    if tok_cache is not None:
+                        tok_cache["access"] = fresh
+                    # write the new token(s) back — a consumed grant's rotated
+                    # replacement must never be discarded
+                    _persist_refreshed(config_dir, refresh, tokresp)
+                    code, usage, retry_after = call(fresh)
+                    if code == 200:
+                        good = fresh
+                elif rstatus in (400, 401):
+                    # the OAuth service itself rejected the grant — the one and
+                    # only signal that a re-sign-in is genuinely needed
+                    _clog(config_dir, f"refresh REJECTED by the OAuth service "
+                                      f"(HTTP {rstatus} {json.dumps(tokresp)[:120]}) "
+                                      "— this login needs a re-sign-in")
+                    return AUTH_FAIL
+                else:
+                    # edge block / rate limit / outage — NOT a dead login. Back
+                    # off here too: retrying a 429ing token endpoint every 15s
+                    # poller cycle keeps its limiter hot and the refresh never
+                    # succeeds.
+                    if tok_cache is not None:
+                        tok_cache["no_poll_until"] = time.time() + 600
+                    _clog(config_dir, f"refresh blocked in transit "
+                                      f"(HTTP {rstatus}) — transient; keeping "
+                                      "the last snapshot, next attempt in 10 min")
+                    return None
+        finally:
+            lockf.close()                        # closing releases the flock
     if code == 401 or (not tries and code is None):
         return AUTH_FAIL                         # refused even after refresh,
                                                  # or no usable token at all
@@ -1774,6 +1846,10 @@ class ClaudeSession:
             if self._onboard_deadline:
                 self._scan_for_onboarding(chunk)
         self.alive = False
+        # Stamp the account: the poller must not consume this grant for
+        # SUB_REFRESH_EXIT_GRACE — the dying claude's last token rotation
+        # may still be settling (or stranded, if it was killed mid-refresh).
+        self.manager.acct_last_exit[self.account or "default"] = time.time()
         print(f"[session {self.cid[:8]}] PTY closed / claude exited", flush=True)
         # An account handoff replaces this object under the same cid — the
         # dying child's exit must not paint "session ended" over its successor.
@@ -2134,6 +2210,7 @@ class SessionManager:
         self.sessions = {}                       # cid -> ClaudeSession
         self.accounts = {}                       # name -> Account (subscriptions)
         self.active_account = "default"          # new sessions spawn under this
+        self.acct_last_exit = {}                 # account -> ts of last claude exit
         self.last_switch_at = 0.0                # debounce anchor for auto-switch
         self._poll_now = threading.Event()       # kick the usage poller early
         self.lock = threading.RLock()
@@ -2848,6 +2925,19 @@ class SessionManager:
                 with self.lock:
                     live = {s.account or "default"
                             for s in self.sessions.values() if s.alive}
+                    last_exit = dict(self.acct_last_exit)
+                # ...and claude processes we did NOT spawn hold grants too
+                # (a hand-launched terminal claude, cont's keepalive ping, a
+                # ceremony left open). Scan the whole host, and also honor a
+                # grace window after any session on the account exits — its
+                # final rotation may still be settling. sub3 died 2026-08-06
+                # because this gate only knew about our own live sessions.
+                proc_dirs = _live_claude_dirs()
+                def _grant_free(a):
+                    return (a.name not in live
+                            and _norm_config_dir(a.config_dir) not in proc_dirs
+                            and now - last_exit.get(a.name, 0)
+                                > SUB_REFRESH_EXIT_GRACE)
                 # Same-org logins share one pool AND one endpoint rate
                 # limiter — polling each config dir separately multi-taps the
                 # limiter for identical numbers (three EF seats = 3 hits per
@@ -2863,7 +2953,7 @@ class SessionManager:
                     got = list(ex.map(
                         lambda a: _fetch_usage(a.config_dir, a.tok,
                                                want_ident=True,
-                                               allow_refresh=a.name not in live),
+                                               allow_refresh=_grant_free(a)),
                         reps))
                 for a, res in zip(reps, got):
                     sibs = [m for m in groups[a.org or f"~{a.name}"]
