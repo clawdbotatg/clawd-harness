@@ -30,6 +30,9 @@
           /* local (private folder) projects: violet where clawdbotatg repos are amber,
              so you always know which world a card/session belongs to */
           --local:#a78bfa; --local-dim:#4c3a78; --local-bg:#120c1e;
+          /* the second engine: codex sessions read green against claude's amber,
+             so which CLI you're talking to is never a guess */
+          --codex:#4fb477;
           /* cyan = background work: the turn ended but claude still has
              background shells/agents running (status "background") */
           --bgwork:#56b6c2; --bgwork-dim:#2b5a62; }
@@ -594,6 +597,19 @@
   #newSession { border:1px dashed var(--edge); padding:11px 14px; background:transparent;
                 color:var(--dim); cursor:pointer; font-family:var(--mono); font-size:13px; text-align:left; font-weight:500; }
   #newSession:hover { color:var(--accent); border-color:var(--accent-dim); }
+  /* engine picker: claude is the wide default button, codex the narrow
+     alternative beside it (see codexButton) */
+  .newrow { display:flex; gap:6px; align-items:stretch; }
+  .newrow #newSession { flex:1; }
+  .codexnew { border:1px dashed var(--edge); background:transparent; color:var(--dim);
+              cursor:pointer; font-family:var(--mono); font-size:12px; padding:0 12px;
+              white-space:nowrap; }
+  .codexnew:hover { color:var(--codex); border-color:var(--codex); }
+  /* engine badge on a session chip/card — only ever shown for non-claude, so
+     the default engine stays visually silent */
+  .ebadge { color:var(--codex); border:1px solid var(--codex); border-radius:3px;
+            font-size:9px; padding:0 3px; margin-left:5px; letter-spacing:.08em;
+            text-transform:uppercase; vertical-align:middle; }
   .menutitle { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.16em;
                padding:0 2px 2px; }
   #machinesmodal { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex;
@@ -2859,6 +2875,8 @@ function renderSessionBar(view) {
     // the AI's 1-2 word tab handle when it exists; full title until then
     lbl.className = 'lbl'; lbl.textContent = s.tab || s.title || 'new session';
     tab.appendChild(lbl);
+    const eb = engineBadge(s);           // only renders for non-claude engines
+    if (eb) tab.appendChild(eb);
     // the honest stamp: how long since YOU last prompted this session.
     // promptedAt moves only on a human prompt — lastActive (the fallback for
     // sessions that predate the field) is bumped by every hook, including the
@@ -4337,7 +4355,7 @@ function openSession(cid) {
 // (the ＋ selector's pick → the project's default machine), so we re-point at that
 // host before issuing the `new` — the frame is routed by which machine's channel
 // it goes out on (the harness `new` only reads `pid`).
-function newSession(targetMachine) {
+function newSession(targetMachine, engine) {
   if (FLEET) {
     const g = currentProjectKey && unifiedProjects.get(currentProjectKey);
     if (!g || !g.machines.length) { setView('projects'); return; }
@@ -4358,8 +4376,33 @@ function newSession(targetMachine) {
   currentCid = null;               // anything still streaming for the old cid is now stale
   term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
   if (activeType) { activeType.finish(); activeType = null; }
-  hsend({ type: 'new', pid: currentPid });
+  hsend({ type: 'new', pid: currentPid, engine: engine || 'claude' });
   setView(DEEP_VIEW);              // server replies with a focus → subscribe once it's spawned
+}
+
+// Which CLI is behind a session, as a small chip. Returns null for claude —
+// the default engine stays visually silent, so the badge always MEANS
+// something when you see it.
+function engineBadge(s) {
+  const e = s && s.engine;
+  if (!e || e === 'claude') return null;
+  const b = document.createElement('span');
+  b.className = 'ebadge'; b.textContent = e;
+  b.title = 'this session is driven by ' + e + ', not claude';
+  return b;
+}
+
+// The second engine's spawn button, sitting next to ＋ new session. Deliberately
+// secondary (smaller, outlined, no ＋): claude is the default and stays the
+// one-tap path — this is "instead, use the other one". A codex session behaves
+// identically everywhere else in the app; see docs/CODEX-ENGINE.md.
+function codexButton(machineGetter) {
+  const b = document.createElement('button');
+  b.className = 'codexnew';
+  b.textContent = 'codex';
+  b.title = 'new session driven by the codex CLI instead of claude';
+  b.onclick = () => newSession(machineGetter ? machineGetter() : null, 'codex');
+  return b;
 }
 
 function closeSession(cid, ev) {
@@ -4457,7 +4500,7 @@ function renderSessions() {
     star.textContent = starLabel();
     star.title = 'make this the default machine for new sessions in this project';
     star.onclick = () => { setDefaultMachine(currentProjectKey, newSessionMachine); star.textContent = starLabel(); };
-    mrow.append(add, sel, star);
+    mrow.append(add, sel, star, codexButton(() => sel.value));
     mrow.addEventListener('focusout', e => {
       if (e.relatedTarget && mrow.contains(e.relatedTarget)) return; // select → ★ stays in-row
       if (!sessionsRepaintDeferred) return;
@@ -4466,10 +4509,12 @@ function renderSessions() {
     });
     sessionsEl.appendChild(mrow);
   } else {
+    const row = document.createElement('div'); row.className = 'newrow';
     const add = document.createElement('button');
     add.id = 'newSession'; add.textContent = '＋  new session';
     add.onclick = () => newSession();
-    sessionsEl.appendChild(add);
+    row.append(add, codexButton());
+    sessionsEl.appendChild(row);
   }
 
   // some of this project's sessions are parked on the 📌 board — say so, quietly
@@ -4496,6 +4541,7 @@ function renderSessions() {
     const title = document.createElement('span');
     title.className = 'stitle'; title.textContent = s.title || 'new session';
     row.appendChild(sdot); row.appendChild(title);
+    const eb0 = engineBadge(s); if (eb0) row.appendChild(eb0);
     if (multi && s._machine) {                  // which host this session lives on
       const mt = document.createElement('span');
       mt.className = 'scount smach'; mt.textContent = '🖥️ ' + shortMachine(s._machine);
@@ -4607,6 +4653,7 @@ function renderPinBoard() {
     const title = document.createElement('span');
     title.className = 'stitle'; title.textContent = s.title || 'new session';
     row.appendChild(title);
+    const eb1 = engineBadge(s); if (eb1) row.appendChild(eb1);
     card.appendChild(row);
 
     if (s.desc) {

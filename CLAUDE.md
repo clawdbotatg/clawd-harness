@@ -171,6 +171,21 @@ user-facing overview; this file orients an agent working **on** the code.
 - **Channels:** WRITE = keystrokes → PTY; READ (visual) = raw PTY bytes → xterm.js
   renders the ANSI; READ (structured) = transcript JSONL tailed → slim events. We
   never parse the terminal's "weird text."
+- **Two engines** (2026-08-07) — a session is either **`claude`** or **`codex`**
+  (`ClaudeSession.engine`, chosen at spawn from the `codex` button beside ＋ new
+  session, persisted in the registry, defaulting to claude everywhere it's
+  missing). It's cheap *because* of the narrow channel contract above: codex's
+  hook payloads use the same field names, so `on_hook` and everything downstream
+  of `_slim_event` are engine-blind. All CLI differences live behind the
+  **`Engine`** strategy object (`s.eng` → `argv`/`env`/`hook_setup`/
+  `transcript_globs`/`slim_event`/`send_settle`/`bg_probe`); a third engine is
+  one subclass. **The rule that matters: everything in the subscription router
+  is fenced behind `Engine.routes_accounts`** — handoffs, the rebalance sweep,
+  both rescues, and both PTY tripwires read *claude's* screens and act by moving
+  a session between Anthropic plans, so they must never run on another engine.
+  codex is single-login (no `CODEX_HOME` pool: no pollable usage endpoint), so
+  `EXPECTATIONS.md` is a claude-only contract. Full design, what's verified, and
+  what still isn't: **[`docs/CODEX-ENGINE.md`](docs/CODEX-ENGINE.md)**.
 - **Hooks → turn signal:** injected via `claude --settings <generated>` →
   each hook `curl`s stdin to `POST /hook` → broadcasts `hook` events
   (Stop / UserPromptSubmit / Pre+PostToolUse / SessionStart+End). Drives the
@@ -291,6 +306,12 @@ user-facing overview; this file orients an agent working **on** the code.
 ## Known issues / next
 - **Transcript tailer logs `tailing …` repeatedly** (busy-reattach loop, inherited
   from console) — worth fixing.
+- **codex sessions: the structured channel is unproven.** The engine layer
+  ships (below), but hooks-actually-firing and the rollout parser were never
+  verified against a signed-in codex. Until someone runs `codex login` on the
+  box and checks that a codex session's busy pill moves, treat a codex session
+  as a working *terminal* whose badges/naming/digests may be inert. Checklist:
+  "Phase 1.5" in [`docs/CODEX-ENGINE.md`](docs/CODEX-ENGINE.md).
 - Roadmap (the reason for the fork): the **AI controller** layer, Telegram
   front-end. Multi-session, multi-project (the projects layer), view switcher,
   and AI naming already exist. ("Per-client terminal sizing" was resolved as

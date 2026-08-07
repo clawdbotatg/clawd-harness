@@ -88,6 +88,19 @@ BIND       = os.environ.get("BIND", "127.0.0.1")  # localhost-only by default.
 # on the LAN, *below* that whole stack — only the token guards it. Opt in with
 # BIND=0.0.0.0 (and accept that the token alone gates bypass-permissions claude).
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
+# Second engine: a session is either `claude` or `codex` (see the Engine layer
+# below and docs/CODEX-ENGINE.md). CODEX_STORE is codex's CODEX_HOME — its
+# config, credentials AND rollout transcripts all live there, so it doubles as
+# the transcript root. One login per machine in v1 (no multi-account routing:
+# codex exposes no pollable usage endpoint — see EXPECTATIONS.md's scope note).
+CODEX_BIN   = os.environ.get("CODEX_BIN", "codex")
+CODEX_STORE = os.path.abspath(os.path.expanduser(
+    os.environ.get("CODEX_HOME", "~/.codex")))
+# Approval posture for codex sessions. Claude sessions inherit the user's
+# bypass-permissions settings; codex needs it stated explicitly or every tool
+# call blocks the turn on an approval prompt no browser client can answer.
+CODEX_SANDBOX  = os.environ.get("CODEX_SANDBOX", "danger-full-access")
+CODEX_APPROVAL = os.environ.get("CODEX_APPROVAL", "never")
 WORKDIR    = os.path.abspath(os.environ.get("WORKDIR", os.getcwd()))
 COLS       = int(os.environ.get("COLS", "120"))
 ROWS       = int(os.environ.get("ROWS", "34"))
@@ -1174,17 +1187,210 @@ class Project:
                 "emoji": self.emoji}
 
 
-# ── PTY-backed Claude session ─────────────────────────────────────────────────
+# ── Engines: what differs between one agent CLI and another ───────────────────
+# The harness's contract with a CLI is deliberately narrow (see CLAUDE.md,
+# "Channels"): keystrokes in, raw PTY bytes out, plus a transcript JSONL on disk
+# and lifecycle hooks POSTed to /hook. We never parse the TUI. That's what makes
+# a second engine a plug-in rather than a fork — everything above this layer
+# (busy pill, naming, digests, pins, tabs, deep links, fleet) is engine-blind.
+#
+# Everything a CLI does DIFFERENTLY lives behind this interface. Adding a third
+# engine should mean writing one subclass, not grepping for "claude".
+# Design notes + what's verified vs assumed: docs/CODEX-ENGINE.md.
+class Engine:
+    name = "claude"
+    bin = CLAUDE_BIN
+    routes_accounts = True      # participates in the subscription router
+    scrub_extra = ()            # env names to strip beyond SCRUB_ENV
+
+    def argv(self, s):          raise NotImplementedError
+    def env(self, s, env):      pass          # mutated in place
+    def hook_setup(self, s):    return None   # → settings path, or None
+    def transcript_globs(self, s):  return []
+    def slim_event(self, s, line):  return None
+    def send_settle(self, big): return SEND_SETTLE if big else SEND_SETTLE_MIN
+    def bg_probe(self, s):      return ""
+
+
+class ClaudeEngine(Engine):
+    name, bin, routes_accounts = "claude", CLAUDE_BIN, True
+
+    def argv(self, s):
+        return [self.bin,
+                ("--resume" if s.resuming else "--session-id"), s.session_id,
+                "--settings", s.settings_path]
+
+    def env(self, s, env):
+        # Claude Code can render its whole TUI in the ALTERNATE screen buffer —
+        # a server-side rollout, so it flips on per-account with no CLI update
+        # or harness change (sub2 flipped mid-day 2026-07-16). xterm.js has no
+        # scrollback in the alt buffer, so every scroll path dies silently: the
+        # ring replay and _history_seed_bytes paint into the hidden normal
+        # buffer and a phone's touch pan finds nothing to scroll. Pin inline
+        # rendering — the seed/ring/scrollback contract depends on it.
+        env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] = "1"
+        if s.config_dir:                     # non-default subscription account
+            env["CLAUDE_CONFIG_DIR"] = s.config_dir
+        else:
+            # default = plain ~/.claude, always: an operator-exported
+            # CLAUDE_CONFIG_DIR would strand transcripts where our globs
+            # (config_dir or ~/.claude) never look.
+            env.pop("CLAUDE_CONFIG_DIR", None)
+        # Guarantee claude never opens onto the onboarding/theme screen when
+        # the dir already holds a login.
+        _ensure_onboarded(s.config_dir)
+
+    def hook_setup(self, s):
+        return s._write_hook_settings()
+
+    def transcript_globs(self, s):
+        base = s.config_dir or os.path.expanduser("~/.claude")
+        return [f"{base}/projects/*/{s.session_id}.jsonl"]
+
+    def slim_event(self, s, line):
+        return s._slim_event_claude(line)
+
+    def bg_probe(self, s):
+        return s._bg_probe_claude()
+
+
+class CodexEngine(Engine):
+    name, bin, routes_accounts = "codex", CODEX_BIN, False
+    # An inherited OPENAI_API_KEY makes codex authenticate as METERED API
+    # instead of the ChatGPT subscription — the exact shape of SCRUB_ENV's
+    # nested-claude trap (gotcha #1), different name. Strip it.
+    scrub_extra = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY")
+
+    def argv(self, s):
+        # No --session-id analogue: codex assigns its own id, so the cid↔sid
+        # binding is INVERTED vs claude — we learn the id from the first
+        # SessionStart hook (_follow_session already handles id changes,
+        # because claude rotates ids on compaction).
+        argv = [self.bin]
+        if s.resuming and s.session_id:
+            argv += ["resume", s.session_id]
+        argv += ["--no-alt-screen",              # inline mode; see slim note below
+                 "-a", CODEX_APPROVAL,
+                 "-s", CODEX_SANDBOX]
+        return argv
+
+    def env(self, s, env):
+        env["CODEX_HOME"] = CODEX_STORE
+        # How the hook command knows WHICH session it belongs to. Claude gets a
+        # per-session settings file via --settings; codex discovers hooks from
+        # config layers only, so the file is shared machine-wide and the cid
+        # rides in the env instead (hook processes are codex's children, so
+        # they inherit it). A hand-run `codex` in a terminal therefore POSTs
+        # with an empty cid — /hook drops unknown cids, which is what we want.
+        env["HARNESS_CID"] = s.cid
+
+    def hook_setup(self, s):
+        _ensure_codex_hooks()
+        return None
+
+    def transcript_globs(self, s):
+        # $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl. Old
+        # rollouts get zstd-compressed in place (.jsonl.zst) by codex's
+        # maintenance pass — we only ever tail the LIVE one, but the glob
+        # tolerates the suffix so a resume can still find a just-archived file.
+        return [f"{CODEX_STORE}/sessions/*/*/*/rollout-*{s.session_id}.jsonl",
+                f"{CODEX_STORE}/sessions/*/*/*/*{s.session_id}*.jsonl"]
+
+    def slim_event(self, s, line):
+        return s._slim_event_codex(line)
+
+
+ENGINES = {"claude": ClaudeEngine(), "codex": CodexEngine()}
+
+
+def _codex_hook_command():
+    """The one-liner every codex hook runs: POST the event's stdin JSON to
+    /hook, tagged with the cid we planted in the child env."""
+    return (f"curl -sS -m 2 -X POST "
+            f"'http://127.0.0.1:{PORT}/hook?t={TOKEN}&cid='\"$HARNESS_CID\" "
+            f"--data-binary @- >/dev/null 2>&1 || true")
+
+
+def _codex_signed_in():
+    """Cheap "is codex usable" probe: its credential file exists. Mirrors
+    _creds_state's job for claude but far simpler — there's one login per
+    machine and no rotation to race with. Never blocks a spawn; a False just
+    labels the session so the user knows why the TUI is asking them to log in
+    (same never-ambush-the-user principle as the claude spawn gate)."""
+    try:
+        return (Path(CODEX_STORE) / "auth.json").exists()
+    except Exception:
+        return True                              # unreadable ≠ signed out
+
+
+_codex_hooks_written = False
+
+
+def _ensure_codex_hooks():
+    """Install our hook handlers into $CODEX_HOME/hooks.json, MERGING with
+    whatever the user already has there (theirs wins on conflict; we only add
+    our own entries, marked so a re-run replaces them instead of stacking up).
+
+    Unlike claude's `--settings <file>`, codex has no per-invocation hook flag —
+    hooks come from config layers only. So this file is machine-wide and shared
+    with the user's own hand-run codex sessions; see CodexEngine.env for why
+    that's safe (cid rides in the env; /hook drops unknown cids)."""
+    global _codex_hooks_written
+    if _codex_hooks_written:
+        return
+    path = Path(CODEX_STORE) / "hooks.json"
+    mark = "clawd-harness"
+    entry = {"hooks": [{"type": "command", "command": _codex_hook_command(),
+                        "timeout": 5, "statusMessage": mark}]}
+    # PermissionRequest is codex's analogue of claude's Notification — the
+    # "blocked, needs a human" signal. Verified present in 0.147.0.
+    events = ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop",
+              "PreToolUse", "PostToolUse", "PermissionRequest"]
+    try:
+        cur = json.loads(path.read_text()) if path.exists() else {}
+    except Exception:
+        cur = {}                              # unparseable → don't clobber blind
+        print(f"[codex] {path} is unreadable — leaving it alone; "
+              "codex sessions will have no turn signal", flush=True)
+        return
+    hooks = cur.setdefault("hooks", {})
+    for ev in events:
+        lst = [e for e in hooks.get(ev, [])   # drop our previous entries
+               if mark not in json.dumps(e)]
+        e = dict(entry)
+        if ev in ("PreToolUse", "PostToolUse"):
+            e = {"matcher": "*", **entry}
+        hooks[ev] = lst + [e]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cur, indent=2))
+        os.chmod(path, 0o600)                 # it embeds our token
+    except Exception as e:
+        print(f"[codex] could not write {path}: {e}", flush=True)
+        return
+    _codex_hooks_written = True
+    print(f"[codex] hooks installed → {path}", flush=True)
+
+
+# ── PTY-backed agent session (claude | codex) ─────────────────────────────────
 class ClaudeSession:
-    """One interactive `claude` process in a PTY, streamed to the websocket
-    clients currently *subscribed* to it. Owned by a SessionManager."""
+    """One interactive agent CLI in a PTY, streamed to the websocket clients
+    currently *subscribed* to it. Owned by a SessionManager. Which CLI is
+    `self.engine` (claude | codex) — everything engine-specific is behind the
+    Engine layer above. (Name kept for now: it appears in the registry, the
+    respawn-clone introspection, and every log line.)"""
 
     def __init__(self, manager, cid, session_id, resuming, pid="",
                  title="", desc="", tab="", prompt_count=0, first_prompt="",
                  created=0.0, last_active=0.0, prompted_at=0.0,
                  account="default", config_dir="", ceremony=False,
-                 pinned=0.0, model="", ctx_tokens=0):
+                 pinned=0.0, model="", ctx_tokens=0, engine="claude"):
         self.manager = manager
+        # Which agent CLI drives this session ("claude" | "codex"). Chosen at
+        # spawn and durable: a --resume must reach for the same binary, and an
+        # unknown/legacy value falls back to claude so an old registry (written
+        # before engines existed) resumes exactly as it did.
+        self.engine = engine if engine in ENGINES else "claude"
         self.pid = pid                           # owning project id
         self.cid = cid                           # stable console id (ours; survives claude rotation)
         self.session_id = session_id             # claude's id (rotates on compaction/resume)
@@ -1271,9 +1477,15 @@ class ClaudeSession:
         self.last_answer = ""                     # last Stop's assistant message — durable (backfilled on resume)
         self.settings_path = None
 
+    @property
+    def eng(self):
+        """The Engine strategy object for this session."""
+        return ENGINES.get(self.engine) or ENGINES["claude"]
+
     # -- registry shape --------------------------------------------------------
     def to_registry(self):
-        return {"cid": self.cid, "pid": self.pid, "session_id": self.session_id,
+        return {"engine": self.engine,
+                "cid": self.cid, "pid": self.pid, "session_id": self.session_id,
                 "title": self.title, "desc": self.desc, "tab": self.tab,
                 "prompt_count": self.prompt_count, "first_prompt": self.first_prompt,
                 "created": self.created, "last_active": self.last_active,
@@ -1324,6 +1536,7 @@ class ClaudeSession:
                  ("working" if self.busy else
                   ("background" if self.bg else "idle"))
         return {"cid": self.cid, "pid": self.pid,
+                "engine": self.engine,
                 "title": self.title or self._fallback_title(),
                 "desc": self.desc or "",
                 "tab": self.tab or "",
@@ -1348,7 +1561,7 @@ class ClaudeSession:
                 "model": self.model,
                 "ctxTokens": self.ctx_tokens}
 
-    def _bg_probe(self):
+    def _bg_probe_claude(self):
         """One read-only look at claude's status file → "shell" | "agent" | "".
         No state change — safe to call from any thread (the handoff guards use
         it fresh, skipping poll_bg's UI debounce)."""
@@ -1375,7 +1588,7 @@ class ClaudeSession:
         hook fires, so a single racy read would flash a phantom 'background'
         at every turn end); turning OFF is immediate. Returns True when
         self.bg changed (caller broadcasts)."""
-        bg = self._bg_probe()
+        bg = self.eng.bg_probe(self)
         if bg and bg != self.bg and self._bg_pending != bg:
             self._bg_pending = bg                # first sighting — arm only
             return False
@@ -1397,26 +1610,14 @@ class ClaudeSession:
         env["LINES"] = str(ROWS)
         for k in SCRUB_ENV:                      # pristine top-level + subscription auth
             env.pop(k, None)
-        # Claude Code can render its whole TUI in the ALTERNATE screen buffer —
-        # a server-side rollout, so it flips on per-account with no CLI update
-        # or harness change (sub2 flipped mid-day 2026-07-16). xterm.js has no
-        # scrollback in the alt buffer, so every scroll path dies silently: the
-        # ring replay and _history_seed_bytes paint into the hidden normal
-        # buffer and a phone's touch pan finds nothing to scroll. Pin inline
-        # rendering — the seed/ring/scrollback contract depends on it.
-        env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] = "1"
-        if self.config_dir:                      # non-default subscription account
-            env["CLAUDE_CONFIG_DIR"] = self.config_dir
-        else:
-            # default = plain ~/.claude, always: an operator-exported
-            # CLAUDE_CONFIG_DIR would strand transcripts where our globs
-            # (config_dir or ~/.claude) never look.
-            env.pop("CLAUDE_CONFIG_DIR", None)
+        for k in self.eng.scrub_extra:           # engine's own metered-API trap
+            env.pop(k, None)
+        # Everything engine-specific about the child's environment — the
+        # alt-screen pin, the config-dir variable, onboarding — lives in the
+        # Engine. Every spawn path (fresh, resume, handoff, restart) funnels
+        # through here, so it's the one place that has to be right.
+        self.eng.env(self, env)
 
-        # Every spawn path (fresh, --resume, handoff, restart) funnels through
-        # here — the one place to guarantee claude never opens onto the
-        # onboarding/theme screen when the dir already holds a login.
-        _ensure_onboarded(self.config_dir)
         # PTY tripwire: FRESH spawns only. A --resume REPAINTS recent
         # conversation, so a session that ever quoted the picker text (this
         # repo's sources; the session that wrote this fix) re-trips the scan
@@ -1427,10 +1628,8 @@ class ClaudeSession:
         self._onboard_deadline = 0.0 if self.resuming \
             else time.time() + ONBOARD_SCAN_WINDOW
 
-        self.settings_path = self._write_hook_settings()
-        cmd = [CLAUDE_BIN,
-               ("--resume" if self.resuming else "--session-id"), self.session_id,
-               "--settings", self.settings_path]
+        self.settings_path = self.eng.hook_setup(self)
+        cmd = self.eng.argv(self)
 
         def _preexec():
             os.setsid()
@@ -1445,7 +1644,7 @@ class ClaudeSession:
         self.master_fd = master
         self.os_pid = self.proc.pid
         self.alive = True
-        print(f"[session {self.cid[:8]}] claude pid={self.os_pid} "
+        print(f"[session {self.cid[:8]}] {self.engine} pid={self.os_pid} "
               f"session_id={self.session_id} account={self.account} "
               f"({'resumed' if self.resuming else 'new'})", flush=True)
 
@@ -1484,9 +1683,18 @@ class ClaudeSession:
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
     def on_hook(self, obj):
-        """Handle one hook callback (from claude via /hook) → update state, fan a
-        slim event out to every client (menu badges), and trigger AI naming."""
+        """Handle one hook callback (from the engine via /hook) → update state,
+        fan a slim event out to every client (menu badges), and trigger AI
+        naming. Engine-blind on purpose: codex emits the same event names and
+        the same payload fields (`hook_event_name`, `session_id`,
+        `transcript_path`, `prompt`, `tool_name`, `last_assistant_message`),
+        which is the single fact that makes a second engine cheap."""
         ev = obj.get("hook_event_name", "?")
+        # codex's name for "blocked, needs a human" — claude calls it
+        # Notification. Normalise at the door so one state machine serves both.
+        if ev == "PermissionRequest":
+            ev = "Notification"
+            obj = {**obj, "hook_event_name": ev}
         self.last_active = time.time()
         if ev == "UserPromptSubmit":
             self.prompted_at = time.time()   # the human prompted — the tab age anchor
@@ -1514,7 +1722,8 @@ class ClaudeSession:
             # verdict to the rescue path — it confirms against the live
             # endpoint and, on a true bounce, hands off + redelivers.
             acct = self.manager.accounts.get(self.account)
-            if not self.ceremony and acct and (acct.broken
+            if self.eng.routes_accounts \
+                    and not self.ceremony and acct and (acct.broken
                          or (acct.usage or {}).get("pct", 0) >= SUB_EXHAUSTED):
                 threading.Thread(target=self.manager.rescue_bounced_prompt,
                                  args=(self, prompt, self.hook_count),
@@ -1549,8 +1758,9 @@ class ClaudeSession:
             threading.Thread(target=self._regenerate_digest, daemon=True).start()
             # Turn over + idle = the safe moment to move this session off a
             # drained plan (no-ops fast in the common case).
-            threading.Thread(target=self.manager.maybe_handoff, args=(self,),
-                             daemon=True).start()
+            if self.eng.routes_accounts:
+                threading.Thread(target=self.manager.maybe_handoff, args=(self,),
+                                 daemon=True).start()
         elif ev == "Notification":
             # Fires both for "needs your permission / input" (mid-turn, busy) and
             # for a 60s-idle nudge (turn already Stopped, not busy). Only the
@@ -1735,7 +1945,9 @@ class ClaudeSession:
         # Short one-liners only need to clear the 0.6s burst cliff; big or
         # multi-line pastes take longer to finalize, so keep the full settle.
         big = len(text) > 280 or text.count("\n") >= 1
-        time.sleep(SEND_SETTLE if big else SEND_SETTLE_MIN)
+        # The settle is per-ENGINE: it's tuned to one TUI's paste heuristic
+        # (gotcha #2), and another CLI's is its own empirical question.
+        time.sleep(self.eng.send_settle(big))
         self.write(b"\r")
         threading.Thread(target=self._send_watchdog, args=(text, pre_hooks),
                          daemon=True).start()
@@ -1782,15 +1994,21 @@ class ClaudeSession:
                 if len(self.ring) > RING_MAX:
                     del self.ring[:-RING_MAX]
             self._to_subscribers_bytes(chunk)
-            self._scan_for_limit(chunk)
-            if self._onboard_deadline:
-                self._scan_for_onboarding(chunk)
+            # Both PTY tripwires read CLAUDE's screens (its limit banner, its
+            # onboarding picker) and both act by moving the session between
+            # subscription accounts — meaningless on an engine outside the
+            # router, and a false positive there could respawn a healthy
+            # session for no reason.
+            if self.eng.routes_accounts:
+                self._scan_for_limit(chunk)
+                if self._onboard_deadline:
+                    self._scan_for_onboarding(chunk)
         self.alive = False
         # Stamp the account: the poller must not consume this grant for
         # SUB_REFRESH_EXIT_GRACE — the dying claude's last token rotation
         # may still be settling (or stranded, if it was killed mid-refresh).
         self.manager.acct_last_exit[self.account or "default"] = time.time()
-        print(f"[session {self.cid[:8]}] PTY closed / claude exited", flush=True)
+        print(f"[session {self.cid[:8]}] PTY closed / {self.engine} exited", flush=True)
         # An account handoff replaces this object under the same cid — the
         # dying child's exit must not paint "session ended" over its successor.
         if self.manager.sessions.get(self.cid) is self:
@@ -1858,25 +2076,38 @@ class ClaudeSession:
 
     # -- read channel: transcript JSONL -> structured events -------------------
     def _find_transcript(self):
-        # Locate by session-id across all project dirs (robust to path
-        # encoding), under THIS session's account config dir — a session
-        # spawned under a non-default account writes its transcript there.
-        base = self.config_dir or os.path.expanduser("~/.claude")
-        hits = glob.glob(f"{base}/projects/*/{self.session_id}.jsonl")
-        return hits[0] if hits else None
+        # Fallback locator, by session-id, for when no hook has told us the
+        # path yet. Claude: across all project dirs (robust to path encoding),
+        # under THIS session's account config dir — a session spawned under a
+        # non-default account writes its transcript there. Codex: under the
+        # date-sharded rollout tree. Both are the Engine's business; newest
+        # wins when a glob matches more than one.
+        if not self.session_id:
+            return None                          # codex: no id until SessionStart
+        for pat in self.eng.transcript_globs(self):
+            hits = sorted(glob.glob(pat), key=os.path.getmtime, reverse=True)
+            if hits:
+                return hits[0]
+        return None
 
     def _follow_session(self, obj):
         """Track the live transcript file + session id from a hook payload. A
         compaction (or resume) rotates claude's session file mid-run; following
         it keeps the tail on the live file and makes a daemon restart resume the
-        current session instead of a stale pre-rotation one."""
+        current session instead of a stale pre-rotation one.
+
+        It is ALSO how a codex session learns its id at all: codex has no
+        --session-id to preset, so a fresh one spawns with an empty id and the
+        first SessionStart fills it in — the same code path, because claude
+        already had to tolerate its id changing underneath us."""
         tpath = obj.get("transcript_path")
         if tpath:
             self._live_transcript = os.path.expanduser(tpath)
         sid = obj.get("session_id")
         if sid and sid != self.session_id:
-            print(f"[session {self.cid[:8]}] rotated {self.session_id} -> {sid}",
-                  flush=True)
+            print(f"[session {self.cid[:8]}] "
+                  f"{'learned id' if not self.session_id else 'rotated'} "
+                  f"{self.session_id or '(none)'} -> {sid}", flush=True)
             self.session_id = sid
             self.manager.save_registry()         # so the next restart resumes this one
 
@@ -1929,7 +2160,15 @@ class ClaudeSession:
 
     def _slim_event(self, line: str):
         """Reduce a raw transcript line to the bits a controller cares about.
-        Event shapes mirror clawd-tg-claude/bot.py's stream-json handling."""
+        The OUTPUT shape is the harness's own (role/text/tools/…) and is
+        engine-independent — every consumer above this line (transcript view,
+        naming seed, digests, search, history seed) stays engine-blind. Only
+        the INPUT format differs, so the parse is the Engine's."""
+        return self.eng.slim_event(self, line)
+
+    def _slim_event_claude(self, line: str):
+        """claude's transcript JSONL → slim events. Shapes mirror
+        clawd-tg-claude/bot.py's stream-json handling."""
         if not line:
             return None
         try:
@@ -2003,6 +2242,90 @@ class ClaudeSession:
                     "is_error": obj.get("is_error"),
                     "duration_ms": obj.get("duration_ms"),
                     "usage": obj.get("usage")}
+        return None
+
+    def _slim_event_codex(self, line: str):
+        """codex's rollout JSONL → the same slim events.
+
+        Format (0.147.0): one JSON object per line, `{"timestamp":…,
+        "type":<kind>, "payload":{…}}`. The kinds we care about:
+          session_meta   — header; carries the session id + cwd
+          response_item  — the conversation itself; payload.type is
+                           `message` (role user/assistant, content parts),
+                           `function_call` / `local_shell_call` (tool use),
+                           `function_call_output` (tool result)
+          event_msg      — CLI-side events; payload.type `token_count` carries
+                           usage + rate_limits, `turn_started`/`turn_complete`
+                           bound the turn.
+        Written defensively: unknown kinds return None rather than raising, and
+        both the payload-wrapped and flat spellings are accepted, because this
+        format is versioned by a CLI we don't control. Anything unrecognised
+        simply doesn't render — it never breaks the tail."""
+        if not line:
+            return None
+        try:
+            obj = json.loads(line)
+        except Exception:
+            return None
+        kind = obj.get("type")
+        p = obj.get("payload")
+        p = p if isinstance(p, dict) else obj    # tolerate an unwrapped line
+        ptype = p.get("type") or kind
+
+        if ptype in ("session_meta", "turn_context"):
+            # Header lines: harvest the model for the splash card, emit nothing.
+            m = p.get("model") or (p.get("turn_context") or {}).get("model")
+            if isinstance(m, str) and m:
+                self.model = m
+            return None
+
+        if ptype == "token_count":
+            # The context-window number for the splash card. codex reports the
+            # window's own totals rather than claude's per-turn input sum.
+            info = p.get("info") or p.get("total_token_usage") or {}
+            tok = (info.get("total_tokens")
+                   or sum(info.get(k) or 0 for k in
+                          ("input_tokens", "cached_input_tokens")))
+            if tok:
+                self.ctx_tokens = tok
+            return None
+
+        if ptype in ("message", "user_message", "agent_message"):
+            role = p.get("role") or ("user" if ptype == "user_message"
+                                     else "assistant")
+            text = p.get("text")
+            if not isinstance(text, str):
+                text = _collect_text(p.get("content") or [])
+            clean = _strip_noise(text or "").strip()
+            if not clean:
+                return None
+            if role == "assistant":
+                return {"role": "assistant", "text": clean}
+            return {"role": "user", "text": clean}
+
+        if ptype in ("function_call", "local_shell_call", "custom_tool_call",
+                     "mcp_tool_call", "command_execution", "web_search_call"):
+            name = (p.get("name") or p.get("tool_name")
+                    or ptype.replace("_call", ""))
+            args = p.get("arguments") or p.get("command") or p.get("input")
+            if isinstance(args, (dict, list)):
+                args = json.dumps(args)[:400]
+            elif isinstance(args, str):
+                args = args[:400]
+            return {"role": "assistant",
+                    "tools": [{"name": name, "input": args or ""}]}
+
+        if ptype in ("function_call_output", "custom_tool_call_output",
+                     "tool_result"):
+            out = p.get("output") or p.get("result") or ""
+            if isinstance(out, dict):
+                out = out.get("output") or json.dumps(out)
+            out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", str(out))[:2000]
+            return {"role": "tool_result",
+                    "results": [{"text": out}]} if out.strip() else None
+
+        if ptype == "reasoning":
+            return None                          # thinking is not the transcript
         return None
 
     # -- subscriber registry / streaming --------------------------------------
@@ -2361,6 +2684,35 @@ class SessionManager:
                 # dead cwd would crash the boot
                 print(f"[session {(e.get('cid') or '')[:8]}] local folder "
                       f"missing ({proj.path}) — session not resumed", flush=True)
+                continue
+            engine = e.get("engine", "claude")    # legacy rows predate engines
+            if engine != "claude":
+                # Non-claude engines don't participate in the subscription
+                # router, so the whole account/credential resume gate below is
+                # not just unnecessary but WRONG for them (it would reroute a
+                # codex session onto a claude config dir). Resume plainly: the
+                # transcript either exists under the engine's own store or it
+                # starts fresh.
+                sid = e.get("session_id") or ""
+                probe = ClaudeSession(self, cid=e.get("cid") or str(uuid.uuid4()),
+                                      pid=pid, session_id=sid, resuming=False,
+                                      engine=engine)
+                resuming = bool(sid and probe._find_transcript())
+                s = ClaudeSession(
+                    self, cid=probe.cid, pid=pid,
+                    session_id=sid if resuming else "", resuming=resuming,
+                    engine=engine,
+                    title=e.get("title", ""), desc=e.get("desc", ""),
+                    tab=e.get("tab", ""),
+                    prompt_count=e.get("prompt_count", 0),
+                    first_prompt=e.get("first_prompt", ""),
+                    created=e.get("created", 0.0),
+                    last_active=e.get("last_active", 0.0),
+                    prompted_at=e.get("prompted_at", 0.0),
+                    pinned=e.get("pinned", 0.0),
+                    model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0))
+                self.sessions[s.cid] = s
+                s.start()
                 continue
             cfg = e.get("config_dir", "")
             name = e.get("account", "default")
@@ -3065,6 +3417,8 @@ class SessionManager:
         for s in sessions:
             if s.ceremony:
                 continue                         # deliberate sign-in — hands off
+            if not s.eng.routes_accounts:
+                continue                         # engine outside the router
             if not (s.alive and s.account != best.name
                     and now - s.last_handoff >= HANDOFF_COOLDOWN):
                 continue
@@ -3082,7 +3436,7 @@ class SessionManager:
                 continue
             if s.busy:
                 continue
-            if s.bg or s._bg_probe():
+            if s.bg or s.eng.bg_probe(s):
                 # Idle-looking but background shells/agents are still running —
                 # a respawn would kill them. Preemptive moves (evacuation,
                 # rebalance) aren't worth that; only the drained rescue above
@@ -3133,7 +3487,7 @@ class SessionManager:
         prompt there. A 95–99% plan can still finish a turn — only >=100 (or
         AUTH_FAIL) qualifies, and a genuinely-running turn is detected and
         left alone."""
-        if not SUB_AUTOSWITCH or s.ceremony:     # sign-in ceremony: never rescued
+        if not SUB_AUTOSWITCH or s.ceremony or not s.eng.routes_accounts:
             return
         time.sleep(BOUNCE_SETTLE)
         # ANY hook since the send (tool hooks, or a Stop that took the normal
@@ -3207,7 +3561,8 @@ class SessionManager:
         a prompt the wall ate is redelivered, and a turn it cut mid-flight
         gets an automatic 'continue' (LIMIT_CONTINUE) — the user never
         babysits a rate limit."""
-        if not SUB_AUTOSWITCH or not s.alive or s.ceremony:
+        if not SUB_AUTOSWITCH or not s.alive or s.ceremony \
+                or not s.eng.routes_accounts:
             return
         now = time.time()
         if now - s.last_bounce_rescue < BOUNCE_COOLDOWN:
@@ -3334,6 +3689,8 @@ class SessionManager:
         mid-conversation)."""
         if not SUB_AUTOSWITCH or s.busy or not s.alive or s.ceremony:
             return
+        if not s.eng.routes_accounts:
+            return                               # engine outside the router
         if time.time() - s.last_handoff < HANDOFF_COOLDOWN:
             return
         acct = self.accounts.get(s.account)      # may be None (e.g. removed default)
@@ -3379,7 +3736,7 @@ class SessionManager:
             self.broadcast_accounts()
             return                               # nowhere better to go — stay put
         self.broadcast_accounts()
-        if not drained and (s.bg or s._bg_probe()):
+        if not drained and (s.bg or s.eng.bg_probe(s)):
             return                               # hot-move is optional; don't kill live background work
         why = ("plan drained; resuming under the fresh one" if drained else
                f"pool {pct:.0f}% hot — moving before the limit wall")
@@ -3732,12 +4089,32 @@ class SessionManager:
                 for p in self._ordered_projects()]
 
     # -- session crud ----------------------------------------------------------
-    def create_session(self, pid, account=None, ceremony=False):
+    def create_session(self, pid, account=None, ceremony=False,
+                       engine="claude"):
         if pid not in self.projects:
             return None
         proj = self.projects[pid]
         if proj.kind == "local" and proj.status == "error":
             return None                          # folder missing — Popen on a dead cwd would fail
+        engine = engine if engine in ENGINES else "claude"
+        if not ENGINES[engine].routes_accounts:
+            # Engines outside the subscription router (codex) spawn plainly:
+            # one login per machine, no account, no config dir, no headroom
+            # math. Everything below this block is Anthropic-specific.
+            cid = str(uuid.uuid4())
+            s = ClaudeSession(self, cid=cid, pid=pid, session_id="",
+                              resuming=False, created=time.time(),
+                              engine=engine)
+            if not _codex_signed_in():
+                s.desc = ("codex is not signed in on this machine — run "
+                          "`codex login` in a terminal once, then start a "
+                          "new session")
+            with self.lock:
+                self.sessions[cid] = s
+            s.start()
+            self.save_registry()
+            self.broadcast_sessions()
+            return s
         # Routing: an explicit override (e.g. the sign-in ceremony) always
         # wins; otherwise, with auto-routing on, each new session picks the
         # account with the MOST HEADROOM at this moment (per-spawn — not a
@@ -4644,7 +5021,8 @@ class Handler(BaseHTTPRequestHandler):
                               "current": MGR.default_cid()})
         elif t == "new":
             s = MGR.create_session(frame.get("pid"),
-                                   account=frame.get("account"))
+                                   account=frame.get("account"),
+                                   engine=frame.get("engine") or "claude")
             if s:
                 client.send_json({"type": "focus", "cid": s.cid})
         elif t == "accountAdd":

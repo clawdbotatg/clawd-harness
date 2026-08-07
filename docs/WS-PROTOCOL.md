@@ -55,7 +55,7 @@ viewer** (each with its own `client.cid`).
 |---|---|---|
 | `subscribe` | `cid` | Attach to that session's live stream. Server immediately sends a `hello`, then a ring-buffer byte snapshot, then replays recent `transcript` history (see "On `subscribe`" below, incl. the unknown-cid error reply). |
 | `list` | — | Server replies with `projects` then `sessions` snapshots. |
-| `new` | `pid`, `account?` | Create a session in project `pid`, spawned under the ACTIVE subscription account (or the named `account` override). Server replies `{type:"focus", cid}` with the new id, and broadcasts `sessions`. |
+| `new` | `pid`, `account?`, `engine?` | Create a session in project `pid`, spawned under the ACTIVE subscription account (or the named `account` override). Server replies `{type:"focus", cid}` with the new id, and broadcasts `sessions`. `engine` picks the agent CLI — `"claude"` (default, and what an omitted field means) or `"codex"`; an unknown value falls back to claude. A non-claude engine ignores `account`: only claude participates in the subscription router. See docs/CODEX-ENGINE.md. |
 | `accountAdd` | `name` | Register a new subscription account (config dir under `~/.clawd-accounts/<name>` + settings symlinks) and spawn its **sign-in session** — a normal claude in the self project under that `CLAUDE_CONFIG_DIR`, where the user completes the OAuth login. Replies `{type:"focus", cid}` for the sign-in session; broadcasts `accounts`. Re-invoking on a still-pending account opens another sign-in session; a no-op on a ready one. |
 | `accountUse` | `name` | Flip which account NEW sessions spawn under (manual switch; running sessions untouched). Refused for a pending account. Broadcasts `accounts`. |
 | `accountRemove` | `name` | Drop an account from the routing roster. Logs nothing out (config dir + Keychain credential stay; running sessions keep their recorded dir). Refused when it would leave no ready account; removing the ACTIVE account re-routes new spawns to the most headroom. `default` stays removed (it's only re-injected on an empty roster; `accountAdd` with name `default` re-adopts it, sans ceremony). Broadcasts `accounts`. |
@@ -193,9 +193,12 @@ no-op that would leave the previous session's stream flowing (that's how
   "tool":<str|null>, "status":"blocked|working|background|idle", "bg":"shell|agent|", "digest":str,
   "blocked_on":str, "lastAnswer":str, "sessionId", "promptCount":int,
   "lastActive":float, "created":float, "alive":bool, "account":str,
-  "pinned":float }
+  "pinned":float, "engine":"claude|codex" }
   // pinned = epoch when the session was 📌 parked on the pin board (see the `pin`
   // op); 0.0 = not pinned. Pinned sessions stay fully alive/promptable.
+  // engine = which agent CLI drives it. Absent on pre-2026-08 rows/clients —
+  // treat a missing value as "claude". `account` is meaningful only for claude;
+  // other engines sit outside the subscription router (docs/CODEX-ENGINE.md).
 ```
 - `waiting` = the session is blocked on an interactive TUI prompt (a permission
   request, `AskUserQuestion`, or `ExitPlanMode`) and needs a human answer — it
