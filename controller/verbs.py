@@ -47,11 +47,13 @@ class Guard:
 
 
 class Verbs:
-    def __init__(self, world, ledger, clients, guard):
+    def __init__(self, world, ledger, clients, guard, notes=None):
         self.world = world
         self.ledger = ledger
         self.clients = clients
         self.guard = guard
+        self.notes = notes                # NotesStore (PM durable memory), optional
+        self.escalate_sink = None         # set by serve: Autopilot.escalate
 
     # ── read ──────────────────────────────────────────────────────────────
     def get_world(self, machine=None, pid=None, verbose=False):
@@ -248,6 +250,49 @@ class Verbs:
             if len(t.get("history", [])) > 3:
                 t["history"] = t["history"][-3:]
         return {"tasks": tasks}
+
+    # ── operator channel + durable memory (always allowed — no fleet writes) ──
+    def escalate(self, question, machine=None, cid=None, urgency="digest"):
+        """Queue something for the operator. 'digest' rides the next batched
+        push (one message per window, not a ping per item); 'now' pushes
+        immediately — reserve it for actively-breaking things."""
+        if not (question or "").strip():
+            return {"ok": False, "error": "empty question"}
+        if self.escalate_sink is None:
+            return {"ok": False, "error": "no escalation channel here — put the "
+                    "question in your reply instead (the operator is reading it)"}
+        item = {"question": question.strip()[:500], "machine": machine, "cid": cid,
+                "urgency": "now" if urgency == "now" else "digest"}
+        if machine and cid:
+            s = self.world.session_detail(machine, cid)
+            if not s.get("error"):
+                item["url"] = self._harness_link(s.get("pid"), cid,
+                                                 machine=machine)["url"]
+        return self.escalate_sink(item)
+
+    def remember_note(self, text, scope="general"):
+        """Write to your own durable memory (rendered into every future turn).
+        Scopes: machine:<id>, project:<name>, task:<id>, general."""
+        if not self.notes:
+            return {"ok": False, "error": "notes store not configured"}
+        return self.notes.remember(scope, text)
+
+    def forget_note(self, scope, index):
+        if not self.notes:
+            return {"ok": False, "error": "notes store not configured"}
+        return self.notes.forget(scope, index)
+
+    def get_notes(self):
+        if not self.notes:
+            return {"ok": False, "error": "notes store not configured"}
+        return {"ok": True, **self.notes.dump()}
+
+    def set_priorities(self, priorities):
+        """Operator-stated standing priorities (ordered). Set ONLY when the
+        operator states/changes them — they steer every future turn."""
+        if not self.notes:
+            return {"ok": False, "error": "notes store not configured"}
+        return self.notes.set_priorities(priorities)
 
     def get_task(self, task_id):
         return self.ledger.get(task_id) or {"error": f"no such task: {task_id}"}

@@ -81,6 +81,25 @@ AUTO_MEMORY = cfg("CONTROLLER_AUTO_MEMORY", "0") == "1"
 # changed. 0 (default) = off; the user-triggered sweep verb works regardless.
 SWEEP_EVERY = float(cfg("CONTROLLER_SWEEP_EVERY", "0") or 0)
 
+# -- autopilot: the PM works when the operator isn't talking to it ---------------
+# Reactor events trigger budgeted PM turns (blocked → triage; a task-linked
+# session finishing a turn → verify-vs-acceptance). See controller/autopilot.py
+# for the runaway guards. CONTROLLER_AUTOPILOT=1 turns it on; the runtime kill
+# switch (POST /api/autopilot) persists to AUTOPILOT_PATH and wins over the env.
+AUTOPILOT = cfg("CONTROLLER_AUTOPILOT", "0") == "1"
+AUTOPILOT_PATH = cfg("CONTROLLER_AUTOPILOT_PATH",
+                     os.path.join(ROOT, ".clawd-controller.autopilot.txt"))
+AUTOPILOT_COOLDOWN = float(cfg("CONTROLLER_AUTOPILOT_COOLDOWN", "300") or 300)
+AUTOPILOT_VERIFY_COOLDOWN = float(cfg("CONTROLLER_AUTOPILOT_VERIFY_COOLDOWN", "900") or 900)
+AUTOPILOT_OWN_ACTION_S = float(cfg("CONTROLLER_AUTOPILOT_OWN_ACTION_S", "120") or 120)
+AUTOPILOT_MAX_PER_HOUR = int(cfg("CONTROLLER_AUTOPILOT_MAX_PER_HOUR", "10") or 10)
+AUTOPILOT_MAX_PER_DAY = int(cfg("CONTROLLER_AUTOPILOT_MAX_PER_DAY", "60") or 60)
+# One batched "needs you" push per window (escalate urgency='digest'); 'now'
+# bypasses it. Also the flush cadence for the autopilot's digest queue.
+DIGEST_WINDOW = float(cfg("CONTROLLER_DIGEST_WINDOW", "900") or 900)
+# The PM's durable memory (priorities + scoped notes) — see controller/notes.py.
+NOTES_PATH = cfg("CONTROLLER_NOTES", os.path.join(ROOT, ".clawd-controller.notes.json"))
+
 # Which harness this controller drives. Single-machine by default (direct to the
 # local harness); the relay/multi-machine adapter layers on top of the same World.
 HARNESS_WS = cfg("CONTROLLER_HARNESS_WS", "ws://127.0.0.1:8787")

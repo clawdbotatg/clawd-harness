@@ -164,8 +164,10 @@ class AgentBrain:
 
     label = "claude"
 
-    def __init__(self, guard, trust="private", model=None, claude_bin=None):
+    def __init__(self, guard, trust="private", model=None, claude_bin=None,
+                 notes=None):
         self.guard = guard
+        self.notes = notes              # NotesStore — rendered into every turn
         self.trust = trust if trust in VALID_TRUST else "private"
         self.model = model or (config.AGENT_MODEL or None)
         # Runtime model override (debug page Config tab) wins over the env pin,
@@ -272,6 +274,10 @@ class AgentBrain:
         if run_turn is None:
             return self._finish(_missing_engine_msg(), [])
         sys_prompt = (self.current_prompt() or "") + _autonomy_note(self.guard.autonomy)
+        if self.notes:
+            block = self.notes.render()
+            if block:                    # durable memory — every thread starts knowing it
+                sys_prompt += "\n\n" + block
         os.environ["CONTROLLER_AUTONOMY"] = self.guard.autonomy
         started = time.time()
         stats = {"tools": 0, "last_event": started}

@@ -342,6 +342,28 @@ whole stack is proud of being pure stdlib, disk-as-source-of-truth. So:
     `modules/router` hook, so the controller must never set `CLAUDE_CONFIG_DIR`,
     and `tools/module sync` is mandatory after pulling the engine repo. Engine
     pinned `engine="claude"` on every run_turn.
+- **Phase 6 — the middle manager (2026-08)** ✅. The brain now works when the
+  operator isn't talking to it (`controller/autopilot.py`):
+  - **Event-driven turns**: Reactor events trigger budgeted PM turns —
+    `blocked` → a TRIAGE turn (read evidence, clear trivial per the sweep
+    protocol, else escalate); `turn_done` on a task-linked session → a VERIFY
+    turn judging the work against the task's acceptance (the Phase-3 TODO,
+    closed). Turns are serialized with operator chats by one shared lock and
+    recorded into a visible "🤖 autopilot" chat thread.
+  - **Runaway guards** (the reason this is safe to leave on): per-cid and
+    per-task cooldowns, own-action echo suppression (via the audit ledger),
+    hourly/daily turn budgets with a single starvation notice, hard pause
+    under `autonomy=readonly`, and a persisted kill switch
+    (`POST /api/autopilot {"on":false}`; knobs `CONTROLLER_AUTOPILOT*`).
+  - **Escalation discipline**: the `escalate` verb is the PM's only unattended
+    channel to the operator — `digest` items batch into ONE windowed Telegram
+    push (`CONTROLLER_DIGEST_WINDOW`), `now` bypasses for genuine emergencies;
+    the raw per-block reactor ping is suppressed while the autopilot owns it.
+  - **Durable memory** (`controller/notes.py`): operator-set standing
+    priorities + scoped fleet notes (`machine:` / `project:` / `task:` /
+    `general`), written through `remember_note`/`set_priorities` verbs and
+    rendered (bounded) into every turn's system prompt — the legible
+    replacement for the auto-memory we turned off.
 
 ## Decision log
 

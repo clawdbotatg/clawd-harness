@@ -57,7 +57,8 @@ def build(connect_wait=4.0):
                 time.sleep(0.05)
     guard = Guard(autonomy=config.AUTONOMY, rate_per_min=config.RATE_PER_MIN)
     world = World(clients, ledger)
-    verbs = Verbs(world, ledger, clients, guard)
+    from .notes import NotesStore
+    verbs = Verbs(world, ledger, clients, guard, notes=NotesStore(config.NOTES_PATH))
     return verbs, clients, guard, ledger, reactor
 
 
@@ -71,11 +72,11 @@ def _serve_alive(base, timeout=1.5):
         return False
 
 
-def make_brain(guard):
+def make_brain(guard, notes=None):
     """The one PM brain: a minimal claude-p-agent (`claude -p` + the fleet MCP
     tools, on your subscription). See controller/agent.py."""
     from .agent import AgentBrain
-    return AgentBrain(guard)
+    return AgentBrain(guard, notes=notes)
 
 
 def main(argv):
@@ -110,11 +111,17 @@ def main(argv):
         return 0
 
     if mode == "serve":
+        import threading
         from . import chat_server
         verbs, clients, guard, ledger, reactor = build()
-        brain = make_brain(guard)
+        brain = make_brain(guard, notes=verbs.notes)
         from .threads import Threads
         threads = Threads(config.THREADS_PATH)
+        # One lock serializes EVERY brain turn — operator chats (HTTP +
+        # Telegram) and autopilot turns alike — so an event-driven turn can
+        # never interleave with a conversation and repoint the memory key
+        # mid-flight.
+        turn_lock = threading.Lock()
 
         # a thin façade the chat server drives. One PM brain (a minimal claude-p-agent),
         # but multiple conversation threads (the chat analog of per-project sessions). A
@@ -195,6 +202,44 @@ def main(argv):
             from .telegram import TelegramBridge
             tg = TelegramBridge(config.TELEGRAM_TOKEN, config.TELEGRAM_ALLOW, router).start()
 
+        # -- autopilot: reactor events → budgeted PM turns -------------------
+        # Turns land in a dedicated "🤖 autopilot" thread so every decision it
+        # makes unattended is reviewable in the normal chat UI.
+        from .autopilot import Autopilot
+
+        def _auto_tid():
+            for tid in threads.order:
+                if threads.threads[tid]["title"] == "🤖 autopilot":
+                    return tid
+            return threads.new(title="🤖 autopilot", select=False)
+
+        def run_pm(kind, prompt):
+            with turn_lock:
+                tid = _auto_tid()
+                brain.conversation_key = f"pm-auto-{time.strftime('%Y%m%d')}"
+                threads.record("me", prompt, tid=tid)
+                threads.persist()
+                out = brain.chat(prompt)
+                threads.record("bot", out.get("reply", ""), out.get("trace"), tid=tid)
+                threads.persist()
+                return out.get("reply", "")
+
+        autopilot = Autopilot(
+            run_pm, verbs, ledger, guard,
+            notify=(tg.notify if tg else None),
+            enabled=config.AUTOPILOT, toggle_path=config.AUTOPILOT_PATH,
+            cooldown_s=config.AUTOPILOT_COOLDOWN,
+            verify_cooldown_s=config.AUTOPILOT_VERIFY_COOLDOWN,
+            own_action_s=config.AUTOPILOT_OWN_ACTION_S,
+            max_per_hour=config.AUTOPILOT_MAX_PER_HOUR,
+            max_per_day=config.AUTOPILOT_MAX_PER_DAY,
+            digest_window_s=config.DIGEST_WINDOW).start()
+        verbs.escalate_sink = autopilot.escalate
+        reactor.on_event(autopilot.feed)
+        print(f"[auto] autopilot {'ON' if autopilot.enabled else 'off'} "
+              f"(budget {autopilot.max_per_hour}/h {autopilot.max_per_day}/d, "
+              f"digest every {int(autopilot.digest_window_s)}s)", flush=True)
+
         # Optional scheduled sweep (CONTROLLER_SWEEP_EVERY seconds, 0 = off):
         # a deterministic verbs.sweep() — no LLM turn, so it's free — pushed to
         # Telegram as a compact digest, suppressed while nothing changed.
@@ -237,13 +282,18 @@ def main(argv):
             if e["kind"] == "blocked":
                 line = f"⏳ needs you — {e['machine']}/{e['cid'][:8]}: {e['summary']}"
                 print("[reactor] " + line, flush=True)
-                if tg:
+                # With the autopilot ON, the raw per-event ping is ITS job to
+                # replace (triage it, or batch it into the digest) — pinging
+                # here too would double-notify every block.
+                if tg and not autopilot.enabled:
                     tg.notify(line)
         reactor.on_event(on_event)
 
         chat_server.serve_with_router(router, verbs, guard,
                                       lambda: brain.label, config.CHAT_PORT,
-                                      reactor=reactor, mcp=debug_mcp, prompt_brain=prompt_brain)
+                                      reactor=reactor, mcp=debug_mcp,
+                                      prompt_brain=prompt_brain,
+                                      turn_lock=turn_lock, autopilot=autopilot)
         return 0
 
     print(__doc__)

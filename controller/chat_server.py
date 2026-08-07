@@ -26,8 +26,11 @@ class ThreadingHTTPServer(ThreadingMixIn, TCPServer):
     allow_reuse_address = True
 
 
-def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, prompt_brain=None):
-    chat_lock = threading.Lock()
+def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None,
+                 prompt_brain=None, turn_lock=None, autopilot=None):
+    # One turn at a time — shared with the autopilot when serve passes its
+    # lock in, so event-driven turns and operator chats never interleave.
+    chat_lock = turn_lock or threading.Lock()
     from . import config
     from .mcp import TOOLS
 
@@ -107,6 +110,10 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
                 return self._send(200, verbs.list_tasks())
             if path == "/api/notifications":
                 return self._send(200, {"events": reactor.recent() if reactor else []})
+            if path == "/api/autopilot":
+                if not autopilot:
+                    return self._send(200, {"available": False})
+                return self._send(200, {"available": True, **autopilot.status()})
             if path == "/api/turn":
                 # live progress of the in-flight PM turn (or {"active":false}) —
                 # lets a front-end show "working: 7 tools, last: find gmail"
@@ -166,6 +173,16 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
                 prompt_brain.set_model(model)
                 return self._send(200, {"ok": True, "model_id": current_model(),
                                         "model": model_label()})
+            if path == "/api/autopilot":
+                if not autopilot:
+                    return self._send(400, {"error": "autopilot unavailable"})
+                if "on" in data:                         # the kill switch
+                    autopilot.set_enabled(bool(data["on"]))
+                if data.get("flush"):                    # push the digest now
+                    return self._send(200, {"ok": True,
+                                            "flushed": autopilot.flush_digest(),
+                                            **autopilot.status()})
+                return self._send(200, {"ok": True, **autopilot.status()})
             if path == "/api/autonomy":
                 mode = (data.get("autonomy") or "").lower()
                 if mode in ("readonly", "confirm", "auto"):
@@ -216,10 +233,12 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
 
 
 def serve_with_router(router, verbs, guard, backend_getter, port, bind="127.0.0.1",
-                      reactor=None, mcp=None, prompt_brain=None):
+                      reactor=None, mcp=None, prompt_brain=None,
+                      turn_lock=None, autopilot=None):
     srv = ThreadingHTTPServer((bind, port),
                               make_handler(router, verbs, guard, backend_getter,
-                                           reactor, mcp, prompt_brain))
+                                           reactor, mcp, prompt_brain,
+                                           turn_lock, autopilot))
     print(f"[controller] chat UI on http://{bind}:{port}  ·  debug http://{bind}:{port}/debug  "
           f"(backend={backend_getter()}, autonomy={guard.autonomy})", flush=True)
     srv.serve_forever()

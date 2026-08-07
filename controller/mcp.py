@@ -54,6 +54,25 @@ TOOLS = [
         "everything' / 'what needs me'.", _S({"max_items": _INT})),
     ("get_attention", "Ranked queue of sessions needing a human, each with a "
         "suggested_action verb. Lighter than sweep (no tails/links).", _S({})),
+    ("escalate", "Queue a question/decision for the operator. urgency='digest' "
+        "(default) batches into ONE periodic push — use it for almost "
+        "everything; 'now' pushes immediately — only for actively-breaking "
+        "things. Include machine+cid when it's about a session (adds a deep "
+        "link).", _S({"question": _STR, "machine": _STR, "cid": _STR,
+                      "urgency": _STR}, ["question"])),
+    ("remember_note", "Write to YOUR durable memory — it is injected into every "
+        "future turn. Use for lasting facts: a machine's quirks, a project's "
+        "state, operator guidance. Scope: 'machine:<id>' | 'project:<name>' | "
+        "'task:<id>' | 'general'. Not for transient status.",
+        _S({"text": _STR, "scope": _STR}, ["text"])),
+    ("forget_note", "Drop one note by scope + index (see get_notes).",
+        _S({"scope": _STR, "index": _INT}, ["scope", "index"])),
+    ("get_notes", "Your full durable memory: priorities + all notes with "
+        "indexes (the prompt only carries the newest).", _S({})),
+    ("set_priorities", "Replace the operator's standing priorities (ordered "
+        "list, highest first). Call ONLY when the operator states or changes "
+        "what matters — priorities steer every future turn and sweep.",
+        _S({"priorities": {"type": "array", "items": _STR}}, ["priorities"])),
     ("session_digest", "Full current detail for one session.",
         _S({"machine": _STR, "cid": _STR}, ["machine", "cid"])),
     ("open_session", "Build a deep link that opens ONE session in the harness UI — "
@@ -134,6 +153,17 @@ class MCPServer:
             return v.sweep(a.get("max_items", 20))
         if name == "get_attention":
             return v.get_attention()
+        if name == "escalate":
+            return v.escalate(a["question"], a.get("machine"), a.get("cid"),
+                              a.get("urgency", "digest"))
+        if name == "remember_note":
+            return v.remember_note(a["text"], a.get("scope", "general"))
+        if name == "forget_note":
+            return v.forget_note(a["scope"], a["index"])
+        if name == "get_notes":
+            return v.get_notes()
+        if name == "set_priorities":
+            return v.set_priorities(a.get("priorities") or [])
         if name == "session_digest":
             return v.session_digest(a["machine"], a["cid"])
         if name == "open_session":
