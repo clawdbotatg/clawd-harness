@@ -134,9 +134,10 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
                     "models": KNOWN_MODELS,
                     "harness": {"base": hbase, "token": config.harness_token(),
                                 "port": hparsed.port or (443 if hparsed.scheme == "https" else 80)},
+                    # compact world: per-machine session count now rides "sessions"
                     "machines": [{"id": m["id"], "connected": m["connected"],
-                                  "sessions": m["session_total"]} for m in snap["machines"]],
-                    "attention_count": snap["attention_count"]})
+                                  "sessions": m.get("sessions", 0)} for m in snap["machines"]],
+                    "attention_count": snap.get("attention_count", 0)})
             return self._send(404, {"error": "not found"})
 
         def do_POST(self):
