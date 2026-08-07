@@ -133,14 +133,16 @@ class HarnessClient:
     def refresh(self):
         return self.send({"type": "list"})
 
-    def new_session(self, pid, timeout=12):
+    def new_session(self, pid, timeout=12, engine="claude"):
         """Create a session in `pid` and block for the server's focus reply with
         the new cid (None on timeout). Serialized so concurrent spawns don't
-        steal each other's focus event."""
+        steal each other's focus event. `engine` picks the agent CLI
+        ("claude" | "codex"); a harness older than the engine layer ignores it
+        and spawns claude, which is the safe fallback."""
         with self._new_lock:
             self._focus_event.clear()
             self._focus_cid = None
-            if not self.send({"type": "new", "pid": pid}):
+            if not self.send({"type": "new", "pid": pid, "engine": engine}):
                 return None
             if self._focus_event.wait(timeout):
                 return self._focus_cid

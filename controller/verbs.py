@@ -465,19 +465,21 @@ class Verbs:
         return self._gate("clone_project", {"machine": machine, "repo_url": repo_url,
                                             "confirm": confirm}, do)
 
-    def spawn(self, machine, pid, confirm=False):
+    def spawn(self, machine, pid, confirm=False, engine="claude"):
         """Start a NEW session in a project (a pid) with no task attached. Returns its
-        cid so you can `ask` it next. For task-bound spawning use `assign` instead."""
+        cid so you can `ask` it next. For task-bound spawning use `assign` instead.
+        `engine` picks the agent CLI: "claude" (default) or "codex"."""
         def do():
             c = self.clients.get(machine)
             if not c:
                 return {"ok": False, "error": f"no such machine: {machine}"}
-            cid = c.new_session(pid)
+            cid = c.new_session(pid, engine=engine)
             if not cid:
                 return {"ok": False, "error": "failed to spawn a session (timeout)"}
-            return {"ok": True, "machine": machine, "pid": pid, "cid": cid}
+            return {"ok": True, "machine": machine, "pid": pid, "cid": cid,
+                    "engine": engine}
         return self._gate("spawn", {"machine": machine, "pid": pid,
-                                    "confirm": confirm}, do)
+                                    "engine": engine, "confirm": confirm}, do)
 
     def close(self, machine, cid, confirm=False):
         """Close a session: its `claude` is terminated and dropped from the harness.

@@ -71,11 +71,11 @@ class RelayMachine:
     def refresh(self):
         return self._send({"type": "list"})
 
-    def new_session(self, pid, timeout=15):
+    def new_session(self, pid, timeout=15, engine="claude"):
         with self._new_lock:
             self._focus_event.clear()
             self._focus_cid = None
-            if not self._send({"type": "new", "pid": pid}):
+            if not self._send({"type": "new", "pid": pid, "engine": engine}):
                 return None
             return self._focus_cid if self._focus_event.wait(timeout) else None
 
