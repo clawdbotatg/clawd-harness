@@ -12,6 +12,7 @@ brain is a minimal claude-p-agent (`claude -p` + the fleet MCP tools); see
 controller/agent.py.
 """
 import json
+import os
 import sys
 import time
 
@@ -60,6 +61,16 @@ def build(connect_wait=4.0):
     return verbs, clients, guard, ledger, reactor
 
 
+def _serve_alive(base, timeout=1.5):
+    """True if a controller serve process answers on its chat port."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(base + "/api/state", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def make_brain(guard):
     """The one PM brain: a minimal claude-p-agent (`claude -p` + the fleet MCP
     tools, on your subscription). See controller/agent.py."""
@@ -72,6 +83,21 @@ def main(argv):
 
     if mode == "mcp":
         # MCP stdio server. Keep stdout clean for JSON-RPC; logs go to stderr.
+        # When spawned by the PM brain (write_mcp_config sets the opt-in env),
+        # proxy tools through the serve process's HTTP API instead of building
+        # a second fleet connection: a second relay dial would collide on the
+        # reserved __ctl__ ident and the two controller processes would
+        # supersede each other's links all turn (the world-flap bug). The
+        # opt-in gate keeps a hand-run/test `-m controller mcp` (which may
+        # point at a different harness entirely) standalone.
+        base = f"http://127.0.0.1:{config.CHAT_PORT}"
+        if os.environ.get("CONTROLLER_MCP_PROXY") == "1" and _serve_alive(base):
+            from .mcp import ProxyMCPServer
+            print(f"[mcp] proxying tools to serve at {base}", file=sys.stderr, flush=True)
+            ProxyMCPServer(base).serve_stdio()
+            return 0
+        print(f"[mcp] no serve at {base} — standalone fleet connection",
+              file=sys.stderr, flush=True)
         verbs, clients, guard, ledger, reactor = build(connect_wait=3.0)
         MCPServer(verbs).serve_stdio()
         return 0
@@ -168,6 +194,41 @@ def main(argv):
         if config.TELEGRAM_TOKEN:
             from .telegram import TelegramBridge
             tg = TelegramBridge(config.TELEGRAM_TOKEN, config.TELEGRAM_ALLOW, router).start()
+
+        # Optional scheduled sweep (CONTROLLER_SWEEP_EVERY seconds, 0 = off):
+        # a deterministic verbs.sweep() — no LLM turn, so it's free — pushed to
+        # Telegram as a compact digest, suppressed while nothing changed.
+        if config.SWEEP_EVERY > 0:
+            import hashlib
+            import threading
+            sweep_state = {"sig": None}
+
+            def _sweep_loop():
+                while True:
+                    time.sleep(config.SWEEP_EVERY)
+                    try:
+                        bundle = verbs.sweep()
+                        items = bundle.get("items", [])
+                        sig = hashlib.sha1(json.dumps(
+                            sorted([i["machine"], i["cid"], i["kind"]] for i in items)
+                        ).encode()).hexdigest()
+                        if sig == sweep_state["sig"]:
+                            continue
+                        sweep_state["sig"] = sig
+                        if not items:
+                            continue
+                        lines = [f"🧹 sweep: {len(items)} item(s) need attention"]
+                        for i in items[:8]:
+                            lines.append(f"• [{i['sev']}] {i['title']} — "
+                                         f"{i['summary']} {i.get('url', '')}".strip())
+                        msg = "\n".join(lines)
+                        print("[sweep] " + msg.replace("\n", " | "), flush=True)
+                        if tg:
+                            tg.notify(msg)
+                    except Exception as e:
+                        print(f"[sweep] error: {e}", flush=True)
+
+            threading.Thread(target=_sweep_loop, daemon=True, name="sweep").start()
 
         # Higher-level reactions: a session crossing into `blocked` (a low-level
         # Claude Code hook) fires a controller event → push it to Telegram. The

@@ -26,6 +26,12 @@ class _State:
         self.sessions = {}
         self.conns = []          # (wfile, lock)
         self._n = 0
+        # scripted read-query material: cid -> [slim events] / screen string
+        self.transcripts = {}
+        self.screens = {}
+        # frame types the mock should IGNORE (simulates an old harness that
+        # predates them — the client must time out gracefully)
+        self.ignore_frames = set()
 
     def add_session(self, pid="p1", **kw):
         with self.lock:
@@ -126,6 +132,51 @@ def _make_handler(state):
 
         def _dispatch(self, f, j):
             t = f.get("type")
+            if t in state.ignore_frames:
+                return
+            if t == "search":
+                ql = (f.get("q") or "").lower()
+                matches = []
+                with state.lock:
+                    sessions = [dict(s) for s in state.sessions.values()]
+                for s in sessions:
+                    for where in ("title", "desc", "digest", "blocked_on"):
+                        v = s.get(where) or ""
+                        if ql and ql in v.lower():
+                            matches.append({"cid": s["cid"], "pid": s["pid"],
+                                            "title": s["title"], "where": where,
+                                            "snippet": v[:160],
+                                            "lastActive": s.get("lastActive", 0)})
+                            break
+                    else:
+                        for ev in state.transcripts.get(s["cid"], []):
+                            txt = ev.get("text") or ""
+                            if ql and ql in txt.lower():
+                                matches.append({"cid": s["cid"], "pid": s["pid"],
+                                                "title": s["title"],
+                                                "where": "transcript",
+                                                "snippet": txt[:160],
+                                                "lastActive": s.get("lastActive", 0)})
+                                break
+                j({"type": "searchResult", "id": f.get("id"), "q": f.get("q"),
+                   "matches": matches[:int(f.get("limit") or 20)],
+                   "scanned": len(sessions), "truncated": False})
+                return
+            if t == "transcriptTail":
+                cid = f.get("cid")
+                if cid not in state.sessions:
+                    j({"type": "transcriptTailResult", "id": f.get("id"),
+                       "cid": cid, "error": f"no such session: {cid}"})
+                    return
+                evs = state.transcripts.get(cid, [])[-int(f.get("n") or 30):]
+                j({"type": "transcriptTailResult", "id": f.get("id"),
+                   "cid": cid, "events": evs})
+                return
+            if t == "screen":
+                cid = f.get("cid")
+                j({"type": "screenResult", "id": f.get("id"), "cid": cid,
+                   "text": state.screens.get(cid, ""), "cols": 80, "rows": 24})
+                return
             if t == "list":
                 j(state.projects_frame())
                 j(state.sessions_frame())

@@ -54,6 +54,33 @@ AUTONOMY = cfg("CONTROLLER_AUTONOMY", "confirm").lower()
 # How many write actions a single target (cid/machine) may trigger per minute.
 RATE_PER_MIN = int(cfg("CONTROLLER_RATE_PER_MIN", "8") or 8)
 
+# -- turn policy ----------------------------------------------------------------
+# One policy for every front-end (HTTP chat + Telegram both ride the streaming
+# path). TURN_STALL kills a turn with NO stream events for that long (a wedged
+# CLI); TURN_TIMEOUT is the hard ceiling on a busy-but-endless turn. 0 disables
+# either. The old split — 240s hard kill on HTTP, no limit at all on Telegram —
+# is exactly what made fleet-wide questions die with "timed out after 240s".
+TURN_TIMEOUT = float(cfg("CONTROLLER_TURN_TIMEOUT", "1800") or 1800)
+TURN_STALL = float(cfg("CONTROLLER_TURN_STALL", "300") or 300)
+
+# -- the PM's own home + memory (context diet) -----------------------------------
+# The brain's `claude -p` used to run with cwd = this repo root, which auto-loads
+# the 22KB harness-development CLAUDE.md (WS protocol, fleet internals) into
+# every PM turn — none of it helps manage sessions, and Claude's per-project
+# auto-memory then bled facts across every PM thread. The PM now runs in its own
+# small home OUTSIDE the repo tree (an inside dir would still inherit the repo
+# CLAUDE.md via ancestor loading), with a purpose-built CLAUDE.md installed from
+# controller/prompts/CLAUDE.pm.md, engine memory in its own dir, and auto-memory
+# off by default (CONTROLLER_AUTO_MEMORY=1 to opt back in).
+AGENT_HOME_DIR = os.path.expanduser(cfg("CONTROLLER_AGENT_HOME", "~/.clawd-controller/home"))
+MEMORY_DIR = os.path.expanduser(cfg("CONTROLLER_MEMORY_DIR", "~/.clawd-controller/memory"))
+AUTO_MEMORY = cfg("CONTROLLER_AUTO_MEMORY", "0") == "1"
+
+# Optional scheduled sweep: every N seconds the serve process runs verbs.sweep()
+# (deterministic, no LLM turn) and pushes a compact digest to Telegram when it
+# changed. 0 (default) = off; the user-triggered sweep verb works regardless.
+SWEEP_EVERY = float(cfg("CONTROLLER_SWEEP_EVERY", "0") or 0)
+
 # Which harness this controller drives. Single-machine by default (direct to the
 # local harness); the relay/multi-machine adapter layers on top of the same World.
 HARNESS_WS = cfg("CONTROLLER_HARNESS_WS", "ws://127.0.0.1:8787")

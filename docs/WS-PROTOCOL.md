@@ -72,6 +72,16 @@ viewer** (each with its own `client.cid`).
 | `restart` | `reason?` | Request a graceful self-restart (fires once all sessions idle). |
 | `restartCancel` | — | Cancel a pending restart. |
 | `ping` | `id?` | Liveness probe. Server immediately replies `{type:"pong", id}` (echoing `id`). Lets a client prove the *full* path is live (in fleet: browser→relay→worker→harness and back over the e2e channel) before deciding whether to repaint in place vs. tear down + re-subscribe. A pre-`pong` harness just ignores it — the prober falls back to reconnect on timeout, so it's backward-safe. |
+| `search` | `q`, `scope?`, `limit?`, `id?` | **Controller read query.** Bounded server-side search over live sessions — meta fields (title/desc/tab/digest/blocked_on/lastAnswer; zero I/O) and/or the tail of each session's transcript (`scope`: `meta` \| `transcript` \| `all`, default `all`). Replies `{type:"searchResult", id, q, matches:[{cid,pid,title,lastActive,where,snippet}], scanned, truncated}` **to the sender only**, computed on a worker thread. Hard bounds: `limit` clamped to 40, ≤3 transcript hits/session (newest first), 160-char snippets, last 2MB of each transcript, 5s wall budget (→ `truncated:true`). Sessions scanned most-recently-active first. |
+| `transcriptTail` | `cid`, `n?`, `chars?`, `id?` | **Controller read query.** Last `n` slim transcript events for one session (same `event` shape as `transcript` frames), every text field truncated to `chars`. Replies `{type:"transcriptTailResult", id, cid, events:[...]}` to the sender only; unknown cid → same frame with `error`. Clamps: `n`≤50, `chars`≤2000, whole reply ≤16KB (oldest events dropped). |
+| `screen` | `cid`, `chars?`, `id?` | **Controller read query.** De-ANSI'd tail of the session's live terminal (ring buffer) — what a human sees right now; the way to read TUI dialogs (trust prompts, menus) that never reach the transcript. Replies `{type:"screenResult", id, cid, text, cols, rows}` to the sender only. `chars` clamped to 4000. |
+
+The three **controller read queries** carry an optional `id` echoed in the
+reply for request/reply correlation. A harness that predates them simply never
+answers — callers should time out and degrade (the controller's `find` falls
+back to meta-only for that machine). In fleet mode they ride the existing
+worker/relay bridge untouched (any typed frame is forwarded verbatim for the
+trusted `__ctl__` ident).
 
 `input` vs `send`: `send` is what you want for prompts — it handles the
 TUI's paste-vs-submit timing (`SEND_SETTLE`). `input` is for raw control
@@ -147,6 +157,17 @@ no-op that would leave the previous session's stream flowing (that's how
 { "type":"restart", "state":"go" }                     // restart firing now (process about to exit)
 ```
 
+### Read-query replies (to the requesting client only)
+```jsonc
+{ "type":"searchResult", "id", "q", "matches":[
+    { "cid", "pid", "title", "lastActive":float,
+      "where":"title|desc|tab|digest|blocked_on|lastAnswer|transcript",
+      "snippet":"…≤160 chars around the hit…" } ],
+  "scanned":int, "truncated":bool }
+{ "type":"transcriptTailResult", "id", "cid", "events":[<event>...] }   // or { …, "error" }
+{ "type":"screenResult", "id", "cid", "text", "cols":int, "rows":int }  // or { …, "error" }
+```
+
 ---
 
 ## Object shapes
@@ -170,7 +191,7 @@ no-op that would leave the previous session's stream flowing (that's how
   // promptedAt = epoch of the last HUMAN prompt (tab-strip age; 0 for pre-field sessions —
   // consumers fall back to lastActive, which every hook bumps incl. restart resumes)
   "tool":<str|null>, "status":"blocked|working|background|idle", "bg":"shell|agent|", "digest":str,
-  "blocked_on":str, "sessionId", "promptCount":int,
+  "blocked_on":str, "lastAnswer":str, "sessionId", "promptCount":int,
   "lastActive":float, "created":float, "alive":bool, "account":str,
   "pinned":float }
   // pinned = epoch when the session was 📌 parked on the pin board (see the `pin`
@@ -203,6 +224,12 @@ no-op that would leave the previous session's stream flowing (that's how
   something in plain text (LLM-inferred) — a *soft* block the `waiting` flag
   (TUI prompts only) misses. `""` when not blocked. These three feed the AI
   controller's read-model; see `docs/CONTROLLER.md`.
+- `lastAnswer` = the last turn's assistant message, truncated to 280 chars —
+  **durable**: captured on every `Stop` and backfilled from the transcript on
+  resume, so it survives harness restarts and controller reconnects (the full
+  500-char version still rides the `Stop` hook's `data.last`; anything longer
+  is `transcriptTail`'s job). Absent on old servers ⇒ degrade to hook-fed
+  capture.
 - `cid` = stable console id (ours; survives claude's id rotation). **Address
   sessions by `cid`, never `sessionId`.**
 - `sessionId` = claude's own id; rotates on compaction/resume.

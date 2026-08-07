@@ -99,6 +99,18 @@ RING_MAX   = int(os.environ.get("RING_MAX", str(256 * 1024)))  # replay buffer c
 # SEED_RING_MAX=0 disables seeding.
 SEED_RING_MAX = int(os.environ.get("SEED_RING_MAX", "8192"))
 SEED_CHARS    = int(os.environ.get("SEED_CHARS", "12000"))   # cap on rendered seed text
+# Controller read-query bounds (the `search` / `transcriptTail` / `screen` WS
+# frames — docs/WS-PROTOCOL.md). Every reply must fit an LLM tool-output budget,
+# so the caps are hard: clamps, per-session hit limits, and a wall-clock stop.
+SEARCH_LIMIT_MAX   = 40                # matches per search reply
+SEARCH_TAIL_BYTES  = 2 * 1024 * 1024   # per-transcript read window (tail of file)
+SEARCH_PER_SESSION = 3                 # transcript hits kept per session (newest first)
+SEARCH_SNIPPET     = 160               # chars of context per hit
+SEARCH_BUDGET_S    = 5.0               # wall-clock stop → truncated:true
+TAIL_EVENTS_MAX    = 50                # transcriptTail: max events
+TAIL_CHARS_MAX     = 2000              # transcriptTail: per-text-field cap
+TAIL_REPLY_BYTES   = 16 * 1024         # transcriptTail: whole-reply cap
+SCREEN_CHARS_MAX   = 4000              # screen: cap on returned text
 # Scrub transcript text before it's replayed as terminal bytes: any escape
 # sequence or control char (except \t \n) in a prompt/answer would otherwise
 # execute in the subscriber's terminal instead of displaying.
@@ -1340,6 +1352,7 @@ class ClaudeSession:
         self.last_tool = None
         self.digest = ""                          # volatile "what it's doing now" (LLM, refreshed each Stop)
         self.blocked_on = None                    # the open question if it ended asking the human (LLM)
+        self.last_answer = ""                     # last Stop's assistant message — durable (backfilled on resume)
         self.settings_path = None
 
     # -- registry shape --------------------------------------------------------
@@ -1403,6 +1416,11 @@ class ClaudeSession:
                 "status": status, "bg": self.bg,
                 "digest": self.digest or "",
                 "blocked_on": self.blocked_on or "",
+                # truncated hard: this rides every `sessions` broadcast. The
+                # fuller text is in the Stop hook / transcriptTail. Durable —
+                # _backfill_last_answer restores it across restarts, so a
+                # controller can always retrieve "what did it last say".
+                "lastAnswer": (self.last_answer or "")[:280],
                 "sessionId": self.session_id,
                 "promptCount": self.prompt_count,
                 "lastActive": self.last_active,
@@ -1522,6 +1540,10 @@ class ClaudeSession:
         # gets named now from its existing content.
         if self.resuming and not self.title:
             threading.Thread(target=self._regenerate_name, daemon=True).start()
+        # lastAnswer lives only in memory; a restart would blank it for every
+        # session until its next turn — recover it from the transcript instead.
+        if self.resuming and not self.last_answer:
+            threading.Thread(target=self._backfill_last_answer, daemon=True).start()
 
     def _write_hook_settings(self):
         """Generate a settings file that POSTs every hook event's stdin JSON to
@@ -1598,6 +1620,8 @@ class ClaudeSession:
             self.busy = False
             self.last_tool = None
             data = {"last": obj.get("last_assistant_message", "")}
+            if data["last"]:
+                self.last_answer = data["last"][:500]
             # Turn complete → the transcript now has a real exchange. Name it if
             # it's still unnamed (so even a 1-prompt session gets a title), and
             # re-name at the 1/3/6/9/… milestones to sharpen as it grows.
@@ -2110,6 +2134,71 @@ class ClaudeSession:
         for ev in events[-limit:]:
             client.send_json({"type": "transcript", "cid": self.cid,
                               "event": ev, "history": True})
+
+    # -- bounded controller reads (transcriptTail / screen frames) ------------
+    def tail_events(self, n=30, chars=400):
+        """Last n slim transcript events with every text field truncated — the
+        controller's 'what did this session actually say/do' read. Bounded by
+        construction: n/chars clamped, whole reply capped at TAIL_REPLY_BYTES."""
+        n = max(1, min(int(n or 30), TAIL_EVENTS_MAX))
+        chars = max(40, min(int(chars or 400), TAIL_CHARS_MAX))
+        path = self.transcript_path or self._find_transcript()
+        if not path:
+            return []
+        try:
+            lines = open(path).read().splitlines()
+        except OSError:
+            return []
+        events = [e for e in (self._slim_event(l) for l in lines) if e]
+        out = []
+        for ev in events[-n:]:
+            ev = dict(ev)
+            if isinstance(ev.get("text"), str):
+                ev["text"] = ev["text"][:chars]
+            if ev.get("tools"):
+                tools = []
+                for tu in ev["tools"][:8]:
+                    try:
+                        arg = json.dumps(tu.get("input"), separators=(",", ":"))
+                    except Exception:
+                        arg = str(tu.get("input"))
+                    tools.append({"name": tu.get("name"), "input": arg[:chars]})
+                ev["tools"] = tools
+            if ev.get("results"):
+                ev["results"] = [str(r)[:chars] for r in ev["results"][:8]]
+            out.append(ev)
+        while len(out) > 1 and len(json.dumps(out)) > TAIL_REPLY_BYTES:
+            out.pop(0)                      # drop oldest until the reply fits
+        return out
+
+    def screen_text(self, chars=1500):
+        """De-ANSI'd tail of the live terminal — what a human would see right
+        now. For TUI dialogs (trust prompts, menus, /login) that never reach
+        the transcript; the same technique as the limit-banner scan."""
+        chars = max(80, min(int(chars or 1500), SCREEN_CHARS_MAX))
+        with self.ring_lock:
+            raw = bytes(self.ring)
+        text = _PTY_ANSI_RE.sub(b"", raw).decode("utf-8", "ignore")
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text[-chars:]
+
+    def _backfill_last_answer(self):
+        """Recover last_answer from the transcript after a resume, so the
+        controller's cheapest retrieval channel survives restarts. The
+        transcript may not exist yet (claude writes it lazily) — retry briefly,
+        then give up quietly; the next Stop hook fills it anyway."""
+        deadline = time.time() + 60
+        while self.alive and not self.last_answer and time.time() < deadline:
+            evs = self.tail_events(10, 500)
+            if evs:
+                for ev in reversed(evs):
+                    if ev.get("role") == "assistant" and ev.get("text"):
+                        self.last_answer = ev["text"][:500]
+                        self.manager.broadcast_sessions()
+                        break
+                return
+            time.sleep(5)
 
     def _history_seed_bytes(self, limit=60):
         """Rendered-transcript scrollback, sent before a shallow ring replay.
@@ -3851,6 +3940,113 @@ class SessionManager:
     def sessions_meta(self):
         return [s.meta() for s in self._ordered()]
 
+    # -- controller read queries (search / transcriptTail / screen) -----------
+    def search(self, q, scope="all", limit=20):
+        """Bounded server-side search over live sessions: meta fields (title/
+        desc/tab/digest/blocked_on — zero I/O) and/or each transcript's tail.
+        Most-recently-active first, so the caps land on useful content. Powers
+        the controller's one-call `find`. Closed sessions' transcripts are out
+        of scope (no cid mapping). See docs/WS-PROTOCOL.md."""
+        q = (q or "").strip()
+        if not q:
+            return {"matches": [], "scanned": 0, "truncated": False}
+        limit = max(1, min(int(limit or 20), SEARCH_LIMIT_MAX))
+        if scope not in ("meta", "transcript", "all"):
+            scope = "all"
+        ql = q.lower()
+        matches, truncated, scanned = [], False, 0
+        deadline = time.time() + SEARCH_BUDGET_S
+        for s in self._ordered():
+            if len(matches) >= limit or time.time() > deadline:
+                truncated = True
+                break
+            scanned += 1
+            base = {"cid": s.cid, "pid": s.pid,
+                    "title": s.title or s._fallback_title(),
+                    "lastActive": s.last_active}
+            if scope in ("meta", "all"):
+                for where, val in (("title", s.title), ("desc", s.desc),
+                                   ("tab", s.tab), ("digest", s.digest),
+                                   ("blocked_on", s.blocked_on),
+                                   ("lastAnswer", s.last_answer)):
+                    if val and ql in val.lower():
+                        i = val.lower().find(ql)
+                        lo = max(0, i - SEARCH_SNIPPET // 2)
+                        matches.append({**base, "where": where,
+                                        "snippet": val[lo:lo + SEARCH_SNIPPET]})
+                        break                # one meta hit per session is plenty
+            if scope in ("transcript", "all") and len(matches) < limit:
+                matches += [{**base, **hit}
+                            for hit in self._search_transcript(s, ql, deadline)]
+        return {"matches": matches[:limit], "scanned": scanned,
+                "truncated": truncated or len(matches) > limit}
+
+    @staticmethod
+    def _search_transcript(s, ql, deadline):
+        """Newest-first substring scan over the tail of one session's transcript.
+        Cheap pre-filter on the raw line before any JSON parse; every hit is a
+        slim-event text, so no tool noise or ANSI ever reaches the caller."""
+        path = s.transcript_path or s._find_transcript()
+        if not path:
+            return []
+        try:
+            size = os.path.getsize(path)
+            with open(path, "r", errors="ignore") as f:
+                if size > SEARCH_TAIL_BYTES:
+                    f.seek(size - SEARCH_TAIL_BYTES)
+                    f.readline()                  # drop the partial line
+                lines = f.read().splitlines()
+        except OSError:
+            return []
+        hits = []
+        for line in reversed(lines):
+            if len(hits) >= SEARCH_PER_SESSION or time.time() > deadline:
+                break
+            if ql not in line.lower():
+                continue
+            ev = s._slim_event(line)
+            if not ev:
+                continue
+            texts = ([ev["text"]] if isinstance(ev.get("text"), str) else []) \
+                + [str(r) for r in ev.get("results") or []]
+            for t in texts:
+                i = t.lower().find(ql)
+                if i >= 0:
+                    lo = max(0, i - SEARCH_SNIPPET // 2)
+                    hits.append({"where": "transcript",
+                                 "snippet": t[lo:lo + SEARCH_SNIPPET]})
+                    break
+        return hits
+
+    def serve_read_query(self, client, frame):
+        """Answer one controller read frame on a worker thread — the reply goes
+        only to the requesting client (like pong/focus), with the request `id`
+        echoed for correlation. Errors ride inside the result frame; bad input
+        can't take the client's read loop down."""
+        t = frame.get("type")
+        reply = {"type": t + "Result", "id": frame.get("id")}
+        try:
+            if t == "search":
+                reply["q"] = frame.get("q", "")
+                reply.update(self.search(frame.get("q", ""),
+                                         frame.get("scope", "all"),
+                                         frame.get("limit", 20)))
+            else:
+                s = self.get(frame.get("cid"))
+                if not s:
+                    reply["error"] = f"no such session: {frame.get('cid')}"
+                elif t == "transcriptTail":
+                    reply["cid"] = s.cid
+                    reply["events"] = s.tail_events(frame.get("n", 30),
+                                                    frame.get("chars", 400))
+                elif t == "screen":
+                    reply["cid"] = s.cid
+                    reply["text"] = s.screen_text(frame.get("chars", 1500))
+                    reply["cols"], reply["rows"] = s.tty_cols, s.tty_rows
+        except Exception as e:
+            reply["error"] = f"{type(e).__name__}: {e}"
+        client.send_json(reply)
+
     # -- global client registry (menu-level fan-out) ---------------------------
     def add_client(self, client):
         with self.clients_lock:
@@ -4516,6 +4712,12 @@ class Handler(BaseHTTPRequestHandler):
             # channel). A returned pong lets the client repaint in place instead of
             # tearing the socket down + resetting the terminal on every tab-switch.
             client.send_json({"type": "pong", "id": frame.get("id")})
+            return
+        if t in ("search", "transcriptTail", "screen"):
+            # Controller read queries — threaded so a transcript scan can't
+            # stall this client's read loop; replied only to the requester.
+            threading.Thread(target=MGR.serve_read_query, args=(client, frame),
+                             daemon=True).start()
             return
         if t == "subscribe":
             MGR.subscribe_client(client, frame.get("cid"))

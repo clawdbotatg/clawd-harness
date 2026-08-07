@@ -3,10 +3,25 @@
 AgentBrain is what the chat server talks to. Each turn calls `run_turn()` from
 claude-p-agent (imported via CLAUDE_P_AGENT_HOME) with this adapter's MCP tools
 and prompts in controller/prompts/.
+
+Framework contract (claude-p-agent ≥ de70b99, the modules era):
+- Subscription routing is the engine's `modules/router` env hook — the 100-line
+  duplicate this adapter used to carry is gone. The controller must therefore
+  NEVER set CLAUDE_CONFIG_DIR (an explicit pin makes the router module no-op);
+  after `git pull` in the engine repo, `tools/module sync` is required or no
+  routing happens at all.
+- The engine is pinned `engine="claude"`: run_turn hard-errors when extra_args
+  is combined with a non-claude engine, so a stray ENGINE= in a shared .env
+  must never be able to select one under the PM.
+- The PM runs in its own home (config.AGENT_HOME_DIR, outside the repo tree)
+  with its own CLAUDE.md and its own memory dir (CLAUDE_P_AGENT_MEMORY), and
+  auto-memory off by default — see config.py.
 """
 import json
 import os
+import shutil
 import sys
+import threading
 import time
 
 from . import config
@@ -16,120 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 PROMPTS_DIR = os.path.join(HERE, "prompts")
 MCP_CONFIG = os.path.join(HERE, ".mcp-config.json")
-
-# ── subscription routing (the PM jumps plans like harness sessions do) ───────
-# The PM's claude runs on whatever login CLAUDE_CONFIG_DIR points at. The
-# harness in this same checkout maintains per-account usage snapshots in its
-# registry; before each turn we point CLAUDE_CONFIG_DIR at the plan with the
-# most headroom. Safe to jump between turns: all account dirs share one
-# projects/ transcript store (server.py _share_projects), so the engine's
-# --resume finds its threads under any plan. No registry / no accounts →
-# env untouched (the box's plain ~/.claude, exactly as before).
-HARNESS_REGISTRY = os.path.join(ROOT, ".clawd-harness.sessions.json")
-ACCOUNTS_DIR = os.path.expanduser(
-    os.environ.get("CLAWD_ACCOUNTS_DIR", "~/.clawd-accounts"))
-_USAGE_FRESH = 3 * float(os.environ.get("USAGE_TTL", "600"))
-_USAGE_TTL = float(os.environ.get("USAGE_TTL", "600"))
-_last_route = {"name": None}
-_own_usage = {}                # name -> {"pct", "checkedAt"} (no-harness fallback)
-
-
-def _registry_accounts():
-    """Accounts as maintained by a harness in this checkout, or None."""
-    try:
-        with open(HARNESS_REGISTRY, encoding="utf-8") as f:
-            return json.load(f).get("accounts") or None
-    except (OSError, ValueError):
-        return None
-
-
-def _own_accounts():
-    """No harness on this box (e.g. the relay): discover account dirs under
-    ~/.clawd-accounts (+ the plain ~/.claude as `default`) and poll their
-    usage ourselves via tools/usage_probe's primitives, cached on _USAGE_TTL.
-    Returns the same shape as the registry so the picker below is shared."""
-    sys.path.insert(0, os.path.join(ROOT, "tools"))
-    try:
-        import usage_probe as up
-    except ImportError:
-        return None
-    finally:
-        sys.path.pop(0)
-    dirs = [("default", "")]
-    try:
-        dirs += sorted((d.name, os.path.join(ACCOUNTS_DIR, d.name))
-                       for d in os.scandir(ACCOUNTS_DIR) if d.is_dir())
-    except OSError:
-        pass
-    out, now = [], time.time()
-    for name, cfg in dirs:
-        cached = _own_usage.get(name)
-        if not cached or now - cached["checkedAt"] > _USAGE_TTL:
-            creds = up.read_credentials(cfg)
-            oauth = (creds or {}).get("claudeAiOauth") or {}
-            access, refresh = oauth.get("accessToken"), oauth.get("refreshToken")
-            if not access:
-                _own_usage.pop(name, None)
-                continue
-            status, usage = up.fetch_usage(access)
-            if status == 401 and refresh:
-                st, tok = up.http_json(
-                    up.TOKEN_URL, {"Content-Type": "application/json"},
-                    {"grant_type": "refresh_token", "refresh_token": refresh,
-                     "client_id": up.OAUTH_CLIENT_ID})
-                if st == 200 and tok and tok.get("access_token"):
-                    status, usage = up.fetch_usage(tok["access_token"])
-            if status != 200 or not isinstance(usage, dict):
-                continue                       # degrade: skip, keep others
-            worst = 0.0
-            for key, _lab in up.WINDOWS:
-                w = usage.get(key)
-                u = w.get("utilization") if isinstance(w, dict) else w
-                if isinstance(u, (int, float)):
-                    worst = max(worst, u)
-            cached = {"pct": round(worst, 1), "checkedAt": now}
-            _own_usage[name] = cached
-        out.append({"name": name, "config_dir": cfg, "ready": True,
-                    "usage": cached})
-    return out or None
-
-
-def _route_account():
-    accounts = _registry_accounts() or _own_accounts()
-    if not accounts:
-        return
-    now = time.time()
-    fresh = [a for a in accounts
-             if a.get("ready") and (a.get("usage") or {}).get("pct") is not None
-             and now - (a.get("usage") or {}).get("checkedAt", 0) < _USAGE_FRESH]
-    if not fresh:
-        return
-    best = min(fresh, key=lambda a: a["usage"]["pct"])
-    if best.get("config_dir"):
-        _share_projects_min(best["config_dir"])   # threads resume across jumps
-        os.environ["CLAUDE_CONFIG_DIR"] = best["config_dir"]
-    else:
-        os.environ.pop("CLAUDE_CONFIG_DIR", None)
-    if best["name"] != _last_route["name"]:
-        _last_route["name"] = best["name"]
-        print(f"[pm] routing turns via account {best['name']} "
-              f"({best['usage']['pct']}% used)", flush=True)
-
-
-def _share_projects_min(config_dir):
-    """Minimal mirror of the harness's shared-transcripts link for boxes with
-    no harness: <account>/projects → ~/.claude/projects, so the engine's
-    --resume finds its threads under any plan. Fresh dirs only — anything
-    already there is left alone (the harness handles real migrations)."""
-    src = os.path.expanduser("~/.claude/projects")
-    dst = os.path.join(config_dir, "projects")
-    try:
-        os.makedirs(src, exist_ok=True)
-        if not os.path.lexists(dst):
-            os.makedirs(config_dir, exist_ok=True)
-            os.symlink(src, dst)
-    except OSError:
-        pass
+HOME_CLAUDE_MD = os.path.join(PROMPTS_DIR, "CLAUDE.pm.md")
 
 AGENT_HOME = os.path.abspath(os.environ.get(
     "CLAUDE_P_AGENT_HOME",
@@ -193,12 +95,21 @@ def _get_forget():
     return forget
 
 
-# The PM gets the fleet MCP verbs PLUS read/investigation built-ins, so it can
-# inspect repos directly (gh/git via Bash, fetch docs, read files) instead of driving
-# sessions blind. Headless `claude -p` DENIES any tool not in --allowedTools, which is
-# why these must be enumerated. Write/Edit are deliberately withheld: the PM delegates
-# actual code changes to the coding sessions it spawns/assigns.
-_BUILTIN_TOOLS = ["Read", "Grep", "Glob", "LS", "Bash", "WebFetch", "WebSearch"]
+# Built-ins are a liability on the fleet box: the PM there has no repos on
+# disk, no gh, and every fleet question is answerable through the MCP verbs —
+# yet given Bash it will happily burn a whole turn grepping paths that don't
+# exist (the 240s-timeout Gmail hunt was 20 Bash calls + 4 doomed GitHub
+# curls). So fleet/box mode defaults to Read only, which deletes that failure
+# mode outright; direct/laptop mode (a real filesystem worth inspecting) keeps
+# the investigation set. Override with CONTROLLER_PM_BUILTINS (comma list, or
+# "none"). Write/Edit stay withheld everywhere: the PM delegates code changes
+# to the sessions it spawns. Headless `claude -p` DENIES any tool not in
+# --allowedTools, which is why these are enumerated.
+_DEFAULT_BUILTINS = "Read" if config.fleet_mode() else \
+    "Read,Grep,Glob,LS,Bash,WebFetch,WebSearch"
+_pm_builtins = config.cfg("CONTROLLER_PM_BUILTINS", "") or _DEFAULT_BUILTINS
+_BUILTIN_TOOLS = [] if _pm_builtins.lower() == "none" else \
+    [t.strip() for t in _pm_builtins.split(",") if t.strip()]
 ALLOWED_TOOLS = ",".join([*(f"mcp__fleet__{n}" for n, _d, _s in TOOLS), *_BUILTIN_TOOLS])
 VALID_TRUST = ("private", "public")
 
@@ -210,6 +121,15 @@ def write_mcp_config():
         "command": os.environ.get("PYTHON", "python3"),
         "args": ["-m", "controller", "mcp"],
         "env": {
+            # cwd is now the PM's own home (not this repo), so the subprocess
+            # needs the repo root on PYTHONPATH to find `-m controller` at all
+            "PYTHONPATH": ROOT,
+            # the subprocess proxies its tools through the serve process on this
+            # port (see __main__ mcp mode) — explicit opt-in so a hand-run or
+            # test `-m controller mcp` never gets hijacked by an unrelated
+            # local serve; the rest is the standalone fallback
+            "CONTROLLER_MCP_PROXY": "1",
+            "CONTROLLER_CHAT_PORT": str(config.CHAT_PORT),
             "CONTROLLER_HARNESS_WS": config.HARNESS_WS,
             "CONTROLLER_HARNESS_TOKEN": config.harness_token(),
             "CONTROLLER_MACHINE": config.MACHINE_ID,
@@ -231,12 +151,12 @@ def _read_prompt(trust):
         return ""
 
 
-def _extra_args(model):
-    args = ["--mcp-config", MCP_CONFIG, "--allowedTools", ALLOWED_TOOLS,
-            "--output-format", "json"]
-    if model:
-        args += ["--model", model]
-    return args
+def _log_turn(evt, **fields):
+    """One structured line per turn boundary → stderr → journald. This is the
+    observability the 240s-timeout era never had: every timeout/stall/error is
+    now a grep away in `journalctl -u clawd-controller`."""
+    print("[turn] " + json.dumps({"evt": evt, **fields}),
+          file=sys.stderr, flush=True)
 
 
 class AgentBrain:
@@ -264,13 +184,36 @@ class AgentBrain:
         # session, auto-resumed. The Router sets this to the current thread's key before
         # each turn; the engine loads/resumes/saves. No session juggling lives here.
         self.conversation_key = None
+        # Live turn status for GET /api/turn — lets the chat UI show progress
+        # instead of silence during a long turn.
+        self.turn_status = {"active": False}
         self.prompt_override = None
         try:
             with open(config.PROMPT_PATH, encoding="utf-8") as f:
                 self.prompt_override = f.read() or None
         except OSError:
             pass
+        if self.prompt_override is not None:
+            # An override silently shadows prompts/private.md — on the box one
+            # sat forgotten for weeks while the tracked persona was edited.
+            print(f"[pm] WARNING: prompt override active ({config.PROMPT_PATH}) "
+                  f"— it SHADOWS controller/prompts/{self.trust}.md; POST "
+                  f"/api/prompt {{\"reset\":true}} to drop it", flush=True)
+        self._install_home()
         write_mcp_config()
+
+    def _install_home(self):
+        """The PM's own cwd/CLAUDE.md + memory dir (context diet — see config).
+        Refreshed each boot so persona updates in the repo reach the home."""
+        try:
+            os.makedirs(config.AGENT_HOME_DIR, exist_ok=True)
+            os.makedirs(config.MEMORY_DIR, exist_ok=True)
+            if os.path.isfile(HOME_CLAUDE_MD):
+                shutil.copyfile(HOME_CLAUDE_MD,
+                                os.path.join(config.AGENT_HOME_DIR, "CLAUDE.md"))
+            os.environ["CLAUDE_P_AGENT_MEMORY"] = config.MEMORY_DIR
+        except OSError as e:
+            print(f"[pm] WARNING: could not prepare agent home: {e}", flush=True)
 
     def forget_conversation(self, key):
         """Clear one conversation's engine memory (used on thread clear/reset)."""
@@ -315,47 +258,30 @@ class AgentBrain:
             pass
 
     def chat(self, user_text):
-        """One user turn → {reply, trace}."""
-        run_turn = _get_run_turn()
-        if run_turn is None:
-            return self._finish(_missing_engine_msg(), [])
-        sys_prompt = (self.current_prompt() or "") + _autonomy_note(self.guard.autonomy)
-        os.environ["CONTROLLER_AUTONOMY"] = self.guard.autonomy
-        _route_account()                 # this turn runs on the plan with most headroom
-        try:
-            r = run_turn(
-                user_text,
-                append_system_prompt=sys_prompt or None,
-                remember=self.conversation_key,
-                cwd=ROOT,
-                extra_args=_extra_args(self.model),
-                return_meta=True,
-                timeout=240,
-            )
-        except FileNotFoundError:
-            return self._finish(f"⚠️ `{self.bin}` not found — is the Claude CLI installed?", [])
-        except RuntimeError as e:
-            return self._finish(f"⚠️ {e}", [])
-        reply = (r.get("text") if isinstance(r, dict) else r) or "(no result)"
-        meta = {k: r.get(k) for k in ("num_turns", "duration_ms")
-                if isinstance(r, dict) and r.get(k) is not None}
-        trace = [{"tool": "claude", "args": meta, "result": {"ok": True}}] if meta else []
-        return self._finish(reply, trace)
+        """One user turn → {reply, trace}. Same code path as chat_stream —
+        one turn policy for every front-end."""
+        return self.chat_stream(user_text, lambda kind, text: None)
 
     def chat_stream(self, user_text, emit):
-        """Like chat(), but fires emit(kind, text) per claude event AS the turn runs
-        — kind 'tool' (a tool call), 'text' (interim narration), or 'final' (the answer
-        if it wasn't already streamed) — then returns the same {reply, trace} as chat().
-        Used by the Telegram front-end so it shows work in progress, not one final dump."""
+        """One user turn, streaming: fires emit(kind, text) per claude event AS
+        the turn runs — kind 'tool' (a tool call), 'text' (interim narration),
+        or 'final' (the answer if it wasn't already streamed) — and returns
+        {reply, trace}. A watchdog enforces the turn policy: TURN_STALL kills a
+        turn with no stream events (wedged CLI), TURN_TIMEOUT is the ceiling."""
         run_turn = _get_run_turn()
         if run_turn is None:
             return self._finish(_missing_engine_msg(), [])
         sys_prompt = (self.current_prompt() or "") + _autonomy_note(self.guard.autonomy)
         os.environ["CONTROLLER_AUTONOMY"] = self.guard.autonomy
-        _route_account()                 # this turn runs on the plan with most headroom
+        started = time.time()
+        stats = {"tools": 0, "last_event": started}
         seen = {"text": ""}
+        self.turn_status = {"active": True, "started": started,
+                            "thread": self.conversation_key, "tools": 0,
+                            "last": ""}
 
         def _ev(event):
+            stats["last_event"] = time.time()
             # Only act on complete assistant messages; ignore partial token deltas
             # (stream_event), system init, and tool-result (user) events.
             if event.get("type") != "assistant":
@@ -366,8 +292,11 @@ class AgentBrain:
                     txt = (b.get("text") or "").strip()
                     if txt:
                         seen["text"] = txt
+                        self.turn_status["last"] = txt[:160]
                         emit("text", txt)
                 elif bt == "tool_use":
+                    stats["tools"] += 1
+                    self.turn_status["tools"] = stats["tools"]
                     name = (b.get("name") or "tool").replace("mcp__fleet__", "")
                     inp = b.get("input") or {}
                     arg = ""
@@ -378,27 +307,83 @@ class AgentBrain:
                             arg = str(inp)
                         if len(arg) > 200:
                             arg = arg[:197] + "…"
+                    self.turn_status["last"] = (name + " " + arg).strip()[:160]
                     emit("tool", (name + " " + arg).strip())
 
-        # Streaming drops the blocking `--output-format json`; run_turn adds stream-json
-        # because on_event is set.
+        # Watchdog: stall (no events) or ceiling → terminate the CLI process.
+        ph = {}
+        verdict = {"kind": "ok"}
+        stop_evt = threading.Event()
+
+        def _watchdog():
+            while not stop_evt.wait(10):
+                now = time.time()
+                if config.TURN_STALL and now - stats["last_event"] > config.TURN_STALL:
+                    verdict["kind"] = "stalled"
+                elif config.TURN_TIMEOUT and now - started > config.TURN_TIMEOUT:
+                    verdict["kind"] = "timeout"
+                else:
+                    continue
+                p = ph.get("proc")
+                if p is not None:
+                    try:
+                        p.terminate()
+                    except Exception:
+                        pass
+                return
+
+        threading.Thread(target=_watchdog, daemon=True,
+                         name="pm-turn-watchdog").start()
         xargs = ["--mcp-config", MCP_CONFIG, "--allowedTools", ALLOWED_TOOLS]
         if self.model:
             xargs += ["--model", self.model]
+        _log_turn("start", thread=self.conversation_key or "",
+                  model=self.model or "", autonomy=self.guard.autonomy)
+
+        def _end(outcome, err=None, meta=None):
+            stop_evt.set()
+            self.turn_status = {"active": False}
+            fields = {"thread": self.conversation_key or "",
+                      "dur_s": round(time.time() - started, 1),
+                      "tools": stats["tools"], "outcome": outcome}
+            if isinstance(meta, dict) and meta.get("num_turns") is not None:
+                fields["num_turns"] = meta.get("num_turns")
+            if err:
+                fields["err"] = str(err)[:200]
+            _log_turn("end", **fields)
+
         try:
             meta = run_turn(
                 user_text, append_system_prompt=sys_prompt or None,
-                remember=self.conversation_key, cwd=ROOT, extra_args=xargs,
-                on_event=_ev, return_meta=True,
+                remember=self.conversation_key, cwd=config.AGENT_HOME_DIR,
+                extra_args=xargs, on_event=_ev, return_meta=True,
+                proc_holder=ph, auto_memory=config.AUTO_MEMORY,
+                engine="claude",
             )
-        except FileNotFoundError:
+        except FileNotFoundError as e:
+            _end("error", err=e)
             return self._finish(f"⚠️ `{self.bin}` not found — is the Claude CLI installed?", [])
         except RuntimeError as e:
-            return self._finish(f"⚠️ {e}", [])
+            kind = verdict["kind"] if verdict["kind"] != "ok" else "error"
+            _end(kind, err=e)
+            msg = {
+                "stalled": f"⚠️ turn killed: no activity for {int(config.TURN_STALL)}s "
+                           f"(after {stats['tools']} tool calls) — likely a wedged CLI; try again",
+                "timeout": f"⚠️ turn killed at the {int(config.TURN_TIMEOUT)}s ceiling "
+                           f"(after {stats['tools']} tool calls)",
+            }.get(kind, f"⚠️ {e}")
+            return self._finish(msg, [])
         reply = ((meta.get("text") if isinstance(meta, dict) else meta) or "").strip() or "(no result)"
+        _end("ok", meta=meta if isinstance(meta, dict) else None)
         if reply != seen["text"]:          # answer wasn't already streamed as the last text block
             emit("final", reply)
-        return self._finish(reply, [])
+        trace = []
+        if isinstance(meta, dict):
+            tmeta = {k: meta.get(k) for k in ("num_turns", "duration_ms")
+                     if meta.get(k) is not None}
+            if tmeta:
+                trace = [{"tool": "claude", "args": tmeta, "result": {"ok": True}}]
+        return self._finish(reply, trace)
 
     def _finish(self, reply, trace):
         return {"reply": reply, "trace": trace}

@@ -10,11 +10,21 @@ without ceremony: address sessions by (machine, cid), tasks by id, and every
 write returns {ok, ...} or {ok:false, blocked|needs_confirm|error, ...}.
 """
 import collections
+import json
+import threading
 import time
 import urllib.parse
 
 WRITE_VERBS = {"assign", "ask", "answer_prompt", "interrupt",
                "create_project", "clone_project", "spawn", "close"}
+
+# Belt-and-braces ceiling for read-verb replies: the brain's tool-output budget
+# is ~25k tokens; anything we hand it must stay comfortably under that even if
+# the world grows 10x. get_world degrades (drop digests → counts-only) rather
+# than ever exceeding it.
+WORLD_CHAR_BUDGET = 20_000
+FIND_LIMIT_MAX = 40
+FIND_FANOUT_BUDGET_S = 12.0
 
 
 class Guard:
@@ -44,8 +54,25 @@ class Verbs:
         self.guard = guard
 
     # ── read ──────────────────────────────────────────────────────────────
-    def get_world(self):
-        return self.world.snapshot()
+    def get_world(self, machine=None, pid=None, verbose=False):
+        snap = self.world.snapshot(machine=machine, pid=pid, verbose=verbose)
+        # Nothing this verb returns may blow the tool-output budget — the raw
+        # fleet snapshot once hit 66KB and the PM's primary sense organ died.
+        if len(json.dumps(snap)) > WORLD_CHAR_BUDGET:
+            for m in snap["machines"]:
+                for p in m.get("projects", []):
+                    for s in p.get("sessions", []):
+                        s.pop("digest", None)
+            snap["truncated"] = True
+        if len(json.dumps(snap)) > WORLD_CHAR_BUDGET:
+            snap = {"machines": [
+                        {k: m.get(k) for k in ("id", "connected", "sessions",
+                                               "blocked", "working", "idle")}
+                        for m in snap["machines"]],
+                    "truncated": True,
+                    "hint": "too big even compacted — drill down with "
+                            "get_world(machine=…) / get_world(machine=…, pid=…)"}
+        return snap
 
     def get_attention(self):
         return {"items": self.world.attention()}
@@ -53,8 +80,174 @@ class Verbs:
     def session_digest(self, machine, cid):
         return self.world.session_detail(machine, cid)
 
+    def find(self, query, machine=None, scope="all", limit=20):
+        """One call answers "which session/task/project has to do with X":
+        the task ledger + cached session/project meta locally (works even for
+        offline machines), plus a server-side transcript search fanned out to
+        every connected machine. Deterministic, bounded, deep links attached."""
+        q = (query or "").strip()
+        if not q:
+            return {"ok": False, "error": "empty query"}
+        ql = q.lower()
+        limit = max(1, min(int(limit or 20), FIND_LIMIT_MAX))
+        matches, seen = [], set()
+
+        def add(m):
+            key = (m.get("machine"), m.get("cid") or m.get("task_id"), m.get("where"))
+            if key not in seen:
+                seen.add(key)
+                matches.append(m)
+
+        # 1) task ledger — local, no I/O
+        for t in self.ledger.list_tasks():
+            hay = " ".join(filter(None, [
+                t.get("goal"), t.get("project"), t.get("acceptance"),
+                " ".join(h.get("event", "") for h in t.get("history", []))]))
+            if ql in hay.lower():
+                add({"where": "task", "task_id": t["id"],
+                     "status": t.get("status"), "machine": t.get("machine"),
+                     "snippet": (t.get("goal") or "")[:160],
+                     "sessions": t.get("sessions", [])[-3:]})
+        # 2) cached session/project meta — includes offline machines
+        clients = {mid: c for mid, c in self.clients.items()
+                   if not machine or mid == machine}
+        for mid, c in clients.items():
+            st = c.state()
+            for p in st["projects"]:
+                name = p.get("name") or ""
+                if ql in name.lower():
+                    add({"where": "project", "machine": mid, "pid": p.get("pid"),
+                         "snippet": name[:160],
+                         "url": self._harness_link(p.get("pid"), machine=mid)["url"]})
+            for s in st["sessions"]:
+                for where, val in (("title", s.get("title")),
+                                   ("desc", s.get("desc")),
+                                   ("digest", s.get("digest")),
+                                   ("blocked_on", s.get("blocked_on")),
+                                   ("lastAnswer", s.get("lastAnswer"))):
+                    if val and ql in val.lower():
+                        add({"where": where, "machine": mid, "cid": s["cid"],
+                             "pid": s.get("pid"),
+                             "title": (s.get("title") or s["cid"])[:60],
+                             "snippet": val[:160],
+                             "url": self._harness_link(s.get("pid"), s["cid"],
+                                                       machine=mid)["url"]})
+                        break               # one meta hit per session is plenty
+        # 3) transcript fan-out — server-side search on each connected machine
+        unreachable = []
+        if scope in ("transcript", "all"):
+            live = [(mid, c) for mid, c in clients.items()
+                    if getattr(c, "connected", False)]
+            per = max(3, limit // len(live)) if live else 0
+            results = {}
+
+            def _one(mid, c):
+                results[mid] = c.search(q, scope="transcript", limit=per)
+
+            threads = [threading.Thread(target=_one, args=(mid, c), daemon=True)
+                       for mid, c in live]
+            for th in threads:
+                th.start()
+            deadline = time.time() + FIND_FANOUT_BUDGET_S
+            for th in threads:
+                th.join(timeout=max(0.1, deadline - time.time()))
+            for mid, _c in live:
+                r = results.get(mid)
+                if not isinstance(r, dict) or r.get("error"):
+                    unreachable.append(mid)
+                    continue
+                for hit in r.get("matches", []):
+                    add({"where": "transcript", "machine": mid,
+                         "cid": hit.get("cid"), "pid": hit.get("pid"),
+                         "title": (hit.get("title") or "")[:60],
+                         "snippet": (hit.get("snippet") or "")[:160],
+                         "url": self._harness_link(hit.get("pid"), hit.get("cid"),
+                                                   machine=mid)["url"]})
+        # precise sources first, transcript hits last
+        order = {"title": 0, "task": 1, "project": 2, "desc": 3, "digest": 4,
+                 "blocked_on": 5, "lastAnswer": 6, "transcript": 7}
+        matches.sort(key=lambda m: order.get(m.get("where"), 9))
+        out = {"ok": True, "query": q, "matches": matches[:limit],
+               "truncated": len(matches) > limit}
+        if unreachable:
+            out["unreachable"] = unreachable
+        return out
+
+    def transcript_tail(self, machine, cid, n=30):
+        """Last n structured transcript events for one session — what it
+        actually said/did. Read this before answer_prompt: a pending
+        AskUserQuestion's options ride in its tool_use event."""
+        c = self.clients.get(machine)
+        if not c:
+            return {"ok": False, "error": f"no such machine: {machine}"}
+        n = max(1, min(int(n or 30), 50))
+        r = c.transcript_tail(cid, n=n)
+        if not isinstance(r, dict) or r.get("error"):
+            return {"ok": False,
+                    "error": (r or {}).get("error") or "no reply from machine"}
+        return {"ok": True, "machine": machine, "cid": cid,
+                "events": r.get("events", [])}
+
+    def peek_screen(self, machine, cid):
+        """De-ANSI'd render of a session's current terminal screen — for TUI
+        dialogs that never reach the transcript (trust prompts, menus)."""
+        c = self.clients.get(machine)
+        if not c:
+            return {"ok": False, "error": f"no such machine: {machine}"}
+        r = c.screen(cid)
+        if not isinstance(r, dict) or r.get("error"):
+            return {"ok": False,
+                    "error": (r or {}).get("error") or "no reply from machine"}
+        return {"ok": True, "machine": machine, "cid": cid,
+                "text": r.get("text", ""), "cols": r.get("cols"),
+                "rows": r.get("rows")}
+
+    def sweep(self, max_items=20):
+        """The one-call check-in bundle: the attention queue enriched with
+        evidence (a short transcript tail for high items), deep links, and a
+        suggested clearing verb — plus rollups (idle sessions with no task,
+        in-progress tasks whose sessions are gone). Read-only: acting on it
+        stays with the persona + the autonomy gate."""
+        max_items = max(1, min(int(max_items or 20), 30))
+        items = self.world.attention(limit=max_items)
+        enriched = 0
+        for it in items:
+            it["url"] = self._harness_link(it.get("pid"), it["cid"],
+                                           machine=it["machine"])["url"]
+            it["clear_with"] = {"verb": it.get("suggested_action"),
+                                "args": {"machine": it["machine"], "cid": it["cid"]}}
+            if it["sev"] == "high" and enriched < 10:
+                enriched += 1
+                c = self.clients.get(it["machine"])
+                r = c.transcript_tail(it["cid"], n=3, chars=200) if c else None
+                if isinstance(r, dict) and not r.get("error"):
+                    it["tail"] = r.get("events", [])
+        idle_no_task, stale_tasks = [], []
+        live_cids = set()
+        for mid, c in self.clients.items():
+            for s in c.state()["sessions"]:
+                live_cids.add(s["cid"])
+                if (self.world._status(s) == "idle" and not s.get("pinned")
+                        and not self.ledger.task_for_cid(s["cid"])):
+                    idle_no_task.append({"machine": mid, "cid": s["cid"],
+                                         "title": (s.get("title") or s["cid"])[:60]})
+        for t in self.ledger.list_tasks("in_progress"):
+            if t.get("sessions") and not any(x in live_cids for x in t["sessions"]):
+                stale_tasks.append({"task_id": t["id"],
+                                    "goal": (t.get("goal") or "")[:100]})
+        counts = {}
+        for it in items:
+            counts[it["sev"]] = counts.get(it["sev"], 0) + 1
+        return {"ok": True, "counts": counts, "items": items,
+                "idle_no_task": idle_no_task[:15],
+                "stale_tasks": stale_tasks[:10]}
+
     def list_tasks(self, status=None):
-        return {"tasks": self.ledger.list_tasks(status)}
+        tasks = self.ledger.list_tasks(status)[:50]
+        for t in tasks:                       # full history stays in get_task
+            if len(t.get("history", [])) > 3:
+                t["history"] = t["history"][-3:]
+        return {"tasks": tasks}
 
     def get_task(self, task_id):
         return self.ledger.get(task_id) or {"error": f"no such task: {task_id}"}

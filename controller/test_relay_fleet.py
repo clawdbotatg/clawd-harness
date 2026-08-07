@@ -95,6 +95,17 @@ def main():
              what="spawned session appears")
     check("spawns a new session (new) over the trusted path", t_spawn)
 
+    def t_search_roundtrip():
+        # the new read-query frames ride the same bridge: request id correlated,
+        # reply routed back through relay `machineMsg` untouched
+        mm = fleet.machines["mockbox"]
+        r = mm.search("remote")
+        assert isinstance(r, dict) and not r.get("error"), r
+        assert any(h["cid"] == "c1" for h in r.get("matches", [])), r
+        t = mm.transcript_tail("c1", n=5)
+        assert isinstance(t, dict) and not t.get("error"), t
+    check("search/transcriptTail round-trip the relay bridge", t_search_roundtrip)
+
     fleet.stop()
     mock.stop()
     print()

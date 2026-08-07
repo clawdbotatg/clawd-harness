@@ -139,7 +139,48 @@ session_digest(cid)                                  # deep-read one session on 
 **`answer_prompt` is the one that's genuinely harder than the rest.** A
 `waiting` session is parked on a TUI menu; answering means raw arrow-keys+enter
 via `input`, not text. It's the difference between a PM that *surfaces*
-blockers and one that *clears* them — prototype it early.
+blockers and one that *clears* them. As built it is no longer blind: the persona
+requires reading the evidence first — `transcript_tail` (a pending
+AskUserQuestion's options ride in its `tool_use` event) or `peek_screen` (a
+de-ANSI'd render of the live terminal, for TUI dialogs that never reach the
+transcript; the `screen` WS frame).
+
+### Retrieval verbs (the 2026-08 senses rebuild)
+
+The original read surface (bare `get_world` + `session_digest`) collapsed at
+fleet scale: the raw snapshot serialized to 66KB — past the tool-output budget
+of the very model reading it — and there was **no retrieval channel at all**
+(no search, no transcript read; `last_answer` lived in process memory and died
+on every reconnect). "Find the task about Gmail" cost a 20-Bash-call turn that
+hit the timeout wall. The rebuilt surface:
+
+- **`find(query)`** — ONE call answers "which session/task/project is about X":
+  task ledger + cached session/project meta locally, plus a **server-side**
+  transcript search fanned out to each machine (the `search` WS frame — hard
+  caps: ≤40 matches, ≤3 hits/session, 160-char snippets, 5s budget per
+  machine). Returns deep links; machines that can't answer are listed in
+  `unreachable`, meta+ledger still cover them.
+- **`get_world(machine=, pid=, verbose=)`** — compact by default (one line per
+  session, empty projects as a name list, per-machine counts) and size-guarded
+  in the verb: over ~20k chars it drops digests, then collapses to counts. It
+  can never again exceed the tool budget. `verbose` only when scoped.
+- **`transcript_tail(machine, cid, n)`** — last n slim transcript events
+  (`transcriptTail` frame; n≤50, text truncated, ≤16KB reply): what a session
+  actually said/did, and the way to retrieve a delegated session's result.
+- **`sweep(max_items)`** — the one-call check-in bundle: attention queue
+  enriched with a 3-event tail per high item, a deep link, and a suggested
+  `clear_with` verb, plus rollups (idle-no-task sessions, in-progress tasks
+  whose sessions are gone). Read-only; the persona's sweep protocol acts on it
+  under the autonomy gate. `CONTROLLER_SWEEP_EVERY` optionally pushes a
+  deterministic (LLM-free) digest to Telegram on a timer.
+- **`sessionMeta.lastAnswer`** — the harness now persists each session's last
+  Stop message in its broadcast meta and **backfills it from the transcript on
+  resume**, so the cheapest retrieval channel survives restarts, reconnects,
+  and per-turn subprocesses.
+
+Wire contract for the three read frames: `docs/WS-PROTOCOL.md` (they ride the
+existing worker/relay bridge untouched; old harnesses ignore them and callers
+time out into graceful degradation).
 
 ---
 
@@ -272,6 +313,35 @@ whole stack is proud of being pure stdlib, disk-as-source-of-truth. So:
 - **Phase 4 — Telegram front-end** ✅. `telegram.py` — allowlisted, stdlib,
   routes messages to the same brain and lets the Reactor push `blocked` alerts to
   your phone. Enabled by setting `CONTROLLER_TELEGRAM_TOKEN` (a dedicated bot).
+- **Phase 5 — senses + reliability rebuild (2026-08)** ✅. Root causes from the
+  live box, fixed structurally:
+  - **The world-flap bug**: `claude -p` spawns `python3 -m controller mcp` per
+    turn; it used to dial the relay itself — a SECOND `role=controller` under
+    the same reserved `__ctl__` ident, which the relay's same-ident supersede
+    rule turned into a mutual connection-kill ping-pong for the whole turn
+    (~1,020 reconnects/day, spawn focus-waits expiring, per-turn `last_answer`
+    amnesia). Now the subprocess is a thin HTTP proxy to the serve process
+    (`ProxyMCPServer` → `POST /api/tool`, opt-in via `CONTROLLER_MCP_PROXY`
+    from `write_mcp_config`) — one fleet connection, ever. The serve link also
+    sends its own WS pings (`KEEPALIVE_EVERY`) and logs every up/down with a
+    reason.
+  - **Retrieval**: `find` / `transcript_tail` / `peek_screen` / `sweep` +
+    durable `lastAnswer` (see "Retrieval verbs" above).
+  - **Turn policy**: one streaming path for HTTP + Telegram, watchdog-enforced
+    (`CONTROLLER_TURN_STALL` 300s no-events kill, `CONTROLLER_TURN_TIMEOUT`
+    1800s ceiling) — replaces the old 240s hard kill that ate every fleet-wide
+    question. Live progress at `GET /api/turn`; structured `[turn]` start/end
+    lines (duration, tools, outcome) in the journal.
+  - **Context diet**: the brain's cwd is now its own home (`~/.clawd-controller/
+    home`, outside the repo so the 22KB harness CLAUDE.md stays out of PM
+    turns), with `controller/prompts/CLAUDE.pm.md` installed as its CLAUDE.md,
+    engine memory in `~/.clawd-controller/memory`, auto-memory off by default,
+    and (fleet mode) built-ins cut to `Read` (`CONTROLLER_PM_BUILTINS`).
+  - **Framework re-sync** (claude-p-agent ≥ de70b99): the controller's
+    duplicated subscription router is deleted — routing is the engine's
+    `modules/router` hook, so the controller must never set `CLAUDE_CONFIG_DIR`,
+    and `tools/module sync` is mandatory after pulling the engine repo. Engine
+    pinned `engine="claude"` on every run_turn.
 
 ## Decision log
 

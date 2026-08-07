@@ -11,6 +11,7 @@ conversation, one user) so request races can't corrupt history.
 import json
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler
 from socketserver import TCPServer, ThreadingMixIn
 from urllib.parse import parse_qs
@@ -106,6 +107,14 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None, p
                 return self._send(200, verbs.list_tasks())
             if path == "/api/notifications":
                 return self._send(200, {"events": reactor.recent() if reactor else []})
+            if path == "/api/turn":
+                # live progress of the in-flight PM turn (or {"active":false}) —
+                # lets a front-end show "working: 7 tools, last: find gmail"
+                # instead of silence while a long turn runs.
+                st = dict(getattr(prompt_brain, "turn_status", None) or {"active": False})
+                if st.get("active") and st.get("started"):
+                    st["elapsed_s"] = round(time.time() - st["started"], 1)
+                return self._send(200, st)
             if path == "/api/threads":
                 return self._send(200, router.list_threads())
             if path == "/api/thread/messages":

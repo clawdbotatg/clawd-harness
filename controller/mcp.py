@@ -11,6 +11,7 @@ out-of-band docs to drive them.
 """
 import json
 import sys
+import urllib.request
 
 PROTOCOL_VERSION = "2025-06-18"
 
@@ -19,13 +20,40 @@ PROTOCOL_VERSION = "2025-06-18"
 _S = lambda props, req=(): {"type": "object", "properties": props, "required": list(req)}  # noqa: E731
 _STR = {"type": "string"}
 _BOOL = {"type": "boolean"}
+_INT = {"type": "integer"}
 
 TOOLS = [
-    ("get_world", "Snapshot of the whole fleet: machines→projects→sessions with "
-        "status (blocked|working|idle), digest, blocked_on, task link, idle_for_s, "
-        "and last_answer. The cheap way to see everything at once.", _S({})),
+    ("get_world", "Compact fleet map: machines→projects→sessions, one line per "
+        "session (cid/title/status/task/idle_m/digest), per-machine counts, "
+        "empty projects as a name list. Bounded — never overflows. Drill down "
+        "with machine=/pid= (verbose=true only when scoped). For 'where is X' "
+        "questions use `find`, NOT this.", _S({"machine": _STR, "pid": _STR,
+                                               "verbose": _BOOL})),
+    ("find", "Deterministic fleet-wide search in ONE call: session titles/"
+        "digests/blocked_on/lastAnswer, project names, the task ledger, AND "
+        "each machine's transcript store (searched server-side on the machine). "
+        "THE way to answer 'which session/task is about X' — never use Bash, "
+        "GitHub, or get_world for that. Returns matches with deep links; "
+        "scope=meta skips transcripts.", _S({"query": _STR, "machine": _STR,
+                                             "scope": _STR, "limit": _INT},
+                                            ["query"])),
+    ("transcript_tail", "Last n structured transcript events for one session — "
+        "what it actually said and did, including tool calls (a pending "
+        "AskUserQuestion's options ride in its tool_use event). n≤50, text "
+        "capped. Read this BEFORE answer_prompt, and to retrieve a delegated "
+        "session's results.", _S({"machine": _STR, "cid": _STR, "n": _INT},
+                                 ["machine", "cid"])),
+    ("peek_screen", "De-ANSI'd render of a session's current terminal screen — "
+        "the only way to read TUI dialogs that never reach the transcript "
+        "(trust prompts, login menus). Use before answering raw keys blind.",
+        _S({"machine": _STR, "cid": _STR}, ["machine", "cid"])),
+    ("sweep", "One-call check-in bundle: the ranked attention queue enriched "
+        "with transcript-tail evidence, deep links, and a suggested clearing "
+        "verb per item, plus rollups (idle sessions with no task, stale "
+        "in-progress tasks). Use when the operator says 'check in on "
+        "everything' / 'what needs me'.", _S({"max_items": _INT})),
     ("get_attention", "Ranked queue of sessions needing a human, each with a "
-        "suggested_action verb. Read this first to triage.", _S({})),
+        "suggested_action verb. Lighter than sweep (no tails/links).", _S({})),
     ("session_digest", "Full current detail for one session.",
         _S({"machine": _STR, "cid": _STR}, ["machine", "cid"])),
     ("open_session", "Build a deep link that opens ONE session in the harness UI — "
@@ -93,7 +121,17 @@ class MCPServer:
     def call_tool(self, name, a):
         v = self.v
         if name == "get_world":
-            return v.get_world()
+            return v.get_world(a.get("machine"), a.get("pid"),
+                               a.get("verbose", False))
+        if name == "find":
+            return v.find(a["query"], a.get("machine"),
+                          a.get("scope", "all"), a.get("limit", 20))
+        if name == "transcript_tail":
+            return v.transcript_tail(a["machine"], a["cid"], a.get("n", 30))
+        if name == "peek_screen":
+            return v.peek_screen(a["machine"], a["cid"])
+        if name == "sweep":
+            return v.sweep(a.get("max_items", 20))
         if name == "get_attention":
             return v.get_attention()
         if name == "session_digest":
@@ -205,3 +243,44 @@ class MCPServer:
             if resp is not None:
                 outfile.write(json.dumps(resp) + "\n")
                 outfile.flush()
+
+
+def _http_json(url, payload=None, timeout=60):
+    """POST payload (or GET when None) to a local serve endpoint, parse JSON."""
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"} if data else {})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+class ProxyMCPServer(MCPServer):
+    """Stdio MCP front-end that proxies every tool/resource to a running
+    `serve` process's HTTP API instead of building its own fleet connection.
+
+    `claude -p` spawns a fresh `python3 -m controller mcp` per turn. If that
+    subprocess dialed the relay itself it would join as a SECOND `role=controller`
+    under the reserved `__ctl__` ident, and the relay's same-ident supersede rule
+    makes the two controller processes kill each other's links for the whole turn
+    — the world-flap bug (1,000+ reconnects/day, spawn focus-waits expiring,
+    per-turn last_answer amnesia). Proxying into serve also means tools see the
+    live Guard (autonomy flips apply instantly) and there is a single writer on
+    the ledger file."""
+
+    def __init__(self, base_url):
+        super().__init__(verbs=None)
+        self.base = base_url.rstrip("/")
+
+    def call_tool(self, name, a):
+        # 60s covers the slowest verb (assign/spawn's focus wait + fan-outs).
+        out = _http_json(self.base + "/api/tool", {"name": name, "args": a}, timeout=60)
+        return out.get("result") if isinstance(out, dict) and "result" in out else out
+
+    def read_resource(self, uri):
+        path = {"fleet://world": "/api/world",
+                "fleet://attention": "/api/attention",
+                "fleet://tasks": "/api/tasks"}.get(uri)
+        if not path:
+            raise ValueError(f"unknown resource: {uri}")
+        return _http_json(self.base + path)

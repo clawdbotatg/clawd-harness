@@ -14,11 +14,16 @@ slice of that interface they use. See docs/CONTROLLER.md.
 import json
 import threading
 import time
+import uuid
 
 from .wsclient import client_connect, ws_read_message, ws_send
 
 # Relay PING_EVERY is 20s; consider the link wedged after ~3 missed pings.
 READ_TIMEOUT = 75.0
+# Our own keepalive: ping the relay every 20s so the reader always hears a pong
+# even if the relay's ping cadence hiccups — READ_TIMEOUT is then a true backstop
+# for genuinely dead links, not a trigger on quiet-but-alive ones.
+KEEPALIVE_EVERY = 20.0
 
 
 class RelayMachine:
@@ -35,6 +40,7 @@ class RelayMachine:
         self._new_lock = threading.Lock()
         self._focus_event = threading.Event()
         self._focus_cid = None
+        self._pending = {}            # request id -> {"ev": Event, "resp": frame}
 
     # -- inbound (called from the fleet reader thread) ------------------------
     def _handle(self, msg):
@@ -52,6 +58,11 @@ class RelayMachine:
                 self._focus_event.set()
             elif t == "exit":
                 self.sessions.pop(msg.get("cid"), None)
+            elif t in ("searchResult", "transcriptTailResult", "screenResult"):
+                slot = self._pending.pop(msg.get("id"), None)
+                if slot:
+                    slot["resp"] = msg
+                    slot["ev"].set()
 
     # -- outbound (compile to toMachine frames) -------------------------------
     def _send(self, msg):
@@ -73,6 +84,41 @@ class RelayMachine:
 
     def raw_input(self, cid, data):
         return self._send({"type": "input", "cid": cid, "data": data})
+
+    # -- request/reply reads (search / transcriptTail / screen) ---------------
+    # 15s default: the extra relay+worker hop on top of the harness's own budget.
+    def request(self, frame, timeout=15):
+        rid = uuid.uuid4().hex[:8]
+        slot = {"ev": threading.Event(), "resp": None}
+        with self._lock:
+            self._pending[rid] = slot
+        if not self._send(dict(frame, id=rid)):
+            with self._lock:
+                self._pending.pop(rid, None)
+            return {"error": "not connected"}
+        if not slot["ev"].wait(timeout):
+            with self._lock:
+                self._pending.pop(rid, None)
+            return {"error": "timeout (machine offline, or its harness predates this frame)"}
+        return slot["resp"]
+
+    def _flush_pending(self, why):
+        """Resolve every in-flight request immediately on disconnect so callers
+        never sit out a full timeout across a redial."""
+        with self._lock:
+            pending, self._pending = dict(self._pending), {}
+        for slot in pending.values():
+            slot["resp"] = {"error": why}
+            slot["ev"].set()
+
+    def search(self, q, scope="all", limit=20):
+        return self.request({"type": "search", "q": q, "scope": scope, "limit": limit})
+
+    def transcript_tail(self, cid, n=30, chars=400):
+        return self.request({"type": "transcriptTail", "cid": cid, "n": n, "chars": chars})
+
+    def screen(self, cid, chars=1500):
+        return self.request({"type": "screen", "cid": cid, "chars": chars})
 
     def close_session(self, cid):
         return self._send({"type": "close", "cid": cid})
@@ -120,9 +166,22 @@ class RelayFleet:
     def _url(self):
         return f"{self.base}/ws?role=controller&t={self.token}"
 
+    def _keepalive(self, wfile, gen_stop):
+        """Ping the relay every KEEPALIVE_EVERY until this connection generation
+        ends. The relay answers pong inline, so the reader always hears traffic
+        and READ_TIMEOUT only fires on a genuinely dead link."""
+        while not gen_stop.wait(KEEPALIVE_EVERY):
+            try:
+                ws_send(wfile, self._wlock, b"", opcode=0x9, mask=True)
+            except Exception:
+                return
+
     def _run(self):
         backoff = 0.5
         while not self._stop:
+            gen_stop = threading.Event()
+            up_at = None
+            reason = "connect failed"
             try:
                 sock, rfile, wfile = client_connect(self._url())
                 # The relay pings every peer every ~20s, so a healthy link is
@@ -134,17 +193,23 @@ class RelayFleet:
                 sock.settimeout(READ_TIMEOUT)
                 self._sock, self._wfile, self.connected = sock, wfile, True
                 backoff = 0.5
+                up_at = time.time()
+                print("[relay] control link up", flush=True)
+                threading.Thread(target=self._keepalive, args=(wfile, gen_stop),
+                                 daemon=True, name="relayfleet-keepalive").start()
                 self.send({"type": "list"})
                 self.on_change("relay", "connected")
                 while not self._stop:
                     m = ws_read_message(rfile)
                     if m is None:
+                        reason = "peer closed (EOF)"
                         break
                     kind, data = m
                     if kind == "ping":
                         ws_send(wfile, self._wlock, data, opcode=0xA, mask=True)
                         continue
                     if kind == "close":
+                        reason = "peer sent close"
                         break
                     if kind in ("pong",) or kind == 0x2:   # ignore PTY bytes
                         continue
@@ -152,8 +217,9 @@ class RelayFleet:
                         self._on_frame(json.loads(data.decode()))
                     except Exception:
                         continue
-            except Exception:
-                pass
+            except Exception as e:
+                reason = f"{type(e).__name__}: {e}"
+            gen_stop.set()
             try:
                 if self._sock:
                     self._sock.close()   # don't leak the fd across redials
@@ -163,6 +229,10 @@ class RelayFleet:
             self.connected = False
             for mm in self.machines.values():
                 mm.connected = False
+                mm._flush_pending("disconnected")
+            if up_at is not None or not self._stop:
+                uptime = f" after {time.time() - up_at:.0f}s" if up_at else ""
+                print(f"[relay] control link down{uptime}: {reason}", flush=True)
             self.on_change("relay", "disconnected")
             if self._stop:
                 break

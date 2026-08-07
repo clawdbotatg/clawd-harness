@@ -12,6 +12,7 @@ import server.py. The wire contract is docs/WS-PROTOCOL.md.
 import json
 import threading
 import time
+import uuid
 
 from .wsclient import client_connect, ws_send, ws_read_message
 
@@ -39,6 +40,7 @@ class HarnessClient:
         self._new_lock = threading.Lock()     # serialize new_session→focus waits
         self._focus_event = threading.Event()
         self._focus_cid = None
+        self._pending = {}                    # request id -> {"ev": Event, "resp": frame}
 
     # -- lifecycle -------------------------------------------------------------
     def start(self):
@@ -84,6 +86,7 @@ class HarnessClient:
             except Exception:
                 pass
             self.connected = False
+            self._flush_pending("disconnected")
             self.on_change(self.machine_id, "disconnected")
             if self._stop:
                 break
@@ -107,6 +110,11 @@ class HarnessClient:
                 self._focus_event.set()
             elif t == "exit":
                 self.sessions.pop(f.get("cid"), None)
+            elif t in ("searchResult", "transcriptTailResult", "screenResult"):
+                slot = self._pending.pop(f.get("id"), None)
+                if slot:
+                    slot["resp"] = f
+                    slot["ev"].set()
         if t == "hook":
             self.on_hook(self.machine_id, f)        # → Reactor (higher-level events)
         self.on_change(self.machine_id, t)
@@ -143,6 +151,42 @@ class HarnessClient:
 
     def raw_input(self, cid, data):
         return self.send({"type": "input", "cid": cid, "data": data})
+
+    # -- request/reply reads (search / transcriptTail / screen) ---------------
+    def request(self, frame, timeout=12):
+        """Send a frame with a correlation id and block for its *Result reply.
+        Returns the reply frame, or {"error": …} on no-connection/timeout — a
+        harness that predates the frame simply never answers, so the timeout is
+        the graceful-degrade path for old servers."""
+        rid = uuid.uuid4().hex[:8]
+        slot = {"ev": threading.Event(), "resp": None}
+        with self._state_lock:
+            self._pending[rid] = slot
+        if not self.send(dict(frame, id=rid)):
+            with self._state_lock:
+                self._pending.pop(rid, None)
+            return {"error": "not connected"}
+        if not slot["ev"].wait(timeout):
+            with self._state_lock:
+                self._pending.pop(rid, None)
+            return {"error": "timeout (harness predates this frame?)"}
+        return slot["resp"]
+
+    def _flush_pending(self, why):
+        with self._state_lock:
+            pending, self._pending = dict(self._pending), {}
+        for slot in pending.values():
+            slot["resp"] = {"error": why}
+            slot["ev"].set()
+
+    def search(self, q, scope="all", limit=20):
+        return self.request({"type": "search", "q": q, "scope": scope, "limit": limit})
+
+    def transcript_tail(self, cid, n=30, chars=400):
+        return self.request({"type": "transcriptTail", "cid": cid, "n": n, "chars": chars})
+
+    def screen(self, cid, chars=1500):
+        return self.request({"type": "screen", "cid": cid, "chars": chars})
 
     def close_session(self, cid):
         return self.send({"type": "close", "cid": cid})

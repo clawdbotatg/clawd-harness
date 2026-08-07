@@ -36,6 +36,12 @@ def _wait(pred, timeout=6.0, what=""):
 def main():
     failures = []
 
+    # Force direct mode regardless of the machine's own controller config: a
+    # `.env.controller` at the repo root (box deploy config) would otherwise
+    # flip fleet_mode() on and change deep-link shapes mid-test.
+    from . import config
+    config.RELAY_URL = ""
+
     def check(name, fn):
         try:
             fn()

@@ -23,7 +23,12 @@ def main():
     env = dict(os.environ)
     env.update({"CONTROLLER_HARNESS_WS": f"ws://127.0.0.1:{PORT}",
                 "CONTROLLER_HARNESS_TOKEN": TOKEN,
-                "CONTROLLER_LEDGER": "/tmp/ctrl-stdio-test.jsonl"})
+                "CONTROLLER_LEDGER": "/tmp/ctrl-stdio-test.jsonl",
+                # force direct mode + no proxy: a `.env.controller` at the repo
+                # root (box config) or a live local serve must not hijack the
+                # subprocess away from the mock harness
+                "CONTROLLER_RELAY": "",
+                "CONTROLLER_MCP_PROXY": ""})
     if os.path.exists("/tmp/ctrl-stdio-test.jsonl"):
         os.remove("/tmp/ctrl-stdio-test.jsonl")
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
