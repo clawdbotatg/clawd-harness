@@ -436,12 +436,15 @@
   .pincard { cursor:pointer; }
   /* bright yellow so which PROJECT a parked to-do belongs to reads at a glance */
   .pincard .pinproj { color:#ffd84d; font-size:11px; font-family:var(--mono); flex:0 0 auto; }
-  .pincard .punpin { position:absolute; top:8px; right:9px; background:transparent;
+  .pincard .punpin { position:absolute; top:8px; right:44px; background:transparent;
                      border:1px solid var(--edge); border-radius:4px; color:var(--dim);
                      font-size:11px; cursor:pointer; padding:3px 8px; line-height:1.3;
                      font-family:var(--mono); white-space:nowrap; }
   .pincard .punpin:hover { color:var(--accent); border-color:var(--accent-dim); background:var(--raised); }
-  .pincard .row { padding-right:76px; }   /* room for the ↩ restore button in the corner */
+  /* ✕ in the corner, ↩ to its left — mirrors the in-session closeBtn/pinBtn layout */
+  .pincard .pclose { right:9px; }
+  .pincard .pclose:hover { color:var(--err); border-color:var(--err); background:var(--raised); }
+  .pincard .row { padding-right:110px; }   /* room for the ↩ restore + ✕ close buttons in the corner */
   .pincard .pinrow { display:flex; gap:6px; margin-top:5px; }
   .pincard .pinrow input { flex:1; min-width:0; background:var(--bg); color:var(--ink);
                      border:1px solid var(--edge); border-radius:4px; padding:6px 9px;
@@ -4636,6 +4639,13 @@ function renderPinBoard() {
     un.title = 'unpin — put this session back into the active session tabs';
     un.onclick = (e) => { e.stopPropagation(); sendPin(s.cid, false); };
     card.appendChild(un);
+
+    // ✕ close — done with this to-do; no need to restore it to the tabs first
+    const x = document.createElement('button');
+    x.className = 'punpin pclose'; x.textContent = '✕';
+    x.title = 'close this session (done with this job)';
+    x.onclick = (e) => closeSession(s.cid, e);
+    card.appendChild(x);
 
     // prompt it right here — stays pinned, no view switch
     const prow = document.createElement('div'); prow.className = 'pinrow';
