@@ -1402,6 +1402,153 @@ def _codex_signed_in():
         return True                              # unreadable ≠ signed out
 
 
+# Codex usage, cached. The probe spawns a process, so it is never on a request
+# path: accounts_meta serves whatever is cached and kicks a refresh when stale.
+CODEX_USAGE_TTL = float(os.environ.get("CODEX_USAGE_TTL", "300"))
+_codex_usage = {"data": None, "at": 0.0, "err": "", "busy": False}
+_codex_usage_lock = threading.Lock()
+
+
+def _codex_app_server_call(methods, timeout=15.0):
+    """Run a short `codex app-server` session and return {method: result}.
+
+    Newline-delimited JSON-RPC over stdio (no "jsonrpc" field), handshake is
+    initialize → initialized → calls. This is codex's own app-server protocol —
+    the same one its VS Code extension speaks — and it is marked EXPERIMENTAL,
+    so treat every part of it as liable to change and degrade to {} rather than
+    raising. Costs one process per call, hence the cache above."""
+    try:
+        proc = subprocess.Popen(
+            [CODEX_BIN, "app-server"], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1, env={**os.environ, "CODEX_HOME": CODEX_STORE})
+    except Exception as e:
+        return {}, f"spawn failed: {e}"
+    out, deadline = {}, time.time() + timeout
+
+    def _reader():
+        try:
+            for ln in proc.stdout:
+                try:
+                    o = json.loads(ln)
+                except Exception:
+                    continue
+                if isinstance(o, dict) and o.get("id") is not None:
+                    out[o["id"]] = o
+        except Exception:
+            pass
+
+    threading.Thread(target=_reader, daemon=True).start()
+
+    def _send(o):
+        proc.stdin.write(json.dumps(o) + "\n")
+        proc.stdin.flush()
+
+    err = ""
+    try:
+        _send({"id": 0, "method": "initialize",
+               "params": {"clientInfo": {"name": "clawd-harness",
+                                         "title": "clawd-harness",
+                                         "version": "1.0.0"},
+                          "capabilities": {"experimentalApi": True}}})
+        while 0 not in out and time.time() < deadline:
+            time.sleep(0.1)
+        if 0 not in out:
+            raise RuntimeError("no initialize reply")
+        _send({"method": "initialized", "params": {}})
+        for i, m in enumerate(methods, start=1):
+            _send({"id": i, "method": m, "params": {}})
+        while len(out) < len(methods) + 1 and time.time() < deadline:
+            time.sleep(0.1)
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    res = {m: (out.get(i) or {}).get("result")
+           for i, m in enumerate(methods, start=1)}
+    if not err and not any(v for v in res.values()):
+        err = "no result"
+    return res, err
+
+
+def _codex_usage_refresh():
+    """Refresh the cached codex usage snapshot (blocking; call in a thread)."""
+    with _codex_usage_lock:
+        if _codex_usage["busy"]:
+            return
+        _codex_usage["busy"] = True
+    try:
+        if not _codex_signed_in():
+            _codex_usage.update(data=None, err="signed out", at=time.time())
+            return
+        res, err = _codex_app_server_call(
+            ["account/rateLimits/read", "account/read"])
+        rl = res.get("account/rateLimits/read") or {}
+        acct = (res.get("account/read") or {}).get("account") or {}
+        snap = rl.get("rateLimits") or {}
+        prim, sec = snap.get("primary") or {}, snap.get("secondary") or {}
+
+        def _win(w):
+            if not w:
+                return None
+            return {"pct": w.get("usedPercent"),
+                    "windowMins": w.get("windowDurationMins"),
+                    "resetsAt": w.get("resetsAt")}
+
+        windows = [w for w in (_win(prim), _win(sec)) if w]
+        data = None
+        if windows or acct:
+            credits = snap.get("credits") or {}
+            data = {
+                "email": acct.get("email") or "",
+                "plan": acct.get("planType") or snap.get("planType") or "",
+                # The most-constrained window is the headline number, matching
+                # how a claude card reads.
+                "pct": max([w["pct"] for w in windows
+                            if isinstance(w.get("pct"), (int, float))],
+                           default=None),
+                "windows": windows,
+                "credits": {"has": bool(credits.get("hasCredits")),
+                            "unlimited": bool(credits.get("unlimited")),
+                            "balance": credits.get("balance")},
+                "limitReached": snap.get("rateLimitReachedType") or "",
+            }
+        _codex_usage.update(data=data, err="" if data else (err or "no data"),
+                            at=time.time())
+        if data:
+            print(f"[codex usage] {data.get('plan') or '?'} "
+                  f"{data.get('pct')}% used", flush=True)
+        else:
+            print(f"[codex usage] unavailable ({err})", flush=True)
+    except Exception as e:                       # never let this kill a sweep
+        _codex_usage.update(data=None, err=f"{type(e).__name__}: {e}",
+                            at=time.time())
+    finally:
+        _codex_usage["busy"] = False
+
+
+def codex_usage_meta():
+    """Cached codex usage for the accounts panel, refreshing in the background
+    when stale. Returns None when codex isn't installed/signed in, so the UI
+    simply shows no codex card rather than an error."""
+    if not _codex_signed_in():
+        return None
+    if (time.time() - _codex_usage["at"] > CODEX_USAGE_TTL
+            and not _codex_usage["busy"]):
+        threading.Thread(target=_codex_usage_refresh, daemon=True).start()
+    d = _codex_usage["data"]
+    return {"engine": "codex", "status": "ready" if d else "unknown",
+            "checkedAt": _codex_usage["at"], "error": _codex_usage["err"],
+            **(d or {})}
+
+
 _codex_hooks_written = False
 
 
@@ -3187,7 +3334,12 @@ class SessionManager:
                     "best": self._best_account(),   # what a new session would pick now
                     "lastSwitch": self.last_switch_at,
                     "accounts": [a.meta(active=(a.name == active))
-                                 for a in self._ordered_accounts()]}
+                                 for a in self._ordered_accounts()],
+                    # The second engine's plan, informational only: codex is
+                    # single-login and outside the router, so this is a
+                    # read-out, never an input to routing. None when codex
+                    # isn't signed in — the UI then shows no codex card.
+                    "codex": codex_usage_meta()}
 
     def broadcast_accounts(self):
         self.broadcast_all(self.accounts_meta())

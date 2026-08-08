@@ -607,6 +607,10 @@
   .codexnew:hover { color:var(--codex); border-color:var(--codex); }
   /* engine badge on a session chip/card — only ever shown for non-claude, so
      the default engine stays visually silent */
+  /* the codex plan card: same shape as a claude one, green edge so you never
+     mistake which engine's meter you're reading */
+  .acct.codexacct { border-left:2px solid var(--codex); }
+  .acct.codexacct .aname { color:var(--codex); }
   .ebadge { color:var(--codex); border:1px solid var(--codex); border-radius:3px;
             font-size:9px; padding:0 3px; margin-left:5px; letter-spacing:.08em;
             text-transform:uppercase; vertical-align:middle; }
@@ -740,7 +744,7 @@
       <span class="bico">🧠</span>
       <div>
         <div class="ah-t">subscriptions</div>
-        <div class="ah-s">every machine signed into every claude plan — new sessions spend the pool whose weekly window resets soonest</div>
+        <div class="ah-s">every machine signed into every plan — new claude sessions spend the pool whose weekly window resets soonest; codex is shown but not routed</div>
       </div>
       <span class="spacer"></span>
       <button id="accountsclose" title="Back to the app">✕ close</button>
@@ -3348,6 +3352,97 @@ function windowRow(w) {
   return win;
 }
 
+// The second engine's plan, as a card in the same language as the claude ones.
+// Deliberately READ-ONLY: codex is single-login and sits outside the
+// subscription router (no pollable pool to route between), so there is no
+// "use this plan" / "next spawn" / remove — nothing here is a routing input.
+// It answers one question: how much codex have I got left? Absent (null) when
+// codex isn't signed in on that box, so the card simply doesn't appear.
+function renderCodexCard(container, cx) {
+  if (!cx) return;
+  const card = document.createElement('div');
+  card.className = 'acct codexacct';
+
+  const row = document.createElement('div'); row.className = 'arow2';
+  const dot = document.createElement('span');
+  dot.className = 'sdot' + (cx.status === 'ready' ? '' : ' dead');
+  if (cx.status === 'ready') dot.style.background = 'var(--codex)';
+  const id = document.createElement('div'); id.className = 'aid';
+  const nm = document.createElement('div'); nm.className = 'aname';
+  nm.textContent = 'codex' + (cx.plan ? ` · ${cx.plan}` : '');
+  const mail = document.createElement('div'); mail.className = 'amail';
+  mail.textContent = [cx.email, cx.limitReached ? '⚠ ' + cx.limitReached : '']
+    .filter(Boolean).join(' · ') || 'signed in';
+  if (cx.limitReached) mail.style.color = 'var(--err)';
+  id.appendChild(nm); id.appendChild(mail);
+  row.appendChild(dot); row.appendChild(id);
+
+  // headline mirrors a claude card: headroom, not usage
+  if (typeof cx.pct === 'number') {
+    const left = Math.max(0, 100 - cx.pct);
+    const bw = document.createElement('div'); bw.className = 'abigwrap';
+    const big = document.createElement('div'); big.className = 'abig';
+    big.style.color = leftColor(left);
+    big.textContent = `${Math.round(left)}%`;
+    const lbl = document.createElement('div');
+    lbl.className = 'abiglbl'; lbl.textContent = 'headroom';
+    bw.appendChild(big); bw.appendChild(lbl);
+    bw.title = 'what remains of codex\'s most-constrained usage window';
+    row.appendChild(bw);
+  }
+  card.appendChild(row);
+
+  // codex reports window length in MINUTES and reset as unix SECONDS;
+  // windowRow wants a label, "used", and epoch millis.
+  (cx.windows || []).forEach(w => {
+    if (typeof w.pct !== 'number') return;
+    const mins = w.windowMins || 0;
+    const label = mins >= 10080 ? `${Math.round(mins / 10080)}w`
+                : mins >= 1440 ? `${Math.round(mins / 1440)}d`
+                : mins >= 60 ? `${Math.round(mins / 60)}h`
+                : mins ? `${mins}m` : 'window';
+    card.appendChild(windowRow({ label, used: w.pct,
+                                 resets: w.resetsAt ? w.resetsAt * 1000 : 0 }));
+  });
+
+  if (cx.credits && (cx.credits.unlimited || cx.credits.has)) {
+    const c = document.createElement('div'); c.className = 'ahint2';
+    c.textContent = cx.credits.unlimited ? 'credits: unlimited'
+                  : `credits: ${cx.credits.balance}`;
+    card.appendChild(c);
+  }
+
+  const act = document.createElement('div'); act.className = 'actrow';
+  const tag = document.createElement('span');
+  tag.className = 'scount'; tag.textContent = 'not routed';
+  tag.title = 'codex is single-login on this machine — the subscription router '
+            + 'only moves claude sessions between plans, so this card is '
+            + 'informational';
+  act.appendChild(tag);
+  const n = (sessionList || []).filter(s => s.engine === 'codex' && s.alive).length;
+  if (n) {
+    const sc = document.createElement('span');
+    sc.className = 'scount'; sc.textContent = `${n} live session${n === 1 ? '' : 's'}`;
+    act.appendChild(sc);
+  }
+  if (cx.checkedAt) {
+    const chk = document.createElement('span');
+    chk.className = 'achk';
+    chk.textContent = `checked ${accountAge(cx.checkedAt)} ago`;
+    act.appendChild(chk);
+  }
+  card.appendChild(act);
+
+  if (cx.status !== 'ready') {
+    const hint = document.createElement('div'); hint.className = 'ahint2';
+    hint.textContent = cx.error
+      ? `codex usage unavailable (${cx.error}) — the session still works; this is only the meter`
+      : 'codex usage unavailable — the session still works; this is only the meter';
+    card.appendChild(hint);
+  }
+  container.appendChild(card);
+}
+
 // One machine's accounts panel, appended to `container`. mid='local' in
 // direct mode; a machine id in fleet mode (controls route to that harness).
 function renderAccountsPanel(container, info, mid) {
@@ -3496,6 +3591,8 @@ function renderAccountsPanel(container, info, mid) {
     }
     container.appendChild(card);
   });
+
+  renderCodexCard(container, info.codex);
 
   // add flow: one tap → a terminal opens → do the claude.ai OAuth there.
   // No label field: the server auto-picks the folder name (sub2, sub3, …),
