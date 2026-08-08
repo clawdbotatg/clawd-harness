@@ -3602,7 +3602,13 @@ class SessionManager:
                     if sess.alive and self.sessions.get(sess.cid) is sess:
                         print(f"[account {slug}] previously-signed-in dir "
                               "(normal TUI) — typing /login", flush=True)
-                        sess.send_message("/login", control=True)
+                        # Trailing space is load-bearing, same as compact_cmd:
+                        # a bare "/login" leaves the slash-command picker open
+                        # and it eats the CR, so the command sits unrun in the
+                        # composer — the exact silent no-op this feature exists
+                        # to prevent. The space completes the token and closes
+                        # the menu.
+                        sess.send_message("/login ", control=True)
                 threading.Thread(target=_autologin, daemon=True).start()
             self.broadcast_sessions()
         print(f"[account {slug}] created — sign-in session "
