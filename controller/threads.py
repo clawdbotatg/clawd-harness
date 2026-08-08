@@ -40,7 +40,7 @@ def _derive_title(text):
 
 class Threads:
     """Owns the set of PM threads + which one is current. A thread is a plain
-    dict: {id, title, title_locked, archived, messages, state}. `state` maps a
+    dict: {id, title, desc, title_locked, archived, messages, state}. `state` maps a
     brain backend name → that brain's exported conversation (history etc.)."""
 
     def __init__(self, path=None):
@@ -71,7 +71,8 @@ class Threads:
         """UI-facing list: live threads first (creation order), then archived."""
         def row(tid):
             t = self.threads[tid]
-            return {"id": tid, "title": t["title"], "archived": t["archived"],
+            return {"id": tid, "title": t["title"], "desc": t.get("desc", ""),
+                    "archived": t["archived"],
                     "count": sum(1 for m in t["messages"] if m["who"] == "me"),
                     "msgs": len(t["messages"]),   # total — lets the UI spot a turn that landed while it wasn't looking
                     "current": tid == self.current}
@@ -109,12 +110,29 @@ class Threads:
                 t["title"] = _derive_title(text)
                 t["title_locked"] = True
 
+    def set_name(self, tid, title=None, desc=None):
+        """AI naming (controller/naming.py) refreshing a thread's title + running
+        tldr. Overrides the first-prompt title (and locks it so a later user
+        message can't re-derive over the AI's name)."""
+        with self._lock:
+            t = self.threads.get(tid)
+            if t is None:
+                return False
+            if title:
+                t["title"] = title[:_TITLE_MAX]
+                t["title_locked"] = True
+            if desc is not None:
+                t["desc"] = desc
+            self.persist()
+            return True
+
     # -- mutations -------------------------------------------------------------
     def new(self, title=None, select=True):
         with self._lock:
             self._seq += 1
             tid = f"t{self._seq}"
             self.threads[tid] = {"id": tid, "title": title or "New thread",
+                                 "desc": "",
                                  "title_locked": bool(title), "archived": False,
                                  "messages": [], "state": {}}
             self.order.append(tid)
@@ -143,6 +161,7 @@ class Threads:
             t["messages"] = []
             t["state"] = {}
             t["title"] = "New thread"
+            t["desc"] = ""
             t["title_locked"] = False
             self.persist()
             return True
@@ -176,6 +195,7 @@ class Threads:
                 continue
             self.threads[tid] = {
                 "id": tid, "title": t.get("title") or "New thread",
+                "desc": t.get("desc") or "",
                 "title_locked": bool(t.get("title_locked")),
                 "archived": bool(t.get("archived")),
                 "messages": t.get("messages") or [],

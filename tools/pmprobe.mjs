@@ -52,7 +52,7 @@ const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, ser
 
 // -- fake controller ---------------------------------------------------------
 // Two threads; a chat request that never resolves until we let it go.
-let threads = [{ id: 't1', title: 'alpha', archived: false, count: 1, msgs: 2, current: true },
+let threads = [{ id: 't1', title: 'alpha', desc: 'probing the pm tab', archived: false, count: 1, msgs: 2, current: true },
                { id: 't2', title: 'beta', archived: false, count: 0, msgs: 0, current: false }];
 let current = 't1';
 const msgs = { t1: [{ who: 'me', text: 'hello alpha' }, { who: 'bot', text: 'hi from alpha', trace: [] }],
@@ -133,6 +133,13 @@ const ctlByText = (t) => page.locator('#sessionbar .pmctl', { hasText: t }).firs
 
 check('PM view opened with its thread tabs', (await tabs()).length === 2, JSON.stringify(await tabs()));
 
+// -- session parity: the running AI tldr line + quick-prompt chips ------------
+const descText = await page.$eval('#sessiondesc', e => e.innerText).catch(() => '');
+check('the AI title + running tldr line shows for the current thread',
+      /alpha/.test(descText) && /probing the pm tab/.test(descText), descText);
+check('the quick-prompt chips are visible in the PM view',
+      await page.$eval('#quickchips', e => !!e.offsetParent && e.children.length > 0));
+
 // -- fire a prompt; the turn now hangs, exactly like a real thinking PM --------
 await page.fill('#box', 'do a long thing');
 await page.click('#send').catch(async () => { await page.press('#box', 'Enter'); });
@@ -183,6 +190,14 @@ await page.waitForTimeout(700);
 const alphaFeed = await page.$eval('#pmfeed', e => e.innerText);
 check('coming back to the thinking thread shows the reply it received',
       /the reply/.test(alphaFeed), alphaFeed.replace(/\s+/g, ' ').slice(0, 120));
+
+// -- a quick-prompt chip sends into the PM thread (turnHeld is resolved now,
+//    so this chat answers immediately) ----------------------------------------
+await page.click('#quickchips button:first-child');   // the 'tldr' chip
+await page.waitForTimeout(700);
+const chipFeed = await page.$eval('#pmfeed', e => e.innerText);
+check('a chip tap sends its prompt into the PM chat',
+      /tldr/.test(chipFeed), chipFeed.replace(/\s+/g, ' ').slice(-120));
 
 // -- swipe left/right hops between PM threads (same gesture as the session rail) --
 // Synthesize the touch sequence the shared #app swipe handler listens for; it

@@ -132,6 +132,31 @@ def main(argv):
         def _key(tid=None):
             return f"pm-{tid or threads.current}"
 
+        # AI thread naming — same feature a session gets: an LLM title + running
+        # tldr, refreshed at prompt 1 then every 3 (controller/naming.py). Fired
+        # async after a turn's reply is recorded, so it never adds latency to the
+        # turn; unconfigured gateway → no-op and first-prompt titles stand.
+        # Operator threads only: the autopilot thread is found BY its fixed
+        # "🤖 autopilot" title (see _auto_tid), so it must never be renamed.
+        from . import naming
+
+        def maybe_name_thread(tid):
+            if not naming.configured():
+                return
+            msgs = threads.messages(tid)
+            count = sum(1 for m in msgs if m.get("who") == "me")
+            if not naming.name_at_prompt(count):
+                return
+
+            def _run():
+                title, desc = naming.generate_thread_name(
+                    naming.transcript_tail(msgs))
+                if title or desc:
+                    threads.set_name(tid, title=title, desc=desc)
+
+            threading.Thread(target=_run, daemon=True,
+                             name="pm-thread-naming").start()
+
         class Router:
             label = "router"
 
@@ -152,6 +177,7 @@ def main(argv):
                 out = brain.chat(text)
                 threads.record("bot", out.get("reply", ""), out.get("trace"), tid=tid)
                 threads.persist()
+                maybe_name_thread(tid)
                 return out
 
             def chat_stream(self, text, emit):
@@ -164,6 +190,7 @@ def main(argv):
                 out = brain.chat_stream(text, emit)
                 threads.record("bot", out.get("reply", ""), out.get("trace"), tid=tid)
                 threads.persist()
+                maybe_name_thread(tid)
                 return out
 
             # -- thread management (driven by the chat server endpoints) --------

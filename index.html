@@ -3019,10 +3019,24 @@ function updateBreadcrumb(title) {        // called when we (re)subscribe to a s
 function refreshBreadcrumb(view) {
   view = view || currentView();
   // PM view: a fixed crumb; its threads ride the #sessionbar like sessions do.
+  // The desc row stays visible here so the PM gets the same running AI tldr
+  // line + quick-prompt chips a session has (title/desc come from the
+  // controller's thread naming — see controller/naming.py).
   if (view === 'pm') {
     meta.textContent = 'fleet pm';
-    document.getElementById('sessiondesc').textContent = '';
-    document.getElementById('descrow').classList.remove('insession');
+    const descEl = document.getElementById('sessiondesc');
+    descEl.textContent = ''; descEl.classList.remove('local');
+    const t = pmThreads.find(x => x.id === pmCurrent);
+    if (t && t.title && t.title !== 'New thread') {
+      const s = document.createElement('span'); s.className = 'sd-title'; s.textContent = t.title;
+      descEl.appendChild(s);
+      if (t.desc) {
+        const d = document.createElement('span'); d.className = 'sd-desc'; d.textContent = t.desc;
+        descEl.appendChild(d);
+      }
+    }
+    document.getElementById('descrow').classList.add('insession');
+    updateTtyStat();               // hides the session state square (PM isn't a session)
     renderSessionBar(view);
     return;
   }
@@ -4600,8 +4614,12 @@ const TTYSTAT_LEGEND = 'amber = working · violet = subagent running · ' +
                        'cyan = background work · red = needs you · ' +
                        'green = idle · hollow red = dead';
 function updateTtyStat() {
+  // Session views only — the desc row is now also visible in the PM view (tldr
+  // line + chips), and a session frame arriving mid-PM must not repaint a stale
+  // state square there.
+  const v = currentView();
   const s = currentCid && allSessions().find(x => x.cid === currentCid);
-  if (!s) { ttystatEl.hidden = true; return; }
+  if (!s || (v !== 'tty' && v !== 'transcript')) { ttystatEl.hidden = true; return; }
   const st = sessionState(s);
   ttystatEl.className = st.key;
   ttystatEl.title = st.word + '\n' + TTYSTAT_LEGEND;
@@ -5885,6 +5903,7 @@ function hideChipTip() { chipTip.style.display = 'none'; }
 }
 function sendQuick(text) {
   const v = currentView();
+  if (v === 'pm') { pmSend(text); return; }   // chips drive the PM chat too (pmSend guards busy)
   if (!currentCid || (v !== 'tty' && v !== 'transcript')) return;
   deliverSend(currentCid, text, text, 'quick');   // 'quick' tags the server's prompt log
   addPending(text, text);
@@ -6949,7 +6968,8 @@ function renderPmBar(bar, wasHidden) {
     if (t.archived && !pmArchOpen) return;
     const tab = document.createElement('button');
     tab.className = 'stab pmtab' + (t.id === pmCurrent ? ' active' : '') + (t.archived ? ' arch' : '');
-    tab.title = t.archived ? 'archived — click to restore' : (t.title || 'thread');
+    tab.title = t.archived ? 'archived — click to restore'
+                           : ((t.title || 'thread') + (t.desc ? ' — ' + t.desc : ''));
     // The thread mid-turn wears the same pulsing LED a busy session does. You can
     // now switch away from a thinking thread, so this is the only thing telling
     // you it's still running (its reply lands in the background).
@@ -6989,7 +7009,9 @@ function pmApplyThreads(s) {           // s = {threads, current, archived_count}
   if (!s || !s.threads) return;
   const switched = pmCurrent != null && s.current !== pmCurrent;
   pmThreads = s.threads; pmCurrent = s.current; pmLoaded = true;
-  if (currentView() === 'pm') renderSessionBar('pm');
+  // Full breadcrumb repaint (not just the bar): the AI title/tldr line above
+  // the composer reads pmThreads, and the 5s poll is how a fresh name lands.
+  if (currentView() === 'pm') refreshBreadcrumb('pm');
   // Resync the feed when it's out of step with the server:
   //  - switched: the current thread changed out from under us (another tab, a
   //    restart that restored a different `current`) — otherwise the bar highlights
