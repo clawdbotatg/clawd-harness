@@ -155,24 +155,34 @@
   /* tty activity box: an always-on glanceable answer to "is this session doing
      anything right now?" — amber pulse = turn in flight, violet pulse = a
      subagent (Task/Agent tool) is running, slow cyan pulse = the turn ended
-     but background shells/agents are still running, solid amber = blocked on you,
-     green = idle, red = dead. Lives at the head of the session-name row above
-     the composer (never occludes the terminal). */
-  #ttystat { display:flex; align-items:center; gap:7px; padding:3px 9px; border-radius:6px;
-             background:var(--raised); border:1px solid var(--edge); font-size:11px;
-             color:var(--dim); font-family:var(--mono); flex:0 0 auto; white-space:nowrap; }
+     but background shells/agents are still running, red pulse = blocked on you,
+     green = idle, hollow red = dead. Lives at the head of the session-name row
+     above the composer (never occludes the terminal).
+
+     It is a COLOR, not a word. This used to be a pill spelling the state out
+     ("working · Bash"), which on a phone ate more of the row than the session's
+     own name — and the row has to hold project + title + tldr. The word now
+     lives in the hover tooltip, written from the same sessionState() string by
+     updateTtyStat(), so the glance is one square and the detail is one hover.
+     Two consequences of dropping the word: needs-you moves from solid amber to
+     RED pulse (amber-with-no-pulse vs amber-with-pulse was only legible while
+     the label disambiguated them — and red-pulse is what the tab strip and the
+     session cards already use for needs-you), and dead becomes a hollow red
+     square so it can't be mistaken for it. */
+  #ttystat { display:flex; align-items:center; flex:0 0 auto; padding:3px 2px; cursor:default; }
   #ttystat[hidden] { display:none; }
-  #ttystat .dot { width:10px; height:10px; border-radius:3px; background:var(--dim); flex:0 0 auto; }
-  #ttystat.working .dot { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
-  #ttystat.agent   .dot { background:var(--local);  animation:pulse 1.1s ease-in-out infinite; }
-  #ttystat.agent   { color:var(--local); border-color:var(--local-dim); }
-  #ttystat.bgwork  .dot { background:var(--bgwork); animation:pulse 2.4s ease-in-out infinite; }
-  #ttystat.bgwork  { color:var(--bgwork); border-color:var(--bgwork-dim); }
-  #ttystat.waiting .dot { background:var(--accent); }
-  #ttystat.waiting { color:var(--accent); border-color:var(--accent-dim); }
-  #ttystat.idle    .dot { background:var(--ok); }
-  #ttystat.dead    .dot { background:var(--err); }
-  #ttystat.dead    { color:var(--err); border-color:var(--err); }
+  #ttystat .dot { width:11px; height:11px; border-radius:3px; flex:0 0 auto;
+                  background:var(--dim); border:1px solid var(--edge); }
+  #ttystat.working .dot { background:var(--accent); border-color:var(--accent);
+                          animation:pulse 1.1s ease-in-out infinite; }
+  #ttystat.agent   .dot { background:var(--local);  border-color:var(--local);
+                          animation:pulse 1.1s ease-in-out infinite; }
+  #ttystat.bgwork  .dot { background:var(--bgwork); border-color:var(--bgwork);
+                          animation:pulse 2.4s ease-in-out infinite; }
+  #ttystat.waiting .dot { background:var(--err); border-color:var(--err);
+                          animation:pulse 1.1s ease-in-out infinite; }
+  #ttystat.idle    .dot { background:var(--ok);  border-color:var(--ok); }
+  #ttystat.dead    .dot { background:transparent; border-color:var(--err); }
   /* Splash: RSVP-style flash reading on session entry. ONE line of big text,
      always in the same spot, hard-cut through three frames — project name →
      session title → AI description — then everything hides. Color codes the
@@ -332,28 +342,32 @@
      left scroll anchor keeps it visible and overflow hides the least-used tail.
 
      The session line itself also splits in two here. On a phone all four things
-     (state pill · project · session title · grey tldr) shared one line, which
-     only "fit" because of the 5px font above — unreadable. So:
-        line 1   🤖 project   Session Title
-        line 2   [🟡 working] the grey one-line tldr
+     (state · project · session title · grey tldr) shared one line, which only
+     "fit" because of the 5px font above — unreadable. So:
+        line 1   🟡 🤖 project   Session Title
+        line 2   the grey one-line tldr
      `display:contents` on #sessiondesc dissolves its box so its three spans
-     become flex items of #descrow directly — that's what lets the state pill
-     (a SIBLING of #sessiondesc) sit on the same line as .sd-desc (a CHILD of
-     it) without restructuring the DOM. Order + a zero-height full-basis ::after
-     forces the break after the title. Desktop keeps its single line untouched. */
+     become flex items of #descrow directly — that's what lets the state box
+     (a SIBLING of #sessiondesc) sit on the same line as .sd-project/.sd-title
+     (CHILDREN of it) without restructuring the DOM. Order + a zero-height
+     full-basis ::after forces the break after the title, leaving line 2 to the
+     tldr alone. The state rides line 1 rather than line 2 because it is now a
+     single square (see #ttystat): it costs ~15px beside the project badge,
+     where as a labelled pill it needed a line's worth of width.
+     Desktop keeps its single line untouched. */
   @media (max-width: 720px) {
     #descrow.insession { flex-wrap: wrap; align-items:center; gap:5px 8px; }
     #sessiondesc { display:contents; }
     #sessiondesc .sd-project, #sessiondesc .sd-title, #sessiondesc .sd-desc {
       font-size:12.5px; line-height:1.3; min-width:0;
       white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    #ttystat { order:0; flex:0 0 auto; }
     #sessiondesc .sd-project { order:1; flex:0 1 auto; }
     #sessiondesc .sd-title   { order:2; flex:1 1 auto; }
     #descrow.insession::after { content:''; order:3; flex:0 0 100%; height:0; }
-    #ttystat { order:4; flex:0 0 auto; }
-    #sessiondesc .sd-desc { order:5; flex:1 1 0; font-size:12px; }
+    #sessiondesc .sd-desc { order:4; flex:1 1 100%; font-size:12px; }
     #sessiondesc .sd-desc::before { content:none; }   /* no leading ": " on its own line */
-    #quickchips { order:6; flex:1 1 100%; margin-left:0; }
+    #quickchips { order:5; flex:1 1 100%; margin-left:0; }
   }
   .inputrow { display:flex; gap:8px; align-items:flex-end; }
   #keys { display:flex; flex-wrap:wrap; gap:6px; }
@@ -870,7 +884,10 @@
   </main>
   <footer>
     <div id="descrow">
-      <div id="ttystat" hidden title="Is this session doing anything right now? amber = working, violet = a subagent is running, cyan = background shells/agents still running, green = idle, red = dead"><span class="dot"></span><span id="ttystatlabel"></span></div>
+      <!-- state of this session as one colored square; the words are the tooltip,
+           written by updateTtyStat() (title + aria-label) so it always names the
+           CURRENT state rather than just the legend -->
+      <div id="ttystat" hidden role="img"><span class="dot"></span></div>
       <div id="sessiondesc" title="AI-generated name for this session"></div>
       <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."></div>
     </div>
@@ -4571,13 +4588,19 @@ function splashProjectName(s, machine) {
 }
 // -- tty activity box: the persistent, glanceable "is it doing anything" ------
 const ttystatEl = document.getElementById('ttystat');
-const ttystatLabel = document.getElementById('ttystatlabel');
+// The box shows the state as a color; this is the rest of the answer, on hover.
+// Line 1 is what THIS session is doing right now, line 2 the legend for the
+// other colors (a native title tooltip renders the \n).
+const TTYSTAT_LEGEND = 'amber = working · violet = subagent running · ' +
+                       'cyan = background work · red = needs you · ' +
+                       'green = idle · hollow red = dead';
 function updateTtyStat() {
   const s = currentCid && allSessions().find(x => x.cid === currentCid);
   if (!s) { ttystatEl.hidden = true; return; }
   const st = sessionState(s);
   ttystatEl.className = st.key;
-  ttystatLabel.textContent = st.word;
+  ttystatEl.title = st.word + '\n' + TTYSTAT_LEGEND;
+  ttystatEl.setAttribute('aria-label', 'session state: ' + st.word);
   ttystatEl.hidden = false;
 }
 function maybeSplash(cid) {
