@@ -124,6 +124,12 @@ user-facing overview; this file orients an agent working **on** the code.
   machines" in `fleet/CLAUDE.md`), and the relay's 20s roster heartbeat **can't
   close a machine's in-flight passkey modal**. `fleet/test_relay_prefs.py`
   guards the server half.
+- **`tools/settingsprobe.mjs`** — fleet-mode probe of the **⚙️ settings** page,
+  currently the "default machine for new projects" select. It asserts the whole
+  chain, not the widget: the choice persists, re-labels the projects rung's
+  `default/all` option, and is what `ensureTargetMachine()` targets — a select
+  that stores a value nothing reads would look perfectly fine. Same fake-relay
+  stub as fleetprobe (no relay, no worker, no passkey).
 
 ## Architecture (one server, multi-project, multi-session)
 - **server.py** — a `SessionManager` owns N `Project`s and N `ClaudeSession`s.

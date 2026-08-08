@@ -569,9 +569,21 @@
   .settoggle:hover { color:var(--ink); border-color:var(--edge-hi); }
   .settoggle.on { color:var(--ok); border-color:var(--ok); }
   .settoggle:disabled { opacity:.45; cursor:default; }
+  /* a picker instead of a switch (settingSelectRow) — same chip as .settoggle,
+     but readable at a glance since the chosen value IS the setting's state */
+  .setselect { flex:0 1 auto; max-width:52%; background:var(--raised); color:var(--ink);
+               border:1px solid var(--edge); padding:7px 10px; font-size:12px;
+               font-family:var(--mono); cursor:pointer; }
+  .setselect:hover:enabled { border-color:var(--edge-hi); }
+  .setselect:focus { outline:none; border-color:var(--accent); }
+  .setselect:disabled { opacity:.45; cursor:default; color:var(--dim); }
   @media (max-width:740px) {
     #settingsbody { padding:14px 12px 44px; }
-    .setrow { gap:12px; }
+    .setrow { gap:12px; flex-wrap:wrap; }
+    /* a select's whole point is that you can read the chosen value — at phone
+       width there's no room beside the label, so give it its own full line
+       (the toggle chip stays inline: 'on'/'off' fits anywhere) */
+    .setselect { flex:1 1 100%; max-width:100%; }
   }
   .amach-sec { border:1px solid var(--edge); background:var(--panel); padding:14px 16px 16px; }
   .amach-sec.offline { opacity:.55; }
@@ -860,7 +872,7 @@
   </div>
   <main>
     <span id="machineTag"></span>
-    <button id="pinBtn" title="Pin this session — park it on the 📌 board (out of the tabs) to check on later">📌</button>
+    <button id="pinBtn" title="Pin this session — park it on the 📌 board and jump to the next session">📌</button>
     <button id="closeBtn" title="Close this session (done with this job)">✕</button>
     <section class="col hidden" id="projects">
       <div id="projectlist"></div>
@@ -2902,20 +2914,9 @@ function renderMachines(list) {
       act.title = 'unchecked: this machine is never contacted — one less passkey to unlock the fleet';
       card.appendChild(act);
     }
-    // "Default for new repos": pin THIS host as the clone target the projects rung
-    // uses, instead of letting it auto-pick the first online machine. A single global
-    // choice — checking one box clears the others on re-render. Online machines only.
-    if (m.online && !off) {
-      const isDef = cloneDefaultMachine() === m.id;
-      const def = document.createElement('label');
-      def.className = 'cdefault' + (isDef ? ' on' : '');
-      const cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.checked = isDef;
-      cb.onchange = () => { setCloneDefaultMachine(cb.checked ? m.id : null); renderMachines(machineList); };
-      const txt = document.createElement('span'); txt.textContent = 'default for new repos';
-      def.append(cb, txt);
-      card.appendChild(def);
-    }
+    // (The "default for new repos" pin used to be a checkbox here. It's a
+    // one-of-N choice, so it was N checkboxes that had to clear each other —
+    // now it's a single select on the ⚙️ settings page, see renderSettings.)
     machinesEl.appendChild(card);
   });
   // Roster changed: connect any newly-online machine and re-merge (online flags
@@ -2925,6 +2926,9 @@ function renderMachines(list) {
   renderProjectRung();
   refreshBreadcrumb();
   resolvePendingNav();        // a URL we restored from may resolve now that the roster is in
+  // the ⚙️ default-machine select is built from this roster — keep it live if
+  // it's on screen (a box going offline changes the option list under you)
+  if (!settingsModal.hidden) renderSettings();
 }
 
 // -- projects (top rung) ----------------------------------------------------
@@ -3278,8 +3282,9 @@ function defaultMachineFor(key) { return loadDefaults()[key] || null; }
 function setDefaultMachine(key, id) { const d = loadDefaults(); d[key] = id; try { localStorage.setItem(DEFAULT_MACHINE_KEY, JSON.stringify(d)); } catch {} }
 // Global default HOST for new repos created/cloned from the projects rung — a single
 // value, distinct from the per-project map above (which picks where an EXISTING
-// unified project opens). Set/cleared by a checkbox on each machine card; read by
-// ensureTargetMachine() so the projects rung stops auto-picking the first online box.
+// unified project opens). Set from the ⚙️ settings page ("default machine for new
+// projects"); read by ensureTargetMachine() so the projects rung stops auto-picking
+// the first online box.
 const CLONE_DEFAULT_KEY = 'cc_clone_default';
 function cloneDefaultMachine() { try { return localStorage.getItem(CLONE_DEFAULT_KEY) || null; } catch { return null; } }
 function setCloneDefaultMachine(id) { try { id ? localStorage.setItem(CLONE_DEFAULT_KEY, id) : localStorage.removeItem(CLONE_DEFAULT_KEY); } catch {} }
@@ -4905,6 +4910,20 @@ function closeCurrentSession() {
   focusSession(rest[Math.min(Math.max(idx, 0), rest.length - 1)] || rest[0]);
 }
 
+// Where to land after 📌-ing the open session. Pinning means "this one is parked,
+// show me the next thing" — following it onto the board is a detour you then have
+// to swipe back out of, so instead we step along the rail exactly like closing
+// does. The server's `pin` ack hasn't landed yet, so the roster still contains
+// this cid; drop it by hand. Nothing left to hop to → the sessions list (which
+// carries the "📌 N pinned on the board" note, so the board is still one tap).
+function hopAfterPin(cid) {
+  const roster = sortedSessions();
+  const idx = roster.findIndex(s => s.cid === cid);
+  const rest = roster.filter(s => s.cid !== cid);
+  if (!rest.length) { navTo('sessions'); return; }
+  focusSession(rest[Math.min(Math.max(idx, 0), rest.length - 1)] || rest[0]);
+}
+
 function highlightCard(cid) {
   sessionsEl.querySelectorAll('.scard').forEach(c =>
     c.classList.toggle('active', c.dataset.cid === cid));
@@ -5235,9 +5254,9 @@ function renderPinsUI() {
   if (currentView() === 'pins') renderPinBoard();
 }
 
-// The in-session 📌 toggle beside the close-✕: pins the open session (and jumps
-// to the board so you see where it went); on an already-pinned session it
-// restores it to the tabs instead.
+// The in-session 📌 toggle beside the close-✕: pins the open session (and hops
+// you to the next one in the list — see hopAfterPin); on an already-pinned
+// session it restores it to the tabs instead.
 function updatePinBtn() {
   const v = currentView();
   const inSession = (v === 'tty' || v === 'transcript') && !!currentCid;
@@ -5248,7 +5267,7 @@ function updatePinBtn() {
   pinBtn.classList.toggle('pinned', pinned);
   pinBtn.title = pinned
     ? 'Unpin — put this session back into the active session tabs'
-    : 'Pin this session — park it on the 📌 board (out of the tabs) to check on later';
+    : 'Pin this session — park it on the 📌 board and jump to the next session';
 }
 
 function setBusy(busy, label) {
@@ -6240,14 +6259,17 @@ const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; setView(v
 menuBtn.onclick = () => navTo('sessions');
 projectsBtn.onclick = () => navTo('projects');
 pinsBtn.onclick = () => navTo('pins');           // 📌 the board of parked to-dos
-// In-session 📌: park the open session on the board (and follow it there so you
-// see where it went); if it's already pinned, restore it to the tabs instead.
+// In-session 📌: park the open session on the board and move straight on to the
+// NEXT session in the normal list (hopAfterPin) — pinning is a "done with this
+// one" gesture, not a request to go look at the board. If it's already pinned,
+// restore it to the tabs instead and stay put.
 pinBtn.onclick = () => {
   if (!currentCid) return;
   const s = allSessions().find(x => x.cid === currentCid);
   const on = !(s && s.pinned);
-  sendPin(currentCid, on);
-  if (on) navTo('pins');
+  const cid = currentCid;
+  sendPin(cid, on);
+  if (on) hopAfterPin(cid);
 };
 document.getElementById('reloadBtn').onclick = () => location.reload();   // manual escape hatch — draft + hash survive a reload
 machinesBtn.onclick = () => openMachines();          // 🖥️ roster page (no longer a rung)
@@ -6683,6 +6705,30 @@ function settingRow(title, sub, { label, on = false, disabled = false, onToggle 
   return row;
 }
 
+// Same row, but the control is a <select> — for a setting that PICKS one of a
+// list instead of flipping. Disabled renders the select greyed with whatever
+// single option explains why, same convention as settingRow.
+function settingSelectRow(title, sub, { options, value = '', disabled = false, onChange = null }) {
+  const row = document.createElement('div');
+  row.className = 'setrow' + (disabled ? ' off' : '');
+  const main = document.createElement('div'); main.className = 'setmain';
+  const t = document.createElement('div'); t.className = 'set-t'; t.textContent = title;
+  const s = document.createElement('div'); s.className = 'set-s'; s.textContent = sub;
+  main.append(t, s);
+  const sel = document.createElement('select');
+  sel.className = 'setselect';
+  options.forEach(o => {
+    const op = document.createElement('option');
+    op.value = o.value; op.textContent = o.label;
+    sel.appendChild(op);
+  });
+  sel.value = value;
+  sel.disabled = disabled || !onChange;
+  if (onChange) sel.onchange = () => onChange(sel.value);
+  row.append(main, sel);
+  return row;
+}
+
 function renderSettings() {
   settingsBody.innerHTML = '';
 
@@ -6710,6 +6756,41 @@ function renderSettings() {
     };
   }
   settingsBody.appendChild(settingRow('notifications', sub, opts));
+
+  // ── default machine for new projects ───────────────────────────────────────
+  // Which box a create/clone from the projects rung lands on (cloneDefaultMachine
+  // → ensureTargetMachine). It lived as a "default for new repos" checkbox on
+  // every 🖥️ machine card: N boxes for a one-of-N answer, each having to clear
+  // the others, and you had to visit the roster to find out where a new repo
+  // would land. One select, one place. The projects rung's machine dropdown
+  // still overrides it per create ("default/all · new repos → X" shows this).
+  const machRow = (sub2, opts2) =>
+    settingsBody.appendChild(settingSelectRow('default machine for new projects', sub2, opts2));
+  if (!FLEET) {
+    machRow('only on the fleet UI (h.atg.link) — a harness you open directly hosts every project itself',
+            { options: [{ value: '', label: 'this machine' }], disabled: true });
+  } else {
+    const workers = machineList.filter(m => m.kind !== 'relay' && isMachineActive(m.id));
+    const short = id => id.replace(/^clawd-/, '');
+    const pref = cloneDefaultMachine();
+    const opts2 = [{ value: '', label: 'auto · first online machine' }].concat(
+      workers.map(m => ({ value: m.id, label: short(m.id) + (m.online ? '' : ' · offline') })));
+    // A pinned box that has since left the roster (or been switched off) still
+    // shows, so "why aren't my repos landing there?" has a visible answer.
+    if (pref && !opts2.some(o => o.value === pref)) opts2.push({ value: pref, label: short(pref) + ' · gone' });
+    const landing = defaultCreateMachine();
+    machRow(
+      workers.length
+        ? 'create + clone from the projects rung land here'
+          + (landing ? ` — right now that's ${short(landing)}` : ' — no online machine to land on right now')
+        : 'no machines on the roster yet',
+      { options: opts2, value: pref || '', disabled: !workers.length,
+        onChange: (v) => {
+          setCloneDefaultMachine(v || null);
+          renderSettings();       // re-read: the sub-line names where repos land now
+          renderProjectRung();    // the rung's 'default/all · new repos → X' label follows
+        } });
+  }
 }
 
 function openSettings() { renderSettings(); settingsModal.hidden = false; }
