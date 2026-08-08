@@ -1092,6 +1092,7 @@ let projectList = [];           // latest project metadata for the resolved mach
 // behind it is implicit, resolved from a per-project default).
 let perMachine = {};            // machineId -> { projectList, sessionList, gotProjects, gotSessions }
 let unifiedProjects = new Map();// projectKey -> { key, name, repoUrl, pinned, machines:[{machineId,pid,online,sessionCount,busyCount,waitingCount,status}] }
+let projectKeyAlias = new Map();// folded key -> surviving group key (name:<name> strays merged into their URL group)
 let currentProjectKey = null;   // identity key of the open project (fleet); direct mode leaves this null
 let newSessionMachine = null;   // fleet: which of the open project's machines a new session spawns on (the ＋ selector)
 let projectFilter = '';         // live filter text in the projects add/search box
@@ -2732,46 +2733,27 @@ function projectEmojiByPid(pid) {
   const p = (projectList || []).find(p => p.pid === pid);
   return (p && p.emoji) || '';
 }
-// Badge for a session row/tab — fleet sessions resolve through their host
-// machine's cached project list (the tab strip spans projects AND machines,
-// which is exactly where the badge earns its keep).
+// Badge for a session row/tab. In fleet the badge must come from the MERGED
+// project (electEmoji), not the host machine's own pick — two boxes running the
+// same repo each badge it independently, and reading the raw per-machine code
+// here is what made one project show up under three different emoji at once.
 function sessionEmoji(s) {
   if (!s) return '';
   if (FLEET && s._machine) {
-    const p = (((perMachine[s._machine] || {}).projectList) || []).find(p => p.pid === s.pid);
-    return (p && p.emoji) || '';
+    const key = s._pkey || projectKeyForSession(s._machine, s.pid);
+    const g = projectGroup(key);
+    return (g && g.emoji) || '';
   }
   return projectEmojiByPid(s.pid);
 }
-// Shortest-unique-prefix for the tab strip's emoji badges: every project owns a
-// 1-3 emoji code, but a tab only needs enough of it to be unambiguous against
-// the OTHER projects currently in the strip — 🐈 alone when no other project
-// starts with 🐈, two emoji when one does. Grapheme-aware (ZWJ sequences and
-// variation selectors are one glyph, not one codepoint).
-function emojiGraphemes(e) {
-  try { return [...new Intl.Segmenter().segment(e || '')].map(x => x.segment); }
-  catch { return Array.from(e || ''); }
-}
-function emojiPrefixMap(codes) {
-  const split = new Map();
-  for (const c of new Set(codes.filter(Boolean))) split.set(c, emojiGraphemes(c));
-  const out = new Map();
-  for (const [c, g] of split) {
-    let need = 1;
-    for (const [c2, g2] of split) {
-      if (c2 === c) continue;
-      let common = 0;
-      while (common < g.length && common < g2.length && g[common] === g2[common]) common++;
-      need = Math.max(need, Math.min(common + 1, g.length));
-    }
-    out.set(c, g.slice(0, need).join(''));
-  }
-  return out;
-}
+// (There used to be a shortest-unique-prefix trimmer here that showed 🐈 instead
+// of 🐈🚀🔧 when no other tab's code started with 🐈. It saved a couple of glyphs
+// and cost the thing the badge exists for: one project must look identical on its
+// card, its tabs and the breadcrumb, or the eye stops reading it as one project.)
 // Badge for the OPEN project (breadcrumb / sessions-rung header).
 function currentProjectEmoji() {
   if (FLEET) {
-    const g = currentProjectKey && unifiedProjects.get(currentProjectKey);
+    const g = projectGroup(currentProjectKey);
     return (g && g.emoji) || '';
   }
   return projectEmojiByPid(currentPid);
@@ -2861,7 +2843,6 @@ function renderSessionBar(view) {
     return;
   }
   bar.innerHTML = '';
-  const emShort = emojiPrefixMap(sorted.map(sessionEmoji));   // 🐈 not 🐈🚀🔧 when 🐈 already says it
   sorted.forEach(s => {
     const tab = document.createElement('button');
     const mOff = FLEET && s._machine && !isMachineOnline(s._machine);   // cached tab — host not on the roster right now
@@ -2876,8 +2857,7 @@ function renderSessionBar(view) {
     const em = sessionEmoji(s);          // project badge: which project this tab belongs to
     if (em) {
       const pe = document.createElement('span');
-      pe.className = 'pemoji'; pe.textContent = emShort.get(em) || em;
-      pe.title = em;                     // hover shows the full project code
+      pe.className = 'pemoji'; pe.textContent = em;   // the WHOLE code — a project wears one badge everywhere
       tab.appendChild(pe);
     }
     const lbl = document.createElement('span');
@@ -2953,10 +2933,10 @@ function mergeProjects() {
     for (const p of (perMachine[mid].projectList || [])) {
       const key = projectKey(p, mid);
       let g = map.get(key);
-      if (!g) { g = { key, name: p.name || '', repoUrl: p.repoUrl || '', kind: p.kind || 'gh', path: p.path || '', pinned: false, lastTouched: 0, emoji: '', machines: [] }; map.set(key, g); }
+      if (!g) { g = { key, name: p.name || '', repoUrl: p.repoUrl || '', kind: p.kind || 'gh', path: p.path || '', pinned: false, lastTouched: 0, emoji: '', emojiVotes: [], machines: [] }; map.set(key, g); }
       if (!g.name && p.name) g.name = p.name;
       if (!g.repoUrl && p.repoUrl) g.repoUrl = p.repoUrl;
-      if (!g.emoji && p.emoji) g.emoji = p.emoji;   // same repo badged on N boxes: first badge wins
+      if (p.emoji) g.emojiVotes.push([mid, p.emoji]);   // each box badges the repo on its own; elected below
       if (p.pinned) g.pinned = true;
       if ((p.lastTouched || 0) > g.lastTouched) g.lastTouched = p.lastTouched || 0;  // warmth = warmest machine
       g.machines.push({ machineId: mid, pid: p.pid, online,
@@ -2976,16 +2956,44 @@ function mergeProjects() {
     const base = normRepo(g.repoUrl).split('/').pop();
     if (base && !byBasename.has(base)) byBasename.set(base, g);   // first URL group wins ties
   }
+  const alias = new Map();
   for (const [key, g] of [...map]) {
     if (!key.startsWith('name:')) continue;
     const target = byBasename.get((g.name || '').toLowerCase());
     if (!target) continue;
     for (const m of g.machines) target.machines.push(m);
+    for (const v of g.emojiVotes) target.emojiVotes.push(v);
     if (g.pinned) target.pinned = true;
     if ((g.lastTouched || 0) > target.lastTouched) target.lastTouched = g.lastTouched;
     map.delete(key);
+    alias.set(key, target.key);        // sessions still key by the stray; follow the fold
   }
+  // One project = ONE badge, everywhere. Each machine's harness picks an emoji for
+  // its own copy of the repo independently, so a fleet project arrives with N
+  // candidate codes. Elect one deterministically — most votes, ties broken by
+  // machineId — rather than "whichever machine's frame landed first", which made
+  // the same project wear a different badge per tab (and flip on reconnect).
+  for (const g of map.values()) g.emoji = electEmoji(g.emojiVotes);
   unifiedProjects = map;
+  projectKeyAlias = alias;
+}
+function electEmoji(votes) {
+  const tally = new Map();             // emoji -> { n, first: lowest machineId that picked it }
+  for (const [mid, code] of (votes || [])) {
+    const t = tally.get(code);
+    if (!t) tally.set(code, { n: 1, first: mid });
+    else { t.n++; if (mid < t.first) t.first = mid; }
+  }
+  let best = '', bn = 0, bf = '';
+  for (const [code, t] of tally) {
+    if (t.n > bn || (t.n === bn && t.first < bf)) { best = code; bn = t.n; bf = t.first; }
+  }
+  return best;
+}
+// The merged group a project key belongs to, following the name→URL fold above.
+function projectGroup(key) {
+  if (!key) return null;
+  return unifiedProjects.get(key) || unifiedProjects.get(projectKeyAlias.get(key)) || null;
 }
 
 // Have all online machines reported their project list yet? Lets nav tell "still
@@ -3769,8 +3777,97 @@ function renderPlanSummary(body, machines) {
     card.appendChild(chips);
     grid.appendChild(card);
   });
+  renderCodexPlanCard(grid, machines);
   sec.appendChild(grid);
   body.appendChild(sec);
+}
+
+// The codex plan, rolled up across machines the same way the claude plans are.
+// It belongs in this grid — "what plans do I have and how much is left" is the
+// question this section answers, and codex is one of the answers — but it stays
+// read-only and wears the engine's green, because it is not routed.
+function renderCodexPlanCard(grid, machines) {
+  // one login per machine, so group by identity across boxes exactly as the
+  // claude roll-up does: same email = same subscription = one card.
+  const pools = new Map();
+  machines.forEach(m => {
+    const cx = (accountsInfoFor(m.id) || {}).codex;
+    if (!cx) return;                             // codex not signed in on that box
+    const key = cx.email || 'codex';
+    if (!pools.has(key)) pools.set(key, { email: cx.email, plan: cx.plan, readings: [] });
+    const p = pools.get(key);
+    p.plan = p.plan || cx.plan;
+    p.readings.push({ mid: m.id, machine: (m.name || m.id).replace(/^clawd-/, ''), cx });
+  });
+  if (!pools.size) return;
+
+  pools.forEach(p => {
+    // freshest reading wins, same rule as the claude cards
+    p.readings.sort((x, y) => (y.cx.checkedAt || 0) - (x.cx.checkedAt || 0));
+    const fresh = p.readings.find(r => typeof r.cx.pct === 'number') || p.readings[0];
+    const cx = fresh.cx;
+    const card = document.createElement('div'); card.className = 'acct codexacct';
+
+    const row = document.createElement('div'); row.className = 'arow2';
+    const id = document.createElement('div'); id.className = 'aid';
+    const nm = document.createElement('div'); nm.className = 'aname';
+    nm.textContent = 'codex' + (p.plan ? ` · ${p.plan}` : '');
+    const mail = document.createElement('div'); mail.className = 'amail';
+    mail.textContent = p.email || 'signed in';
+    id.appendChild(nm); id.appendChild(mail);
+    const bw = document.createElement('div'); bw.className = 'abigwrap';
+    const big = document.createElement('div'); big.className = 'abig';
+    const lbl = document.createElement('div'); lbl.className = 'abiglbl';
+    if (typeof cx.pct === 'number') {
+      const left = Math.max(0, 100 - cx.pct);
+      big.style.color = leftColor(left);
+      big.textContent = `${Math.round(left)}%`;
+      lbl.textContent = 'headroom';
+      bw.title = `freshest reading — ${fresh.machine}, ${accountAge(cx.checkedAt)} ago`;
+    } else {
+      big.style.color = 'var(--err)'; big.textContent = '⚠';
+      lbl.textContent = 'no reading';
+      bw.title = cx.error || 'codex usage unavailable';
+    }
+    bw.appendChild(big); bw.appendChild(lbl);
+    row.appendChild(id); row.appendChild(bw);
+    card.appendChild(row);
+
+    (cx.windows || []).forEach(w => {
+      if (typeof w.pct !== 'number') return;
+      card.appendChild(windowRow({ label: codexWinLabel(w.windowMins),
+                                   used: w.pct,
+                                   resets: w.resetsAt ? w.resetsAt * 1000 : 0 }));
+    });
+
+    const chips = document.createElement('div'); chips.className = 'aplan-machines';
+    const nr = document.createElement('span');
+    nr.className = 'amchip'; nr.textContent = 'not routed';
+    nr.title = 'codex is single-login per machine and sits outside the '
+             + 'subscription router — this card is informational';
+    chips.appendChild(nr);
+    p.readings.forEach((r, i) => {
+      const n = (sessionList || []).filter(s => s.engine === 'codex' && s.alive
+                                             && (!FLEET || machineForCid(s.cid) === r.mid)).length;
+      const c = document.createElement('span');
+      c.className = 'amchip' + (i ? '' : ' fresh');
+      const pctTxt = typeof r.cx.pct === 'number'
+        ? `${Math.round(100 - r.cx.pct)}%` : '⚠';
+      c.textContent = `🖥️ ${r.machine} · ${pctTxt} · ${accountAge(r.cx.checkedAt)}`
+                    + (n ? ` · ${n} live` : '');
+      c.title = `${r.machine}'s codex reading`;
+      chips.appendChild(c);
+    });
+    card.appendChild(chips);
+    grid.appendChild(card);
+  });
+}
+
+function codexWinLabel(mins) {
+  return mins >= 10080 ? `${Math.round(mins / 10080)}w`
+       : mins >= 1440 ? `${Math.round(mins / 1440)}d`
+       : mins >= 60 ? `${Math.round(mins / 60)}h`
+       : mins ? `${mins}m` : 'window';
 }
 
 // Populate the 🧠 page — a grid with one section per machine in fleet mode,
