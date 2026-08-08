@@ -194,23 +194,34 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None,
                     router.reset()
                 return self._send(200, {"ok": True})
             # -- PM threads (multiple conversations) --------------------------
-            # serialized with chat so a thread switch can't land mid-turn and point
-            # the brain's conversation key at the wrong thread.
+            # These do NOT take chat_lock. A turn runs for minutes, and parking
+            # thread bookkeeping behind it made every control in the PM tab dead
+            # for the length of the turn: ＋ new, a thread tab, ✕ archive all
+            # blocked until the reply landed, so the tab read as frozen (worse,
+            # each dead click burned one of the browser's ~6 connections to the
+            # origin, eventually stalling the rest of the page too). Safety comes
+            # from `Threads`' own short lock plus `Router.chat` pinning its `tid`
+            # up front — `current` moving mid-turn can't misroute the transcript.
             if path == "/api/thread/new":
-                with chat_lock:
-                    return self._send(200, router.new_thread(data.get("title")))
+                return self._send(200, router.new_thread(data.get("title")))
             if path == "/api/thread/select":
                 tid = data.get("id")
                 if not tid:
                     return self._send(400, {"error": "id required"})
-                with chat_lock:
-                    return self._send(200, router.select_thread(tid))
-            if path == "/api/thread/clear":
-                with chat_lock:
-                    return self._send(200, router.clear_thread(data.get("id")))
+                return self._send(200, router.select_thread(tid))
             if path == "/api/thread/archive":
-                with chat_lock:
-                    return self._send(200, router.archive_thread(data.get("id")))
+                return self._send(200, router.archive_thread(data.get("id")))
+            # Clear is the exception: it drops the thread's *brain* memory, which
+            # an in-flight turn is actively writing. Don't block on the turn (that
+            # is the freeze we just fixed) — refuse fast so the UI can say why.
+            if path == "/api/thread/clear":
+                if not chat_lock.acquire(blocking=False):
+                    return self._send(409, {"error": "a PM turn is in flight — "
+                                                     "clear once it finishes"})
+                try:
+                    return self._send(200, router.clear_thread(data.get("id")))
+                finally:
+                    chat_lock.release()
             if path == "/api/tool":          # invoke a tool by hand (debug page)
                 if not mcp:
                     return self._send(503, {"error": "tool runner unavailable"})

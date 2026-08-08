@@ -224,7 +224,13 @@ async function archiveThread(id){
   renderThreads(await jpost("/api/thread/archive", {id}));
   if (wasCurrent) await loadMessages();   // current moved → render the new current
 }
-$("#reset").onclick = async ()=>{ renderThreads(await jpost("/api/thread/clear", {})); await loadMessages(); };
+// Clear is the one thread op the server refuses mid-turn (409) — it drops brain
+// memory a running turn is writing. Say so instead of silently doing nothing.
+$("#reset").onclick = async ()=>{
+  const out = await jpost("/api/thread/clear", {});
+  if (out && out.error) return alert(out.error);
+  renderThreads(out); await loadMessages();
+};
 
 let harnessInfo = null;        // {base, token, port} — for building deep links
 function sessionHref(machine, pid, cid){

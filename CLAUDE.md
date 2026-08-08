@@ -108,6 +108,13 @@ user-facing overview; this file orients an agent working **on** the code.
   file on *this* machine, so it goes green on uncommitted work. A green uiprobe
   plus an unpushed commit is the exact combination that has repeatedly produced
   a false "it's live." Pair it with `tools/shipcheck.py`.
+- **`tools/pmprobe.mjs`** — the same idea for the **PM tab**: it stubs every
+  `/pm/*` call (so it needs no live controller and never touches a real session),
+  holds `/api/chat` open to simulate a turn mid-think, then asserts the tab is
+  still drivable — switch threads, ＋ new, and that the reply lands in the thread
+  that *sent* it rather than whichever one you switched to. Guards the 2026-08-08
+  "PM tab freezes while it's thinking" bug from the client side;
+  `controller/test_pm_responsive.py` guards the server side.
 
 ## Architecture (one server, multi-project, multi-session)
 - **server.py** — a `SessionManager` owns N `Project`s and N `ClaudeSession`s.

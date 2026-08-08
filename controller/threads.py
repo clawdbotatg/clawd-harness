@@ -13,11 +13,18 @@ Persisted to a JSON file (like `.clawd-harness.sessions.json`) so threads — an
 the brain state riding inside them — survive a daemon restart, carrying each
 thread's `--resume` id across too.
 
-Storage is intentionally dumb: one process, all chats serialized by the chat
-server's lock, so no concurrency guard is needed here.
+**Thread bookkeeping is deliberately NOT serialized with brain turns.** A turn
+takes minutes; the chat server's turn lock must never be what a click on ＋ new /
+a thread tab / ✕ archive waits on, or the whole PM tab goes dead for the length
+of the turn (it did — every one of those endpoints sat on the chat lock). So this
+class owns its own short-held `RLock` instead: mutations and `persist()` run
+under it, and metadata ops stay safe while a turn is in flight. Turns pin their
+`tid` up front (see `Router.chat`), so `current` moving mid-turn can't misroute a
+transcript.
 """
 import json
 import os
+import threading
 
 _TITLE_MAX = 48
 
@@ -38,6 +45,9 @@ class Threads:
 
     def __init__(self, path=None):
         self.path = path
+        # Reentrant: archive() → new() → persist() all want it, and every public
+        # method takes it. Held for microseconds — never across a brain turn.
+        self._lock = threading.RLock()
         self.threads = {}        # tid -> thread dict
         self.order = []          # tids, creation order
         self.current = None
@@ -48,7 +58,8 @@ class Threads:
 
     # -- queries ---------------------------------------------------------------
     def live(self):
-        return [t for t in self.order if not self.threads[t]["archived"]]
+        with self._lock:
+            return [t for t in self.order if not self.threads[t]["archived"]]
 
     def get(self, tid):
         return self.threads.get(tid)
@@ -64,82 +75,91 @@ class Threads:
                     "count": sum(1 for m in t["messages"] if m["who"] == "me"),
                     "msgs": len(t["messages"]),   # total — lets the UI spot a turn that landed while it wasn't looking
                     "current": tid == self.current}
-        live = [row(t) for t in self.order if not self.threads[t]["archived"]]
-        arch = [row(t) for t in self.order if self.threads[t]["archived"]]
-        return {"threads": live + arch, "current": self.current,
-                "archived_count": len(arch)}
+        with self._lock:
+            live = [row(t) for t in self.order if not self.threads[t]["archived"]]
+            arch = [row(t) for t in self.order if self.threads[t]["archived"]]
+            return {"threads": live + arch, "current": self.current,
+                    "archived_count": len(arch)}
 
     def messages(self, tid=None):
-        t = self.threads.get(tid or self.current)
-        return list(t["messages"]) if t else []
+        with self._lock:
+            t = self.threads.get(tid or self.current)
+            return list(t["messages"]) if t else []
 
     # -- brain state in/out ----------------------------------------------------
     def state_for(self, backend, tid=None):
-        t = self.threads.get(tid or self.current)
-        return (t["state"].get(backend) if t else None) or {}
+        with self._lock:
+            t = self.threads.get(tid or self.current)
+            return (t["state"].get(backend) if t else None) or {}
 
     def save_state(self, backend, state, tid=None):
-        t = self.threads.get(tid or self.current)
-        if t is not None:
-            t["state"][backend] = state
+        with self._lock:
+            t = self.threads.get(tid or self.current)
+            if t is not None:
+                t["state"][backend] = state
 
     def record(self, who, text, trace=None, tid=None):
         """Append a display message; lock the title from the first user message."""
-        t = self.threads.get(tid or self.current)
-        if t is None:
-            return
-        t["messages"].append({"who": who, "text": text, "trace": trace or []})
-        if who == "me" and not t["title_locked"]:
-            t["title"] = _derive_title(text)
-            t["title_locked"] = True
+        with self._lock:
+            t = self.threads.get(tid or self.current)
+            if t is None:
+                return
+            t["messages"].append({"who": who, "text": text, "trace": trace or []})
+            if who == "me" and not t["title_locked"]:
+                t["title"] = _derive_title(text)
+                t["title_locked"] = True
 
     # -- mutations -------------------------------------------------------------
     def new(self, title=None, select=True):
-        self._seq += 1
-        tid = f"t{self._seq}"
-        self.threads[tid] = {"id": tid, "title": title or "New thread",
-                             "title_locked": bool(title), "archived": False,
-                             "messages": [], "state": {}}
-        self.order.append(tid)
-        if select or self.current is None:
-            self.current = tid
-        self.persist()
-        return tid
+        with self._lock:
+            self._seq += 1
+            tid = f"t{self._seq}"
+            self.threads[tid] = {"id": tid, "title": title or "New thread",
+                                 "title_locked": bool(title), "archived": False,
+                                 "messages": [], "state": {}}
+            self.order.append(tid)
+            if select or self.current is None:
+                self.current = tid
+            self.persist()
+            return tid
 
     def select(self, tid):
-        t = self.threads.get(tid)
-        if t is None:
-            return False
-        if t["archived"]:           # selecting an archived thread restores it
-            t["archived"] = False
-        self.current = tid
-        self.persist()
-        return True
+        with self._lock:
+            t = self.threads.get(tid)
+            if t is None:
+                return False
+            if t["archived"]:           # selecting an archived thread restores it
+                t["archived"] = False
+            self.current = tid
+            self.persist()
+            return True
 
     def clear(self, tid=None):
         """Wipe a thread's context (history + transcript) but keep the slot."""
-        t = self.threads.get(tid or self.current)
-        if t is None:
-            return False
-        t["messages"] = []
-        t["state"] = {}
-        t["title"] = "New thread"
-        t["title_locked"] = False
-        self.persist()
-        return True
+        with self._lock:
+            t = self.threads.get(tid or self.current)
+            if t is None:
+                return False
+            t["messages"] = []
+            t["state"] = {}
+            t["title"] = "New thread"
+            t["title_locked"] = False
+            self.persist()
+            return True
 
     def archive(self, tid=None):
         """Hide a thread. If it was current, move to another live thread (or make
         a fresh one so there's always something to talk to)."""
-        t = self.threads.get(tid or self.current)
-        if t is None:
-            return False
-        t["archived"] = True
-        if self.current == t["id"]:
-            others = self.live()
-            self.current = others[0] if others else self.new(select=True)
-        self.persist()
-        return True
+        with self._lock:
+            t = self.threads.get(tid or self.current)
+            if t is None:
+                return False
+            t["archived"] = True
+            if self.current == t["id"]:
+                others = self.live()
+                self.current = others[0] if others else self.new(select=True)
+            self.persist()
+            return True
 
     # -- persistence -----------------------------------------------------------
     def _load(self):
@@ -172,12 +192,19 @@ class Threads:
     def persist(self):
         if not self.path:
             return
-        data = {"seq": self._seq, "current": self.current,
-                "threads": [self.threads[t] for t in self.order]}
-        tmp = self.path + ".tmp"
-        try:
-            with open(tmp, "w") as f:
-                json.dump(data, f)
-            os.replace(tmp, self.path)
-        except OSError:
-            pass
+        # Under the lock: `tmp` is a single fixed path, so two concurrent
+        # persists (a turn recording its reply while you click ＋ new) would
+        # interleave writes into the same file and rename a half-written blob
+        # over the real one. Serializing the JSON here also snapshots a
+        # consistent view of threads/order/current.
+        with self._lock:
+            data = {"seq": self._seq, "current": self.current,
+                    "threads": [self.threads[t] for t in self.order]}
+            blob = json.dumps(data)
+            tmp = self.path + ".tmp"
+            try:
+                with open(tmp, "w") as f:
+                    f.write(blob)
+                os.replace(tmp, self.path)
+            except OSError:
+                pass

@@ -1296,6 +1296,10 @@ let pmCurrent = null;    // selected thread id
 let pmMessages = [];     // current thread's transcript [{who,text,trace}]
 let pmArchOpen = false;  // whether archived threads are revealed in the bar
 let pmLoaded = false, pmBusy = false;
+// Which thread the in-flight turn belongs to. Switching threads mid-turn is
+// allowed (the server no longer blocks it), so the spinner and the reply must
+// follow the SENDING thread, not whatever you happen to be looking at.
+let pmBusyTid = null;
 let pmState = { models: [], model: '', backend: 'bankr' };  // /api/state cache for the model picker
 // PM thinking-spinner state (declared early — hoisted render fns touch it at boot)
 let pmThinkEl = null, pmThinkTimer = null, pmSpinTimer = null, pmThinkStart = 0, pmSpinFrame = 0;
@@ -6594,7 +6598,9 @@ function renderPmFeed() {
       else { pmRenderTrace(m.trace); pmReplyBubble(m, false); }
     });
   }
-  if (pmBusy) pmShowThinking();
+  // Only the thread that's actually mid-turn wears the spinner — switching away
+  // from a thinking thread must not make a quiet one look busy.
+  if (pmBusy && pmBusyTid === pmCurrent) pmShowThinking();
   pmfeed.scrollTop = pmfeed.scrollHeight;
 }
 // PM threads in the #sessionbar: same .stab look as session tabs (dot + title),
@@ -6606,7 +6612,13 @@ function renderPmBar(bar, wasHidden) {
     const tab = document.createElement('button');
     tab.className = 'stab pmtab' + (t.id === pmCurrent ? ' active' : '') + (t.archived ? ' arch' : '');
     tab.title = t.archived ? 'archived — click to restore' : (t.title || 'thread');
-    const dot = document.createElement('span'); dot.className = 'sdot'; tab.appendChild(dot);
+    // The thread mid-turn wears the same pulsing LED a busy session does. You can
+    // now switch away from a thinking thread, so this is the only thing telling
+    // you it's still running (its reply lands in the background).
+    const thinking = pmBusy && t.id === pmBusyTid;
+    const dot = document.createElement('span');
+    dot.className = 'sdot' + (thinking ? ' busy' : ''); tab.appendChild(dot);
+    if (thinking) tab.title = (t.title || 'thread') + ' — thinking…';
     const lbl = document.createElement('span'); lbl.className = 'lbl'; lbl.textContent = t.title || 'new thread'; tab.appendChild(lbl);
     if (!t.archived) {
       const x = document.createElement('span'); x.className = 'x'; x.textContent = '✕'; x.title = 'archive';
@@ -6645,10 +6657,13 @@ function pmApplyThreads(s) {           // s = {threads, current, archived_count}
   //    restart that restored a different `current`) — otherwise the bar highlights
   //    one thread while the feed shows another's messages.
   //  - stale: the server transcript grew while this tab wasn't the sender (a turn
-  //    that outlived a reload, another device, Telegram). Skipped while pmBusy —
-  //    our own in-flight send renders incrementally and must not double-append.
+  //    that outlived a reload, another device, Telegram). Skipped only when the
+  //    in-flight send is on the thread we're LOOKING at — that one renders
+  //    incrementally and must not double-append. A turn thinking away on another
+  //    thread doesn't touch this feed, so it mustn't freeze this feed's resync.
   const cur = s.threads.find(t => t.id === s.current);
-  const stale = !pmBusy && cur && cur.msgs != null && cur.msgs !== pmMessages.length;
+  const rendering = pmBusy && pmBusyTid === pmCurrent;
+  const stale = !rendering && cur && cur.msgs != null && cur.msgs !== pmMessages.length;
   if ((switched || stale) && currentView() === 'pm') pmLoadMessages();
 }
 async function pmLoadMessages() {
@@ -6691,7 +6706,13 @@ async function pmArchive(tid) {
 }
 async function pmSend(text) {
   if (pmBusy || !text.trim()) return;
-  pmBusy = true;
+  // Pin the turn to the thread it was sent from. You can switch threads while it
+  // thinks (＋ new / a tab / ✕ no longer wait on the turn), and the incremental
+  // append below writes straight into the DOM — so without this the reply would
+  // land in whatever thread you were looking at when it came back.
+  const tid = pmCurrent;
+  pmBusy = true; pmBusyTid = tid;
+  if (currentView() === 'pm') renderSessionBar('pm');   // light this thread's LED now, not at the next 5s poll
   pmMessages.push({ who: 'me', text });
   bubble('user', 'you', text, true, pmfeed);   // append the user turn (no full rebuild)
   pmShowThinking();                             // braille spinner + elapsed time, like a session
@@ -6700,10 +6721,16 @@ async function pmSend(text) {
   catch (e) { out = { reply: '⚠️ controller unreachable (/pm)', trace: [] }; }
   pmHideThinking();
   const msg = { who: 'bot', text: out.reply || '(no reply)', trace: out.trace || [] };
-  pmMessages.push(msg);
-  pmRenderTrace(msg.trace);     // tool + collapsible result bubbles
-  pmReplyBubble(msg, true);     // typewriter reveal of the reply
-  pmBusy = false;
+  const stillHere = pmCurrent === tid;
+  if (stillHere) {
+    pmMessages.push(msg);
+    pmRenderTrace(msg.trace);   // tool + collapsible result bubbles
+    pmReplyBubble(msg, true);   // typewriter reveal of the reply
+  }
+  pmBusy = false; pmBusyTid = null;
+  // Moved on: pmMessages belongs to the other thread now, so don't touch the
+  // feed. The threads refresh below bumps this thread's msg count, and the
+  // stale-check in pmApplyThreads repaints it when you come back.
   try { pmApplyThreads(await pmApi('/api/threads')); } catch (e) {}   // refresh tab titles + counts (bar only)
   if (currentView() === 'pm') box.focus();
 }

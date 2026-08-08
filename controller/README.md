@@ -74,6 +74,18 @@ the brain history + `--resume` id inside them — survive a daemon restart. API:
 `GET /api/thread/messages?id=`, `POST /api/thread/{new,select,clear,archive}`.
 Telegram shares the **current** thread.
 
+**Thread bookkeeping must never wait on a turn.** One lock serializes every brain
+turn (HTTP chat, Telegram, autopilot) — but ＋ new / select / archive are
+deliberately *outside* it. They used to take it, and since a turn runs for
+minutes, that made every control in the PM tab hang for the length of the turn:
+the tab read as frozen, and each hung click also burned one of the browser's ~6
+connections to the origin until the rest of the page stalled too. Safety instead
+comes from `Threads`' own short-held lock plus `Router.chat` pinning its `tid`
+before the turn, so `current` moving mid-turn can't misroute a transcript. The
+one exception is **clear**, which drops brain memory a running turn is writing:
+it returns **409** mid-turn rather than blocking. Pinned by
+`test_pm_responsive.py` — don't put a thread endpoint back behind the turn lock.
+
 ## Autonomy (the write guard)
 
 Write verbs (assign / ask / answer_prompt / interrupt / create|clone project)
@@ -161,6 +173,7 @@ python3 -m controller.test_controller   # client → world → verbs (mock harne
 python3 -m controller.test_mcp          # MCP dispatch (read + write)
 python3 -m controller.test_mcp_stdio    # MCP as a real stdio subprocess
 python3 -m controller.test_threads      # PM conversation threads (store + persist)
+python3 -m controller.test_pm_responsive # PM controls stay live while a turn runs
 ```
 
 ## Files
