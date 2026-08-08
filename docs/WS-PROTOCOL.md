@@ -193,7 +193,7 @@ no-op that would leave the previous session's stream flowing (that's how
   "tool":<str|null>, "status":"blocked|working|background|idle", "bg":"shell|agent|", "digest":str,
   "blocked_on":str, "lastAnswer":str, "sessionId", "promptCount":int,
   "lastActive":float, "created":float, "alive":bool, "account":str,
-  "pinned":float, "engine":"claude|codex" }
+  "pinned":float, "testHint":str, "engine":"claude|codex" }
   // pinned = epoch when the session was 📌 parked on the pin board (see the `pin`
   // op); 0.0 = not pinned. Pinned sessions stay fully alive/promptable.
   // engine = which agent CLI drives it. Absent on pre-2026-08 rows/clients —
@@ -223,6 +223,16 @@ no-op that would leave the previous session's stream flowing (that's how
   refreshed on every `Stop` — see naming below). `""` until the first turn ends
   or if naming is unconfigured. The *stable* label is `title`/`desc`; the digest
   is the live state. Held in memory only (not persisted; regenerated each turn).
+- `testHint` = the **human's** verification step for a 📌 pinned session — one
+  imperative line ("run a stream with three guests and watch for choppy
+  video/audio"), LLM-derived from the transcript when the session is pinned and
+  refreshed on each `Stop` while it stays pinned. Pinning means "coded, not yet
+  verified", so this is what closing the to-do actually requires. `""` when the
+  session isn't pinned (cleared on unpin), while the first generation is in
+  flight, if the model judged there's nothing verifiable yet, or if naming is
+  unconfigured. **Durable** (persisted in the registry) — a restart must not
+  blank the board's instructions. Model: `TEST_HINT_MODEL`, defaulting to
+  `BANKR_MODEL`.
 - `blocked_on` = the open question if the turn ended by asking the human
   something in plain text (LLM-inferred) — a *soft* block the `waiting` flag
   (TUI prompts only) misses. `""` when not blocked. These three feed the AI

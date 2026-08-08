@@ -214,6 +214,31 @@ DIGEST_SYS_PROMPT = ("You summarize the live state of a software-engineering "
                      '{"digest": "<max 12 words: what it is doing right now>", '
                      '"blocked_on": "<if it is waiting on a human decision, the '
                      'question in <=12 words; else empty string>"}.')
+# The *test hint* is what the 📌 pin board is for. Pinning means "this work looks
+# done but nobody has verified it" — so the moment a session lands on the board
+# we ask the LLM one question: what does the HUMAN have to go do to prove it?
+# One imperative line ("run a stream with three guests and watch for choppy
+# video"), rendered blue on the pin card, so a board of parked to-dos reads as a
+# testing checklist instead of a pile of titles you have to re-open to decode.
+# Durable (persisted, unlike the digest): a restart must not blank the board.
+TEST_SYS_PROMPT = ("A developer just parked this software-engineering session on "
+                   "a \"test it later\" board: the coding looks done, but a HUMAN "
+                   "still has to verify it by hand. Given the transcript, reply "
+                   "with ONLY compact JSON and nothing else: "
+                   '{"test": "<max 16 words: the manual check the human must '
+                   'perform>"}. '
+                   "Write ONE imperative instruction naming the concrete thing to "
+                   "open, run or look at AND what would prove it worked — e.g. "
+                   '"run a stream with three guests and watch for choppy '
+                   'video/audio". Describe only what a PERSON does outside this '
+                   "session (open the app, click the thing, watch the output); "
+                   "never say \"ask claude\" and never describe more coding. If "
+                   "the session has produced nothing verifiable yet, reply with an "
+                   "empty string.")
+# The hint is a slightly harder ask than naming (it has to reason about what
+# would falsify the work), so it gets its own model knob — default: whatever
+# names sessions, so an unconfigured harness changes nothing.
+TEST_MODEL = os.environ.get("TEST_HINT_MODEL", "") or ""
 # Project *emoji codes*: every project gets a short 1–3 emoji badge (AI-picked
 # from its README / files / commits) shown on its card, the sessions rung, and
 # every session tab — so a glance at the tab strip tells you which project each
@@ -1647,7 +1672,8 @@ class ClaudeSession:
                  title="", desc="", tab="", prompt_count=0, first_prompt="",
                  created=0.0, last_active=0.0, prompted_at=0.0,
                  account="default", config_dir="", ceremony=False,
-                 pinned=0.0, model="", ctx_tokens=0, engine="claude"):
+                 pinned=0.0, test_hint="", model="", ctx_tokens=0,
+                 engine="claude"):
         self.manager = manager
         # Which agent CLI drives this session ("claude" | "codex"). Chosen at
         # spawn and durable: a --resume must reach for the same binary, and an
@@ -1683,6 +1709,11 @@ class ClaudeSession:
         # move it off the active tab strip onto the pin board. Persisted so a
         # restart doesn't dump every parked to-do back into the tabs.
         self.pinned = pinned
+        # The pin's blue line: "what the human has to go do to close this out"
+        # (TEST_SYS_PROMPT). Written when the session is pinned and refreshed on
+        # every Stop while it stays pinned; cleared on unpin so a re-pin asks
+        # again. Durable — a restart shouldn't blank the board's instructions.
+        self.test_hint = test_hint
 
         self.title = title
         self.desc = desc
@@ -1755,6 +1786,7 @@ class ClaudeSession:
                 "prompted_at": self.prompted_at,
                 "account": self.account, "config_dir": self.config_dir,
                 "ceremony": self.ceremony, "pinned": self.pinned,
+                "test_hint": self.test_hint,
                 "model": self.model, "ctx_tokens": self.ctx_tokens}
 
     def clone_for_respawn(self, **overrides):
@@ -1821,6 +1853,7 @@ class ClaudeSession:
                 "alive": self.alive,
                 "account": self.account,
                 "pinned": self.pinned,
+                "testHint": self.test_hint or "",   # 📌 board: the human's verification step
                 "model": self.model,
                 "ctxTokens": self.ctx_tokens}
 
@@ -2019,6 +2052,12 @@ class ClaudeSession:
             # naming milestones) so live session state stays current for the
             # controller / dashboard. Cheap, async, in-memory only.
             threading.Thread(target=self._regenerate_digest, daemon=True).start()
+            # Parked on the 📌 board? Re-derive "what the human must test" too —
+            # a board session can be prompted in place, and the answer to "what
+            # am I waiting on" moves with it.
+            if self.pinned:
+                threading.Thread(target=self._regenerate_test_hint,
+                                 daemon=True).start()
             # Turn over + idle = the safe moment to move this session off a
             # drained plan (no-ops fast in the common case).
             if self.eng.routes_accounts:
@@ -2090,6 +2129,28 @@ class ClaudeSession:
         self.blocked_on = ((blocked_on or "").strip() or None)
         if self.blocked_on:
             self.blocked_on = self.blocked_on[:140]
+        self.manager.broadcast_sessions()
+
+    def _regenerate_test_hint(self):
+        """Ask the LLM what the HUMAN has to go verify, for the 📌 pin board's
+        blue line. Fired when a session is pinned and on every Stop while it
+        stays pinned (prompting a parked session from the board can change what
+        needs testing). Persisted, so the board survives a restart with its
+        instructions intact. Silent no-op when naming is unconfigured."""
+        if not self.pinned:                          # unpinned mid-flight — drop it
+            return
+        text = self._transcript_text_for_naming()
+        if not text:
+            return
+        hint = generate_test_hint(text)
+        if hint is None:                             # naming off, or call failed
+            return
+        hint = hint[:160]
+        if hint == self.test_hint:
+            return
+        self.test_hint = hint
+        print(f"[test {self.cid[:8]}] {hint!r}", flush=True)
+        self.manager.save_registry()
         self.manager.broadcast_sessions()
 
     def _transcript_text_for_naming(self, cap=3500):
@@ -2994,6 +3055,7 @@ class SessionManager:
                     last_active=e.get("last_active", 0.0),
                     prompted_at=e.get("prompted_at", 0.0),
                     pinned=e.get("pinned", 0.0),
+                    test_hint=e.get("test_hint", ""),
                     model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0))
                 self.sessions[s.cid] = s
                 s.start()
@@ -3061,9 +3123,19 @@ class SessionManager:
                 account=name, config_dir=cfg,
                 ceremony=e.get("ceremony", False),
                 pinned=e.get("pinned", 0.0),
+                test_hint=e.get("test_hint", ""),
                 model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0))
             self.sessions[s.cid] = s
             s.start()
+        # Backfill the 📌 board's blue line for pins that predate the field (or
+        # whose generation lost a race with a restart). One-shot at boot: a
+        # session already parked and already verified-looking still needs to
+        # tell you what to go test. A "" answer isn't retried until its next
+        # Stop or re-pin, so this can't loop.
+        for s in self.sessions.values():
+            if s.pinned and not s.test_hint:
+                threading.Thread(target=s._regenerate_test_hint,
+                                 daemon=True).start()
         # No auto-created session: with zero projects there are legitimately zero
         # sessions, and the client lands on the projects page.
         self.save_registry()
@@ -4498,6 +4570,13 @@ class SessionManager:
         s.pinned = time.time() if on else 0.0
         print(f"[session {cid[:8]}] {'pinned 📌' if on else 'unpinned'}",
               flush=True)
+        if on:
+            # Landing on the board = "done coding, needs a human to check it".
+            # Derive that check now (async — the pin itself must stay instant);
+            # the card renders it the moment the broadcast lands.
+            threading.Thread(target=s._regenerate_test_hint, daemon=True).start()
+        else:
+            s.test_hint = ""      # off the board → stale instruction; re-pin re-asks
         self.save_registry()
         self.broadcast_sessions()
 
@@ -4532,7 +4611,8 @@ class SessionManager:
     # -- controller read queries (search / transcriptTail / screen) -----------
     def search(self, q, scope="all", limit=20):
         """Bounded server-side search over live sessions: meta fields (title/
-        desc/tab/digest/blocked_on — zero I/O) and/or each transcript's tail.
+        desc/tab/digest/blocked_on/test_hint — zero I/O) and/or each
+        transcript's tail.
         Most-recently-active first, so the caps land on useful content. Powers
         the controller's one-call `find`. Closed sessions' transcripts are out
         of scope (no cid mapping). See docs/WS-PROTOCOL.md."""
@@ -4557,6 +4637,7 @@ class SessionManager:
                 for where, val in (("title", s.title), ("desc", s.desc),
                                    ("tab", s.tab), ("digest", s.digest),
                                    ("blocked_on", s.blocked_on),
+                                   ("test_hint", s.test_hint),
                                    ("lastAnswer", s.last_answer)):
                     if val and ql in val.lower():
                         i = val.lower().find(ql)
@@ -4702,18 +4783,20 @@ class SessionManager:
 
 
 # ── AI naming (title + one-line description via Bankr LLM gateway) ─────────────
-def _llm_json(sys_prompt, user_text, max_tokens=120):
+def _llm_json(sys_prompt, user_text, max_tokens=120, model=""):
     """POST one (system, user) turn to the configured gateway and return the
     parsed JSON object the model emitted, or None if naming is unconfigured, the
     call fails, or no JSON is found. Stdlib-only HTTP — the single transport both
     generate_name and generate_digest share (one place handles the
-    openai/anthropic/bankr body+auth differences; no drift)."""
+    openai/anthropic/bankr body+auth differences; no drift). `model` overrides
+    BANKR_MODEL for callers whose job wants a different tier (see TEST_MODEL)."""
     if not (BANKR_API_KEY and BANKR_BASE_URL):
         return None
+    model = model or BANKR_MODEL
     try:
         if BANKR_API == "anthropic":
             url = f"{BANKR_BASE_URL}/v1/messages"
-            body = {"model": BANKR_MODEL, "max_tokens": max_tokens,
+            body = {"model": model, "max_tokens": max_tokens,
                     "system": sys_prompt,
                     "messages": [{"role": "user", "content": user_text}]}
             headers = {"x-api-key": BANKR_API_KEY,
@@ -4721,7 +4804,7 @@ def _llm_json(sys_prompt, user_text, max_tokens=120):
                        "content-type": "application/json"}
         else:  # openai-compatible (incl. bankr — same body, different auth header)
             url = f"{BANKR_BASE_URL}/chat/completions"
-            body = {"model": BANKR_MODEL, "max_tokens": max_tokens, "temperature": 0.3,
+            body = {"model": model, "max_tokens": max_tokens, "temperature": 0.3,
                     "messages": [{"role": "system", "content": sys_prompt},
                                  {"role": "user", "content": user_text}]}
             if BANKR_API == "bankr":
@@ -4765,6 +4848,17 @@ def generate_digest(transcript_text):
     if not parsed:
         return (None, None)
     return (parsed.get("digest"), parsed.get("blocked_on"))
+
+
+def generate_test_hint(transcript_text):
+    """Return the one-line "here's what YOU have to go test" for a 📌 pinned
+    session, "" if the model judged there's nothing verifiable yet, or None if
+    naming is unconfigured / the call failed (caller keeps the old hint)."""
+    parsed = _llm_json(TEST_SYS_PROMPT, transcript_text, model=TEST_MODEL)
+    if not parsed:
+        return None
+    hint = parsed.get("test")
+    return hint.strip() if isinstance(hint, str) else ""
 
 
 # ── project emoji codes (1–3 emoji identity badge via the same gateway) ───────

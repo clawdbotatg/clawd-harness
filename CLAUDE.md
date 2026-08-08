@@ -218,6 +218,18 @@ user-facing overview; this file orients an agent working **on** the code.
   a long session's title sharp. Secrets
   load from a gitignored **`.clawd-harness.env`** (`_load_env_file` at boot — the
   launchd daemon doesn't inherit your shell env, so this is the way).
+- **📌 pin board + its test hint:** pinning parks a session as "coded, not yet
+  verified" — it leaves the tab strip/sessions rung and lives on the board
+  (`pin` WS op; pure metadata, the claude keeps running and is promptable from
+  the card). Because the *only* thing standing between a pin and done is a
+  human going and checking something, the server runs one LLM pass on pin
+  (`TEST_SYS_PROMPT` → `generate_test_hint` → `s.test_hint`, broadcast as
+  `testHint`) and renders it as the card's **blue line**: one imperative
+  instruction for *you* ("open /eq on the god-mode machine during the next show
+  and verify composite stays at 30 fps"). Refreshed on each Stop while pinned,
+  cleared on unpin, persisted (a restart must not blank the board), backfilled
+  at boot for pins that lack one. Same gateway as naming; `TEST_HINT_MODEL`
+  overrides `BANKR_MODEL` if this job ever wants a stronger tier.
 - **Right model for the right job:** naming is a cheap, frequent, fire-and-forget
   labeler (~900 input tokens, 3×/session, async) — so `BANKR_MODEL` = **`qwen3-coder`**,
   the winner of a full 41-model cost+speed+reliability survey: ~$0.032 per 1,000

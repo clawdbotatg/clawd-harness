@@ -583,6 +583,12 @@
   /* the high-signal "needs you" line — a session blocked on a human decision */
   .scard .sblock { color:#ffce9e; font-size:12px; line-height:1.4; background:rgba(214,77,42,.10);
                    border-left:2px solid var(--err); padding:3px 8px; margin-top:1px; }
+  /* 📌 board only: the human's verification step (AI-derived on pin). Blue —
+     the one line on the card addressed to YOU rather than describing the
+     session, so a board of parked to-dos reads as a testing checklist. */
+  .scard .stest { color:#9cc9ff; font-size:12px; line-height:1.4;
+                  background:rgba(90,150,255,.10); border-left:2px solid #4d86d6;
+                  padding:3px 8px; margin-top:1px; }
   .scard .smeta { color:var(--dim); font-size:11px; font-family:var(--mono); }
   /* compact CPU/RAM/disk/GPU bars on a machine card */
   .sysstats { display:flex; flex-direction:column; gap:2px; margin-top:2px; }
@@ -4910,6 +4916,14 @@ function renderPinBoard() {
       const dig = document.createElement('div');
       dig.className = 'sdig'; dig.textContent = '› ' + s.digest;
       card.appendChild(dig);
+    }
+    // the blue line — what YOU have to go do to close this to-do out. Derived
+    // server-side when the session was pinned (TEST_SYS_PROMPT); absent for the
+    // second or two while it generates, or entirely if AI naming is off.
+    if (s.testHint) {
+      const tst = document.createElement('div');
+      tst.className = 'stest'; tst.textContent = '🧪 ' + s.testHint;
+      card.appendChild(tst);
     }
     if (s.blocked_on) {
       const blk = document.createElement('div');

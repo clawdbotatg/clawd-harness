@@ -126,6 +126,7 @@ class Verbs:
                                    ("desc", s.get("desc")),
                                    ("digest", s.get("digest")),
                                    ("blocked_on", s.get("blocked_on")),
+                                   ("test_hint", s.get("testHint")),
                                    ("lastAnswer", s.get("lastAnswer"))):
                     if val and ql in val.lower():
                         add({"where": where, "machine": mid, "cid": s["cid"],
