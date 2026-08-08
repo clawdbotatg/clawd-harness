@@ -681,6 +681,33 @@ def _norm_config_dir(config_dir):
         (config_dir or "~/.claude").rstrip("/")))
 
 
+# cont's credential-custody ledger (clawd-containers): one file per VM whose
+# guest currently rides a login, containing that login's config dir. A login
+# in VM custody has a SECOND live consumer of its rotating refresh grant —
+# the guest's claude — that no host-side ps scan can see (2026-08-07: the
+# wrangler's bounce path put sub5 in exactly this blind spot).
+VM_CUSTODY_DIR = os.environ.get(
+    "VM_CUSTODY_DIR", os.path.expanduser("~/.config/cont/vm-accounts"))
+
+
+def _vm_custody_dirs():
+    """Normalized config dirs of every login a VM custody record names.
+    Empty set when the ledger doesn't exist (no cont on this box) or can't
+    be read — the flock and live-process guards still stand behind this."""
+    dirs = set()
+    try:
+        for f in os.listdir(VM_CUSTODY_DIR):
+            try:
+                with open(os.path.join(VM_CUSTODY_DIR, f)) as fh:
+                    rec = fh.read().strip()
+                dirs.add(_norm_config_dir(rec))
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return dirs
+
+
 def _ping_rotate(config_dir):
     """Rotate an idle account's OAuth tokens by letting the REAL client do
     it: a minimal `claude -p` under the config dir refreshes and persists
@@ -850,6 +877,11 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
                     oa3 = (blob3 or {}).get("claudeAiOauth") or {}
                     fresh = oa3.get("accessToken")
                     if fresh:
+                        # Timestamped success line — the sub4 postmortem
+                        # lived and died by this log; silence is not an
+                        # option on the rotation path.
+                        _clog(config_dir, "rotated via client ping — fresh "
+                                          "access token adopted from the store")
                         if tok_cache is not None:
                             tok_cache["access"] = fresh
                         code, usage, retry_after = call(fresh)
@@ -3345,9 +3377,16 @@ class SessionManager:
                 # final rotation may still be settling. sub3 died 2026-08-06
                 # because this gate only knew about our own live sessions.
                 proc_dirs = _live_claude_dirs()
+                # ...and a login in cont's VM custody has a consumer no ps
+                # scan can see: the guest's claude inside a tart VM. The
+                # wrangler's bounce path (2026-08-07) ran guests on the
+                # fleet login with no host-visible process at all.
+                custody_dirs = _vm_custody_dirs()
                 def _grant_free(a):
                     return (a.name not in live
                             and _norm_config_dir(a.config_dir) not in proc_dirs
+                            and _norm_config_dir(a.config_dir)
+                                not in custody_dirs
                             and now - last_exit.get(a.name, 0)
                                 > SUB_REFRESH_EXIT_GRACE)
                 # Same-org logins share one pool AND one endpoint rate
