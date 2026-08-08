@@ -45,7 +45,10 @@ let token = '';
 try { token = readFileSync(join(ROOT, '.clawd-harness.token'), 'utf8').trim(); } catch {}
 
 const browser = await chromium.launch({ executablePath: exec });
-const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+// serviceWorkers: 'block' — a fresh profile registers sw.js on load, and the
+// app's controllerchange handler then location.reload()s the page mid-probe,
+// destroying the execution context under whatever check runs next.
+const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, serviceWorkers: 'block' });
 
 // -- fake controller ---------------------------------------------------------
 // Two threads; a chat request that never resolves until we let it go.
@@ -180,6 +183,35 @@ await page.waitForTimeout(700);
 const alphaFeed = await page.$eval('#pmfeed', e => e.innerText);
 check('coming back to the thinking thread shows the reply it received',
       /the reply/.test(alphaFeed), alphaFeed.replace(/\s+/g, ' ').slice(0, 120));
+
+// -- swipe left/right hops between PM threads (same gesture as the session rail) --
+// Synthesize the touch sequence the shared #app swipe handler listens for; it
+// routes through navFwd/navBack → cyclePmThread, so this proves the whole chain.
+const swipe = (dx) => page.evaluate((dx) => {
+  const el = document.getElementById('app');
+  const mk = (type, x) => {
+    const t = new Touch({ identifier: 1, target: el, clientX: x, clientY: 300 });
+    return new TouchEvent(type, { touches: type === 'touchend' ? [] : [t],
+                                  changedTouches: [t], bubbles: true, cancelable: true });
+  };
+  el.dispatchEvent(mk('touchstart', 300));
+  el.dispatchEvent(mk('touchmove', 300 + dx / 2));
+  el.dispatchEvent(mk('touchend', 300 + dx));
+}, dx);
+const activeTab = async () => (await tabs()).find(t => t.active)?.label;
+
+const beforeSwipe = await activeTab();          // 'alpha' (we just switched back)
+await swipe(-140);                              // swipe left = next thread
+await page.waitForTimeout(500);
+const afterLeft = await activeTab();
+check('swipe left moves to the next PM thread', afterLeft !== beforeSwipe && !!afterLeft,
+      `active: ${beforeSwipe} -> ${afterLeft}`);
+check('  …and we are still on the PM view (no depth nav)', /#\/pm/.test(page.url()), page.url());
+await swipe(140);                               // swipe right = previous thread
+await page.waitForTimeout(500);
+const afterRight = await activeTab();
+check('swipe right comes back to the previous thread', afterRight === beforeSwipe,
+      `active: ${afterLeft} -> ${afterRight}`);
 
 check('no uncaught page errors', errors.length === 0, errors.join(' | '));
 

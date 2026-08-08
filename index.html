@@ -6499,13 +6499,25 @@ const goDeeper    = () => stepLevel(+1);   // dive in
 const goShallower = () => stepLevel(-1);   // climb out
 
 // The session plane = the terminal or the transcript. There, horizontal motion
-// flips through the unified session roster (the rail); everywhere else (the
-// projects/sessions lists, PM) it still walks abstraction levels so back-nav
-// works. navFwd/navBack are the single source of truth shared by swipe + both
-// keyboard handlers, so all three stay in lock-step.
+// flips through the unified session roster (the rail); on the PM view it flips
+// through the PM threads (its rail — 'pm' isn't in LEVELS, so stepLevel would
+// just no-op there); everywhere else (the projects/sessions lists) it still
+// walks abstraction levels so back-nav works. navFwd/navBack are the single
+// source of truth shared by swipe + both keyboard handlers, so all three stay
+// in lock-step.
 function inSessionView() { const v = currentView(); return v === 'tty' || v === 'transcript'; }
-function navFwd()  { if (inSessionView()) cycleSession(+1); else goDeeper(); }     // swipe left / →
-function navBack() { if (inSessionView()) cycleSession(-1); else goShallower(); }  // swipe right / ←
+// PM analog of cycleSession: wrap-around hop along the thread tabs, over exactly
+// the threads the bar shows (archived ones only while pmArchOpen reveals them).
+function cyclePmThread(dir) {
+  const list = pmThreads.filter(t => !t.archived || pmArchOpen);
+  if (!list.length) return;
+  const idx = list.findIndex(t => t.id === pmCurrent);
+  const next = idx < 0 ? (dir > 0 ? 0 : list.length - 1)
+                       : (idx + dir + list.length) % list.length;
+  if (list[next].id !== pmCurrent) pmSelect(list[next].id);
+}
+function navFwd()  { if (inSessionView()) cycleSession(+1); else if (currentView() === 'pm') cyclePmThread(+1); else goDeeper(); }     // swipe left / →
+function navBack() { if (inSessionView()) cycleSession(-1); else if (currentView() === 'pm') cyclePmThread(-1); else goShallower(); }  // swipe right / ←
 const gotoProjects = () => navTo('projects');   // the new "up and out" — the rail owns left/right now (same as the header projects button)
 
 // Plain-arrow mirror of the swipe gesture. Skipped while a text field owns focus —
