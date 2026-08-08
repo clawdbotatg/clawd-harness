@@ -183,8 +183,11 @@ user-facing overview; this file orients an agent working **on** the code.
   is fenced behind `Engine.routes_accounts`** — handoffs, the rebalance sweep,
   both rescues, and both PTY tripwires read *claude's* screens and act by moving
   a session between Anthropic plans, so they must never run on another engine.
-  codex is single-login (no `CODEX_HOME` pool: no pollable usage endpoint), so
-  `EXPECTATIONS.md` is a claude-only contract. Full design, what's verified, and
+  codex is single-login, so `EXPECTATIONS.md` is a claude-only contract — but
+  its **plan/usage does show on the 🧠 page** (green card, read-only, "not
+  routed"): `codex app-server` answers `account/rateLimits/read` over JSON-RPC
+  in ~0.5s, so unlike the rollout scrape this repo first assumed, the number is
+  live. Multi-login codex routing is therefore *possible* and simply not built. Full design, what's verified, and
   what still isn't: **[`docs/CODEX-ENGINE.md`](docs/CODEX-ENGINE.md)**.
 - **Hooks → turn signal:** injected via `claude --settings <generated>` →
   each hook `curl`s stdin to `POST /hook` → broadcasts `hook` events

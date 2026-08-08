@@ -90,13 +90,23 @@
 > each harness its own `CODEX_HOME` (costs a separate `codex login` per
 > harness) or teach the hook command to fan out to both ports.
 >
-> ### `rate_limits` is real after all
+> ### Usage: there IS a live endpoint (this doc was wrong)
 >
-> The live rollout carries `rate_limits: {primary: {used_percent, window_minutes:
-> 10080, resets_at}}` — populated, not the `null` the issue tracker reports for
-> exec mode. That makes Phase 3 (usage-aware routing for codex) more plausible
-> than this doc first assumed, though it's still pull-from-transcript and stale
-> while a session sits idle.
+> Gap 7 below assumed codex's only usage numbers were scraped from a rollout —
+> stale whenever a session sits idle, and therefore useless for routing. That
+> was wrong twice over. The rollout's `rate_limits` is populated (not the
+> `null` the issue tracker reports for exec mode), and better: **`codex
+> app-server` answers `account/rateLimits/read` and `account/read` on demand**,
+> giving plan, email, and each window's `usedPercent` / `windowDurationMins` /
+> `resetsAt` — a fresh reading any time, ~0.5s per probe.
+>
+> That's what the 🧠 page's codex card is built on (`_codex_app_server_call`,
+> `codex_usage_meta`, cached behind `CODEX_USAGE_TTL`). It also means **Phase 3
+> is genuinely available** if we ever want it: usage-aware routing across
+> several codex logins is now blocked only on `CODEX_HOME` juggling and a
+> second `codex login`, not on missing data. Deliberately not done — one login
+> per machine is the current contract, and the card says "not routed" so the
+> UI never implies otherwise.
 
 ## Why it's tractable
 
