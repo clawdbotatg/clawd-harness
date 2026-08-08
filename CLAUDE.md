@@ -41,12 +41,18 @@ user-facing overview; this file orients an agent working **on** the code.
   `auto_update_loop` (~5 min + jitter): on-main + clean-worktree + ff-only →
   it pulls itself, then the file watcher hot-reloads browsers (index.html) or
   gracefully restarts (server.py). A dirty worktree (live-edit in progress) is
-  skipped. Opt a box out with `AUTO_PULL=0`. No ssh, no manual pulls — **for
-  harness machines**. The one exception is the **relay box** (serves the fleet
-  UI at `h.atg.link`): it runs no harness, so nothing auto-pulls it — a UI
-  change is NOT live on the fleet URL until the box's `~/clawd-harness`
-  checkout is pulled (no restart needed; the relay reads `index.html` per
-  request). See `docs/fleet/DEPLOY.md` for the box details.
+  skipped. Opt a box out with `AUTO_PULL=0`. No ssh, no manual pulls.
+  **The relay box now self-updates too** (2026-08-07): it runs no harness, so
+  it used to be the one box nothing pulled — and it's the box that *serves the
+  fleet UI*, so a pushed UI change stayed invisible on `h.atg.link` until a
+  human remembered one ssh (it once sat 8 commits behind while every harness
+  was current). A systemd timer (`fleet/deploy/clawd-fleet-pull.timer` →
+  `relay-pull.sh`, ~3 min, same on-main/clean/ff-only guards) closes that.
+  UI-only changes need no restart (`index.html` is read per request); a
+  `fleet/*.py` change restarts relay+worker automatically; a `controller/`
+  change only WARNS in the journal, because restarting kills a running PM turn
+  — do that one by hand when quiet (`journalctl -u clawd-fleet-pull`). See
+  `docs/fleet/DEPLOY.md`.
 - Daemon: `./daemon.sh install [WORKDIR]` (launchd, RunAtLoad + KeepAlive,
   re-`--resume`s sessions). Also `status | logs | restart | uninstall`.
 - Smoke test: `python3 smoke_test.py` (reads the token file; asserts both channels).

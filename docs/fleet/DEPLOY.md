@@ -20,14 +20,36 @@ it directly; the relay serves the same file (`_serve_file` reads it from one lev
 `fleet/../index.html`) and injects the flag. No copy to keep in sync.
 
 ### Changing the UI
-Edit the one canonical file, then deploy via **git** (the box is a checkout now, no scp):
+Edit the one canonical file and push. **That's the whole deploy** — since
+2026-08-07 the box pulls itself (see "self-update" below), and the relay serves
+`index.html` fresh per request, so a UI change is live on `h.atg.link` within
+~3 minutes with no ssh and no restart.
 ```bash
 # 1. edit ~/clawd/clawd-harness/index.html   (harness live-reloads localhost:8787)
-# 2. commit + push, then pull on the box (relay serves index.html fresh per request — no restart needed)
+# 2. commit + push. done.
 git push origin main
-ssh zkllmapi 'cd ~/clawd-harness && git pull'
+# impatient? force the box's pull instead of waiting for the timer:
+ssh zkllmapi 'sudo systemctl start clawd-fleet-pull.service'
 ```
 Verify the JS first: extract the `<script>` and `node --check` it.
+
+### Self-update on the box
+`clawd-fleet-pull.timer` (~3 min, jittered) runs `fleet/deploy/relay-pull.sh`
+with the same guards as the harness's `auto_update_loop`: on main, clean
+worktree, `--ff-only`. It exists because this box runs no harness and so was
+the ONE box nothing updated — while also being the box that serves the UI. That
+asymmetry silently stranded the fleet UI 8 commits behind on 2026-08-07.
+
+What it restarts:
+
+| changed | action |
+|---|---|
+| `index.html` / docs | nothing — served per request |
+| `fleet/*.py` | restarts `clawd-fleet-relay` + `clawd-fleet-worker` (both `Restart=always`; clients reconnect) |
+| `controller/` | **warns only** — a restart kills a running PM turn, so do it by hand when quiet |
+
+Watch it: `journalctl -u clawd-fleet-pull -f`. Disable:
+`sudo systemctl disable --now clawd-fleet-pull.timer`.
 
 ## The box (relay backend)
 - Host: `ssh zkllmapi` (Ubuntu, `174.129.67.164`). **Shared/production** — also runs
