@@ -20,16 +20,47 @@
 >   → a real `codex` child with the right argv → clean close
 > - ✅ `CODEX_HOME` isolation, `hooks.json` install (0600)
 >
-> **Not yet verified — needs a signed-in codex** (`codex login` on the harness
-> box; there were no credentials when this was written):
-> - ❓ that the hooks actually FIRE and reach `/hook` (incl. `$HARNESS_CID`
->   surviving codex's shell invocation) — without this there's no busy pill
-> - ❓ the rollout JSONL parse (`_slim_event_codex`) against a real transcript
-> - ❓ send/submit timing (`SEND_SETTLE`) against codex's paste heuristic
-> - ❓ whether scrollback is usable in practice (see gap 1)
+> Then verified end-to-end on **clawd-head** (a signed-in codex, `gpt-5.6-sol
+> high`), which is what turned the rest of this from prediction into fact:
+> - ✅ hooks FIRE and reach `/hook` — the TUI prints `• Running Stop hook:
+>   clawd-harness`, `$HARNESS_CID` survives codex's invocation, and AI naming
+>   ran off it (a session titled itself "Count to 15")
+> - ✅ send/submit works on the **default** `SEND_SETTLE` — no codex-specific
+>   constant needed
+> - ✅ the rollout parser extracts tool calls and results
+> - ⚠️ …but it dropped every *message* until `_collect_codex_text` landed —
+>   see "the two trust gates" and "the output_text trap" below
+> - ❓ still open: whether scrollback is usable in practice (gap 1), and a
+>   re-check of the transcript view after the text-parts fix
 >
-> Until those are checked, a codex session is a working terminal whose
-> *structured* channel is unproven.
+> ### The two trust gates (found the hard way, 2026-08-07)
+>
+> A fresh codex session opens on **two blocking screens** no browser client can
+> answer, and until they're answered it runs no hooks at all — a working
+> terminal that is completely silent to the harness:
+>
+> 1. *"Do you trust the contents of this directory?"* — per directory.
+> 2. *"Hooks need review — N hooks are new or changed"* — per hook-set hash.
+>
+> Answering (2) by hand from the TUI wrote 7 `trusted_hash` entries into
+> `config.toml` **and the hooks still didn't fire.** What works is not asking:
+> `--dangerously-bypass-hook-trust` on every spawn (`CODEX_BYPASS_HOOK_TRUST=0`
+> opts out), plus `_ensure_codex_trusted()` seeding
+> `[projects."<path>"] trust_level = "trusted"` for the workdir. Don't try to
+> persist the per-handler trust state instead — that means reproducing codex's
+> private hashing scheme, which will rot the moment it changes.
+>
+> ### The output_text trap
+>
+> codex writes messages with the **Responses-API** spelling: `input_text`
+> inbound, `output_text` outbound. claude's `_collect_text` only knows
+> `type:"text"`, so reusing it made every message extract to `""` — tool calls
+> parsed fine, both sides of the conversation vanished, and the transcript
+> looked broken when one lookup was. `_collect_codex_text` handles all three.
+>
+> Corollary for testing: `transcript_tail(n=8)` on a codex session returns
+> nothing even when everything works — the last raw lines of a rollout are
+> `token_count` / `turn_context` noise the parser correctly drops. Ask for 60.
 
 ## Why it's tractable
 
