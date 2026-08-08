@@ -486,23 +486,34 @@
   #addProject .arow { display:flex; gap:8px; }
   #addProject .arow button { flex:1; font-size:13px; padding:8px 10px; }
   #addProject .ahint { color:var(--dim); font-size:11px; }
-  /* 🧠 subscriptions — a full page, not a modal */
-  #accountsmodal { position:fixed; inset:0; background:var(--bg); z-index:50;
+  /* 🧠 subscriptions + 🖥️ machines — full pages, not modals. One shared
+     presentation (header strip + scrolling card grid) so the two 🧠/🖥️ buttons
+     open the same shape of thing. `#machinelist` doubles as the machines body,
+     so it overrides the rung-list rule above (id+id beats the single id). */
+  #accountsmodal, #machinesmodal { position:fixed; inset:0; background:var(--bg); z-index:50;
                    display:flex; flex-direction:column; }
-  #accountsmodal[hidden] { display:none; }
-  #acctshead { display:flex; align-items:center; gap:14px; padding:14px 22px;
+  #accountsmodal[hidden], #machinesmodal[hidden] { display:none; }
+  #acctshead, #machshead { display:flex; align-items:center; gap:14px; padding:14px 22px;
                border-bottom:1px solid var(--edge); flex:0 0 auto; }
-  #acctshead .bico { font-size:22px; }
-  #acctshead .ah-t { font-weight:700; font-size:15px; }
-  #acctshead .ah-s { color:var(--dim); font-size:11px; margin-top:2px; }
-  #acctshead .spacer { flex:1; }
-  #accountsclose { background:transparent; border:1px solid var(--edge); color:var(--dim);
+  #acctshead .bico, #machshead .bico { font-size:22px; }
+  #acctshead .ah-t, #machshead .ah-t { font-weight:700; font-size:15px; }
+  #acctshead .ah-s, #machshead .ah-s { color:var(--dim); font-size:11px; margin-top:2px; }
+  #acctshead .spacer, #machshead .spacer { flex:1; }
+  #accountsclose, #machinesclose { background:transparent; border:1px solid var(--edge); color:var(--dim);
                    padding:7px 12px; font-size:13px; }
-  #accountsclose:hover { color:var(--ink); border-color:var(--edge-hi); }
-  #accountsbody { flex:1; min-height:0; overflow-y:auto; padding:20px 22px 44px;
+  #accountsclose:hover, #machinesclose:hover { color:var(--ink); border-color:var(--edge-hi); }
+  #accountsbody, #machinesmodal #machinelist {
+                  flex:1; min-height:0; overflow-y:auto; padding:20px 22px 44px;
+                  max-width:none; align-self:auto;
                   display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr));
                   gap:16px; align-content:start; }
-  @media (max-width:740px) { #accountsbody { grid-template-columns:1fr; padding:14px 12px 44px; } }
+  /* the "machines · N/N online" label and the empty-roster hint are full-width rows */
+  #machinesmodal #machinelist > .menutitle,
+  #machinesmodal #machinelist > .ahint { grid-column:1/-1; }
+  #machinesmodal #machinelist > .scard { align-self:start; }
+  @media (max-width:740px) {
+    #accountsbody, #machinesmodal #machinelist { grid-template-columns:1fr; padding:14px 12px 44px; }
+  }
   .amach-sec { border:1px solid var(--edge); background:var(--panel); padding:14px 16px 16px; }
   .amach-sec.offline { opacity:.55; }
   .amach-hd { display:flex; align-items:center; gap:9px; font-weight:600; font-size:13px; }
@@ -622,16 +633,9 @@
             text-transform:uppercase; vertical-align:middle; }
   .menutitle { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.16em;
                padding:0 2px 2px; }
-  #machinesmodal { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex;
-             align-items:center; justify-content:center; z-index:50; }
-  #machinesmodal[hidden] { display:none; }
   .qrcard { background:var(--panel); border:1px solid var(--edge); border-top:2px solid var(--accent);
             padding:22px; text-align:center; max-width:340px; }
-  /* machines roster overlay: a scrollable card of read-only machine stats */
-  .machinescard { text-align:left; width:min(440px,92vw); max-width:440px; max-height:80vh;
-            display:flex; flex-direction:column; }
-  .machinescard #machinelist { flex:1; min-height:0; overflow-y:auto; margin-bottom:12px; }
-  .machinescard #machinesclose { align-self:center; }
+  /* machines roster (🖥️): a full page — styled with #accountsmodal above */
   .scard.ro { cursor:default; }
   .scard.offline { opacity:.55; }
   .scard.offline:hover { border-color:var(--edge); }
@@ -743,10 +747,16 @@
     <div id="spotlist"></div>
   </div></div>
   <div id="machinesmodal" hidden>
-    <div class="qrcard machinescard">
-      <div id="machinelist"></div>
-      <button id="machinesclose">close</button>
+    <div id="machshead">
+      <span class="bico">🖥️</span>
+      <div>
+        <div class="ah-t">machines</div>
+        <div class="ah-s">every box on the fleet — read-only roster with per-machine load; tick one to make it the default host for new clones</div>
+      </div>
+      <span class="spacer"></span>
+      <button id="machinesclose" title="Back to the app">✕ close</button>
     </div>
+    <div id="machinelist"></div>
   </div>
   <div id="accountsmodal" hidden>
     <div id="acctshead">
@@ -4712,23 +4722,40 @@ function renderSessions() {
   // Sessions for this project across EVERY machine that hosts it, each tagged with
   // its `_machine` — no more "pick one machine to view". A multi-machine project
   // now shows one merged list; each card badges the host it's on.
-  const everything = projectSessions();
-  const list = everything.filter(s => !s.pinned);   // 📌 parked ones live on the pin board, not here
+  // No project selected — fleet boot, or you climbed out to the top rung. Rather
+  // than render an empty list (projectSessions() is scoped to the current project
+  // and returns [] here), show EVERY session, importance-ordered, exactly like the
+  // tab strip does. 💬 must always answer "here are your sessions".
+  const noProject = FLEET ? !currentProjectKey : !currentPid;
+  const everything = noProject ? allSessions() : projectSessions();
+  const list = noProject ? sortedSessions()          // all machines/projects, already unpinned + ranked
+                         : everything.filter(s => !s.pinned);   // 📌 parked ones live on the pin board, not here
   const pinnedHere = everything.length - list.length;
   const multi = FLEET && (() => { const g = unifiedProjects.get(currentProjectKey); return g && g.machines.length > 1; })();
   sessionsEl.innerHTML = '';
   const label = document.createElement('div');
   label.className = 'menutitle';
-  const pn = projectName(currentPid);
-  const pe = currentProjectEmoji();
-  label.textContent = (pn ? (pe ? pe + ' ' : '') + pn + ' · ' : '') + `sessions · ${list.length}`;
+  const pn = noProject ? '' : projectName(currentPid);
+  const pe = noProject ? '' : currentProjectEmoji();
+  label.textContent = noProject
+    ? `all sessions · ${list.length}`
+    : (pn ? (pe ? pe + ' ' : '') + pn + ' · ' : '') + `sessions · ${list.length}`;
   sessionsEl.appendChild(label);
 
   // ＋ new session — with a machine picker when the project spans more than one
   // host, so you choose WHERE it spawns (defaults to the project's default
   // machine; ★ pins the current pick as that default). Single-machine / direct
   // mode: just the button, host stays invisible.
-  if (multi) {
+  if (noProject) {
+    // Nothing to spawn into yet — a new session needs a project for its cwd. Point
+    // at the projects rung instead of offering a button that can't work.
+    const row = document.createElement('div'); row.className = 'newrow';
+    const pick = document.createElement('button');
+    pick.id = 'newSession'; pick.textContent = '＋  new session — pick a project';
+    pick.onclick = () => navTo('projects');
+    row.appendChild(pick);
+    sessionsEl.appendChild(row);
+  } else if (multi) {
     const g = unifiedProjects.get(currentProjectKey);
     if (!newSessionMachine || !g.machines.some(m => m.machineId === newSessionMachine && m.online))
       newSessionMachine = defaultMachineFor(currentProjectKey) || currentMachine
@@ -4782,20 +4809,36 @@ function renderSessions() {
     sessionsEl.appendChild(note);
   }
 
-  const localProj = currentProjectIsLocal();
+  const localProj = !noProject && currentProjectIsLocal();
   list.forEach(s => {
     const card = document.createElement('div');
     card.className = 'scard' + (s.cid === currentCid ? ' active' : '') +
                      (localProj ? ' local' : '');
     card.dataset.cid = s.cid;
-    card.onclick = () => { pendingSendText = null; openSession(s.cid); };  // manual open cancels a queued new-session send
+    // In all-sessions mode a card can live in another project (and, in fleet,
+    // another machine), so go through focusSession — it re-points the project/
+    // machine first. openSession assumes the session is in the current project.
+    card.onclick = noProject
+      ? () => focusSession(s)
+      : () => { pendingSendText = null; openSession(s.cid); };  // manual open cancels a queued new-session send
 
     const row = document.createElement('div'); row.className = 'row';
     const sdot = document.createElement('span');
     sdot.className = 'sdot' + (!s.alive ? ' dead' : s.waiting ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '');
     const title = document.createElement('span');
     title.className = 'stitle'; title.textContent = s.title || 'new session';
-    row.appendChild(sdot); row.appendChild(title);
+    row.appendChild(sdot);
+    if (noProject) {                     // mixed list — badge which project each one is in
+      const em = sessionEmoji(s);
+      if (em) {
+        const pb = document.createElement('span');
+        pb.className = 'pemoji'; pb.textContent = em;
+        const full = sessionEmojiFull(s);
+        if (full !== em) pb.title = full;
+        row.appendChild(pb);
+      }
+    }
+    row.appendChild(title);
     const eb0 = engineBadge(s); if (eb0) row.appendChild(eb0);
     if (multi && s._machine) {                  // which host this session lives on
       const mt = document.createElement('span');
@@ -5962,7 +6005,12 @@ function setView(view) {
   // session you're not viewing — say so in the placeholder. The PM view keeps
   // the composer (it talks to the current PM thread).
   composer.style.display = (projects || pins) ? 'none' : '';
-  box.placeholder = pm ? 'message → fleet PM' : sessions ? 'message → new session' : 'message';
+  // On the sessions rung a message starts a NEW session — which needs a project.
+  // With none selected (the all-sessions listing) say so rather than promise it.
+  const noProj = FLEET ? !currentProjectKey : !currentPid;
+  box.placeholder = pm ? 'message → fleet PM'
+                  : sessions ? (noProj ? 'pick a project to start a session' : 'message → new session')
+                  : 'message';
   syncComposer();              // each level has its own draft — swap the box to this one's
   menuBtn.classList.toggle('on', sessions);
   projectsBtn.classList.toggle('on', projects);
@@ -5985,7 +6033,10 @@ function setView(view) {
 // the toggle button hops between the two deep views; projects/sessions have their own entries.
 // Each is a manual nav, so it cancels any pending question auto-return (navTo wraps that).
 const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; setView(v); };
-menuBtn.onclick = () => { if (currentPid) navTo('sessions'); else navTo('projects'); };
+// 💬 always lands on the sessions rung — with no project selected it lists EVERY
+// session (see renderSessions). It used to bounce to the projects rung in that
+// case, which read as "the sessions button doesn't show me my sessions."
+menuBtn.onclick = () => navTo('sessions');
 projectsBtn.onclick = () => navTo('projects');
 pinsBtn.onclick = () => navTo('pins');           // 📌 the board of parked to-dos
 // In-session 📌: park the open session on the board (and follow it there so you
