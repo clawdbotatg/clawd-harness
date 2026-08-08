@@ -113,6 +113,16 @@ _BUILTIN_TOOLS = [] if _pm_builtins.lower() == "none" else \
 ALLOWED_TOOLS = ",".join([*(f"mcp__fleet__{n}" for n, _d, _s in TOOLS), *_BUILTIN_TOOLS])
 VALID_TRUST = ("private", "public")
 
+# A turn can end with no user-visible text (tool-only turn, or the CLI swallowed
+# the answer). Rendering "(no result)" taught the operator nothing — instead the
+# PM gets ONE nudge for a real status line, and only if that also comes back
+# empty does the chat show the fallback line.
+EMPTY_TURN_NUDGE = (
+    "Your last turn produced no reply visible to the operator. "
+    "Give the operator a one-line status of what you just did or found."
+)
+EMPTY_TURN_FALLBACK = "PM turn produced no output — see transcript."
+
 
 def write_mcp_config():
     """Write the MCP config that tells `claude -p` how to launch the controller's
@@ -379,8 +389,28 @@ class AgentBrain:
                            f"(after {stats['tools']} tool calls)",
             }.get(kind, f"⚠️ {e}")
             return self._finish(msg, [])
-        reply = ((meta.get("text") if isinstance(meta, dict) else meta) or "").strip() or "(no result)"
-        _end("ok", meta=meta if isinstance(meta, dict) else None)
+        def _text_of(m):
+            return ((m.get("text") if isinstance(m, dict) else m) or "").strip()
+
+        reply = _text_of(meta)
+        outcome = "ok"
+        if not reply:
+            _log_turn("empty_renudge", thread=self.conversation_key or "")
+            try:
+                meta2 = run_turn(
+                    EMPTY_TURN_NUDGE, append_system_prompt=sys_prompt or None,
+                    remember=self.conversation_key, cwd=config.AGENT_HOME_DIR,
+                    extra_args=xargs, on_event=_ev, return_meta=True,
+                    proc_holder=ph, auto_memory=config.AUTO_MEMORY,
+                    engine="claude",
+                )
+            except (FileNotFoundError, RuntimeError):
+                meta2 = None                 # nudge died → fall to the fallback line
+            if _text_of(meta2):
+                reply, meta = _text_of(meta2), meta2
+            else:
+                reply, outcome = EMPTY_TURN_FALLBACK, "empty"
+        _end(outcome, meta=meta if isinstance(meta, dict) else None)
         if reply != seen["text"]:          # answer wasn't already streamed as the last text block
             emit("final", reply)
         trace = []
