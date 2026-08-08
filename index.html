@@ -2520,15 +2520,20 @@ const machinesBtn = document.getElementById('machinesBtn');
 // the banner. Direct mode has no push sender, so this is fleet-only.
 const notifyBtn = document.getElementById('notifyBtn');
 const PUSH_ON_KEY = 'cc_push_on';
+const PUSH_UI_KEY = 'cc_push_ui';   // '1' → show the bell even when alerts are off
 const pushSupported = FLEET && 'serviceWorker' in navigator
   && 'PushManager' in window && 'Notification' in window;
 
 function reflectNotifyBtn() {
   if (!notifyBtn) return;
   if (!pushSupported) { notifyBtn.hidden = true; return; }
-  notifyBtn.hidden = false;
   const perm = Notification.permission;
   const on = perm === 'granted' && localStorage.getItem(PUSH_ON_KEY) === '1';
+  // Header real estate is scarce on a phone. The bell only earns its slot once
+  // alerts are actually ON (so the off-switch is never orphaned); to opt in the
+  // first time, run localStorage.setItem('cc_push_ui','1') in the console.
+  if (!on && localStorage.getItem(PUSH_UI_KEY) !== '1') { notifyBtn.hidden = true; return; }
+  notifyBtn.hidden = false;
   notifyBtn.classList.toggle('on', on);
   notifyBtn.querySelector('.bico').textContent = (perm === 'denied') ? '🔕' : '🔔';
   notifyBtn.title = perm === 'denied'
