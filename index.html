@@ -751,7 +751,7 @@
       <span class="bico">🖥️</span>
       <div>
         <div class="ah-t">machines</div>
-        <div class="ah-s">every box on the fleet — read-only roster with per-machine load; tick one to make it the default host for new clones</div>
+        <div class="ah-s">every box on the fleet, with its load — read-only, except the tick that picks the default host for new clones</div>
       </div>
       <span class="spacer"></span>
       <button id="machinesclose" title="Back to the app">✕ close</button>
@@ -6049,7 +6049,7 @@ pinBtn.onclick = () => {
   if (on) navTo('pins');
 };
 document.getElementById('reloadBtn').onclick = () => location.reload();   // manual escape hatch — draft + hash survive a reload
-machinesBtn.onclick = () => openMachines();          // 🖥️ roster overlay (no longer a rung)
+machinesBtn.onclick = () => openMachines();          // 🖥️ roster page (no longer a rung)
 document.getElementById('brand').onclick = () => navTo('projects');
 if (!FLEET) machinesBtn.style.display = 'none';   // no machines rung when talking to a harness directly
 pendingNav = parseHash();        // restore project / session / depth from the URL…
@@ -6431,16 +6431,17 @@ stage.addEventListener('touchend', (e) => {
 // A window resize/rotation is the user manipulating THIS device → claim the PTY size.
 window.addEventListener('resize', () => { fit.fit(); sendResize(true); term.scrollToBottom(); bottomJustifyTTY(); });
 
-// -- machines roster overlay (the 🖥️ button) ---------------------------------
+// -- machines roster page (the 🖥️ button) ------------------------------------
 // Read-only fleet overview with per-machine stats. Replaces the old machines rung;
-// renderMachines keeps it live on every roster broadcast.
+// renderMachines keeps it live on every roster broadcast. Presented as a full page
+// (same shape as the 🧠 subscriptions page) — so there's no backdrop to click away
+// on: you leave via ✕ close or Esc.
 const machinesModal = document.getElementById('machinesmodal');
 function openMachines() { renderMachines(machineList); machinesModal.hidden = false; }
 const accountsModal = document.getElementById('accountsmodal');
 document.getElementById('accountsclose').onclick = () => { accountsModal.hidden = true; };
-document.getElementById('accountsBtn').onclick = () => openAccounts();   // 🧠 subscriptions overlay
+document.getElementById('accountsBtn').onclick = () => openAccounts();   // 🧠 subscriptions page
 document.getElementById('machinesclose').onclick = () => { machinesModal.hidden = true; };
-machinesModal.onclick = (e) => { if (e.target === machinesModal) machinesModal.hidden = true; };
 
 // -- global Esc → projects rung ----------------------------------------------
 // Universal "take me home": pressing Escape anywhere pops you back out to the

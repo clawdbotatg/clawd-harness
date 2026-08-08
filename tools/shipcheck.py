@@ -53,9 +53,12 @@ def check(verbose=True):
     dirty = git("status", "--porcelain", "--untracked-files=no").stdout.strip()
     if dirty:
         good = False
-        lines.append(f"{BAD} uncommitted changes — not shipped, AND this box's "
-                     f"auto-pull is disabled while the tree is dirty:")
+        lines.append(f"{BAD} uncommitted changes — whatever is in these files is NOT in "
+                     f"production, and this box's auto-pull is disabled while the tree "
+                     f"is dirty (so it also blocks other people's pushes from landing here):")
         lines += [f"      {d}" for d in dirty.splitlines()]
+        lines.append("      (sessions share this worktree — `git diff` before assuming "
+                     "it's yours; it may be another session mid-edit.)")
     else:
         lines.append(f"{OK} working tree clean")
 
@@ -98,16 +101,25 @@ def main():
     deadline = time.time() + args.wait
     while True:
         good, lines = check()
-        stuck_locally = any("NOT pushed" in l or "uncommitted" in l for l in lines)
-        if good or not args.wait or stuck_locally or time.time() > deadline:
+        # Two independent verdicts. "Is my pushed commit live yet?" is worth waiting
+        # on — the relay pulls on a ~3min timer. "Is there an unpushed commit?" is
+        # not: no amount of waiting pushes it. A DIRTY TREE also doesn't stop the
+        # poll, because the dirt is often another session mid-edit in this shared
+        # worktree while the commit I care about is already on its way to prod.
+        unpushed = any("NOT pushed" in l for l in lines)
+        prod_behind = any("serving DIFFERENT" in l for l in lines)
+        if good or not args.wait or unpushed or not prod_behind or time.time() > deadline:
             print("\n".join(lines))
             if good:
                 print("\nIN PRODUCTION. (Not checked: server.py on individual "
                       "harness boxes — they self-pull on their own timer.)")
-            elif stuck_locally:
-                print("\nNOT SHIPPED — and waiting will not fix it. See above.")
-            else:
+            elif unpushed:
+                print("\nNOT SHIPPED — and waiting will not fix it. Push. See above.")
+            elif prod_behind:
                 print(f"\nNOT LIVE after {args.wait}s.")
+            else:
+                print("\nHEAD is live in production, but the checks above are not all "
+                      "green — read them before calling this done.")
             return 0 if good else 1
         time.sleep(20)
 
