@@ -277,3 +277,72 @@ Complete Phase 0 and extract only WebSocket framing plus transcript parsers. Thi
 creates immediate test value, validates the module conventions, and touches
 neither routing policy nor process lifecycle. Reassess the target layout after
 that milestone before committing to the remaining filenames.
+
+---
+
+## Review notes — do / don't (living section)
+
+*Added 2026-08-07 after a first review of this plan against the repo. Append new
+judgments here rather than silently rewriting the phases above; this section is
+the running record of what we actually decided.*
+
+### The honest framing
+
+The monolith is not the problem — the **untested routing policy** is. Every
+production incident in memory (mis-routing on stale usage, the 07-11 limit-wall
+pileup, the fake-exhausted 429) was a routing/policy bug, not a
+code-organization bug. So sequence for **test coverage first** and let the
+module layout be a side effect. Phases 0 and 3 are the payoff; the rest is
+tidiness that must earn its keep.
+
+### Do
+
+- **Do Phase 0 now, on `main`.** It is purely additive (no runtime code
+  touched), so the fleet auto-pull deploying it continuously is harmless. Treat
+  Phase 0 as the real deliverable: even if no extraction ever happens, the
+  fixtures + contract tests + CI pay for themselves.
+- **Source golden fixtures from production captures, not synthetic data** —
+  real 429 bodies, stale `checkedAt` states, the dup-org login shape, actual
+  transcript/rollout lines (scrubbed). Every nasty routing edge case came from
+  live weirdness; synthetic fixtures would encode our assumptions, which is
+  exactly what we can't trust.
+- **Do all extraction work on a branch, merge at phase boundaries.** Every push
+  to `main` is a live deploy: fleet machines auto-pull ~5 min. A multi-commit
+  extraction sequence on `main` deploys prod piecemeal, continuously,
+  mid-phase. Branches are inert (auto-pull is main-only, ff-only), so merge
+  only whole phases.
+- **Expand `RESTART_FILES` / `WATCH_FILES` inside Phase 1, not later.** They
+  watch `server.py` and `index.html` by name. The first commit that moves code
+  into `harness/*.py` silently breaks graceful restart for that code (and
+  `web/*` would break live reload). This is invariant 9's failure mode and it
+  fires on commit one unless the watch lists move with the code.
+- **Stop after the first milestone and judge.** If it felt mechanical and the
+  tests caught drift, continue to Phases 2–3 (routing extraction is where the
+  `GOAL.md` promises become automated tests instead of prod incidents). If it
+  felt like churn, keep the test suite and walk away — nothing lost.
+- **Before Phase 1: land or delete stray uncommitted work** (at review time:
+  `tools/escprobe.mjs`), per this plan's own precondition.
+
+### Don't
+
+- **Don't schedule Phase 5 (browser split).** Highest blast radius, lowest
+  value: `index.html` is live-edited by parallel sessions, the Playwright
+  probes assume its current shape, and the split requires `fleet/relay.py`
+  changes (serving `web/*` with correct MIME + `no-store`, plus the `__FLEET__`
+  injection point) landing in lockstep with a manual pull on the relay box —
+  the one machine that does *not* auto-pull. It would ship broken on
+  `h.atg.link` while looking fine locally. Revisit only after Phases 0–4 have
+  settled in production.
+- **Don't touch routing thresholds or rescue behavior during any extraction**
+  (the plan already says this — it bears repeating as the #1 way this refactor
+  could cause a real outage).
+- **Don't let the refactor block normal shipping.** Small fixes keep landing on
+  `main` as usual; the extraction branch rebases onto them. If the branch
+  diverges painfully, that's a signal the phase is too big — split it, don't
+  freeze the repo.
+
+### Decision log
+
+- **2026-08-07** — plan reviewed, verdict: green-light Phase 0 + first
+  milestone (WS framing + transcript parsers) on a branch, watch-list fix
+  folded into Phase 1, Phase 5 unscheduled. Not yet started.
