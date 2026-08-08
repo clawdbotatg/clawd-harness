@@ -1,0 +1,10 @@
+[Unit]
+Description=clawd fleet relay box — pull main (the relay runs no harness, so nothing else updates it)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/clawd-harness
+ExecStart=/home/ubuntu/clawd-harness/fleet/deploy/relay-pull.sh

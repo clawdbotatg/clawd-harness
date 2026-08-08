@@ -1,0 +1,13 @@
+[Unit]
+Description=pull main on the relay box every few minutes (matches the harness auto-update cadence)
+
+[Timer]
+# ~3 min, jittered so it never lands in lockstep with the harnesses' own loops.
+OnBootSec=90s
+OnUnitActiveSec=3min
+RandomizedDelaySec=45s
+AccuracySec=15s
+Unit=clawd-fleet-pull.service
+
+[Install]
+WantedBy=timers.target
