@@ -2729,35 +2729,77 @@ function projectName(pid) {
   return p ? p.name : '';
 }
 // -- project emoji badges (AI-picked identity codes; '' until generated) ------
-function projectEmojiByPid(pid) {
+//
+// A project owns a 1-3 emoji code, but you rarely need to SEE all of it: enough
+// leading emoji to tell it from every other project is enough, and one glyph is
+// usually enough. So the code is the identity and `shortEmoji()` is the display
+// form — trimmed against the codes of ALL known projects (fleet-wide, not just
+// the ones currently on screen), so a project's badge is stable and identical
+// everywhere it appears. Every badge accessor below returns the display form;
+// the *Full variants exist for hover titles.
+function emojiGraphemes(e) {
+  try { return [...new Intl.Segmenter().segment(e || '')].map(x => x.segment); }
+  catch { return Array.from(e || ''); }
+}
+function emojiPrefixMap(codes) {
+  const split = new Map();
+  for (const c of new Set(codes.filter(Boolean))) split.set(c, emojiGraphemes(c));
+  const out = new Map();
+  for (const [c, g] of split) {
+    let need = 1;
+    for (const [c2, g2] of split) {
+      if (c2 === c) continue;
+      let common = 0;
+      while (common < g.length && common < g2.length && g[common] === g2[common]) common++;
+      need = Math.max(need, Math.min(common + 1, g.length));
+    }
+    out.set(c, g.slice(0, need).join(''));
+  }
+  return out;
+}
+// Every project's code, both modes. Fleet reads the ELECTED per-group code, so
+// the same repo on N machines contributes one entry, not N rival ones.
+function allProjectEmojiCodes() {
+  if (FLEET) return [...unifiedProjects.values()].map(g => g.emoji || '');
+  return (projectList || []).map(p => p.emoji || '');
+}
+let _emShortSig = null, _emShortMap = new Map();
+function emojiShortMap() {
+  const codes = [...new Set(allProjectEmojiCodes().filter(Boolean))].sort();
+  const sig = codes.join(' ');
+  if (sig !== _emShortSig) { _emShortSig = sig; _emShortMap = emojiPrefixMap(codes); }
+  return _emShortMap;   // recomputed only when the set of codes actually changes
+}
+function shortEmoji(code) { return code ? (emojiShortMap().get(code) || code) : ''; }
+
+function projectEmojiFullByPid(pid) {
   const p = (projectList || []).find(p => p.pid === pid);
   return (p && p.emoji) || '';
 }
+function projectEmojiByPid(pid) { return shortEmoji(projectEmojiFullByPid(pid)); }
 // Badge for a session row/tab. In fleet the badge must come from the MERGED
 // project (electEmoji), not the host machine's own pick — two boxes running the
 // same repo each badge it independently, and reading the raw per-machine code
 // here is what made one project show up under three different emoji at once.
-function sessionEmoji(s) {
+function sessionEmojiFull(s) {
   if (!s) return '';
   if (FLEET && s._machine) {
     const key = s._pkey || projectKeyForSession(s._machine, s.pid);
     const g = projectGroup(key);
     return (g && g.emoji) || '';
   }
-  return projectEmojiByPid(s.pid);
+  return projectEmojiFullByPid(s.pid);
 }
-// (There used to be a shortest-unique-prefix trimmer here that showed 🐈 instead
-// of 🐈🚀🔧 when no other tab's code started with 🐈. It saved a couple of glyphs
-// and cost the thing the badge exists for: one project must look identical on its
-// card, its tabs and the breadcrumb, or the eye stops reading it as one project.)
+function sessionEmoji(s) { return shortEmoji(sessionEmojiFull(s)); }
 // Badge for the OPEN project (breadcrumb / sessions-rung header).
-function currentProjectEmoji() {
+function currentProjectEmojiFull() {
   if (FLEET) {
     const g = projectGroup(currentProjectKey);
     return (g && g.emoji) || '';
   }
-  return projectEmojiByPid(currentPid);
+  return projectEmojiFullByPid(currentPid);
 }
+function currentProjectEmoji() { return shortEmoji(currentProjectEmojiFull()); }
 
 function updateBreadcrumb(title) {        // called when we (re)subscribe to a session
   if (title != null) currentTitle = title;
@@ -2857,7 +2899,9 @@ function renderSessionBar(view) {
     const em = sessionEmoji(s);          // project badge: which project this tab belongs to
     if (em) {
       const pe = document.createElement('span');
-      pe.className = 'pemoji'; pe.textContent = em;   // the WHOLE code — a project wears one badge everywhere
+      pe.className = 'pemoji'; pe.textContent = em;
+      const full = sessionEmojiFull(s);
+      if (full !== em) pe.title = full;  // hover shows the project's whole code
       tab.appendChild(pe);
     }
     const lbl = document.createElement('span');
@@ -4063,7 +4107,9 @@ function renderProjectRung() {
     sdot.className = 'sdot' + (busyP ? ' cloning' : errP ? ' err' : offline ? ' dead' : '');
     const title = document.createElement('span');
     title.className = 'stitle';
-    title.textContent = (p.emoji ? p.emoji + ' ' : '') + p.name;
+    const pem = shortEmoji(p.emoji);     // display form — same trimmed badge as this project's tabs
+    title.textContent = (pem ? pem + ' ' : '') + p.name;
+    if (p.emoji && p.emoji !== pem) title.title = p.emoji;
     row.appendChild(sdot); row.appendChild(title);
     if (p.pinned) {
       const tag = document.createElement('span');
