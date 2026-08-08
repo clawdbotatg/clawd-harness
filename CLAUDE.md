@@ -144,8 +144,16 @@ user-facing overview; this file orients an agent working **on** the code.
   sessions** (`ClaudeSession.ceremony` — spawned by the 🧠 panel's add /
   re-sign-in buttons) deliberately sit on a broken account, so every
   rescue/handoff path skips them for the session's lifetime; a re-sign-in
-  ceremony also auto-types `/login` once the TUI is up (a stale-creds dir
-  opens the normal TUI, not the login screen).
+  ceremony also auto-types `/login` once the TUI is up. The gate is
+  `_opens_normal_tui` — **onboarding state, not credentials**: any dir that
+  has ever been signed in opens claude's normal TUI (which needs `/login`
+  typed into it), and a *revoked* login is deleted from the credential store,
+  so the old "are the creds present?" test skipped exactly the re-sign-in
+  case it existed for. Only a never-signed-in dir (no `.claude.json`) is left
+  alone — there the CLI paints its own login/onboarding flow and injected
+  keystrokes would garble it. The SessionStart wait is soft (a hook that
+  never fires — e.g. a credential-less dir — must not cost the feature): it
+  falls through to a fixed timer and types anyway.
   Deep doc: [`docs/fleet/SUB-ROUTING.md`](docs/fleet/SUB-ROUTING.md); what the
   accounts panel should display + mis-bound-login runbook:
   [`docs/fleet/ACCOUNTS-PANEL.md`](docs/fleet/ACCOUNTS-PANEL.md) (key trap: one
@@ -230,6 +238,28 @@ user-facing overview; this file orients an agent working **on** the code.
   cleared on unpin, persisted (a restart must not blank the board), backfilled
   at boot for pins that lack one. Same gateway as naming; `TEST_HINT_MODEL`
   overrides `BANKR_MODEL` if this job ever wants a stronger tier.
+  **Pinning also compacts** (`_on_pinned` → `_compact_for_pin`): parking is the
+  one moment compaction is free — nobody is waiting on the answer — and the
+  return trip (you come back days later, after testing) then opens on a full
+  context window instead of an auto-compact firing mid-thought. The hint is
+  derived FIRST, off the un-thinned transcript, then `/compact` is typed into
+  the TUI once the session is genuinely idle (never mid-turn: `busy` races the
+  composer, `waiting` would answer a TUI prompt with the literal text
+  "/compact"), bounded by `PIN_COMPACT_WAIT`; `PIN_COMPACT=0` opts out.
+  **`Engine.compact_cmd` ends in a space and must keep doing so:** typing
+  `/compact` leaves the slash-command autocomplete menu open and the menu eats
+  the submitting CR — the first cut of this shipped-in-testing as "/compact"
+  parked in the composer, picker up, nothing run. The space completes the
+  token, the menu closes, the CR submits (`⎿ Not enough messages to compact.`
+  is what a *working* one says on a short session). Control sends also take the
+  full `SEND_SETTLE`, because what has to finish before the CR is the menu
+  closing, not a paste burst. It goes
+  through `send_message(..., control=True)` — a harness send, not a human one,
+  so it skips the bounce watchdog (a slash command fires no UserPromptSubmit,
+  which the detector would read as a walled plan) and leaves `prompted_at`
+  alone. The Stop-side hint refresh is gated on `prompt_count` moving, so the
+  turn `/compact` itself ends can't overwrite a good hint with one read off a
+  summarized transcript.
 - **Right model for the right job:** naming is a cheap, frequent, fire-and-forget
   labeler (~900 input tokens, 3×/session, async) — so `BANKR_MODEL` = **`qwen3-coder`**,
   the winner of a full 41-model cost+speed+reliability survey: ~$0.032 per 1,000

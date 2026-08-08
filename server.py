@@ -239,6 +239,15 @@ TEST_SYS_PROMPT = ("A developer just parked this software-engineering session on
 # would falsify the work), so it gets its own model knob — default: whatever
 # names sessions, so an unconfigured harness changes nothing.
 TEST_MODEL = os.environ.get("TEST_HINT_MODEL", "") or ""
+# Pinning also COMPACTS. A pin means "I'm done driving this for now, come back
+# after testing" — and the thing that decides whether coming back is pleasant is
+# how much context window is left. Compacting at the moment of parking is free
+# (nobody is waiting on the session) and buys the return trip a full window
+# instead of an immediate auto-compact mid-thought. Sent as a real TUI slash
+# command once the session goes idle: PIN_COMPACT_WAIT bounds how long we hold
+# the door for a turn that's still finishing. PIN_COMPACT=0 opts out.
+PIN_COMPACT      = os.environ.get("PIN_COMPACT", "1") != "0"
+PIN_COMPACT_WAIT = float(os.environ.get("PIN_COMPACT_WAIT", "900"))   # s to wait for idle
 # Project *emoji codes*: every project gets a short 1–3 emoji badge (AI-picked
 # from its README / files / commits) shown on its card, the sessions rung, and
 # every session tab — so a glance at the tab strip tells you which project each
@@ -615,6 +624,32 @@ def _ensure_onboarded(config_dir):
           "completed (hasCompletedOnboarding seeded — login already present, "
           "theme picker suppressed)", flush=True)
     return True
+
+
+def _opens_normal_tui(config_dir):
+    """True iff a spawn into this dir will paint claude's NORMAL TUI (so a
+    `/login` has to be typed into it) rather than the CLI's own login /
+    onboarding flow (which we must never inject keystrokes into).
+
+    The signal is ONBOARDING state, not credentials. A dir that has ever been
+    signed in keeps `hasCompletedOnboarding` + `oauthAccount` in its
+    .claude.json forever — and a revoked login is *deleted* from the
+    credential store, so `_creds_state` reads 'absent' for exactly the
+    re-sign-in case the auto-/login exists to serve (2026-08-07: every
+    'sign in again' ceremony on this box — clawd, slop, austinmax, sub2 —
+    landed on a normal TUI with no /login typed, because the old gate asked
+    'are the creds present?'). A genuinely fresh dir has no .claude.json at
+    all, so it answers False and is left strictly alone."""
+    cfg = _claude_config_file(config_dir)
+    try:
+        data = json.loads(cfg.read_text()) if cfg.exists() else {}
+    except (OSError, ValueError):
+        data = {}
+    if data.get("hasCompletedOnboarding") or data.get("oauthAccount"):
+        return True
+    # No config record, but a live credential blob: onboarding is skipped and
+    # the TUI opens anyway (a signed-in dir whose .claude.json got wiped).
+    return _creds_state(config_dir) == "present"
 
 
 def _cred_sig(config_dir):
@@ -1271,6 +1306,18 @@ class Engine:
     def slim_event(self, s, line):  return None
     def send_settle(self, big): return SEND_SETTLE if big else SEND_SETTLE_MIN
     def bg_probe(self, s):      return ""
+    # The CLI's "summarize this conversation to reclaim context" slash command,
+    # typed into the TUI when a session is pinned. Both shipped CLIs carry
+    # /compact in their command tables; "" would opt an engine out.
+    #
+    # THE TRAILING SPACE IS LOAD-BEARING. Typing "/compact" leaves the TUI's
+    # slash-command autocomplete menu open, and the submitting CR is eaten by
+    # the menu instead of running anything — the harness's first cut of this
+    # left "/compact" sitting in the composer with the picker up (verified in a
+    # scratch harness: menu open, session id unrotated, nothing ran). The space
+    # completes the token, the menu closes, and the CR submits. Verified on
+    # claude; assumed for codex, whose TUI uses the same picker pattern.
+    compact_cmd = "/compact "
 
 
 class ClaudeEngine(Engine):
@@ -1714,6 +1761,7 @@ class ClaudeSession:
         # every Stop while it stays pinned; cleared on unpin so a re-pin asks
         # again. Durable — a restart shouldn't blank the board's instructions.
         self.test_hint = test_hint
+        self._hint_at_prompt = 0                  # prompt_count the hint was derived at
 
         self.title = title
         self.desc = desc
@@ -2055,7 +2103,10 @@ class ClaudeSession:
             # Parked on the 📌 board? Re-derive "what the human must test" too —
             # a board session can be prompted in place, and the answer to "what
             # am I waiting on" moves with it.
-            if self.pinned:
+            # …but only when a real exchange has happened since the last one:
+            # /compact ends a turn too, and its post-compaction transcript is
+            # exactly the wrong thing to re-derive a test step from.
+            if self.pinned and self.prompt_count > self._hint_at_prompt:
                 threading.Thread(target=self._regenerate_test_hint,
                                  daemon=True).start()
             # Turn over + idle = the safe moment to move this session off a
@@ -2146,12 +2197,55 @@ class ClaudeSession:
         if hint is None:                             # naming off, or call failed
             return
         hint = hint[:160]
+        # Derived at this prompt count. The Stop-side refresh compares against
+        # it so only a REAL new exchange re-asks — the turn that /compact itself
+        # ends must not overwrite a good hint with one read off a summarized
+        # transcript.
+        self._hint_at_prompt = self.prompt_count
         if hint == self.test_hint:
             return
         self.test_hint = hint
         print(f"[test {self.cid[:8]}] {hint!r}", flush=True)
         self.manager.save_registry()
         self.manager.broadcast_sessions()
+
+    def _on_pinned(self):
+        """Everything that happens when a session lands on the 📌 board, in the
+        order that matters. The test hint first, off the FULL transcript — then
+        compact, which is the thing that would have thinned it."""
+        self._regenerate_test_hint()
+        self._compact_for_pin()
+
+    def _compact_for_pin(self):
+        """Type /compact into a freshly pinned session. Parking is exactly when
+        compaction is free: nobody is waiting on the answer, and the return trip
+        (you come back after testing, often days later) gets a full context
+        window instead of an auto-compact firing mid-thought.
+
+        Never mid-turn: `busy` would race the composer, `waiting` would answer
+        a TUI prompt with the literal text "/compact", and background work means
+        the CLI is still occupied. So we hold the door open until it's genuinely
+        idle, bounded by PIN_COMPACT_WAIT — a session that never settles simply
+        doesn't get compacted."""
+        cmd = self.eng.compact_cmd
+        if not (PIN_COMPACT and cmd) or self.ceremony or not self.prompt_count:
+            return
+        deadline = time.time() + PIN_COMPACT_WAIT
+        while time.time() < deadline:
+            if not (self.pinned and self.alive):
+                return                    # unpinned or closed while we waited
+            if not (self.busy or self.waiting or self.bg):
+                break
+            time.sleep(2.0)
+        else:
+            print(f"[session {self.cid[:8]}] pinned but never went idle in "
+                  f"{PIN_COMPACT_WAIT:.0f}s — skipping the automatic {cmd}",
+                  flush=True)
+            return
+        if not (self.pinned and self.alive):
+            return
+        print(f"[session {self.cid[:8]}] pinned → typing {cmd.strip()}", flush=True)
+        self.send_message(cmd, control=True)      # ours, not the human's
 
     def _transcript_text_for_naming(self, cap=3500):
         path = self.transcript_path or self._find_transcript()
@@ -2261,20 +2355,32 @@ class ClaudeSession:
         except OSError:
             pass
 
-    def send_message(self, text: str):
-        """High-level: type a message, let the paste settle, then submit (CR)."""
-        self.prompted_at = time.time()   # belt-and-braces: a bounced prompt fires no hook
+    def send_message(self, text: str, control: bool = False):
+        """High-level: type a message, let the paste settle, then submit (CR).
+
+        control=True marks a send the HARNESS made, not the human: a TUI slash
+        command like /compact. Those are handled by the TUI itself and fire no
+        UserPromptSubmit, so the no-hook bounce detector would read a perfectly
+        healthy delivery as a walled plan and go hunting for a rescue — and
+        they aren't prompts, so they must not touch `prompted_at` (the "when
+        did a human last say something" clock behind tab ages)."""
+        if not control:
+            self.prompted_at = time.time()   # belt-and-braces: a bounced prompt fires no hook
         pre_hooks = self.hook_count
         self.write(text.encode("utf-8"))
         # Short one-liners only need to clear the 0.6s burst cliff; big or
         # multi-line pastes take longer to finalize, so keep the full settle.
         big = len(text) > 280 or text.count("\n") >= 1
         # The settle is per-ENGINE: it's tuned to one TUI's paste heuristic
-        # (gotcha #2), and another CLI's is its own empirical question.
-        time.sleep(self.eng.send_settle(big))
+        # (gotcha #2), and another CLI's is its own empirical question. A
+        # control send takes the long settle regardless of length: it's a slash
+        # command, and what has to finish before the CR is the autocomplete
+        # menu closing, not a paste burst.
+        time.sleep(self.eng.send_settle(big or control))
         self.write(b"\r")
-        threading.Thread(target=self._send_watchdog, args=(text, pre_hooks),
-                         daemon=True).start()
+        if not control:
+            threading.Thread(target=self._send_watchdog, args=(text, pre_hooks),
+                             daemon=True).start()
 
     def _send_watchdog(self, text, pre_hooks):
         """We just delivered a message; a healthy CLI answers with a
@@ -3473,23 +3579,30 @@ class SessionManager:
         if s:
             s.title = f"sign in · {slug}"
             s.desc = "complete the Claude OAuth login in this terminal"
-            # Re-sign-in (the account's dir still holds stale/revoked
-            # credentials): the CLI opens its NORMAL TUI, not the login
-            # screen — the user shouldn't have to remember to type /login,
-            # so type it for them once the TUI is up. A credential-less dir
-            # is left alone: there the CLI boots straight into its own
-            # login/onboarding flow and injected keystrokes would garble it.
-            if _creds_state(a.config_dir) == "present":
+            # Re-sign-in (this dir has been signed in before — stale creds,
+            # or creds the provider already revoked): the CLI opens its
+            # NORMAL TUI, not the login screen — the user shouldn't have to
+            # remember to type /login, so type it for them once the TUI is
+            # up. A never-signed-in dir is left alone: there the CLI boots
+            # straight into its own login/onboarding flow and injected
+            # keystrokes would garble it. See _opens_normal_tui for why the
+            # test is onboarding state and NOT "are the creds present".
+            if _opens_normal_tui(a.config_dir):
                 s.desc = ("/login is being typed for you — complete the "
                           "Claude OAuth in this terminal")
                 def _autologin(sess=s):
+                    # SessionStart is the clean "TUI is up" signal, but it is
+                    # a hook — and a hook that never fires must not silently
+                    # cost the user the whole feature. Fall through to a
+                    # fixed delay instead; by then the TUI has long painted.
                     if not sess._started_evt.wait(30):
-                        return
+                        print(f"[account {slug}] no SessionStart in 30s — "
+                              "typing /login on the timer anyway", flush=True)
                     time.sleep(2.0)
                     if sess.alive and self.sessions.get(sess.cid) is sess:
-                        print(f"[account {slug}] stale login on file — "
-                              "typing /login", flush=True)
-                        sess.send_message("/login")
+                        print(f"[account {slug}] previously-signed-in dir "
+                              "(normal TUI) — typing /login", flush=True)
+                        sess.send_message("/login", control=True)
                 threading.Thread(target=_autologin, daemon=True).start()
             self.broadcast_sessions()
         print(f"[account {slug}] created — sign-in session "
@@ -4561,9 +4674,11 @@ class SessionManager:
             return self.sessions.get(cid)
 
     def pin(self, cid, on):
-        """📌 park a session on the pin board (or restore it). Pure metadata —
-        the claude process is untouched, so a pinned to-do can still be
-        prompted from the board and picks up exactly where it left off."""
+        """📌 park a session on the pin board (or restore it). Still pure
+        metadata as far as the board is concerned — the process is untouched
+        and a pinned to-do can still be prompted from the card — but parking
+        does now DO two things to the session: derive the human's test step
+        (the blue line) and compact it, in that order (_on_pinned)."""
         s = self.get(cid)
         if not s:
             return
@@ -4574,7 +4689,7 @@ class SessionManager:
             # Landing on the board = "done coding, needs a human to check it".
             # Derive that check now (async — the pin itself must stay instant);
             # the card renders it the moment the broadcast lands.
-            threading.Thread(target=s._regenerate_test_hint, daemon=True).start()
+            threading.Thread(target=s._on_pinned, daemon=True).start()
         else:
             s.test_hint = ""      # off the board → stale instruction; re-pin re-asks
         self.save_registry()
