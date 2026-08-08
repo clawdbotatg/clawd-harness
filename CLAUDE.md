@@ -35,6 +35,28 @@ user-facing overview; this file orients an agent working **on** the code.
 > is set.
 
 ## Run / test
+
+> ### Definition of done: `python3 tools/shipcheck.py`
+> **A change is not done when the file is saved, and not done when you have
+> screenshotted it working. It is done when `shipcheck` exits 0.** Run it before
+> you tell the user a UI change is live — it verifies tree-clean + HEAD-pushed +
+> `h.atg.link` serving HEAD's `index.html` byte-for-byte (`--wait` blocks through
+> the relay's ~3min pull).
+>
+> This is written as a hard gate because the trap is *designed* to feel like
+> success. Saving `index.html` hot-reloads the browsers on **this** box in ~1s,
+> and `tools/uiprobe.mjs` drives `127.0.0.1:8787` — so the local loop produces a
+> real, correct screenshot of the new UI **from the working-tree file, committed
+> or not**. Every signal says shipped; the phone still shows the old page,
+> because production is the fleet and the fleet only moves on `git push`.
+> Leaving the tree dirty is worse than neutral: it makes `auto_update_loop` skip
+> this box, so it also blocks *everyone else's* pushed changes from landing here.
+> The standing "only commit when asked" default does not apply to this repo —
+> here, push **is** the deploy, so "make the UI do X" means in production.
+>
+> Do not report a change as live on the strength of a local screenshot. That is
+> exactly the evidence that has been wrong every time.
+
 - `python3 server.py` → prints a tokenized URL `http://127.0.0.1:8787/?t=<token>`
   (token persisted in `.clawd-harness.token`; or set `CONSOLE_TOKEN`).
 - **Deploy to the fleet = `git push` to main.** Every harness runs
@@ -82,6 +104,10 @@ user-facing overview; this file orients an agent working **on** the code.
   A process launched from the Bash tool is on *this* machine (same as `server.py`),
   so it can. This is the loop that turns "guess a fix, commit, ask the human to
   eyeball it" into "run it, read the number."
+  **It proves the code, not the deploy.** uiprobe renders the *working-tree*
+  file on *this* machine, so it goes green on uncommitted work. A green uiprobe
+  plus an unpushed commit is the exact combination that has repeatedly produced
+  a false "it's live." Pair it with `tools/shipcheck.py`.
 
 ## Architecture (one server, multi-project, multi-session)
 - **server.py** — a `SessionManager` owns N `Project`s and N `ClaudeSession`s.
@@ -175,10 +201,16 @@ user-facing overview; this file orients an agent working **on** the code.
 - **Live-reload of the UI (no manual reload needed):** `watch_ui` *also* polls
   `WATCH_FILES` (`index.html`) and, on an mtime change, broadcasts WS
   `{type:"reload"}` → every open browser calls `location.reload()`
-  (`index.html` ~L495). So **saving `index.html` is enough — all open tabs
-  hard-reload themselves within ~1s**; never tell the user to reload manually,
-  and don't restart the server for a UI-only edit (that's only for
-  `RESTART_FILES`). Caveat: this needs `server.py` to be running.
+  (`index.html` ~L495). So **saving `index.html` is enough to see the edit —
+  tabs on *this* box hard-reload themselves within ~1s**; never tell the user to
+  reload manually, and don't restart the server for a UI-only edit (that's only
+  for `RESTART_FILES`). Caveat: this needs `server.py` to be running.
+  **Enough to *see*, not enough to *ship*** — this reloads only browsers attached
+  to this machine's harness, straight off the working-tree file. Every other box,
+  and the `h.atg.link` UI the user is actually looking at, is still on the last
+  pushed commit. Don't let a working local reload (or a `uiprobe` screenshot,
+  same source) stand in for a deploy: finish with `tools/shipcheck.py` (see
+  "Definition of done" under Run / test).
 - **One WebSocket per browser, multiplexed** — a client subscribes to one session
   (its PTY bytes + transcript); session metadata (titles, busy badges) fans out to
   all clients.
