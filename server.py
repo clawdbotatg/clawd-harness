@@ -1361,6 +1361,14 @@ def _codex_hook_command():
             f"--data-binary @- >/dev/null 2>&1 || true")
 
 
+# Wrapper tags codex injects as `role:"user"` messages that are context, not
+# conversation. Verified against a real rollout on heart (2026-08-07); harmless
+# to over-list, so add freely as new ones show up.
+CODEX_INJECTED_TAGS = ("<environment_context>", "<skills_instructions>",
+                       "<multi_agent_mode>", "<user_instructions>",
+                       "<project_doc>", "<agents_md>")
+
+
 def _collect_codex_text(content):
     """Text out of a codex message's content parts.
 
@@ -2388,12 +2396,17 @@ class ClaudeSession:
             return None
 
         if ptype == "token_count":
-            # The context-window number for the splash card. codex reports the
-            # window's own totals rather than claude's per-turn input sum.
-            info = p.get("info") or p.get("total_token_usage") or {}
-            tok = (info.get("total_tokens")
-                   or sum(info.get(k) or 0 for k in
-                          ("input_tokens", "cached_input_tokens")))
+            # The context-window number for the splash card: "how full is the
+            # window right now", matching what the claude branch computes.
+            # LAST_token_usage, not total_ — total_ is cumulative across the
+            # whole session and blows past the context window (346k against a
+            # 258k window on the rollout this was written from). The input
+            # side alone is the occupancy; output is what left. The
+            # denominator, if we ever show a fraction, is
+            # info.model_context_window.
+            info = p.get("info") or {}
+            usage = info.get("last_token_usage") or info
+            tok = usage.get("input_tokens") or 0
             if tok:
                 self.ctx_tokens = tok
             return None
@@ -2401,11 +2414,21 @@ class ClaudeSession:
         if ptype in ("message", "user_message", "agent_message"):
             role = p.get("role") or ("user" if ptype == "user_message"
                                      else "assistant")
+            # Codex opens every session by injecting its own preamble as
+            # `role:"developer"` messages (skills instructions, the /root
+            # team prompt, multi-agent mode) plus a `role:"user"`
+            # <environment_context> block. None of that is conversation: left
+            # in, it heads the transcript view, poisons the naming/digest seed
+            # and eats the phone's history seed with boilerplate. Only the two
+            # real roles survive, and injected context blocks are dropped by
+            # their wrapper tag.
+            if role not in ("user", "assistant"):
+                return None
             text = p.get("text")
             if not isinstance(text, str):
                 text = _collect_codex_text(p.get("content") or [])
             clean = _strip_noise(text or "").strip()
-            if not clean:
+            if not clean or clean.startswith(CODEX_INJECTED_TAGS):
                 return None
             if role == "assistant":
                 return {"role": "assistant", "text": clean}
@@ -2425,8 +2448,14 @@ class ClaudeSession:
 
         if ptype in ("function_call_output", "custom_tool_call_output",
                      "tool_result"):
-            out = p.get("output") or p.get("result") or ""
-            if isinstance(out, dict):
+            # `output` is a LIST of Responses-API content parts, not a string —
+            # str()ing it renders a python repr into the transcript view.
+            out = p.get("output")
+            if out is None:
+                out = p.get("result") or ""
+            if isinstance(out, list):
+                out = _collect_codex_text(out)
+            elif isinstance(out, dict):
                 out = out.get("output") or json.dumps(out)
             out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", str(out))[:2000]
             return {"role": "tool_result",

@@ -61,6 +61,42 @@
 > Corollary for testing: `transcript_tail(n=8)` on a codex session returns
 > nothing even when everything works — the last raw lines of a rollout are
 > `token_count` / `turn_context` noise the parser correctly drops. Ask for 60.
+>
+> ### Three more shape traps (heart, 2026-08-07, against a real rollout)
+>
+> - **The injected preamble.** Codex opens every session with its own prompt
+>   material: three `role:"developer"` messages (skills instructions, the
+>   `/root` team prompt, multi-agent mode) plus a `role:"user"`
+>   `<environment_context>` block. Rendered as conversation it heads the
+>   transcript, poisons the naming/digest seed, and eats the phone's history
+>   seed with boilerplate. Only `user`/`assistant` roles survive the parser now,
+>   and `CODEX_INJECTED_TAGS` drops the context blocks that wear a user role.
+> - **Tool output is a list, not a string.** `custom_tool_call_output.output`
+>   is a list of Responses-API parts; `str()`-ing it renders a Python repr
+>   into the transcript view.
+> - **`total_token_usage` is cumulative, `last_token_usage` is the context.**
+>   The first sums the whole session and sails past the window (346k against a
+>   258k window). The splash card wants `last_token_usage.input_tokens`;
+>   `info.model_context_window` is the denominator if we ever show a fraction.
+>
+> ### Known limitation: two harnesses on one machine collide
+>
+> `_ensure_codex_hooks` writes OUR port and token into the single shared
+> `$CODEX_HOME/hooks.json`, because codex has no per-invocation hook flag. Two
+> harnesses on one box (this repo deliberately coexists with clawd-console on
+> another port) will overwrite each other's, and the loser's codex sessions
+> POST their hooks into a dead port — a silent loss of the turn signal. claude
+> is immune, since `--settings` is per session. Fix, if it ever bites: give
+> each harness its own `CODEX_HOME` (costs a separate `codex login` per
+> harness) or teach the hook command to fan out to both ports.
+>
+> ### `rate_limits` is real after all
+>
+> The live rollout carries `rate_limits: {primary: {used_percent, window_minutes:
+> 10080, resets_at}}` — populated, not the `null` the issue tracker reports for
+> exec mode. That makes Phase 3 (usage-aware routing for codex) more plausible
+> than this doc first assumed, though it's still pull-from-transcript and stale
+> while a session sits idle.
 
 ## Why it's tractable
 
