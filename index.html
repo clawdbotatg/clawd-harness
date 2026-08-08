@@ -302,6 +302,9 @@
   #sessiondesc .sd-title { color:var(--accent); font-weight:600; }
   #sessiondesc.local .sd-title { color:var(--local); }
   #sessiondesc .sd-desc { color:var(--dim); font-weight:400; }
+  /* the ": " that joins title and tldr lives in CSS, not the text node, so the
+     two-line mobile layout below can drop it when the tldr starts its own line */
+  #sessiondesc .sd-desc::before { content:': '; }
   @media (pointer: coarse) { #sessiondesc { font-size:5px; } }
   /* Quick-prompt chips: one-tap sends of the things you say most (QUICK_PROMPTS,
      most-used farthest right). Share the session-name line; only in a session. */
@@ -326,11 +329,31 @@
              pointer-events:none; }
   /* Skinny screens: chips don't fit beside the session name — wrap onto their
      own full-width row below it. Most-used is the leftmost chip, so the natural
-     left scroll anchor keeps it visible and overflow hides the least-used tail. */
+     left scroll anchor keeps it visible and overflow hides the least-used tail.
+
+     The session line itself also splits in two here. On a phone all four things
+     (state pill · project · session title · grey tldr) shared one line, which
+     only "fit" because of the 5px font above — unreadable. So:
+        line 1   🤖 project   Session Title
+        line 2   [🟡 working] the grey one-line tldr
+     `display:contents` on #sessiondesc dissolves its box so its three spans
+     become flex items of #descrow directly — that's what lets the state pill
+     (a SIBLING of #sessiondesc) sit on the same line as .sd-desc (a CHILD of
+     it) without restructuring the DOM. Order + a zero-height full-basis ::after
+     forces the break after the title. Desktop keeps its single line untouched. */
   @media (max-width: 720px) {
-    #descrow.insession { flex-wrap: wrap; }
-    #sessiondesc { flex-basis: 100%; }
-    #quickchips { flex: 1 1 100%; }
+    #descrow.insession { flex-wrap: wrap; align-items:center; gap:5px 8px; }
+    #sessiondesc { display:contents; }
+    #sessiondesc .sd-project, #sessiondesc .sd-title, #sessiondesc .sd-desc {
+      font-size:12.5px; line-height:1.3; min-width:0;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    #sessiondesc .sd-project { order:1; flex:0 1 auto; }
+    #sessiondesc .sd-title   { order:2; flex:1 1 auto; }
+    #descrow.insession::after { content:''; order:3; flex:0 0 100%; height:0; }
+    #ttystat { order:4; flex:0 0 auto; }
+    #sessiondesc .sd-desc { order:5; flex:1 1 0; font-size:12px; }
+    #sessiondesc .sd-desc::before { content:none; }   /* no leading ": " on its own line */
+    #quickchips { order:6; flex:1 1 100%; margin-left:0; }
   }
   .inputrow { display:flex; gap:8px; align-items:flex-end; }
   #keys { display:flex; flex-wrap:wrap; gap:6px; }
@@ -2883,7 +2906,9 @@ function refreshBreadcrumb(view) {
     const t = document.createElement('span'); t.className = 'sd-title'; t.textContent = title;
     descEl.appendChild(t);
     if (longDesc) {
-      const d = document.createElement('span'); d.className = 'sd-desc'; d.textContent = ': ' + longDesc;
+      // the ": " separator is CSS (.sd-desc::before) — mobile drops it when the
+      // tldr wraps onto its own line under the title
+      const d = document.createElement('span'); d.className = 'sd-desc'; d.textContent = longDesc;
       descEl.appendChild(d);
     }
   }
