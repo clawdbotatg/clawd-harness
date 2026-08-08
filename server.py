@@ -1361,6 +1361,27 @@ def _codex_hook_command():
             f"--data-binary @- >/dev/null 2>&1 || true")
 
 
+def _collect_codex_text(content):
+    """Text out of a codex message's content parts.
+
+    claude's _collect_text only knows blocks of `type:"text"`; codex uses the
+    Responses-API spelling — `input_text` on the way in, `output_text` on the
+    way out. Reusing claude's helper silently returned "" for every message,
+    which read as "the parser is broken" when in fact only this one lookup
+    was (clawd-head, 2026-08-07: tool calls parsed, messages didn't)."""
+    if isinstance(content, str):
+        return content
+    out = []
+    for b in content or []:
+        if isinstance(b, str):
+            out.append(b)
+        elif isinstance(b, dict):
+            if b.get("type") in ("output_text", "input_text", "text", None) \
+                    and isinstance(b.get("text"), str):
+                out.append(b["text"])
+    return "\n".join(t for t in out if t).strip()
+
+
 def _codex_signed_in():
     """Cheap "is codex usable" probe: its credential file exists. Mirrors
     _creds_state's job for claude but far simpler — there's one login per
@@ -2382,7 +2403,7 @@ class ClaudeSession:
                                      else "assistant")
             text = p.get("text")
             if not isinstance(text, str):
-                text = _collect_text(p.get("content") or [])
+                text = _collect_codex_text(p.get("content") or [])
             clean = _strip_noise(text or "").strip()
             if not clean:
                 return None
