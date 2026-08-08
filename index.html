@@ -796,7 +796,7 @@
       <span class="bico">🖥️</span>
       <div>
         <div class="ah-t">machines</div>
-        <div class="ah-s">every box on the fleet, with its load — read-only, except the tick that picks the default host for new clones</div>
+        <div class="ah-s">every box on the fleet, with its load. untick one and this app stops talking to it entirely — no passkey to unlock it, no projects from it — until you tick it back on</div>
       </div>
       <span class="spacer"></span>
       <button id="machinesclose" title="Back to the app">✕ close</button>
@@ -1155,6 +1155,73 @@ const composer = document.querySelector('footer');
 let ws = null, decoder = new TextDecoder();
 let currentMachine = null;      // fleet machine the viewed project resolved to (null = none yet)
 let machineList = [];           // latest roster from the relay
+// -- active machines (the passkey budget) ------------------------------------
+// Talking to a machine costs ONE passkey per 24h (its E2E channel is bound to a
+// human-verified assertion), so a fleet of N boxes costs N ceremonies at dawn
+// even when you only wanted one of them. A machine can be switched OFF from the
+// machines tab: the page then never opens its channel, never lists it, and
+// never prompts for it — so unchecking five boxes turns six prompts into two.
+//
+// The set is a DENY-list (unknown machine = ON, so a new box needs no config)
+// and it lives on the RELAY, not here: unchecking on the phone must also take
+// effect on the desktop. localStorage is only a cache so the first paint after
+// a reload already knows the answer — the relay's `prefs` frame, which always
+// precedes the first roster, is the truth.
+const INACTIVE_KEY = 'cc_fleet_inactive';
+let fleetInactive = new Set();  // machineIds switched off
+try { fleetInactive = new Set(JSON.parse(localStorage.getItem(INACTIVE_KEY) || '[]')); } catch {}
+function isMachineActive(id) { return !fleetInactive.has(id); }
+// A machine we should be talking to right now: on the roster, online, a real
+// box (not the hub), and switched on. Every fan-out over the fleet funnels
+// through here — that's what makes "off" mean off everywhere.
+function machineIsLive(m) { return m && m.online && m.kind !== 'relay' && isMachineActive(m.id); }
+function liveMachines() { return machineList.filter(machineIsLive); }
+function cacheInactive() { try { localStorage.setItem(INACTIVE_KEY, JSON.stringify([...fleetInactive])); } catch {} }
+// Apply a set from the relay (its `prefs` frame). Returns the ids whose state
+// actually changed, so the caller can tear down / wake exactly those.
+function applyInactive(ids) {
+  const next = new Set(ids || []);
+  const changed = [];
+  for (const id of next) if (!fleetInactive.has(id)) changed.push(id);
+  for (const id of fleetInactive) if (!next.has(id)) changed.push(id);
+  fleetInactive = next;
+  cacheInactive();
+  return changed;
+}
+// Push our set to the relay, which persists it and echoes it to every device.
+function saveInactive() {
+  cacheInactive();
+  if (FLEET && ws && ws.readyState === 1 && relayAuthed) ws.send(JSON.stringify({ type: 'prefs', inactive: [...fleetInactive] }));
+}
+// Switch a machine on or off. Off tears the channel down and drops its cached
+// lists so nothing stale lingers in the rungs — but deliberately KEEPS the e2e
+// resume material, so switching it back on inside the 24h window re-attaches
+// silently instead of charging another passkey. Toggling is cheap on purpose.
+function setMachineActive(id, on) {
+  if (on) fleetInactive.delete(id); else fleetInactive.add(id);
+  saveInactive();
+  applyMachineActivation(id, on);
+}
+function applyMachineActivation(id, on) {
+  if (on) {
+    fleetBootstrap();
+  } else {
+    delete e2eChans[id];
+    delete perMachine[id];
+    if (cloneDefaultMachine() === id) setCloneDefaultMachine(null);
+    // Switching off the box you're currently inside: its session is gone from
+    // every list, so climb out rather than leave the tty pointed at a machine
+    // we've stopped talking to (a frozen terminal that never reconnects).
+    if (currentMachine === id) {
+      currentMachine = null; currentCid = null; currentProjectKey = null; currentPid = null;
+      term.reset(); feed.innerHTML = '';
+      setView('projects');
+    }
+  }
+  mergeProjects();
+  renderProjectRung();
+  if (!machinesModal.hidden) renderMachines(machineList);
+}
 let currentCid = null;          // session this browser is viewing
 let streamCid = null;           // session the server last bound this link to (from `hello`)
 let currentTitle = '';          // title of the viewed session (for the breadcrumb)
@@ -1693,7 +1760,7 @@ function handleRelay(m) {
   if (m.type === 'authRequired') { onAuthRequired(m); return; }
   if (m.type === 'authOk') {
     if (m.session) saveSession(m.session, m.expires);
-    hidePasskey(); meta.textContent = '';
+    hidePasskey('edge'); meta.textContent = '';   // only OUR prompt — never a machine's in-flight one
     // Open the auth gate so buffered toMachine frames (the e2e handshake) can flow.
     // The actual re-list + re-subscribe is driven from the `machines` frame the
     // relay sends right after authOk, so fleetResync() always runs with a fresh
@@ -1702,11 +1769,23 @@ function handleRelay(m) {
     setRelayAuthed();
     return;
   }
+  if (m.type === 'prefs') {
+    // The shared active-machines set. Arrives before the first roster on every
+    // connect (relay._send_prefs), and again whenever ANY device toggles a box —
+    // so a machine you switch off on the phone stops being talked to here too.
+    const changed = applyInactive(m.inactive);
+    if (!changed.length) return;
+    for (const id of changed) if (!isMachineActive(id)) applyMachineActivation(id, false);
+    if (changed.some(isMachineActive)) fleetBootstrap();   // switched ON elsewhere → open its channel here too
+    mergeProjects(); renderProjectRung();
+    if (!machinesModal.hidden) renderMachines(machineList);
+    return;
+  }
   if (m.type === 'pushOk') return;   // relay ack'd our subscription; nothing to repaint
   if (m.type === 'pong') { onPong(m.id); return; }   // relay-hop liveness pong (probe fell back — no open e2e channel)
   if (m.type === 'machines') {
-    hidePasskey();
-    setRelayAuthed();                 // a no-passkey relay hands us `machines` with no authOk — gate opens here
+    hidePasskey('edge');            // heartbeat roster: must NOT close a machine's live prompt
+    setRelayAuthed();               // a no-passkey relay hands us `machines` with no authOk — gate opens here
     const wasOnline = currentMachine ? isMachineOnline(currentMachine) : true;
     const prevOnline = {};            // per-machine, for the offline→online re-list below
     machineList.forEach(x => { prevOnline[x.id] = x.online; });
@@ -1718,7 +1797,7 @@ function handleRelay(m) {
     // viewed; the others' cached session lists used to stay frozen.
     if (alreadySynced)
       (m.machines || []).forEach(x => {
-        if (x.online && prevOnline[x.id] === false) scheduleRelist(x.id, 2000);
+        if (machineIsLive(x) && prevOnline[x.id] === false) scheduleRelist(x.id, 2000);
       });
     saveFleetCacheSoon();
     // A worker↔relay socket flap drops every viewer's harness link on that machine
@@ -1965,10 +2044,14 @@ function e2eGetAssertionNow(machine, challengeBytes) {
     btn.textContent = 'whisper the safe word 🔒';
     let firing = false;
     const fire = () => { if (firing) return; firing = true; meta.textContent = 'passkey…';
-      get().then(a => { el.hidden = true; resolve(a); })
+      get().then(a => { hidePasskey(machine); resolve(a); })
            .catch(() => { firing = false; meta.textContent = ''; });   // gesture needed → tap fires it
     };
     btn.onclick = fire;
+    // Claim the modal for THIS machine. Until we release it, neither the relay's
+    // 20s roster heartbeat nor an edge authOk can close it out from under the
+    // tap that's about to fire the assertion (see passkeyOwner).
+    passkeyOwner = machine;
     el.hidden = false;
     setTimeout(fire, REVEAL_MS);
   });
@@ -2050,7 +2133,7 @@ async function e2eEnsure(machine, opts = {}) {
     ch.chal = b64uEnc(challenge);                         // this attempt's identity, for err correlation
     e2eLog(machine, '#' + ch.inst, 'passkey prompt (challenge ' + ch.chal.slice(0, 12) + '…)');
     const assertion = await e2eGetAssertion(machine, challenge);      // Face ID, channel-bound
-    hidePasskey();
+    hidePasskey(machine);   // ours to close — the FIFO may already have raised the NEXT machine's
     ch.phase = 'auth';
     e2eSendCtlTracked(ch, machine, await build(assertion));          // ClientAuth
     e2eLog(machine, '#' + ch.inst, 'ClientAuth sent (challenge ' + b64uEnc(challenge).slice(0, 12) + '…)');
@@ -2068,6 +2151,7 @@ async function e2eEnsure(machine, opts = {}) {
   })().catch((e) => {
     e2eLog(machine, '#' + ch.inst, 'FAILED:', (e && e.message) || e);
     ch.status = 'failed'; ch.pendingCtl = null;
+    hidePasskey(machine);   // release the modal, else a dead handshake leaves it stuck over the app
     e2eFailUntil[machine] = Date.now() + E2E_FAIL_COOLDOWN_MS;   // no auto-retry storm; user gesture still retries
     if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
     else { meta.textContent = 'secure channel failed: ' + ((e && e.message) || e); console.error('[e2e] handshake failed for', machine, e); }
@@ -2207,6 +2291,7 @@ function hydrateFleetCache() {
   // dropping tabs. got* stay false — boot-landing still waits for live data.
   machineList = (snap.machineList || []).map(m => Object.assign({}, m, { online: false }));
   for (const id in snap.perMachine) {
+    if (!isMachineActive(id)) continue;   // don't repopulate a switched-off box from the cache
     const c = snap.perMachine[id] || {};
     perMachine[id] = { projectList: c.projectList || [], sessionList: c.sessionList || [],
                        sessionsAt: c.sessionsAt || 0, gotProjects: false, gotSessions: false };
@@ -2238,7 +2323,7 @@ function scheduleRelist(machine, delay) {
     st.timer = null;
     if (st.attempt >= 8) { st.attempt = 0; return; }   // give up — wake()'s sweep re-arms later
     st.attempt++;
-    if (isMachineOnline(machine) && canRelistSilently(machine)) {
+    if (isMachineOnline(machine) && isMachineActive(machine) && canRelistSilently(machine)) {
       e2eEnsure(machine, { auto: true, reason: 'relist' })
         .then(() => e2eSendFrame(machine, { type: 'list' })).catch(() => {});
     }
@@ -2254,7 +2339,7 @@ function relistSatisfied(machine) {
 function sweepStaleLists() {
   if (!FLEET || !relayAuthed) return;
   for (const m of machineList) {
-    if (!m.online || m.kind === 'relay') continue;
+    if (!machineIsLive(m)) continue;
     const pm = perMachine[m.id];
     const fresh = pm && pm.sessionsAt && Date.now() - pm.sessionsAt < LIST_STALE_MS;
     if (!fresh && canRelistSilently(m.id)) scheduleRelist(m.id, 0);
@@ -2342,15 +2427,32 @@ function setPmCookie(tok) {
 }
 
 let lastAuthReq = null;
-function showPasskey(msg) {
+// Who the single #passkey modal currently belongs to: 'edge' (the relay gate) or
+// a machineId (that box's E2E handshake). It exists because the modal is ONE
+// element serving two ceremonies, and the relay re-broadcasts the roster every
+// 20s as a liveness heartbeat — so the `machines` handler's blind hidePasskey()
+// used to yank the modal out from under a half-finished per-machine unlock. The
+// button that fires the assertion vanished, the handshake never completed, its
+// channel sat 'handshaking' forever, and the page stayed blank until a manual
+// reload — "I authed once, got a blank screen, had to reload for the rest".
+// Now a hide only lands if it comes from the ceremony that raised the modal.
+let passkeyOwner = null;
+function showPasskey(msg, owner = 'edge') {
   const el = document.getElementById('passkey');
   document.getElementById('passkeysub').textContent = msg;
   const btn = document.getElementById('passkeybtn');
   btn.textContent = 'whisper the safe word 🔒';
-  btn.onclick = () => { el.hidden = true; doAssertion(lastAuthReq); };
+  btn.onclick = () => { hidePasskey(); doAssertion(lastAuthReq); };
+  passkeyOwner = owner;
   el.hidden = false;
 }
-function hidePasskey() { const el = document.getElementById('passkey'); if (el) el.hidden = true; }
+// owner omitted = force (an explicit teardown by whoever raised it).
+function hidePasskey(owner) {
+  if (owner !== undefined && passkeyOwner && passkeyOwner !== owner) return;
+  passkeyOwner = null;
+  const el = document.getElementById('passkey');
+  if (el) el.hidden = true;
+}
 
 // A signed edge assertion whose ws.send may have died with the socket (iOS drops
 // it while the Face ID sheet is up). The relay accepts any challenge it issued in
@@ -2695,8 +2797,10 @@ function renderMachines(list) {
   machineList = list;
   machinesEl.innerHTML = '';
   const online = list.filter(m => m.online).length;
+  const off = list.filter(m => m.kind !== 'relay' && !isMachineActive(m.id)).length;
   const label = document.createElement('div');
-  label.className = 'menutitle'; label.textContent = `machines · ${online}/${list.length} online`;
+  label.className = 'menutitle';
+  label.textContent = `machines · ${online}/${list.length} online` + (off ? ` · ${off} off` : '');
   machinesEl.appendChild(label);
   if (!list.length) {
     const note = document.createElement('div');
@@ -2709,6 +2813,10 @@ function renderMachines(list) {
     // projects/sessions to drive. Show it for topology awareness, but as a muted,
     // non-clickable infra card (opening it would only hang on an empty list).
     const isRelay = m.kind === 'relay';
+    // Switched off: the page holds no channel to this box, so it costs no
+    // passkey and contributes no projects. The card stays here (dimmed) because
+    // this is the one place you can switch it back on.
+    const off = !isRelay && !isMachineActive(m.id);
     const card = document.createElement('div');
     // Read-only roster overview (no longer a navigable rung): the machine behind a
     // project is chosen via the per-project default + the sessions-rung select, not
@@ -2716,6 +2824,7 @@ function renderMachines(list) {
     card.className = 'scard ro' + (m.id === currentMachine ? ' active' : '') + (isRelay ? ' relay' : '');
     card.style.cursor = 'default';
     if (isRelay) card.style.opacity = '0.7';
+    else if (off) card.style.opacity = '0.5';
     const row = document.createElement('div'); row.className = 'row';
     const sdot = document.createElement('span');
     sdot.className = 'sdot' + (m.online ? '' : ' dead');
@@ -2724,8 +2833,8 @@ function renderMachines(list) {
     row.appendChild(sdot); row.appendChild(title);
     const tag = document.createElement('span');
     tag.className = 'scount';
-    tag.textContent = isRelay ? 'relay' : (m.online ? 'online' : 'offline');
-    if (isRelay) { tag.style.color = 'var(--dim)'; tag.style.borderColor = 'var(--edge)'; }
+    tag.textContent = isRelay ? 'relay' : off ? 'off' : (m.online ? 'online' : 'offline');
+    if (isRelay || off) { tag.style.color = 'var(--dim)'; tag.style.borderColor = 'var(--edge)'; }
     else if (m.online) { tag.style.color = 'var(--ok)'; tag.style.borderColor = '#22401f'; }
     else tag.style.color = 'var(--err)';
     row.appendChild(tag);
@@ -2759,10 +2868,27 @@ function renderMachines(list) {
       // Each metric is optional; a probe that failed on the box is just omitted.
       if (m.stats.sys) card.appendChild(renderSysStats(m.stats.sys));
     }
+    // The active switch. Unchecked = this browser opens no channel to the box,
+    // so it costs no passkey at dawn and shows no projects. Offered for offline
+    // machines too — switching one off while it's asleep is exactly how you stop
+    // it ambushing you with a prompt when it wakes. The setting lives on the
+    // relay, so this also unchecks it on your other devices.
+    if (!isRelay) {
+      const act = document.createElement('label');
+      act.className = 'cdefault' + (off ? '' : ' on');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = !off;
+      cb.onchange = () => setMachineActive(m.id, cb.checked);
+      const txt = document.createElement('span');
+      txt.textContent = off ? 'switched off · no passkey, no projects' : 'talk to this machine';
+      act.append(cb, txt);
+      act.title = 'unchecked: this machine is never contacted — one less passkey to unlock the fleet';
+      card.appendChild(act);
+    }
     // "Default for new repos": pin THIS host as the clone target the projects rung
     // uses, instead of letting it auto-pick the first online machine. A single global
     // choice — checking one box clears the others on re-render. Online machines only.
-    if (m.online) {
+    if (m.online && !off) {
       const isDef = cloneDefaultMachine() === m.id;
       const def = document.createElement('label');
       def.className = 'cdefault' + (isDef ? ' on' : '');
@@ -3036,6 +3162,10 @@ function currentProjectIsLocal() {
 function mergeProjects() {
   const map = new Map();
   for (const mid of Object.keys(perMachine)) {
+    // A switched-off machine contributes nothing — including from the hydrated
+    // localStorage cache, which would otherwise show its projects as ghosts we
+    // can't open and can't refresh.
+    if (!isMachineActive(mid)) continue;
     const online = isMachineOnline(mid);
     for (const p of (perMachine[mid].projectList || [])) {
       const key = projectKey(p, mid);
@@ -3105,9 +3235,11 @@ function projectGroup(key) {
 
 // Have all online machines reported their project list yet? Lets nav tell "still
 // loading" apart from "this project genuinely doesn't exist" for deep links.
+// (Switched-off machines are excluded: we will never talk to them, so waiting
+// on their reply would hang boot-landing and every deep link forever.)
 function allMachinesReplied() {
   if (!machineList.length) return false;
-  const online = machineList.filter(m => m.online && m.kind !== 'relay');
+  const online = liveMachines();
   if (!online.length) return true;
   return online.every(m => perMachine[m.id] && perMachine[m.id].gotProjects);
 }
@@ -3115,7 +3247,7 @@ function allMachinesReplied() {
 // before it can pick the most-important session across the whole fleet.
 function allMachinesSessions() {
   if (!machineList.length) return false;
-  const online = machineList.filter(m => m.online && m.kind !== 'relay');
+  const online = liveMachines();
   if (!online.length) return true;
   return online.every(m => perMachine[m.id] && perMachine[m.id].gotSessions);
 }
@@ -3139,9 +3271,9 @@ function setCloneDefaultMachine(id) { try { id ? localStorage.setItem(CLONE_DEFA
 // select's 'default/all' option so the target is visible before you click).
 function defaultCreateMachine() {
   const pref = cloneDefaultMachine();
-  if (pref && isMachineOnline(pref)) return pref;
-  if (currentMachine && isMachineOnline(currentMachine)) return currentMachine;
-  const on = machineList.find(m => m.online && m.kind !== 'relay');
+  if (pref && isMachineOnline(pref) && isMachineActive(pref)) return pref;
+  if (currentMachine && isMachineOnline(currentMachine) && isMachineActive(currentMachine)) return currentMachine;
+  const on = liveMachines()[0];
   return on ? on.id : null;
 }
 function pickMachineEntry(g) {
@@ -3196,7 +3328,10 @@ async function fleetBootstrap() {
   if (!FLEET || bootstrapping) return;
   bootstrapping = true;
   try {
-    const live = machineList.filter(m => m.online && m.kind !== 'relay');
+    // Switched-off machines are skipped outright — no channel, no passkey. This
+    // one filter is the feature: everything else below is bookkeeping so an
+    // off machine doesn't leave ghosts in the rungs.
+    const live = liveMachines();
     // Resumable machines first: they re-attach with no passkey, so the common case
     // (everything seen within the resume TTL) loads instantly and silently. Machines
     // needing a fresh safe-word come last and one at a time, so a pending prompt
@@ -3272,9 +3407,9 @@ function ensureTargetMachine() {
   // An explicit clone default (set via the machine roster checkbox) wins outright —
   // that's the whole point of pinning one: deterministic host for new repos.
   const pref = cloneDefaultMachine();
-  if (pref && isMachineOnline(pref)) { currentMachine = pref; e2eEnsure(pref, { reason: 'target' }).catch(() => {}); return true; }
-  if (currentMachine && isMachineOnline(currentMachine)) return true;
-  const on = machineList.find(m => m.online && m.kind !== 'relay');
+  if (pref && isMachineOnline(pref) && isMachineActive(pref)) { currentMachine = pref; e2eEnsure(pref, { reason: 'target' }).catch(() => {}); return true; }
+  if (currentMachine && isMachineOnline(currentMachine) && isMachineActive(currentMachine)) return true;
+  const on = liveMachines()[0];
   if (!on) { meta.textContent = 'no online machine to host a new project'; return false; }
   currentMachine = on.id;
   e2eEnsure(on.id, { reason: 'target' }).catch(() => {});
@@ -4019,10 +4154,11 @@ function renderAccountsBody() {
   if (!FLEET) {
     section('this machine', true, accountsInfo, 'local');
   } else {
-    const machines = machineList.filter(m => m.kind !== 'relay');
+    const machines = machineList.filter(m => m.kind !== 'relay' && isMachineActive(m.id));
     if (!machines.length) {
       const h = document.createElement('div'); h.className = 'ahint2';
-      h.textContent = 'no machines connected yet';
+      h.textContent = machineList.length ? 'every machine is switched off — turn one on in 🖥️ machines'
+                                         : 'no machines connected yet';
       body.appendChild(h);
     }
     // freshest usage check first — the top section is the one whose numbers
@@ -4042,9 +4178,7 @@ function openAccounts() {
   renderAccountsBody();
   // freshen the meters on open (forced poll, cheap)
   if (!FLEET) hsend({ type: 'accountsRefresh' });
-  else machineList.forEach(m => {
-    if (m.online && m.kind !== 'relay') hsendTo(m.id, { type: 'accountsRefresh' });
-  });
+  else liveMachines().forEach(m => hsendTo(m.id, { type: 'accountsRefresh' }));
 }
 
 // Direct mode entry point: a `projects` frame for the (single) local harness.
@@ -4095,8 +4229,8 @@ function renderProjectRung() {
   let msel = null;
   if (FLEET) {
     msel = document.createElement('select');
-    const workers = machineList.filter(m => m.kind !== 'relay');
-    if (projMachine && !workers.some(m => m.id === projMachine)) projMachine = '';  // picked box left the roster
+    const workers = machineList.filter(m => m.kind !== 'relay' && isMachineActive(m.id));
+    if (projMachine && !workers.some(m => m.id === projMachine)) projMachine = '';  // picked box left the roster (or was switched off)
     const defName = defaultCreateMachine();
     const all = document.createElement('option');
     all.value = '';
@@ -4575,6 +4709,7 @@ function allSessions() {
   if (!FLEET) return sessionList.map(s => Object.assign({ _machine: null, _pkey: null }, s));
   const out = [];
   for (const mid of Object.keys(perMachine)) {
+    if (!isMachineActive(mid)) continue;   // switched off: no tabs, no pins, never the boot landing
     for (const s of ((perMachine[mid] || {}).sessionList || []))
       out.push(Object.assign({ _machine: mid, _pkey: projectKeyForSession(mid, s.pid) }, s));
   }
@@ -6207,6 +6342,17 @@ function resolvePendingNav() {
 // roster + enough machines to reply, tell "still loading" apart from "gone", and
 // re-point the machine when the named session lives off the default.
 function resolvePendingNavFleet(nav) {
+  // A link that NAMES a switched-off machine (a notification tap, a shared URL,
+  // a reload of a tab that was open on it) is an explicit "I want that box" —
+  // so it wins over the checkbox: switch the machine back on, persist it, and
+  // let the resolve re-run once its projects land. Without this the deep link
+  // would resolve against a merged list the machine isn't in and bounce you to
+  // the projects rung, which reads as a broken notification.
+  if (nav.machine && !isMachineActive(nav.machine)) {
+    e2eLog(nav.machine, 'deep link to a switched-off machine — switching it on');
+    setMachineActive(nav.machine, true);
+    meta.textContent = 'waking ' + nav.machine + '…';
+  }
   if (isHomeRoute(nav)) {                                    // boot default-landing: warmest session across the fleet
     if (machineList.length && allMachinesSessions()) landHome();
     return;                                                 // else keep waiting for the rosters

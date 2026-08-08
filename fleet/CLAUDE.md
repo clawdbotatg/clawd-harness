@@ -33,6 +33,32 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     The relay needs **no** crypto for this (blind passthrough); `cryptography`
 >     is a **worker-only** dep. Tests: `test_e2e.py`, `test_e2e_mitm.py`,
 >     `test_e2e_interop.py` (Python↔browser byte-for-byte via `node`).
+>   - ***Active machines* — the passkey budget** (2026-08-08). "One per machine
+>     per day" MULTIPLIES: N boxes on the roster = **N+1 ceremonies** every
+>     morning (the edge gate plus one E2E handshake each), even when you only
+>     wanted one box. So a machine can be **switched off** from the machines tab:
+>     the page then opens no channel to it, sends it nothing, merges none of its
+>     projects/sessions, and never prompts for it. The set is a **deny-list stored
+>     on the relay** (`{type:"prefs", inactive:[…]}` in both directions,
+>     persisted to `.clawd-fleet.prefs.json`) rather than in localStorage, because
+>     unchecking on the phone has to take effect on the desktop too.
+>     **Frame ordering is load-bearing:** the relay sends `prefs` *before* a
+>     mobile's first `machines` frame (`_send_prefs`) — the page kicks its
+>     handshakes off the roster, so a roster that arrived first would unlock the
+>     very boxes you switched off. Unknown machine = ON, so a new box needs no
+>     config. Switching one off KEEPS its e2e resume material, so switching it
+>     back on inside the 24h window is silent. A deep link that NAMES an off
+>     machine (a notification tap) switches it back on — explicit navigation beats
+>     the checkbox. Tests: `test_relay_prefs.py` (server),
+>     `../tools/fleetprobe.mjs` (client).
+>   - **The passkey modal is ONE element with TWO owners** (`passkeyOwner` in
+>     `index.html`): the edge gate, and each machine's handshake. The relay
+>     re-broadcasts the roster every `PING_EVERY` (20s) as a liveness heartbeat,
+>     and the `machines` handler used to `hidePasskey()` blindly — which yanked a
+>     half-finished per-machine unlock off the screen mid-tap, stranded its
+>     channel in `handshaking` forever, and left the page blank until a manual
+>     reload. Every `hidePasskey()` call site must now NAME its owner; an
+>     unqualified call is a force-hide and should be rare.
 > - **Live at `wss://h.atg.link`** (its own subdomain → the box). The relay serves
 >   the unified `index.html` there. (The earlier `relay.atg.link` subdomain was
 >   retired 2026-06 — DNS + cert still exist on the box but its nginx vhost is
@@ -47,7 +73,9 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >   reverted — archived on `archive/react-scaffold-eth`).
 > - New files: `webauthn.py`, `e2e.py` (E2E channel crypto), `test_webauthn.py`,
 >   `test_relay_passkey.py`, `test_e2e.py`, `test_e2e_mitm.py`, `test_e2e_interop.py`,
->   `.fleet.worker_id.json` (worker identity key, gitignored).
+>   `test_relay_prefs.py` (the active-machines set), `.fleet.worker_id.json`
+>   (worker identity key, gitignored), `.clawd-fleet.prefs.json` (the
+>   active-machines set, gitignored).
 
 ## The one principle that must not regress
 **The `fleet/` layer never modifies or imports the harness.** The harness
@@ -124,6 +152,9 @@ Corollary directions baked into the design:
 - Local loop: `python3 relay.py` + `python3 worker.py --machine X` + `python3 fleet_cli.py`.
 - `python3 fleet_smoke.py` — prototype loop assertion (exits non-zero on failure).
 - `python3 fleet_proxy_smoke.py` — harness-proxy loop assertion (mock harness).
+- `python3 test_relay_prefs.py` — the shared active-machines set: `prefs` before
+  the first roster, echoed to every device, persisted, sanitized. Run after
+  touching prefs or the mobile auth path. Client half: `cd ../tools && node fleetprobe.mjs`.
 - Env: `FLEET_MOBILE_TOKEN` + `FLEET_WORKER_TOKEN` (auth; both fall back to
   `FLEET_TOKEN`, then `.clawd-fleet.token`), `FLEET_WORKER_ALLOW` (csv machine
   allowlist), `FLEET_ALLOW_EXEC=1` (enable the `exec` diagnostic, off by default),

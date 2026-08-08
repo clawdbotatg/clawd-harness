@@ -23,8 +23,10 @@ Protocol (all JSON text frames):
     (handshake via query: ?role=mobile&t=<token>)
     {type:"list"}                               # ask for the machine roster
     {type:"ping", id:N}                         # app-level liveness probe (answered pre-auth)
+    {type:"prefs", inactive:[<machineId>,…]}    # set the "switched off" machines (shared across devices)
     {type:"toMachine", machine:<id|"*">, msg:{...}}
   relay→mobile:
+    {type:"prefs", inactive:[<machineId>,…]}    # ALWAYS sent before the first `machines` (see _send_prefs)
     {type:"machines", machines:[{id,host,kind,online,lastSeen,stats:{projects,sessions,active,sys?}|null}]}
         # sent on join/leave AND every PING_EVERY as a JS-visible heartbeat (authed mobiles only)
     {type:"machineMsg", machine:<id>, msg:{...}}
@@ -198,6 +200,50 @@ def save_push_subs(subs):
     with _push_lock:
         try:
             PUSH_SUBS_FILE.write_text(json.dumps(subs))
+        except Exception:
+            pass
+
+
+# ── fleet prefs (the "active machines" set) ─────────────────────────────────
+# One shared blob of user preference, keyed to nothing: this relay has exactly
+# one enrolled human. It exists so unchecking a machine on the phone also
+# unchecks it on the desktop — the whole point of the feature is that the set of
+# boxes you talk to (and therefore the number of passkeys you pay at dawn)
+# follows you, instead of being re-tuned on every device.
+#
+# `inactive` is a DENY-list, not an allow-list: a machine nobody has ever heard
+# of is ACTIVE. That way adding a box to the fleet needs no config to become
+# usable, and an empty/missing file means "everything on" — exactly the
+# behaviour that predates this feature.
+PREFS_FILE = Path(os.environ.get("FLEET_PREFS_FILE") or (HERE / ".clawd-fleet.prefs.json"))
+_prefs_lock = threading.Lock()
+MAX_INACTIVE = 128       # a fleet is tens of boxes; this is a disk-abuse bound
+MAX_MACHINE_ID = 64
+
+
+def clean_inactive(ids):
+    """Sanitize a client-supplied deny-list before it reaches disk. This is the
+    one place a mobile writes persistent state on a shared production box, so
+    it's bounded and typed rather than trusted."""
+    out = []
+    for x in (ids or [])[:MAX_INACTIVE]:
+        if isinstance(x, str) and 0 < len(x) <= MAX_MACHINE_ID and x not in out:
+            out.append(x)
+    return out
+
+
+def load_prefs():
+    try:
+        raw = json.loads(PREFS_FILE.read_text())
+        return {"inactive": clean_inactive(raw.get("inactive"))}
+    except Exception:
+        return {"inactive": []}
+
+
+def save_prefs(prefs):
+    with _prefs_lock:
+        try:
+            PREFS_FILE.write_text(json.dumps(prefs))
         except Exception:
             pass
 
@@ -409,6 +455,7 @@ class Relay:
         self.uploads = {}   # upload_id -> {"event":Event, "result":dict|None}
         self.upload_seq = 0
         self.push_subs = load_push_subs()   # phone Web Push subscriptions (opaque)
+        self.prefs = load_prefs()           # {"inactive":[machineId,…]} — see load_prefs
 
     # ── image upload bridge (HTTP POST → worker over WS → harness → back) ─────
     def new_upload(self):
@@ -437,6 +484,28 @@ class Relay:
                      "online": not w.dead,
                      "lastSeen": int(w.last_seen), "stats": w.stats}
                     for w in self.workers.values()]
+
+    # ── prefs (active machines) ─────────────────────────────────────────────
+    # Always delivered BEFORE the first roster: the page starts its per-machine
+    # E2E handshakes (and therefore its passkey prompts) off the `machines`
+    # frame, so a roster that arrives first would unlock boxes the user had
+    # switched off — the exact prompt storm this feature exists to stop.
+    def _prefs_msg(self):
+        with self.lock:
+            return {"type": "prefs", "inactive": list(self.prefs.get("inactive") or [])}
+
+    def _send_prefs(self, conn):
+        conn.send_json(self._prefs_msg())
+
+    def broadcast_prefs(self):
+        """Fan the set to every authed mobile so unchecking on the phone lands on
+        the desktop too (this is why prefs live here and not in localStorage)."""
+        msg = self._prefs_msg()
+        with self.lock:
+            mobiles = list(self.mobiles.values())
+        for m in mobiles:
+            if m.mfa_ok:
+                m.send_json(msg)
 
     def broadcast_roster(self):
         msg = {"type": "machines", "machines": self.roster()}
@@ -481,6 +550,7 @@ class Relay:
             old.close()
         print(f"[relay] mobile online: {conn.ident} [{conn.peer}]", flush=True)
         if conn.mfa_ok:
+            self._send_prefs(conn)
             conn.send_json({"type": "machines", "machines": self.roster()})
         else:
             conn.send_json(self._auth_challenge(conn))
@@ -542,6 +612,7 @@ class Relay:
                     mobile.mfa_ok = True
                     mobile.auth_until = exp
                     mobile.send_json({"type": "authOk"})
+                    self._send_prefs(mobile)
                     mobile.send_json({"type": "machines", "machines": self.roster()})
                 else:
                     mobile.send_json(self._auth_challenge(mobile, reason="expired"))
@@ -569,6 +640,7 @@ class Relay:
                 tok, exp = new_session(SESSION_TTL)
                 print(f"[relay] mobile authed: {mobile.ident}", flush=True)
                 mobile.send_json({"type": "authOk", "session": tok, "expires": int(exp * 1000)})
+                self._send_prefs(mobile)
                 mobile.send_json({"type": "machines", "machines": self.roster()})
             else:
                 print(f"[relay] mobile auth rejected ({reason}): {mobile.ident}", flush=True)
@@ -588,7 +660,22 @@ class Relay:
             return
 
         if t == "list":
+            self._send_prefs(mobile)
             mobile.send_json({"type": "machines", "machines": self.roster()})
+            return
+        if t == "prefs":
+            # The user checked/unchecked a machine. Store the whole deny-list
+            # (last writer wins — it's one human on one account, not a CRDT) and
+            # echo it to EVERY authed mobile including the sender: the sender
+            # treats the echo as the ack, so a write that never reaches disk
+            # never silently looks applied.
+            inactive = clean_inactive(frame.get("inactive"))
+            with self.lock:
+                self.prefs["inactive"] = inactive
+                snapshot = dict(self.prefs)
+            save_prefs(snapshot)
+            self.broadcast_prefs()
+            print(f"[relay] prefs: {len(inactive)} machine(s) switched off", flush=True)
             return
         if t == "pushSubscribe":
             # The phone enabled notifications: store its (opaque) Web Push

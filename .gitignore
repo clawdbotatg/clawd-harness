@@ -25,6 +25,7 @@ fleet/.clawd-fleet.machine
 fleet/.clawd-fleet.passkeys.json
 fleet/.clawd-fleet.vapid.json
 fleet/.clawd-fleet.push-subs.json
+fleet/.clawd-fleet.prefs.json
 fleet/.fleet.worker_id.json
 fleet/.fleet.e2e_resume.json
 fleet/.fleet.e2e_resume.json.tmp
@@ -54,6 +55,7 @@ tools/uiprobe.png
 tools/acctprobe.png
 tools/navprobe.png
 tools/pmprobe.png
+tools/fleetprobe.png
 
 # ⚙️ settings page probe shot
 tools/settings.png

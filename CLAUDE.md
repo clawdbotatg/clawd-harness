@@ -115,6 +115,15 @@ user-facing overview; this file orients an agent working **on** the code.
   that *sent* it rather than whichever one you switched to. Guards the 2026-08-08
   "PM tab freezes while it's thinking" bug from the client side;
   `controller/test_pm_responsive.py` guards the server side.
+- **`tools/fleetprobe.mjs`** — the same idea for **fleet mode**, which uiprobe
+  can't reach (it drives the harness directly, where `FLEET` is false). It reads
+  `index.html` off disk with the relay's own `__FLEET__` injection and stubs
+  `window.WebSocket`, so it needs no relay, no worker and no passkey, and nothing
+  leaves the machine. Asserts the two things that decide how many passkeys you
+  pay at dawn: a **switched-off machine receives zero frames** (see "active
+  machines" in `fleet/CLAUDE.md`), and the relay's 20s roster heartbeat **can't
+  close a machine's in-flight passkey modal**. `fleet/test_relay_prefs.py`
+  guards the server half.
 
 ## Architecture (one server, multi-project, multi-session)
 - **server.py** — a `SessionManager` owns N `Project`s and N `ClaudeSession`s.
