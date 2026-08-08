@@ -91,6 +91,48 @@ if (!noProj.cards)              { console.log('FAIL: sessions rung listed nothin
 if (!noProj.sessionTabs)        { console.log('FAIL: no session tabs visible'); bad = 1; }
 console.log(bad ? 'FAILED' : 'PASS — 💬 shows sessions with no project selected');
 
+// ⚙️ settings page: opens, lists the notifications row, closes on Esc.
+await page.click('#settingsBtn');
+await page.waitForTimeout(500);
+const setOpen = await page.evaluate(() => ({
+  open: !document.getElementById('settingsmodal').hidden,
+  rows: [...document.querySelectorAll('#settingsbody .setrow')].map(r => ({
+    t: r.querySelector('.set-t').textContent,
+    ctl: r.querySelector('.settoggle').textContent,
+    disabled: r.querySelector('.settoggle').disabled,
+  })),
+}));
+console.log('⚙️ settings:           ', JSON.stringify(setOpen));
+
+// Direct mode reports push "unavailable" (fleet-only), so the real on/off control
+// never renders here. Build both states directly to check the control itself —
+// which branch gets picked is separately covered by the reads above.
+const toggleLook = await page.evaluate(() => {
+  const out = [];
+  for (const on of [true, false]) {
+    const r = settingRow('notifications', 'x', { label: on ? 'on' : 'off', on, onToggle: () => {} });
+    document.getElementById('settingsbody').appendChild(r);
+    const b = r.querySelector('.settoggle');
+    out.push({ label: b.textContent, on: b.classList.contains('on'), disabled: b.disabled });
+  }
+  return out;
+});
+console.log('  toggle states:       ', JSON.stringify(toggleLook));
+if (toggleLook[0].label !== 'on' || !toggleLook[0].on || toggleLook[0].disabled) {
+  console.log('FAIL: "on" toggle did not render as an enabled, lit control'); bad = 1;
+}
+if (toggleLook[1].label !== 'off' || toggleLook[1].on) {
+  console.log('FAIL: "off" toggle rendered wrong'); bad = 1;
+}
+await page.screenshot({ path: join(HERE, 'settings.png') });
+await page.keyboard.press('Escape');
+await page.waitForTimeout(300);
+const setClosed = await page.evaluate(() => document.getElementById('settingsmodal').hidden);
+if (!setOpen.open)                       { console.log('FAIL: ⚙️ did not open'); bad = 1; }
+if (setOpen.rows[0]?.t !== 'notifications') { console.log('FAIL: no notifications row'); bad = 1; }
+if (!setClosed)                          { console.log('FAIL: Esc did not close settings'); bad = 1; }
+console.log(bad ? 'FAILED' : 'PASS — settings page opens, lists notifications, closes on Esc');
+
 await page.screenshot({ path: join(HERE, 'navprobe.png') });
 console.log('screenshot -> tools/navprobe.png');
 await browser.close();

@@ -513,18 +513,18 @@
      presentation (header strip + scrolling card grid) so the two 🧠/🖥️ buttons
      open the same shape of thing. `#machinelist` doubles as the machines body,
      so it overrides the rung-list rule above (id+id beats the single id). */
-  #accountsmodal, #machinesmodal { position:fixed; inset:0; background:var(--bg); z-index:50;
+  #accountsmodal, #machinesmodal, #settingsmodal { position:fixed; inset:0; background:var(--bg); z-index:50;
                    display:flex; flex-direction:column; }
-  #accountsmodal[hidden], #machinesmodal[hidden] { display:none; }
-  #acctshead, #machshead { display:flex; align-items:center; gap:14px; padding:14px 22px;
+  #accountsmodal[hidden], #machinesmodal[hidden], #settingsmodal[hidden] { display:none; }
+  #acctshead, #machshead, #setshead { display:flex; align-items:center; gap:14px; padding:14px 22px;
                border-bottom:1px solid var(--edge); flex:0 0 auto; }
-  #acctshead .bico, #machshead .bico { font-size:22px; }
-  #acctshead .ah-t, #machshead .ah-t { font-weight:700; font-size:15px; }
-  #acctshead .ah-s, #machshead .ah-s { color:var(--dim); font-size:11px; margin-top:2px; }
-  #acctshead .spacer, #machshead .spacer { flex:1; }
-  #accountsclose, #machinesclose { background:transparent; border:1px solid var(--edge); color:var(--dim);
+  #acctshead .bico, #machshead .bico, #setshead .bico { font-size:22px; }
+  #acctshead .ah-t, #machshead .ah-t, #setshead .ah-t { font-weight:700; font-size:15px; }
+  #acctshead .ah-s, #machshead .ah-s, #setshead .ah-s { color:var(--dim); font-size:11px; margin-top:2px; }
+  #acctshead .spacer, #machshead .spacer, #setshead .spacer { flex:1; }
+  #accountsclose, #machinesclose, #settingsclose { background:transparent; border:1px solid var(--edge); color:var(--dim);
                    padding:7px 12px; font-size:13px; }
-  #accountsclose:hover, #machinesclose:hover { color:var(--ink); border-color:var(--edge-hi); }
+  #accountsclose:hover, #machinesclose:hover, #settingsclose:hover { color:var(--ink); border-color:var(--edge-hi); }
   #accountsbody, #machinesmodal #machinelist {
                   flex:1; min-height:0; overflow-y:auto; padding:20px 22px 44px;
                   max-width:none; align-self:auto;
@@ -536,6 +536,28 @@
   #machinesmodal #machinelist > .scard { align-self:start; }
   @media (max-width:740px) {
     #accountsbody, #machinesmodal #machinelist { grid-template-columns:1fr; padding:14px 12px 44px; }
+  }
+  /* ⚙️ settings: same full-page shell as 🧠/🖥️, but a single readable column of
+     rows rather than a card grid — settings are a list you scan top to bottom,
+     not a set of peers to compare side by side. */
+  #settingsbody { flex:1; min-height:0; overflow-y:auto; padding:20px 22px 44px;
+                  display:flex; flex-direction:column; gap:12px;
+                  width:100%; max-width:720px; }
+  .setrow { display:flex; align-items:center; gap:16px;
+            border:1px solid var(--edge); background:var(--panel); padding:14px 16px; }
+  .setrow.off { opacity:.6; }                 /* setting not available here */
+  .setrow .setmain { flex:1; min-width:0; }
+  .setrow .set-t { font-size:13px; font-weight:600; }
+  .setrow .set-s { color:var(--dim); font-size:11px; margin-top:3px; line-height:1.45; }
+  .settoggle { flex:0 0 auto; background:transparent; border:1px solid var(--edge); color:var(--dim);
+               padding:7px 14px; font-size:12px; font-family:var(--mono); text-transform:lowercase;
+               letter-spacing:.04em; white-space:nowrap; cursor:pointer; }
+  .settoggle:hover { color:var(--ink); border-color:var(--edge-hi); }
+  .settoggle.on { color:var(--ok); border-color:var(--ok); }
+  .settoggle:disabled { opacity:.45; cursor:default; }
+  @media (max-width:740px) {
+    #settingsbody { padding:14px 12px 44px; }
+    .setrow { gap:12px; }
   }
   .amach-sec { border:1px solid var(--edge); background:var(--panel); padding:14px 16px 16px; }
   .amach-sec.offline { opacity:.55; }
@@ -742,15 +764,15 @@
     <span class="meta" id="meta">connecting…</span>
     <span class="spacer"></span>
     <!-- one control strip, left→right: projects · sessions · machines · subscriptions
-         · PM · pins · reload. All the same square emoji chip (.hbtn); only 📌 carries
-         a count. -->
+         · PM · pins · settings · reload. All the same square emoji chip (.hbtn);
+         only 📌 carries a count. -->
     <button id="projectsBtn" class="hbtn" title="All projects"><span class="bico">🗂️</span></button>
     <button id="menuBtn" class="hbtn" title="Sessions in this project"><span class="bico">💬</span></button>
     <button id="machinesBtn" class="hbtn" title="Fleet machines"><span class="bico">🖥️</span></button>
     <button id="accountsBtn" class="hbtn" title="Claude subscription accounts — headroom & sign-in"><span class="bico">🧠</span></button>
-    <button id="notifyBtn" class="hbtn" title="Notify me when a session needs me" hidden><span class="bico">🔔</span></button>
     <button id="status" class="hbtn" title="Fleet PM — click to open"><span class="bico">👩‍💼</span></button>
     <button id="pinsBtn" class="hbtn" title="Pin board — sessions parked to check on later"><span class="bico">📌</span><span class="pincount" hidden></span></button>
+    <button id="settingsBtn" class="hbtn" title="Settings"><span class="bico">⚙️</span></button>
     <button id="reloadBtn" class="hbtn" title="Reload (recover a blank screen)"><span class="bico">🔄</span></button>
   </header>
   <div id="sessionbar" hidden></div>
@@ -792,6 +814,18 @@
       <button id="accountsclose" title="Back to the app">✕ close</button>
     </div>
     <div id="accountsbody"></div>
+  </div>
+  <div id="settingsmodal" hidden>
+    <div id="setshead">
+      <span class="bico">⚙️</span>
+      <div>
+        <div class="ah-t">settings</div>
+        <div class="ah-s">how this device behaves — stored per browser, not per machine</div>
+      </div>
+      <span class="spacer"></span>
+      <button id="settingsclose" title="Back to the app">✕ close</button>
+    </div>
+    <div id="settingsbody"></div>
   </div>
   <div id="login" hidden>
     <div class="qrcard">
@@ -1668,7 +1702,7 @@ function handleRelay(m) {
     setRelayAuthed();
     return;
   }
-  if (m.type === 'pushOk') { reflectNotifyBtn(); return; }
+  if (m.type === 'pushOk') return;   // relay ack'd our subscription; nothing to repaint
   if (m.type === 'pong') { onPong(m.id); return; }   // relay-hop liveness pong (probe fell back — no open e2e channel)
   if (m.type === 'machines') {
     hidePasskey();
@@ -2564,34 +2598,19 @@ const machinesEl = document.getElementById('machinelist');
 const machinesBtn = document.getElementById('machinesBtn');
 
 // ── Web Push: "ring me when a session needs me" ──────────────────────────────
-// A header bell opts you in. iOS only allows this for an INSTALLED PWA (Add to
-// Home Screen) and only from a user gesture — so the button is gated on feature
-// support + fleet mode and does the permission ask on click. The subscription is
-// registered with the relay over the authed WS as a RAW frame (not toMachine);
-// the relay fans it to the workers, which send the bodyless tickle. sw.js shows
-// the banner. Direct mode has no push sender, so this is fleet-only.
-const notifyBtn = document.getElementById('notifyBtn');
+// iOS only allows this for an INSTALLED PWA (Add to Home Screen) and only from a
+// user gesture, so opting IN has to ride a click. The subscription is registered
+// with the relay over the authed WS as a RAW frame (not toMachine); the relay
+// fans it to the workers, which send the bodyless tickle. sw.js shows the banner.
+// Direct mode has no push sender, so this is fleet-only.
+//
+// The on/off switch is the first row of the ⚙️ settings page (renderSettings),
+// not a header bell — the top-right strip is a fixed set of controls and a
+// conditional extra one kept breaking it. enableNotifications() is called
+// straight from that row's click, which is the user gesture iOS requires.
 const PUSH_ON_KEY = 'cc_push_on';
-const PUSH_UI_KEY = 'cc_push_ui';   // '1' → show the bell even when alerts are off
 const pushSupported = FLEET && 'serviceWorker' in navigator
   && 'PushManager' in window && 'Notification' in window;
-
-function reflectNotifyBtn() {
-  if (!notifyBtn) return;
-  if (!pushSupported) { notifyBtn.hidden = true; return; }
-  const perm = Notification.permission;
-  const on = perm === 'granted' && localStorage.getItem(PUSH_ON_KEY) === '1';
-  // Header real estate is scarce on a phone. The bell only earns its slot once
-  // alerts are actually ON (so the off-switch is never orphaned); to opt in the
-  // first time, run localStorage.setItem('cc_push_ui','1') in the console.
-  if (!on && localStorage.getItem(PUSH_UI_KEY) !== '1') { notifyBtn.hidden = true; return; }
-  notifyBtn.hidden = false;
-  notifyBtn.classList.toggle('on', on);
-  notifyBtn.querySelector('.bico').textContent = (perm === 'denied') ? '🔕' : '🔔';
-  notifyBtn.title = perm === 'denied'
-    ? 'Notifications blocked — enable for this site in iOS Settings'
-    : (on ? 'Alerts on — tap to turn off' : 'Notify me when a session needs me');
-}
 
 function urlB64ToUint8(b64) {
   const pad = '='.repeat((4 - b64.length % 4) % 4);
@@ -2607,7 +2626,7 @@ function sendPushSubscription(sub) {
 async function enableNotifications() {
   try {
     const perm = await Notification.requestPermission();   // must ride the click gesture
-    if (perm !== 'granted') { reflectNotifyBtn(); return; }
+    if (perm !== 'granted') { meta.textContent = 'notifications not granted'; return; }
     const reg = await navigator.serviceWorker.ready;
     const r = await fetch('/push/vapidPublicKey', { cache: 'no-store' });
     const key = (await r.json()).key || '';
@@ -2617,7 +2636,7 @@ async function enableNotifications() {
       userVisibleOnly: true, applicationServerKey: urlB64ToUint8(key) });
     localStorage.setItem(PUSH_ON_KEY, '1');
     sendPushSubscription(sub);
-    reflectNotifyBtn();
+    meta.textContent = 'alerts on';
   } catch (e) { meta.textContent = 'notif error: ' + ((e && e.message) || e); }
 }
 
@@ -2629,7 +2648,7 @@ async function disableNotifications() {
     if (sub && ws && ws.readyState === 1)
       ws.send(JSON.stringify({ type: 'pushUnsubscribe', endpoint: sub.endpoint }));
   } catch {}
-  reflectNotifyBtn();
+  meta.textContent = 'alerts off';
 }
 
 // Re-send our existing subscription after each (re)auth so a restarted relay
@@ -2644,11 +2663,6 @@ async function syncPushSubscription() {
     if (sub) sendPushSubscription(sub);
   } catch {}
 }
-
-if (notifyBtn) notifyBtn.onclick = () =>
-  (Notification.permission === 'granted' && localStorage.getItem(PUSH_ON_KEY) === '1')
-    ? disableNotifications() : enableNotifications();
-reflectNotifyBtn();
 
 // Compact CPU/RAM/disk/GPU line for a machine card. Each metric: a label, a tiny
 // proportional bar, and "% (used/total)". Bar tints amber→red as it fills, so a
@@ -6472,6 +6486,67 @@ document.getElementById('accountsclose').onclick = () => { accountsModal.hidden 
 document.getElementById('accountsBtn').onclick = () => openAccounts();   // 🧠 subscriptions page
 document.getElementById('machinesclose').onclick = () => { machinesModal.hidden = true; };
 
+// -- ⚙️ settings page (the gear button) ---------------------------------------
+// Same full-page shell as 🖥️/🧠. Everything here is DEVICE state (localStorage +
+// browser permissions), not fleet state — that's why the subtitle says so: an
+// alert toggled on your phone has no effect on the laptop's browser.
+// Rows are built by renderSettings() so each one can reflect live permission
+// state; add the next setting as another builder call in there.
+const settingsModal = document.getElementById('settingsmodal');
+const settingsBody = document.getElementById('settingsbody');
+
+// One row: title, explanation, and a right-hand control. A null onToggle renders
+// the control disabled — the setting exists but isn't available on this device,
+// which is worth showing (and explaining) rather than hiding.
+function settingRow(title, sub, { label, on = false, disabled = false, onToggle = null }) {
+  const row = document.createElement('div');
+  row.className = 'setrow' + (disabled ? ' off' : '');
+  const main = document.createElement('div'); main.className = 'setmain';
+  const t = document.createElement('div'); t.className = 'set-t'; t.textContent = title;
+  const s = document.createElement('div'); s.className = 'set-s'; s.textContent = sub;
+  main.append(t, s);
+  const btn = document.createElement('button');
+  btn.className = 'settoggle' + (on ? ' on' : '');
+  btn.textContent = label;
+  btn.disabled = disabled || !onToggle;
+  if (onToggle) btn.onclick = () => onToggle();
+  row.append(main, btn);
+  return row;
+}
+
+function renderSettings() {
+  settingsBody.innerHTML = '';
+
+  // ── notifications ──────────────────────────────────────────────────────────
+  // Web push. Fleet-only (direct mode has no push sender) and, on iOS, only for
+  // an installed PWA. Turning it ON must ride the click gesture, which it does:
+  // this button IS the gesture.
+  const perm = ('Notification' in window) ? Notification.permission : 'unsupported';
+  const on = pushSupported && perm === 'granted' && localStorage.getItem(PUSH_ON_KEY) === '1';
+  let sub, opts;
+  if (!pushSupported) {
+    sub = FLEET
+      ? 'this browser has no push support (on iOS, add the app to your Home Screen first)'
+      : 'only available on the fleet UI (h.atg.link) — a harness you open directly has no push sender';
+    opts = { label: 'unavailable', disabled: true };
+  } else if (perm === 'denied') {
+    sub = 'blocked for this site — re-enable it in your browser/iOS settings, then come back';
+    opts = { label: 'blocked', disabled: true };
+  } else {
+    sub = on ? 'this device gets a banner when a session needs you'
+             : 'get a banner on this device when a session needs you';
+    opts = {
+      label: on ? 'on' : 'off', on,
+      onToggle: async () => { await (on ? disableNotifications() : enableNotifications()); renderSettings(); },
+    };
+  }
+  settingsBody.appendChild(settingRow('notifications', sub, opts));
+}
+
+function openSettings() { renderSettings(); settingsModal.hidden = false; }
+document.getElementById('settingsBtn').onclick = () => openSettings();
+document.getElementById('settingsclose').onclick = () => { settingsModal.hidden = true; };
+
 // -- global Esc → projects rung ----------------------------------------------
 // Universal "take me home": pressing Escape anywhere pops you back out to the
 // projects rung — UNLESS something else legitimately owns the key. We yield to,
@@ -6485,6 +6560,7 @@ window.addEventListener('keydown', (e) => {
   if (!document.getElementById('login').hidden ||
       !document.getElementById('passkey').hidden) return;   // gated — nowhere to go
   if (!machinesModal.hidden) { machinesModal.hidden = true; e.preventDefault(); return; }
+  if (!settingsModal.hidden) { settingsModal.hidden = true; e.preventDefault(); return; }
   const el = document.activeElement;
   if (el && el.closest && el.closest('#term')) return;      // live terminal owns Esc (claude's TUI)
   if (currentView() === 'projects') return;                 // already home
