@@ -136,6 +136,13 @@ user-facing overview; this file orients an agent working **on** the code.
   still in the `<input>` but not yet mirrored into `projectFilter` isn't
   dropped. It calls `renderProjects(projectList)` — literally what a frame does
   — so it touches no session. See "Repaint, don't rebuild" below.
+- **`tools/tabfilterprobe.mjs`** — guards the **🔎 tab-strip filter** (2026-08-09):
+  that it sits at the far right, stays pinned there when the strip scrolls (it's
+  `position:sticky`, so tabs pass *under* it), that typing narrows the strip and
+  clearing restores it, and — the one that bites — that a `renderSessionBar()`
+  repaint keeps the live `<input>`, its focus, and text the `input` event hasn't
+  mirrored yet. It lands on the **sessions rung** (`#/p/self`), where the strip
+  already renders, so it subscribes to nothing and claims no PTY size.
 
 ## Architecture (one server, multi-project, multi-session)
 - **server.py** — a `SessionManager` owns N `Project`s and N `ClaudeSession`s.
@@ -419,6 +426,22 @@ user-facing overview; this file orients an agent working **on** the code.
   hook bumps `last_active`, so without it a `projects` frame fires per
   Pre/PostToolUse — the fingerprint excludes `lastTouched` (nothing renders it;
   it only feeds the sort, and a reorder still changes the pid order).
+- **🔎 tab-strip filter** (2026-08-09) — a small box that **hovers over the far
+  right of the `#sessionbar`** and narrows the strip to sessions whose handle /
+  title / tldr / live digest / project (and, in fleet, machine) contain what you
+  type; space-separated words are ANDed, Esc clears, Enter opens a filter that
+  narrowed to one. Purely client-side and purely cosmetic — it hides tab *nodes*,
+  touches no session, sends nothing, and the **open session's tab is never
+  filtered away** (losing "you are here" is worse than one extra tab). Two
+  mechanics carry it: `position:sticky; right:0` (not absolute — `#sessionbar`
+  *is* the scroll container, so an absolute child would scroll away with the
+  tabs) plus a left-fading `--panel` gradient so tabs vanish behind it; and the
+  same **repaint, don't rebuild** rule as above — `renderSessionBar` no longer
+  does `innerHTML=''`, it wipes the tabs *around* the box (`ensureTabFilter`) and
+  `insertBefore`s new ones, because the box is a live `<input>` and even
+  re-`appendChild`ing it blurs it mid-word. `tools/tabfilterprobe.mjs` guards it.
+  On touch it collapses to the 🔎 alone until tapped (the strip is the whole
+  screen there). PM threads ride the same strip and get no filter.
 - **URL routing** — nav state lives in the **hash** (the `?t=` token stays in the
   query): `#/` projects · `#/p/<pid>` sessions · `#/p/<pid>/s/<cid>` transcript ·
   `…/tty` terminal. So a reload (or a shared link) lands back on the same

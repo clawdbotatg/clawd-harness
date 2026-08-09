@@ -100,6 +100,38 @@
   #sessionbar .stab .age { flex:0 0 auto; margin-left:2px; font-size:10px; color:var(--dim); }
   #sessionbar .stab.active .age { color:inherit; opacity:.75; }
   #sessionbar .stab.moff { opacity:.5; }   /* host machine off the roster — cached tab, kept visible */
+  #sessionbar .stab.fhide { display:none; }   /* filtered out — hidden, not removed (nodes survive the repaint) */
+  /* 🔎 tab filter: parks at the far right of the strip and HOVERS over it —
+     position:sticky (not absolute) so it rides the scrollport's right edge while
+     the tabs scroll underneath, and the gradient hides them as they pass behind.
+     margin-left:auto keeps it right-aligned when the tabs don't fill the row. */
+  #sessionbar .tfilter { position:sticky; right:0; z-index:3; flex:0 0 auto; margin-left:auto;
+                         display:inline-flex; align-items:center; gap:5px;
+                         padding-left:26px; padding-right:0;
+                         background:linear-gradient(to right, transparent 0, var(--panel) 24px); }
+  #sessionbar .tfilter .ficon { flex:0 0 auto; font-size:11px; color:var(--dim); cursor:pointer;
+                                user-select:none; }
+  #sessionbar .tfilter input { width:92px; background:var(--raised); color:var(--ink);
+                               border:1px solid var(--edge); padding:3px 7px; font:inherit;
+                               font-size:11px; }
+  #sessionbar .tfilter input::placeholder { color:var(--dim); }
+  #sessionbar .tfilter input:focus { outline:none; border-color:var(--accent); width:150px; }
+  #sessionbar .tfilter.on input { border-color:var(--accent); color:var(--accent); }
+  #sessionbar .tfilter.none input { border-color:var(--err); color:var(--err); }
+  #sessionbar .tfilter.on .ficon { color:var(--accent); }
+  #sessionbar .tfilter .fclear { flex:0 0 auto; color:var(--dim); cursor:pointer; font-size:11px;
+                                 padding:0 2px; user-select:none; }
+  #sessionbar .tfilter .fclear:hover { color:var(--err); }
+  /* Touch: the strip is the whole screen width, so an always-open box would eat a
+     fifth of it. Collapse to the 🔎 alone until you tap it (or a filter is live). */
+  @media (pointer: coarse) {
+    #sessionbar .tfilter { padding-left:18px; }
+    #sessionbar .tfilter .ficon { font-size:13px; padding:0 2px; }
+    #sessionbar .tfilter input { font-size:16px; width:0; padding:0; border-width:0; }
+    #sessionbar .tfilter.open input, #sessionbar .tfilter.on input {
+      width:120px; padding:3px 7px; border-width:1px; }
+    #sessionbar .tfilter input:focus { width:120px; }
+  }
   /* project emoji badge: never shrinks — the title ellipsizes, the badge stays legible */
   .pemoji { flex:0 0 auto; white-space:nowrap; }
   /* PM chip: just the face (a plain .hbtn) — session status shows as border color
@@ -3117,7 +3149,13 @@ function renderSessionBar(view) {
     if (!wasHidden) refitTTY();
     return;
   }
-  bar.innerHTML = '';
+  // Repaint, don't rebuild — the filter box is a live <input> that must survive
+  // every frame (same rule as the projects rung): wipe the tabs around it and
+  // insert new ones BEFORE it, never move it (a re-append blurs it mid-word).
+  const fbox = ensureTabFilter(bar);
+  Array.from(bar.children).forEach(c => { if (c !== fbox) c.remove(); });
+  const q = tabFilterTerms();
+  let shown = 0;
   sorted.forEach(s => {
     const tab = document.createElement('button');
     const mOff = FLEET && s._machine && !isMachineOnline(s._machine);   // cached tab — host not on the roster right now
@@ -3154,10 +3192,91 @@ function renderSessionBar(view) {
       ag.title = 'last prompted ' + age + ' ago';
       tab.appendChild(ag);
     }
-    bar.appendChild(tab);
+    // The open session's tab is never filtered away — losing "you are here"
+    // while narrowing the strip is more disorienting than one extra tab.
+    const hit = !q.length || s.cid === currentCid || tabFilterHit(s, q);
+    if (hit) shown++; else tab.classList.add('fhide');
+    bar.insertBefore(tab, fbox);
   });
+  paintTabFilter(q, shown, sorted.length);
   bar.hidden = false;
   if (wasHidden) refitTTY();
+}
+
+// ---- 🔎 filter the tab strip ------------------------------------------------
+// A box hovering over the right edge of #sessionbar that narrows the strip to
+// sessions whose name / tldr / digest / project (and, in fleet, machine) contain
+// what you typed. Space-separated words are ANDed. Purely client-side and purely
+// cosmetic: it hides tab NODES, touches no session and sends nothing.
+let tabFilter = '';        // live text (this browser only, not persisted)
+let tabFilterEl = null;    // the sticky wrapper — one node for the app's life
+let tabFilterInp = null;
+function tabFilterTerms() {
+  return tabFilter.trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+// Everything a tab is "about" — what the tab shows plus what it doesn't (the
+// tldr, the live digest, the project it lives in) so a word you remember from
+// the work finds the session even when its 1-2 word handle doesn't say it.
+function tabFilterHit(s, terms) {
+  const parts = [s.tab, s.title, s.desc, s.digest, s.blocked_on, s.engine];
+  if (FLEET) {
+    const key = s._pkey || (s._machine ? projectKeyForSession(s._machine, s.pid) : '');
+    const g = key ? projectGroup(key) : null;
+    if (g) parts.push(g.name);
+    parts.push(s._machine);
+  } else {
+    const p = (projectList || []).find(p => p.pid === s.pid);
+    if (p) parts.push(p.name);
+  }
+  const hay = parts.filter(Boolean).join(' ').toLowerCase();
+  return terms.every(t => hay.includes(t));
+}
+function ensureTabFilter(bar) {
+  if (!tabFilterEl) {
+    const wrap = document.createElement('span');
+    wrap.className = 'tfilter';
+    const ico = document.createElement('span');
+    ico.className = 'ficon'; ico.textContent = '🔎';
+    // On touch the box is collapsed to this icon (see the coarse-pointer CSS) —
+    // tapping it opens the box; it folds away again on blur unless a filter is live.
+    ico.onclick = () => { wrap.classList.add('open'); tabFilterInp.focus(); };
+    const inp = document.createElement('input');
+    inp.type = 'text'; inp.placeholder = 'filter';
+    inp.value = tabFilter;
+    inp.addEventListener('input', () => { tabFilter = inp.value; renderSessionBar(); });
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.preventDefault(); setTabFilter(''); inp.blur(); }
+      // Enter on a filter narrowed to one session opens it
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const terms = tabFilterTerms();
+        const hits = terms.length ? sortedSessions().filter(s => tabFilterHit(s, terms)) : [];
+        if (hits.length === 1) focusSession(hits[0]);
+      }
+    });
+    inp.addEventListener('blur', () => { if (!tabFilter.trim()) wrap.classList.remove('open'); });
+    const x = document.createElement('span');
+    x.className = 'fclear'; x.textContent = '✕'; x.title = 'clear filter';
+    x.onclick = () => { setTabFilter(''); wrap.classList.remove('open'); };
+    wrap.appendChild(ico); wrap.appendChild(inp); wrap.appendChild(x);
+    tabFilterEl = wrap; tabFilterInp = inp;
+  }
+  if (tabFilterEl.parentNode !== bar) bar.appendChild(tabFilterEl);   // PM view wipes the strip
+  return tabFilterEl;
+}
+// Programmatic writes fire no `input` event — keep the box and the mirror in step.
+function setTabFilter(v) {
+  tabFilter = v;
+  if (tabFilterInp && tabFilterInp.value !== v) tabFilterInp.value = v;
+  renderSessionBar();
+}
+function paintTabFilter(terms, shown, total) {
+  if (!tabFilterEl) return;
+  const on = terms.length > 0;
+  tabFilterEl.classList.toggle('on', on);
+  tabFilterEl.classList.toggle('none', on && shown === 0);
+  tabFilterEl.querySelector('.fclear').hidden = !on;
+  tabFilterEl.querySelector('.ficon').title = on ? `${shown}/${total} sessions match` : 'filter sessions';
 }
 
 // ---- fleet: unified projects across machines -------------------------------
