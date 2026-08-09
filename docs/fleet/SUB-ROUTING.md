@@ -99,11 +99,41 @@ machine, so it won every ranking it entered. Sixteen live sessions were sitting
 on it. The plan didn't break; it narrowed, and a narrowed plan is invisible to a
 capacity router.
 
-**The signal.** A plan that *carries* fable advertises a weekly fable window in
-the usage payload **from 0% used** (verified: `sub3` at `7d fable 0.0%`), so
-absence is entitlement, not merely non-use. `_fable_state()` reads
-`_fetch_usage`'s normalized windows, so it works whether the number arrives via
-the legacy per-model keys or the newer `limits` array.
+**The signal, and the trap in it.** A plan that *carries* fable advertises a
+weekly fable window in the usage payload **from 0% used** (verified: `sub3` at
+`7d fable 0.0%`). But absence is NOT simply the negative of that — measured
+across the fleet within an hour of the first cut shipping, **the scoped windows
+also drop out when a plan is at its limit**:
+
+| box | account | reading | fable window |
+|---|---|---|---|
+| clawd-sat | `sub5` | 100% | absent |
+| clawd-gut | `sub4` | 91% | absent |
+| clawd-leftclaw | `sub5` | 15% | `7d fable 0.0%` |
+| clawd-head | `sub4` | 6% | `7d fable 2.0%` |
+
+The *same* subscription reports differently depending on how hot it is, so a
+naive "no window = no fable" convicts healthy pools for being busy. Worse, 91%
+is **under** the 97% hot bar, so the gate would be the only thing excluding a
+pool that works fine — silently deleting real capacity.
+
+So `_fable_state()` is three rules, not one:
+
+1. A fable window present → **capable**, and `record_usage()` stamps
+   `Account.fable_seen` (persisted).
+2. Seen within `FABLE_STICKY` (6h) → still **capable**. Entitlement doesn't
+   flicker between polls; a payload that stops mentioning fable for one reading
+   is a degraded payload, not a downgraded plan. It expires so a *real* plan
+   change is still caught within a day.
+3. Absent, and every window is under `FABLE_TRUST_MAX` (80%) → **incapable**.
+   Otherwise **unknown**, which stays routable.
+
+The asymmetry is deliberate: failing to convict a hot fable-less pool costs one
+turn (and anything ≥ `SUB_HOT` is skipped on capacity anyway), while convicting
+a healthy pool removes capacity the fleet needs. `record_usage()` is the single
+choke point that writes both the snapshot and the sighting — callers must not
+assign `.usage` directly on a good reading, and same-pool siblings inherit the
+stamp.
 
 **It's a heuristic on an undocumented endpoint, so it degrades in one direction
 only.** Three rules make the failure mode survivable:

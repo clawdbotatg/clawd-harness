@@ -26,10 +26,12 @@ import types
 import server
 
 
-def acct(name, pct, fable=True, reset_in_h=48, **kw):
+def acct(name, pct, fable=True, reset_in_h=48, seen=0.0, **kw):
     """A ready Account with a synthetic usage snapshot. `fable=None` = a pool
-    we've never had a good reading for (no windows at all)."""
-    a = server.Account(name, config_dir=f"/tmp/{name}", ready=True, **kw)
+    we've never had a good reading for (no windows at all). `seen` = epoch of
+    a previously observed fable window (0 = never)."""
+    a = server.Account(name, config_dir=f"/tmp/{name}", ready=True,
+                       fable_seen=seen, **kw)
     if fable is None:
         a.usage = {"pct": pct, "checkedAt": time.time()}
         return a
@@ -86,6 +88,62 @@ def test_no_reading_is_unknown_not_incapable():
 
 
 @case
+def test_a_limited_plan_hides_its_scoped_windows_and_must_not_convict():
+    """THE false positive, measured across the fleet an hour after the gate
+    shipped: the scoped windows drop out of the payload when a plan is at its
+    limit. `sub4` showed no fable window at 91% used on one box while the same
+    subscription showed `7d fable` on a fresh one. Absence from a maxed-out
+    reading proves nothing, and convicting on it silently deletes real
+    capacity — 91% is UNDER the 97% hot bar, so the gate would be the only
+    thing excluding a pool that works fine."""
+    maxed = acct("sub4-hot", 91.0, fable=False)
+    assert server._reading_trusts_absence(maxed.usage) is False
+    assert maxed.fable() is None, "a limited payload must not convict"
+    assert maxed.routable() is True, "…and an unproven pool stays routable"
+
+
+@case
+def test_a_healthy_reading_still_convicts():
+    """The correction must not neuter the gate: clawdteam sat at 47% with no
+    fable window and genuinely could not run it (verified with a real
+    `claude -p --model fable` call)."""
+    healthy = acct("clawdteam", 47.0, fable=False)
+    assert server._reading_trusts_absence(healthy.usage) is True
+    assert healthy.fable() is False and healthy.routable() is False
+
+
+@case
+def test_a_recent_sighting_outweighs_one_bad_reading():
+    """Plan entitlement doesn't flicker between polls. Having SEEN fable
+    minutes ago, a payload that stops mentioning it is a degraded payload,
+    not a downgraded plan."""
+    a = acct("blip", 5.0, fable=False, seen=time.time() - 60)
+    assert a.fable() is True and a.routable() is True
+
+
+@case
+def test_stickiness_expires_so_a_real_downgrade_is_caught():
+    """The slop org really did change plans. A sighting from last week must
+    not protect it forever."""
+    stale = acct("slop", 5.0, fable=False,
+                 seen=time.time() - server.FABLE_STICKY - 1)
+    assert stale.fable() is False, "an expired sighting must stop shielding"
+
+
+@case
+def test_recording_a_reading_stamps_the_sighting():
+    """The stickiness is only possible if the stamp is actually written on the
+    reading that saw fable — record_usage is the single choke point for that."""
+    a = server.Account("x", ready=True)
+    a.record_usage(3.0, [{"key": "seven_day", "label": "7d", "used": 3.0}])
+    assert a.fable_seen == 0.0, "no fable window → no stamp"
+    a.record_usage(3.0, [{"key": "weekly_scoped_fable", "label": "7d fable",
+                          "used": 0.0}])
+    assert a.fable_seen > 0, "a fable window must stamp the sighting"
+    assert "fable_seen" in a.to_registry(), "and it must survive a restart"
+
+
+@case
 def test_manual_overrides_beat_the_heuristic():
     """It's a heuristic on an undocumented endpoint — both escape hatches have
     to actually override it."""
@@ -121,8 +179,10 @@ def test_capable_pools_still_rank_by_the_normal_rules():
 def test_gate_never_strands_the_router():
     """Routing to a fable-less plan is bad; routing nowhere is worse. With no
     capable pool anywhere, the roster still resolves (on capacity alone)."""
-    m = mgr(acct("a", 80.0, fable=False, reset_in_h=90),
+    # both readings healthy (< FABLE_TRUST_MAX) so both genuinely convict
+    m = mgr(acct("a", 70.0, fable=False, reset_in_h=90),
             acct("b", 4.0, fable=False, reset_in_h=10))
+    assert all(x.fable() is False for x in m.accounts.values()), "setup"
     assert m._best_account() == "b", "all-incapable must still rank normally"
     assert m._stranded_warned is True, "the fallback must announce itself"
 
@@ -160,12 +220,20 @@ def test_meta_reports_the_verdict_to_the_ui():
 def test_route_key_positional_names_match_the_tuple():
     """_maybe_autoswitch indexes _route_key's tuple by these names; a term
     added without moving them would silently compare the wrong fields."""
-    S, a = server.SessionManager, acct("x", 98.0, fable=False, reset_in_h=1)
-    k = mgr(a)._route_key(a)
-    assert len(k) == 5
-    assert k[S.KEY_CAP] is True and k[S.KEY_HOT] is True
-    assert k[S.KEY_NORESET] is False and k[S.KEY_PCT] == 98.0
-    assert k[S.KEY_RESET] > time.time()
+    # A pool can no longer be BOTH hot and heuristically convicted — at 98%
+    # the payload is too degraded to trust an absent window (that is the whole
+    # point of _reading_trusts_absence) — so force the verdict by hand to
+    # exercise both flags at once.
+    S, a = server.SessionManager, acct("x", 98.0, reset_in_h=1)
+    server.SUB_NO_FABLE.add("x")
+    try:
+        k = mgr(a)._route_key(a)
+        assert len(k) == 5
+        assert k[S.KEY_CAP] is True and k[S.KEY_HOT] is True
+        assert k[S.KEY_NORESET] is False and k[S.KEY_PCT] == 98.0
+        assert k[S.KEY_RESET] > time.time()
+    finally:
+        server.SUB_NO_FABLE.discard("x")
 
 
 if __name__ == "__main__":

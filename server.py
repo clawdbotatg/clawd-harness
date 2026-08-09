@@ -453,6 +453,17 @@ SUB_NO_FABLE = {n.strip() for n in
                 os.environ.get("SUB_NO_FABLE", "").split(",") if n.strip()}
 SUB_FABLE_OK = {n.strip() for n in
                 os.environ.get("SUB_FABLE_OK", "").split(",") if n.strip()}
+# A missing fable window only means "no fable" on a HEALTHY snapshot: the
+# scoped windows also disappear when the plan is at its limit (measured across
+# the fleet the same day this shipped — see _reading_trusts_absence). Don't
+# convict from a reading where any window is at/over this mark…
+FABLE_TRUST_MAX = float(os.environ.get("FABLE_TRUST_MAX", "80"))
+# …and once fable HAS been seen for an account, believe it this long. Plan
+# entitlement doesn't flicker between polls; a payload that stops mentioning
+# fable for one reading is a degraded payload, not a downgraded plan. Long
+# enough to ride out a hot 5h window, short enough that a REAL plan change
+# (the slop org, 2026-08-09) is caught within a day.
+FABLE_STICKY = float(os.environ.get("FABLE_STICKY", "21600"))     # 6h
 # How many sessions the capability evacuation may move per sweep. A plan
 # change convicts a whole pool at once, so this is the one handoff trigger
 # that can fire on EVERY session simultaneously — 16 of them were parked on
@@ -1143,26 +1154,66 @@ def _weekly_reset(usage):
     return soonest
 
 
-def _fable_state(usage):
-    """True / False / None — does this pool's plan carry Fable?
-
-    True  = a good reading advertises a fable-scoped window (any group).
-    False = a good reading advertises windows but NONE of them are fable's.
-    None  = we have never had a good reading, so we don't know. Callers must
-            treat None as 'yes' — an endpoint change that stopped emitting
-            scoped limits altogether would otherwise convict every pool at
-            once and leave the router with nothing to spend, which is a far
-            worse failure than one turn on the wrong plan.
-
-    Reads _fetch_usage's normalized windows (key `weekly_scoped_fable`, label
-    `7d fable`) rather than the raw payload, so it stays correct whether the
-    number arrives via the legacy per-model keys or the newer `limits` array."""
-    windows = (usage or {}).get("windows") or []
-    if not windows:
-        return None
-    for w in windows:
+def _has_fable_window(usage):
+    """True iff this snapshot advertises a fable-scoped window (any group).
+    Reads _fetch_usage's NORMALIZED windows (key `weekly_scoped_fable`, label
+    `7d fable`), so it works whether the number arrived via the legacy
+    per-model keys or the newer `limits` array."""
+    for w in (usage or {}).get("windows") or []:
         if "fable" in f"{w.get('key','')} {w.get('label','')}".lower():
             return True
+    return False
+
+
+def _reading_trusts_absence(usage):
+    """Is this snapshot healthy enough for a MISSING fable window to mean
+    anything?
+
+    No — and this is the correction to the first cut of the gate (2026-08-09,
+    same day): the scoped windows drop out of the payload when the plan is at
+    its limit, not only when the plan lacks the model. Measured across the
+    fleet within an hour of shipping: every pool the gate convicted apart from
+    the genuinely fable-less one was sitting at 91–100% on its 5h window, and
+    the SAME subscription that showed no fable window on a maxed box showed
+    `7d fable 0.0%` on a fresh one. Absence tracks BEING RATE-LIMITED at least
+    as well as it tracks entitlement.
+
+    So a negative verdict is only trusted from a snapshot where nothing is
+    near a cap. The cost of being wrong here is asymmetric: failing to convict
+    a hot fable-less pool loses one turn (and anything ≥ SUB_HOT is skipped by
+    the capacity rules anyway), while convicting a healthy pool silently
+    removes real capacity from the fleet."""
+    used = [w.get("used") for w in (usage or {}).get("windows") or []]
+    return all(isinstance(u, (int, float)) and u < FABLE_TRUST_MAX for u in used)
+
+
+def _fable_state(usage, seen_at=0.0, now=None):
+    """True / False / None — does this pool's plan carry Fable?
+
+    True  = this reading advertises a fable window, or one was seen recently
+            (within FABLE_STICKY). Entitlement doesn't flicker minute to
+            minute; a payload that momentarily stops mentioning it is far
+            more likely to be degraded than the plan to have been downgraded.
+    False = a HEALTHY reading (see _reading_trusts_absence) advertises windows
+            and none of them are fable's, and we haven't seen fable recently.
+    None  = no good reading, or one we don't trust to convict. Callers must
+            treat None as 'yes' — an endpoint change that stopped emitting
+            scoped limits altogether would otherwise convict every pool at
+            once and leave the router with nothing to spend, which is far
+            worse than one turn on the wrong plan.
+
+    `seen_at` is the epoch seconds of the last observed fable window for this
+    account (0 = never), which is what makes the stickiness possible at all —
+    it must be remembered ACROSS readings, not derived from one."""
+    now = time.time() if now is None else now
+    if not (usage or {}).get("windows"):
+        return None
+    if _has_fable_window(usage):
+        return True
+    if seen_at and now - seen_at < FABLE_STICKY:
+        return True                              # believed recently; a blip, not a downgrade
+    if not _reading_trusts_absence(usage):
+        return None                              # limited payload — absence proves nothing
     return False
 
 
@@ -1272,7 +1323,7 @@ class Account:
     (i.e. the sign-in ceremony completed)."""
 
     def __init__(self, name, config_dir="", email="", org="", org_name="",
-                 tier="", ready=False, created=0.0, usage=None):
+                 tier="", ready=False, created=0.0, usage=None, fable_seen=0.0):
         self.name = name
         self.config_dir = config_dir
         self.email = email
@@ -1282,6 +1333,11 @@ class Account:
         self.ready = ready
         self.created = created or time.time()
         self.usage = usage or None               # {"pct","windows","checkedAt"}
+        self.fable_seen = fable_seen or 0.0      # epoch of the last OBSERVED fable window.
+                                                 # Persisted: the stickiness in _fable_state is
+                                                 # only meaningful across readings, and a restart
+                                                 # that forgot it would re-convict every pool
+                                                 # whose payload is momentarily degraded.
         self.error = ""                          # last poll error (in-memory)
         self.broken = False                      # ready but credentials now refused →
                                                  # excluded from routing until re-sign-in
@@ -1294,8 +1350,23 @@ class Account:
         return {"name": self.name, "config_dir": self.config_dir,
                 "email": self.email, "org": self.org,
                 "org_name": self.org_name, "tier": self.tier,
-                "ready": self.ready,
+                "ready": self.ready, "fable_seen": self.fable_seen,
                 "created": self.created, "usage": self.usage}
+
+    def record_usage(self, pct, windows, now=None):
+        """Store a GOOD usage reading, and stamp the fable sighting with it.
+
+        One method rather than four assignments: `fable_seen` is what makes
+        _fable_state's stickiness work, and a caller that set `usage` while
+        forgetting the stamp would let a degraded payload convict a pool that
+        this very reading proves is fine. Callers must not assign `.usage`
+        directly on a good reading."""
+        now = time.time() if now is None else now
+        self.usage = {"pct": round(pct, 1), "windows": windows,
+                      "checkedAt": now, "goodAt": now}
+        if _has_fable_window(self.usage):
+            self.fable_seen = now
+        return self.usage
 
     def fable(self):
         """Tri-state Fable entitlement for THIS account — the usage payload's
@@ -1304,7 +1375,7 @@ class Account:
             return True
         if self.name in SUB_NO_FABLE:
             return False
-        return _fable_state(self.usage)
+        return _fable_state(self.usage, self.fable_seen)
 
     def routable(self):
         """False iff the capability gate says this pool can't do the fleet's
@@ -3349,7 +3420,8 @@ class SessionManager:
                         email=e.get("email", ""), org=e.get("org", ""),
                         org_name=e.get("org_name", ""), tier=e.get("tier", ""),
                         ready=e.get("ready", False),
-                        created=e.get("created", 0.0), usage=e.get("usage"))
+                        created=e.get("created", 0.0), usage=e.get("usage"),
+                        fable_seen=e.get("fable_seen", 0.0))
             if not a.org_name:
                 # registries predating org_name (and BROKEN logins, whose
                 # token-bound profile fetch can never run) still deserve a
@@ -4121,12 +4193,17 @@ class SessionManager:
                     elif res:
                         pct, windows, ident = res
                         with self.lock:
-                            a.usage = {"pct": round(pct, 1), "windows": windows,
-                                       "checkedAt": now, "goodAt": now}
+                            a.record_usage(pct, windows, now)
                             a.error = ""
                             for m in sibs:
-                                # same pool, same numbers — a copy, not a poll
+                                # same pool, same numbers — a copy, not a poll.
+                                # The fable sighting copies too: siblings are
+                                # the SAME subscription under another folder
+                                # label, so one seeing fable is all of them
+                                # seeing it (and a sibling left unstamped
+                                # would convict on the next degraded payload).
                                 m.usage = dict(a.usage)
+                                m.fable_seen = max(m.fable_seen, a.fable_seen)
                                 m.error = ""
                             if ident:
                                 # token-bound identity is THE authority: it
@@ -4307,8 +4384,7 @@ class SessionManager:
             if acct:
                 with self.lock:
                     now2 = time.time()
-                    acct.usage = {"pct": round(pct, 1), "windows": windows,
-                                  "checkedAt": now2, "goodAt": now2}
+                    acct.record_usage(pct, windows, now2)
                     acct.broken = False
         elif got is None and acct:
             # Endpoint unreachable with the stored token — fall back to the
@@ -4378,8 +4454,7 @@ class SessionManager:
             if acct:
                 with self.lock:
                     now2 = time.time()
-                    acct.usage = {"pct": round(pct, 1), "windows": windows,
-                                  "checkedAt": now2, "goodAt": now2}
+                    acct.record_usage(pct, windows, now2)
                     acct.broken = False
         if not walled:
             return                               # echoed/stale banner on a cool pool
@@ -4508,8 +4583,7 @@ class SessionManager:
             if acct:
                 with self.lock:
                     now2 = time.time()
-                    acct.usage = {"pct": round(pct, 1), "windows": windows,
-                                  "checkedAt": now2, "goodAt": now2}
+                    acct.record_usage(pct, windows, now2)
                     acct.broken = False
         elif (backed_off or got == RATE_LIMITED) and acct:
             u = acct.usage or {}
