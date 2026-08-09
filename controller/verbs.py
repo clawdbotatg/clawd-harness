@@ -11,6 +11,7 @@ write returns {ok, ...} or {ok:false, blocked|needs_confirm|error, ...}.
 """
 import collections
 import json
+import re
 import threading
 import time
 import urllib.parse
@@ -315,12 +316,45 @@ class Verbs:
     # Read-only — these build a deep link, they don't touch the fleet. The chat
     # UI renders any result carrying `nav:true` as an "Open ↗" button (and the
     # url is in the reply text too, so Telegram/non-browser clients still get it).
+    @staticmethod
+    def _norm_repo(url):
+        """Mirror of index.html normRepo() (and fleet/worker.py _norm_repo):
+        canonicalize a git remote so the same repo unifies across machines.
+        MUST stay byte-identical to the JS or the deep-link projectKey won't
+        match the one the fleet UI routes on."""
+        s = (url or "").strip()
+        if not s:
+            return ""
+        s = re.sub(r"^git@([^:]+):", r"\1/", s)            # git@host:owner/repo → host/owner/repo
+        s = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", s)  # strip scheme
+        s = re.sub(r"\.git$", "", s, flags=re.I)            # drop trailing .git
+        s = re.sub(r"/+$", "", s)                           # drop trailing slash
+        return s.lower()
+
+    def _project_key(self, machine, pid):
+        """The unified projectKey the FLEET UI routes on — NOT the machine-local
+        pid. `unifiedProjects` in index.html is keyed by repo (so one project
+        that lives on N machines is one card), so a hash carrying a raw pid
+        finds no group and bounces you to the projects list. Local (private
+        folder) projects are machine-qualified. Mirror of index.html
+        projectKey() / fleet/worker.py _project_key()."""
+        c = self.clients.get(machine)
+        p = None
+        if c:
+            p = next((x for x in c.state()["projects"] if x.get("pid") == pid), None)
+        if not p:
+            return None
+        if p.get("kind") == "local":
+            return f"local:{machine}:{p.get('path') or p.get('name') or ''}"
+        return self._norm_repo(p.get("repoUrl")) or ("name:" + (p.get("name") or ""))
+
     def _harness_link(self, pid=None, cid=None, view="transcript", machine=None):
         """Build the deep link into the harness UI. Hash route mirrors index.html:
-        direct mode  `#/p/<pid>/s/<cid>` ; fleet/box mode is machine-prefixed —
-        `#/m/<machine>/p/<pid>/s/<cid>` (`…/tty` for the terminal). Returns an
-        absolute `url` plus a host-relative `path` (+ `port`) so the browser can
-        rebuild it against its own origin — see pmNavHref()/navHref() in the UI.
+        direct mode  `#/p/<pid>/s/<cid>` ; fleet/box mode is machine-prefixed AND
+        keyed by projectKey, not pid — `#/m/<machine>/p/<projectKey>/s/<cid>`
+        (`…/tty` for the terminal). Returns an absolute `url` plus a host-relative
+        `path` (+ `port`) so the browser can rebuild it against its own origin —
+        see pmNavHref()/navHref() in the UI. Full grammar: docs/DEEPLINKS.md.
 
         Fleet mode (CONTROLLER_RELAY set): the UI is served by the public relay at
         its own origin under a passkey, so the link drops the harness `?t=` token
@@ -328,12 +362,19 @@ class Verbs:
         the public origin it's already viewing). Direct mode keeps the token+port."""
         from . import config
         seg = ""
-        if config.fleet_mode() and machine:
-            seg = "m/" + urllib.parse.quote(machine) + "/"
+        if config.fleet_mode():
+            if machine:
+                seg = "m/" + urllib.parse.quote(machine, safe="") + "/"
+            # Fleet routes on the unified projectKey; a pid here silently lands
+            # the user on the projects list. If we can't resolve one (machine
+            # gone / project not in the cache yet), drop the project segment
+            # rather than emit a hash that can't resolve — the machine prefix
+            # alone still gets them to the right box.
+            pid = self._project_key(machine, pid) if pid else None
         if cid and pid:
-            frag = f"#/{seg}p/{pid}/s/{cid}" + ("/tty" if view == "tty" else "")
+            frag = f"#/{seg}p/{urllib.parse.quote(pid, safe='')}/s/{cid}" + ("/tty" if view == "tty" else "")
         elif pid:
-            frag = f"#/{seg}p/{pid}"
+            frag = f"#/{seg}p/{urllib.parse.quote(pid, safe='')}"
         else:
             frag = f"#/{seg}"
         if config.fleet_mode():

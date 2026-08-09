@@ -971,9 +971,13 @@ term.loadAddon(fit);
 // http(s) links on hover and opens them in a new tab on click/tap. Works even
 // on touch (where the terminal is read-only): it's a render+click decoration,
 // not stdin. window.open(_, '_blank', noopener) so the harness tab isn't
-// navigated away from a tapped link.
+// navigated away from a tapped link — except for a link back into this app
+// (a deep link an agent printed), which is navigation and belongs in-app.
 term.loadAddon(new WebLinksAddon.WebLinksAddon(
-  (event, uri) => window.open(uri, '_blank', 'noopener,noreferrer')));
+  (event, uri) => {
+    const h = inAppHash(uri);
+    if (h) navInApp(h); else window.open(uri, '_blank', 'noopener,noreferrer');
+  }));
 term.open(document.getElementById('term'));
 fit.fit();
 
@@ -5413,6 +5417,36 @@ function typeBubble(cls, who, text, feedEl) {
   return d;
 }
 
+// ── in-app links ────────────────────────────────────────────────────────────
+// Anything pointing back at THIS app (PM deep links in a reply, a URL printed
+// into the terminal, the ↗ open button) is navigation, not an outbound link:
+// route it through the hash so it lands in the running app. Opening it as a
+// document load is the bug the PM's links had — a new tab/window (on iOS, out of
+// the installed PWA into Safari), which then has to boot the whole UI again.
+// Returns the hash to navigate to, or null when the link is genuinely external.
+function inAppHash(href) {
+  try {
+    const u = new URL(href, location.href);
+    if (u.origin !== location.origin) return null;
+    return u.hash && u.hash.startsWith('#/') ? u.hash : null;
+  } catch (e) { return null; }
+}
+function navInApp(hash) {
+  // Same hash → hashchange won't fire, so re-resolve by hand (the notification
+  // path does the same): tapping "open" on the session you're already in should
+  // still take you there rather than do nothing.
+  if (hash === location.hash) { pendingNav = parseHash(); resolvePendingNav(); }
+  else location.hash = hash;
+}
+document.addEventListener('click', (e) => {
+  const a = e.target && e.target.closest && e.target.closest('a[href]');
+  if (!a || a.target === '_blank') return;
+  const h = inAppHash(a.getAttribute('href'));
+  if (!h) return;
+  e.preventDefault();
+  navInApp(h);
+});
+
 // Minimal, XSS-safe markdown: escape first, then format a common subset.
 function escHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function mdToHtml(src) {
@@ -5426,7 +5460,16 @@ function mdToHtml(src) {
   src = src.replace(/`([^`]+)`/g, (m, c) => { inline.push('<code>' + c + '</code>'); return IB + (inline.length-1) + IE; });
   src = src.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   src = src.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-  src = src.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  // A link BACK INTO this app (the PM writes deep links into its replies) must
+  // navigate in-app; target="_blank" pops the whole harness out into a second
+  // browser window — on iOS, out of the installed PWA into Safari. Only genuinely
+  // external links get a new tab.
+  src = src.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    (m, label, url) => {
+      const h = url.replace(/"/g, '%22');
+      return inAppHash(h) ? '<a href="' + h + '">' + label + '</a>'
+                          : '<a href="' + h + '" target="_blank" rel="noopener">' + label + '</a>';
+    });
   src = src.replace(/^#{1,6}\s+(.+)$/gm, '<strong>$1</strong>');
   src = src.replace(/^\s*[-*]\s+(.+)$/gm, '• $1');
   src = src.replace(/\n/g, '<br>');

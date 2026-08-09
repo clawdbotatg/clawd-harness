@@ -20,7 +20,11 @@ TOKEN = "mocktoken"
 class _State:
     def __init__(self):
         self.lock = threading.RLock()
+        # repoUrl matters: fleet deep links key on the normalized repo (the
+        # unified projectKey), not the machine-local pid — see verbs._project_key.
         self.projects = {"p1": {"pid": "p1", "name": "demo", "status": "ready",
+                                "repoUrl": "https://github.com/clawdbotatg/demo.git",
+                                "kind": "gh",
                                 "sessionCount": 0, "busyCount": 0, "waitingCount": 0,
                                 "pinned": False}}
         self.sessions = {}

@@ -88,19 +88,34 @@ def main():
 
     def t_fleet_links():
         # Fleet/box mode: machine-prefixed route, no token, no box-internal port —
-        # the browser rebuilds host-relative against the public relay origin.
+        # the browser rebuilds host-relative against the public relay origin. And
+        # the project segment is the URL-ENCODED unified projectKey (normalized
+        # repo), never the machine-local pid: index.html's unifiedProjects map is
+        # keyed by repo, so a pid finds no group and bounces to the projects list.
         from . import config
         saved = config.RELAY_URL
         config.RELAY_URL = "ws://127.0.0.1:8788"
+        KEY = "github.com%2Fclawdbotatg%2Fdemo"
+        orig_proj = dict(client.projects["p1"])
         try:
             r = verbs.open_session("self", "c1", view="tty")
-            assert r["ok"] and r["path"] == "/#/m/self/p/p1/s/c1/tty", r
+            assert r["ok"] and r["path"] == f"/#/m/self/p/{KEY}/s/c1/tty", r
             assert r["port"] is None and "?t=" not in r["path"], r
             rp = verbs.open_project("self", "p1")
-            assert rp["path"] == "/#/m/self/p/p1" and rp["port"] is None, rp
+            assert rp["path"] == f"/#/m/self/p/{KEY}" and rp["port"] is None, rp
+            # …and the key mirrors index.html projectKey() for the other kinds.
+            assert verbs._norm_repo("git@github.com:O/R.git") == "github.com/o/r"
+            st = client.state()["projects"][0]
+            st.update(kind="local", path="/tmp/secret", repoUrl="")
+            client.projects["p1"] = st
+            assert verbs._project_key("self", "p1") == "local:self:/tmp/secret"
+            st.update(kind="gh", path="", repoUrl="")
+            client.projects["p1"] = st
+            assert verbs._project_key("self", "p1") == "name:demo"
         finally:
             config.RELAY_URL = saved
-    check("fleet deep links are machine-prefixed + host-relative", t_fleet_links)
+            client.projects["p1"] = orig_proj
+    check("fleet deep links carry the projectKey, not the pid", t_fleet_links)
 
     def t_readonly_blocks_write():
         r = verbs.ask("self", "c1", "hello")

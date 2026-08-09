@@ -82,9 +82,11 @@ github.com/clawdbotatg/clawd-harness
 → github.com%2Fclawdbotatg%2Fclawd-harness
 ```
 
-Canonical implementations (keep these two in sync if you touch either):
+Canonical implementations (keep these three in sync if you touch any):
 - JS: `normRepo()` / `projectKey()` in `index.html`
 - Python: `Worker._norm_repo()` / `Worker._project_key()` in `fleet/worker.py`
+- Python: `Verbs._norm_repo()` / `Verbs._project_key()` in `controller/verbs.py`
+  (every PM deep link — `open_session`, `find`, `sweep`, escalations)
 
 ---
 
@@ -108,6 +110,17 @@ url = f"/#/m/{quote(machine, safe='')}/p/{quote(key, safe='')}/s/{cid}"
 
 Open it by setting `location.href`/`location.hash`, or from a service worker
 `clients.openWindow(url)` / `client.navigate(url)`.
+
+**A link home is navigation, not an outbound link.** Anything rendered *inside*
+the app that points back at it (a PM reply's markdown link, a URL an agent
+printed into the terminal, the ↗ open button) must route through the hash, never
+`target="_blank"` / `window.open` — a new tab has to boot the whole UI again, and
+on iOS it throws you out of the installed PWA into Safari. `index.html` has one
+pair of helpers for this: `inAppHash(href)` (same origin + a `#/…` hash → the
+hash to go to, else `null` for a genuinely external link) and `navInApp(hash)`
+(sets the hash, or force-re-resolves when it's already the current one), plus a
+delegated `click` handler that applies them to every `<a>` in the page. Guarded
+by `tools/pmprobe.mjs`.
 
 ---
 
@@ -154,7 +167,9 @@ See `docs/fleet/` and the fleet-push-notifications memory for the full design.
 
 **Gotchas that make a link land on a list instead of the session:**
 - projectKey doesn't match (e.g. forgot to URL-encode, or `normRepo` drift) → no
-  group found → projects list.
+  group found → projects list. **The classic: passing the machine-local `pid`
+  where fleet wants the projectKey** — it looks like a perfectly formed URL and
+  resolves to nothing (the PM shipped exactly this until 2026-08-08).
 - Missing `m/<machine>` in fleet mode → default machine → wrong session list.
 - Stale page: an installed PWA caches the old `index.html`; if the grammar
   changed, **force-quit + reopen** before testing (it won't auto-reload).

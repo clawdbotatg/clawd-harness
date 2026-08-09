@@ -57,6 +57,11 @@ let threads = [{ id: 't1', title: 'alpha', desc: 'probing the pm tab', archived:
 let current = 't1';
 const msgs = { t1: [{ who: 'me', text: 'hello alpha' }, { who: 'bot', text: 'hi from alpha', trace: [] }],
                t2: [] };
+// A same-origin deep link (what every PM nav verb returns) + an external one,
+// so the click check can prove we route ours in-app WITHOUT swallowing the rest
+// of the web.
+const DEEP = `http://127.0.0.1:${PORT}/#/p/self`;
+const REPLY_LINK = ` — [open it](${DEEP}) / [docs](https://example.com/x)`;
 let releaseTurn = null;
 const turnHeld = new Promise(res => { releaseTurn = res; });
 let turnStarted = null;
@@ -82,9 +87,13 @@ await page.route('**/pm/**', async route => {
     threads = threads.map(t => t.id === tid ? { ...t, msgs: msgs[tid].length } : t);
     turnStarted();
     await turnHeld;                              // ...held open until we release it
-    msgs[tid] = [...msgs[tid], { who: 'bot', text: 'the reply', trace: [] }];
+    // The reply carries a deep link back into the harness, exactly as the PM is
+    // told to (controller/prompts/private.md: "include it as a clickable
+    // markdown link") — the probe asserts below that it navigates IN-APP.
+    const reply = `the reply${REPLY_LINK}`;
+    msgs[tid] = [...msgs[tid], { who: 'bot', text: reply, trace: [] }];
     threads = threads.map(t => t.id === tid ? { ...t, msgs: msgs[tid].length } : t);
-    return json(route, { reply: 'the reply', trace: [] });
+    return json(route, { reply, trace: [] });
   }
   if (p === '/api/thread/new') {
     const id = 't' + (threads.length + 1);
@@ -227,6 +236,33 @@ await page.waitForTimeout(500);
 const afterRight = await activeTab();
 check('swipe right comes back to the previous thread', afterRight === beforeSwipe,
       `active: ${afterLeft} -> ${afterRight}`);
+
+// -- a deep link in a PM reply navigates IN-APP, not into a second browser ----
+// The 2026-08-08 report: "when it links to a session and I click on it, it takes
+// me to a new browser and also not the right place." Half of that was the link
+// itself (fleet links carried the machine-local pid instead of the projectKey —
+// controller/test_controller.py guards that); this is the other half. mdToHtml
+// used to stamp target="_blank" on EVERY link, so a link home popped the whole
+// app out into a new tab/window — on iOS, out of the installed PWA into Safari.
+const linkInfo = await page.$$eval('#pmfeed a', els => els.map(
+  e => ({ href: e.getAttribute('href'), target: e.target })));
+const homeLink = linkInfo.find(l => (l.href || '').includes('#/p/self'));
+const extLink = linkInfo.find(l => (l.href || '').includes('example.com'));
+check('the PM reply rendered its deep link', !!homeLink, JSON.stringify(linkInfo));
+check('  …with no target=_blank (a link home is navigation, not an outbound link)',
+      !!homeLink && homeLink.target !== '_blank', JSON.stringify(homeLink));
+check('  …while a genuinely external link still opens in a new tab',
+      !!extLink && extLink.target === '_blank', JSON.stringify(extLink));
+
+let popped = false;
+page.on('popup', () => { popped = true; });
+await page.evaluate(() => { window.__noReload = true; });   // cleared by a document load
+await page.click('#pmfeed a[href*="#/p/self"]');
+await page.waitForTimeout(600);
+check('clicking it stays in this page (no popup, no reload)',
+      !popped && await page.evaluate(() => window.__noReload === true),
+      `popup=${popped} url=${page.url()}`);
+check('  …and it actually navigated to the linked place', /#\/p\/self$/.test(page.url()), page.url());
 
 check('no uncaught page errors', errors.length === 0, errors.join(' | '));
 
