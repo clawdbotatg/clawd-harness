@@ -260,7 +260,9 @@ def main(argv):
             own_action_s=config.AUTOPILOT_OWN_ACTION_S,
             max_per_hour=config.AUTOPILOT_MAX_PER_HOUR,
             max_per_day=config.AUTOPILOT_MAX_PER_DAY,
-            digest_window_s=config.DIGEST_WINDOW).start()
+            digest_window_s=config.DIGEST_WINDOW,
+            pipeline_idle_s=config.PIPELINE_IDLE,
+            pipeline_sweep_s=config.PIPELINE_SWEEP).start()
         verbs.escalate_sink = autopilot.escalate
         reactor.on_event(autopilot.feed)
         print(f"[auto] autopilot {'ON' if autopilot.enabled else 'off'} "

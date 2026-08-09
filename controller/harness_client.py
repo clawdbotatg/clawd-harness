@@ -29,6 +29,11 @@ class HarnessClient:
         self.projects = {}        # pid -> projectMeta
         self.sessions = {}        # cid -> sessionMeta (incl. status/digest/blocked_on)
         self.last_answer = {}     # cid -> last Stop assistant message
+        # The last `accounts` frame (subscription pools + usage). Cached rather
+        # than fetched: the harness pushes it on every change, and the PM needs
+        # to be able to say "that machine is nearly out of plan" without the
+        # operator asking the harness UI.
+        self.accounts = {}
         self.boot = None
         self.connected = False
 
@@ -102,6 +107,8 @@ class HarnessClient:
                 self.projects = {p["pid"]: p for p in f.get("projects", [])}
             elif t == "sessions":
                 self.sessions = {s["cid"]: s for s in f.get("sessions", [])}
+            elif t == "accounts":
+                self.accounts = f
             elif t == "hook":
                 if f.get("event") == "Stop":
                     self.last_answer[f.get("cid")] = (f.get("data") or {}).get("last", "")
@@ -193,11 +200,20 @@ class HarnessClient:
     def close_session(self, cid):
         return self.send({"type": "close", "cid": cid})
 
+    def pin_session(self, cid, on=True):
+        return self.send({"type": "pin", "cid": cid, "on": bool(on)})
+
     def create_project(self, name):
         return self.send({"type": "createProject", "name": name})
 
     def add_project(self, repo_url):
         return self.send({"type": "addProject", "repoUrl": repo_url})
+
+    def add_local_project(self, path):
+        return self.send({"type": "addLocalProject", "path": path})
+
+    def remove_project(self, pid):
+        return self.send({"type": "removeProject", "pid": pid})
 
     # -- snapshot --------------------------------------------------------------
     def state(self):
@@ -209,4 +225,5 @@ class HarnessClient:
                 "projects": [dict(p) for p in self.projects.values()],
                 "sessions": [dict(s) for s in self.sessions.values()],
                 "last_answer": dict(self.last_answer),
+                "accounts": dict(self.accounts),
             }

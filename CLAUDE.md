@@ -257,6 +257,21 @@ user-facing overview; this file orients an agent working **on** the code.
   in ~0.5s, so unlike the rollout scrape this repo first assumed, the number is
   live. Multi-login codex routing is therefore *possible* and simply not built. Full design, what's verified, and
   what still isn't: **[`docs/CODEX-ENGINE.md`](docs/CODEX-ENGINE.md)**.
+- **The PM (`controller/`)** — the AI middle manager. It is a **WS client like
+  any other** (never imports `server.py`) with one tool surface,
+  `controller/verbs.py`, shared by the MCP server and the in-process brain.
+  Deep doc: **[`docs/CONTROLLER.md`](docs/CONTROLLER.md)**. The trap to know:
+  **a harness feature the verbs don't surface does not exist to the PM**, and one
+  the *persona* (`controller/prompts/private.md`) doesn't mention won't get used
+  even when the verb exists — codex shipped for a day reachable only from a
+  `spawn` argument the persona steered away from. When you add a harness
+  feature, ask what the PM should now be able to see or do, and change three
+  places together: the verb, its MCP description, and the persona.
+  **Pipelines** (2026-08-08) are the multi-step form: one task, ≤6 ordered
+  steps, a session and engine each, chained by the autopilot without an LLM turn
+  — the shape "research on claude → double-check on codex → claude writes it up"
+  needs, since a PM turn ends when it replies. `controller/test_pipeline.py` runs
+  that exact chain against the mock harness.
 - **Hooks → turn signal:** injected via `claude --settings <generated>` →
   each hook `curl`s stdin to `POST /hook` → broadcasts `hook` events
   (Stop / UserPromptSubmit / Pre+PostToolUse / SessionStart+End). Drives the
@@ -411,12 +426,16 @@ user-facing overview; this file orients an agent working **on** the code.
 ## Known issues / next
 - **Transcript tailer logs `tailing …` repeatedly** (busy-reattach loop, inherited
   from console) — worth fixing.
-- **codex sessions: the structured channel is unproven.** The engine layer
-  ships (below), but hooks-actually-firing and the rollout parser were never
-  verified against a signed-in codex. Until someone runs `codex login` on the
-  box and checks that a codex session's busy pill moves, treat a codex session
-  as a working *terminal* whose badges/naming/digests may be inert. Checklist:
-  "Phase 1.5" in [`docs/CODEX-ENGINE.md`](docs/CODEX-ENGINE.md).
+- **codex's turn signal dies if two harnesses share a box.** Hooks *do* fire
+  (verified end-to-end on clawd-head — the old "unproven" note here was stale;
+  see "What is verified" in [`docs/CODEX-ENGINE.md`](docs/CODEX-ENGINE.md)), but
+  codex has no per-invocation hook flag, so `_ensure_codex_hooks` writes our port
+  into the single shared `$CODEX_HOME/hooks.json`. This repo deliberately
+  coexists with clawd-console, so the loser's codex sessions POST to a dead port
+  and go silent — a working terminal with inert badges. Fix if it bites: a
+  per-harness `CODEX_HOME` (costs a `codex login` each) or fan the hook command
+  out to both ports. Still open: scrollback (gap 1) and codex `send_settle`
+  timing — "Phase 1.5"/"Phase 2" in that doc.
 - Roadmap (the reason for the fork): the **AI controller** layer, Telegram
   front-end. Multi-session, multi-project (the projects layer), view switcher,
   and AI naming already exist. ("Per-client terminal sizing" was resolved as

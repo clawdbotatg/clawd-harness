@@ -27,16 +27,19 @@ TOOLS = [
         "session (cid/title/status/task/idle_m/digest), per-machine counts, "
         "empty projects as a name list. Bounded — never overflows. Drill down "
         "with machine=/pid= (verbose=true only when scoped). For 'where is X' "
-        "questions use `find`, NOT this.", _S({"machine": _STR, "pid": _STR,
-                                               "verbose": _BOOL})),
+        "questions use `find`, NOT this. Two flags appear only when true: "
+        "`engine` (absent ⇒ claude, so `engine:\"codex\"` marks the codex ones) "
+        "and `pinned` (parked on the 📌 board = done-but-unverified, NOT idle "
+        "work). `kind:\"local\"` on a project = a private folder, no GitHub.",
+        _S({"machine": _STR, "pid": _STR, "verbose": _BOOL})),
     ("find", "Deterministic fleet-wide search in ONE call: session titles/"
         "digests/blocked_on/lastAnswer, project names, the task ledger, AND "
         "each machine's transcript store (searched server-side on the machine). "
         "THE way to answer 'which session/task is about X' — never use Bash, "
-        "GitHub, or get_world for that. Returns matches with deep links; "
-        "scope=meta skips transcripts.", _S({"query": _STR, "machine": _STR,
-                                             "scope": _STR, "limit": _INT},
-                                            ["query"])),
+        "GitHub, or get_world for that. Returns matches with deep links (and "
+        "`engine` on the non-claude ones); scope=meta skips transcripts.",
+        _S({"query": _STR, "machine": _STR, "scope": _STR, "limit": _INT},
+           ["query"])),
     ("transcript_tail", "Last n structured transcript events for one session — "
         "what it actually said and did, including tool calls (a pending "
         "AskUserQuestion's options ride in its tool_use event). n≤50, text "
@@ -51,9 +54,27 @@ TOOLS = [
         "with transcript-tail evidence, deep links, and a suggested clearing "
         "verb per item, plus rollups (idle sessions with no task, stale "
         "in-progress tasks). Use when the operator says 'check in on "
-        "everything' / 'what needs me'.", _S({"max_items": _INT})),
+        "everything' / 'what needs me'. Items on a non-claude session carry "
+        "`engine` — worth knowing, because a codex session's badge can go silent "
+        "while its transcript is fine, so believe the transcript. Pair with "
+        "get_pins for the done-but-unverified queue, which a sweep omits.",
+        _S({"max_items": _INT})),
     ("get_attention", "Ranked queue of sessions needing a human, each with a "
         "suggested_action verb. Lighter than sweep (no tails/links).", _S({})),
+    ("get_pins", "The 📌 pin board: sessions parked as \"coded, but a human "
+        "still has to go and check it\". Each carries `test_hint` — one "
+        "imperative instruction for the operator ('open /eq during the next "
+        "show and verify 30fps'). The honest answer to 'what's outstanding?' "
+        "that the attention queue can't give (a pin isn't blocked) and "
+        "idle_no_task shouldn't (a pin is deliberately parked). Read-only.",
+        _S({"machine": _STR})),
+    ("get_accounts", "Subscription health per machine: which Claude login new "
+        "sessions spawn under, how much of each plan window is spent, when it "
+        "resets — plus codex's plan (read-only, single-login, outside the "
+        "router). Use before promising a big multi-session job, and to answer "
+        "'are we about to run out of plan?'. There is intentionally no verb to "
+        "switch accounts: the harness routes itself, continuously, better than "
+        "a turn-based PM can.", _S({"machine": _STR})),
     ("escalate", "Queue a question/decision for the operator. urgency='digest' "
         "(default) batches into ONE periodic push — use it for almost "
         "everything; 'now' pushes immediately — only for actively-breaking "
@@ -96,9 +117,45 @@ TOOLS = [
         _S({"task_id": _STR, "text": _STR}, ["task_id", "text"])),
     ("assign", "Put a task to work: spawn a new session in project `spawn_in` (a "
         "pid) OR reuse `existing` (a cid), link it to the task, and send the goal "
-        "as the first message. WRITE — needs confirm=true under autonomy=confirm.",
+        "as the first message. `engine` picks the CLI for a newly spawned session "
+        "— \"claude\" (default) or \"codex\" — and is recorded on the task. WRITE "
+        "— needs confirm=true under autonomy=confirm.",
         _S({"task_id": _STR, "machine": _STR, "spawn_in": _STR, "existing": _STR,
-            "confirm": _BOOL}, ["task_id", "machine"])),
+            "engine": _STR, "confirm": _BOOL}, ["task_id", "machine"])),
+    ("create_pipeline", "Plan a MULTI-STEP task: one goal, an ordered list of "
+        "steps, a session per step, and each step may run a different engine. "
+        "This is the tool for \"research it with claude, have codex "
+        "double-check that, then let claude write the final report\" — a shape "
+        "nothing else here can express. Each step is "
+        "{role, engine, prompt, pid?, reuse?}: `role` is a short label; "
+        "`engine` is claude|codex; `prompt` is what to ask (every EARLIER "
+        "step's final answer is folded in automatically, so write 'critique the "
+        "research above', not a placeholder); `pid` is the project to spawn in; "
+        "`reuse`=<earlier step number> sends this step to THAT step's session "
+        "instead of a fresh one (how a step keeps its own earlier work in "
+        "context). Max 6 steps. Bookkeeping only — nothing runs until "
+        "start_pipeline.",
+        _S({"goal": _STR,
+            "steps": {"type": "array", "items": {"type": "object"}},
+            "machine": _STR, "project": _STR, "acceptance": _STR},
+           ["goal", "steps"])),
+    ("start_pipeline", "Run step 1 of a pipeline. `machine`/`pid` are the "
+        "defaults for steps that don't name their own. WRITE — and this is the "
+        "ONE approval for the WHOLE chain: confirming it approves every step, "
+        "which is why later steps then advance on their own without asking "
+        "again. Say so when you relay the proposal.",
+        _S({"task_id": _STR, "machine": _STR, "pid": _STR, "confirm": _BOOL},
+           ["task_id"])),
+    ("advance_pipeline", "Close the pipeline's running step (recording its "
+        "session's final answer) and start the next; on the last step, mark the "
+        "task `review` and return the report. Normally you do NOT call this — it "
+        "fires by itself the moment a step's session finishes. Call it by hand "
+        "to unstick a chain, with force=true to close a step whose session "
+        "produced nothing readable.",
+        _S({"task_id": _STR, "force": _BOOL}, ["task_id"])),
+    ("get_step_output", "One pipeline step's FULL recorded answer — get_task "
+        "truncates them. This is where a finished pipeline's final report is.",
+        _S({"task_id": _STR, "n": _INT}, ["task_id", "n"])),
     ("ask", "Send a message/prompt to a session. WRITE.",
         _S({"machine": _STR, "cid": _STR, "text": _STR, "confirm": _BOOL},
            ["machine", "cid", "text"])),
@@ -122,6 +179,25 @@ TOOLS = [
     ("close", "Close/kill a session: its claude is terminated and dropped from the "
         "harness (the project stays). Irreversible — check session_digest first. WRITE.",
         _S({"machine": _STR, "cid": _STR, "confirm": _BOOL}, ["machine", "cid"])),
+    ("pin", "📌 Park a finished session on the pin board (on=true, default) or "
+        "restore it to the tab strip (on=false). The move for \"the work is "
+        "done but a human still has to verify it\": the session stays alive and "
+        "promptable, leaves the tab strip, and the harness derives its blue "
+        "test-hint line. Side effect: it also /compacts the session once idle, "
+        "so pin things that are parked, not mid-thought. WRITE.",
+        _S({"machine": _STR, "cid": _STR, "on": _BOOL, "confirm": _BOOL},
+           ["machine", "cid"])),
+    ("add_local_project", "Adopt an existing folder on that machine's disk as a "
+        "PRIVATE local project: sessions run in it normally, but the harness "
+        "never runs gh/git-remote against it and it has no repo URL. Use when "
+        "the operator names a folder that isn't a GitHub repo. WRITE.",
+        _S({"machine": _STR, "path": _STR, "confirm": _BOOL},
+           ["machine", "path"])),
+    ("remove_project", "Detach a local (private) project: drop it from the "
+        "registry and close its sessions. NEVER deletes the folder. Refused for "
+        "gh projects — those go away by deleting the folder on the box, which "
+        "is the operator's job, not yours. WRITE.",
+        _S({"machine": _STR, "pid": _STR, "confirm": _BOOL}, ["machine", "pid"])),
 ]
 
 RESOURCES = [
@@ -155,6 +231,10 @@ class MCPServer:
             return v.sweep(a.get("max_items", 20))
         if name == "get_attention":
             return v.get_attention()
+        if name == "get_pins":
+            return v.get_pins(a.get("machine"))
+        if name == "get_accounts":
+            return v.get_accounts(a.get("machine"))
         if name == "escalate":
             return v.escalate(a["question"], a.get("machine"), a.get("cid"),
                               a.get("urgency", "digest"))
@@ -182,8 +262,21 @@ class MCPServer:
             return v.set_task_status(a["task_id"], a["status"])
         if name == "note_task":
             return v.note_task(a["task_id"], a["text"])
+        if name == "create_pipeline":
+            return v.create_pipeline(a["goal"], a.get("steps") or [],
+                                     a.get("project"), a.get("acceptance", ""),
+                                     a.get("machine"))
+        if name == "start_pipeline":
+            return v.start_pipeline(a["task_id"], a.get("machine"), a.get("pid"),
+                                    a.get("confirm", False))
+        if name == "advance_pipeline":
+            return v.advance_pipeline(a["task_id"], a.get("force", False))
+        if name == "get_step_output":
+            return v.get_step_output(a["task_id"], a["n"])
         if name == "assign":
-            return v.assign(a["task_id"], a["machine"], a.get("spawn_in"), a.get("existing"), a.get("confirm", False))
+            return v.assign(a["task_id"], a["machine"], a.get("spawn_in"),
+                            a.get("existing"), a.get("confirm", False),
+                            engine=a.get("engine", "claude"))
         if name == "ask":
             return v.ask(a["machine"], a["cid"], a["text"], a.get("confirm", False))
         if name == "answer_prompt":
@@ -199,6 +292,14 @@ class MCPServer:
                            engine=a.get("engine", "claude"))
         if name == "close":
             return v.close(a["machine"], a["cid"], a.get("confirm", False))
+        if name == "pin":
+            return v.pin(a["machine"], a["cid"], a.get("on", True),
+                         a.get("confirm", False))
+        if name == "add_local_project":
+            return v.add_local_project(a["machine"], a["path"],
+                                       a.get("confirm", False))
+        if name == "remove_project":
+            return v.remove_project(a["machine"], a["pid"], a.get("confirm", False))
         raise ValueError(f"unknown tool: {name}")
 
     def read_resource(self, uri):

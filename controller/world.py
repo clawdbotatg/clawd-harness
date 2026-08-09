@@ -12,6 +12,8 @@ to clear it. See docs/CONTROLLER.md (the reading phase).
 """
 import time
 
+from .verbs import engine_tag
+
 _SEV_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 
@@ -44,13 +46,17 @@ class World:
                 row = (self._verbose_session(s, st, now) if verbose
                        else self._compact_session(s, now))
                 sess_by_pid.setdefault(s.get("pid"), []).append(row)
-            projects, empty = [], []
+            projects, empty, local = [], [], []
             for p in st["projects"]:
                 if pid and p.get("pid") != pid:
                     continue
+                is_local = p.get("kind") == "local"
+                if is_local:
+                    local.append(p.get("name") or p["pid"])
                 rows = sess_by_pid.get(p["pid"], [])
                 if rows:
                     projects.append({"pid": p["pid"], "name": p.get("name"),
+                                     **({"kind": "local"} if is_local else {}),
                                      "sessions": rows})
                 elif not pid:
                     empty.append(p.get("name") or p["pid"])
@@ -58,6 +64,10 @@ class World:
                  "sessions": len(st["sessions"]), **counts, "projects": projects}
             if empty:
                 m["empty_projects"] = empty[:30]
+            if local:
+                # private folders on this machine's disk: the harness runs no
+                # gh/git-remote operation against them and they have no repo URL
+                m["local_projects"] = local[:30]
             if dropped:
                 m["more_sessions"] = dropped
                 m["hint"] = f"get_world(machine='{mid}') for the rest"
@@ -73,7 +83,16 @@ class World:
         """One line per session — the default get_world shape."""
         out = {"cid": s["cid"],
                "title": (s.get("title") or s["cid"])[:60],
-               "status": self._status(s)}
+               "status": self._status(s),
+               # engine only when it ISN'T claude (verbs.engine_tag) — this dict
+               # rides in every snapshot, so the default costs nothing
+               **engine_tag(s)}
+        if s.get("bg"):
+            out["bg"] = s["bg"]           # which kind of background work
+        if s.get("pinned"):
+            # parked on the 📌 board: done-but-unverified, not idle work going
+            # undone. Reading a pin as "nobody is driving this" is wrong.
+            out["pinned"] = True
         tid = self.ledger.task_for_cid(s["cid"])
         if tid:
             out["task"] = tid
@@ -134,6 +153,10 @@ class World:
         return {
             "sev": sev, "machine": mid, "pid": s.get("pid"), "cid": s["cid"],
             "title": (s.get("title") or s["cid"])[:60], "kind": kind,
+            # a codex session's badge can go silent while its transcript is fine
+            # (docs/CODEX-ENGINE.md), so which CLI parked it changes how the
+            # evidence should be read
+            **engine_tag(s),
             "summary": summary[:120],
             "digest": (s.get("digest") or "")[:80],
             "blocked_on": (s.get("blocked_on") or "")[:120],

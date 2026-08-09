@@ -45,7 +45,10 @@ class _State:
                  "desc": "", "named": False, "busy": False, "waiting": False,
                  "tool": None, "status": "idle", "digest": "", "blocked_on": "",
                  "sessionId": f"s{cid}", "promptCount": 0, "lastActive": 0,
-                 "created": 0, "alive": True}
+                 "created": 0, "alive": True,
+                 # engine layer + pin board fields (docs/WS-PROTOCOL.md sessionMeta)
+                 "engine": "claude", "pinned": 0.0, "testHint": "",
+                 "lastAnswer": "", "bg": ""}
             s.update({k: v for k, v in kw.items() if k in s})
             self.sessions[cid] = s
         return cid
@@ -65,6 +68,22 @@ class _State:
         with self.lock:
             return {"type": "projects", "boot": "mockboot",
                     "projects": [dict(p) for p in self.projects.values()]}
+
+    def accounts_frame(self):
+        """A plausible `accounts` frame — one hot pool, one cool, plus codex."""
+        return {"type": "accounts", "active": "alpha", "auto": True,
+                "best": "beta", "lastSwitch": 0,
+                "accounts": [
+                    {"name": "alpha", "email": "a@x", "status": "ready",
+                     "active": True, "usagePct": 91.0, "headroom": 9.0,
+                     "windows": [{"key": "w", "label": "weekly", "used": 91.0,
+                                  "resets": "2026-08-12T00:00:00Z"}]},
+                    {"name": "beta", "email": "b@x", "status": "ready",
+                     "active": False, "usagePct": 12.0, "headroom": 88.0,
+                     "windows": [{"key": "w", "label": "weekly", "used": 12.0,
+                                  "resets": "2026-08-10T00:00:00Z"}]}],
+                "codex": {"engine": "codex", "status": "ready", "plan": "pro",
+                          "pct": 40.0, "limitReached": ""}}
 
     def register(self, wfile, lock):
         with self.lock:
@@ -113,6 +132,7 @@ def _make_handler(state):
             state.register(self.wfile, lock)
             j(state.projects_frame())
             j(state.sessions_frame())
+            j(state.accounts_frame())
             try:
                 while True:
                     msg = ws_read_message(self.rfile)
@@ -184,9 +204,40 @@ def _make_handler(state):
             if t == "list":
                 j(state.projects_frame())
                 j(state.sessions_frame())
+                j(state.accounts_frame())
             elif t == "new":
-                cid = state.add_session(f.get("pid", "p1"))
+                # unknown engine falls back to claude, exactly as the harness does
+                eng = f.get("engine") or "claude"
+                cid = state.add_session(f.get("pid", "p1"),
+                                        engine=eng if eng in ("claude", "codex")
+                                        else "claude")
                 j({"type": "focus", "cid": cid})
+                state.broadcast(state.sessions_frame())
+            elif t == "pin":
+                cid, on = f.get("cid"), f.get("on", True)
+                state.set_session(cid, pinned=(1.0 if on else 0.0),
+                                  testHint=("go verify it by hand" if on else ""))
+            elif t == "addLocalProject":
+                path = f.get("path") or ""
+                with state.lock:
+                    n = len(state.projects) + 1
+                    pid = f"L{n}"
+                    state.projects[pid] = {
+                        "pid": pid, "name": path.rstrip("/").split("/")[-1] or pid,
+                        "path": path, "repoUrl": "", "kind": "local",
+                        "status": "ready", "sessionCount": 0, "busyCount": 0,
+                        "waitingCount": 0, "pinned": False}
+                state.broadcast(state.projects_frame())
+            elif t == "removeProject":
+                pid = f.get("pid")
+                with state.lock:
+                    proj = state.projects.get(pid)
+                    if proj and proj.get("kind") == "local":
+                        state.projects.pop(pid, None)
+                        for cid in [c for c, s in state.sessions.items()
+                                    if s.get("pid") == pid]:
+                            state.sessions.pop(cid, None)
+                state.broadcast(state.projects_frame())
                 state.broadcast(state.sessions_frame())
             elif t == "subscribe":
                 cid = f.get("cid")
@@ -209,7 +260,8 @@ def _make_handler(state):
                                      "data": {"message": "needs your input"}})
                 else:
                     state.set_session(cid, busy=False, status="idle",
-                                      digest=f"handled: {text[:30]}")
+                                      digest=f"handled: {text[:30]}",
+                                      lastAnswer=f"done: {text}")
                     state.broadcast({"type": "hook", "cid": cid, "event": "Stop",
                                      "busy": False, "waiting": False, "tool": None,
                                      "data": {"last": f"done: {text}"}})

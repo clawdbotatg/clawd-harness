@@ -94,6 +94,14 @@ AUTOPILOT_VERIFY_COOLDOWN = float(cfg("CONTROLLER_AUTOPILOT_VERIFY_COOLDOWN", "9
 AUTOPILOT_OWN_ACTION_S = float(cfg("CONTROLLER_AUTOPILOT_OWN_ACTION_S", "120") or 120)
 AUTOPILOT_MAX_PER_HOUR = int(cfg("CONTROLLER_AUTOPILOT_MAX_PER_HOUR", "10") or 10)
 AUTOPILOT_MAX_PER_DAY = int(cfg("CONTROLLER_AUTOPILOT_MAX_PER_DAY", "60") or 60)
+# Pipelines (multi-step, possibly multi-engine tasks) advance the instant a
+# step's session finishes a turn — deterministically, so these are NOT bounded
+# by the turn budget above. The settle sweep is the fallback for a step whose
+# turn-end hook never arrives (a codex session on a two-harness box loses it —
+# docs/CODEX-ENGINE.md): a step's answer that is new and has stopped changing for
+# PIPELINE_IDLE seconds advances the chain anyway, so nothing wedges forever.
+PIPELINE_IDLE = float(cfg("CONTROLLER_PIPELINE_IDLE", "120") or 120)
+PIPELINE_SWEEP = float(cfg("CONTROLLER_PIPELINE_SWEEP", "20") or 20)
 # One batched "needs you" push per window (escalate urgency='digest'); 'now'
 # bypasses it. Also the flush cadence for the autopilot's digest queue.
 DIGEST_WINDOW = float(cfg("CONTROLLER_DIGEST_WINDOW", "900") or 900)

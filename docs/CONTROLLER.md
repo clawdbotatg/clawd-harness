@@ -129,7 +129,7 @@ keystroke-level actuators (`new`, `send`, `input`):
 
 ```
 create_task(goal, project, acceptance) -> task_id   # ledger-only (controller state)
-assign(task_id, {spawn_in: pid} | {existing: cid})  # → new + send
+assign(task_id, {spawn_in: pid} | {existing: cid}, engine)  # → new + send
 ask(cid, text)                                       # → send
 answer_prompt(cid, choice)                           # → input (raw keys) — the hard one
 interrupt(cid) / pause(cid)
@@ -181,6 +181,82 @@ hit the timeout wall. The rebuilt surface:
 Wire contract for the three read frames: `docs/WS-PROTOCOL.md` (they ride the
 existing worker/relay bridge untouched; old harnesses ignore them and callers
 time out into graceful degradation).
+
+### Pipelines — multi-step, multi-engine tasks (2026-08)
+
+**The gap:** a PM turn ends when it replies, so "research it with claude, have
+codex double-check that, then let claude write the final report" had nowhere to
+live. The only unattended follow-up was the autopilot's verify turn, which is
+single-shot, bound to one task↔one session, and explicitly forbidden from
+spawning. Meanwhile `assign` — the persona's strong default for all new work —
+could only ever spawn claude, so the engine layer was reachable from exactly one
+verb (`spawn`) that the persona steers away from.
+
+A **pipeline** is a task whose work is an ordered list of steps (≤6), each with
+its own session and its own engine:
+
+```
+create_pipeline(goal, steps, acceptance)   # ledger-only; steps = [{role, engine, prompt, pid, reuse?}]
+start_pipeline(task_id, machine, pid)      # WRITE — the ONE approval for the whole chain
+advance_pipeline(task_id, force?)          # close the running step, run the next
+get_step_output(task_id, n)                # a step's full recorded answer
+```
+
+Design decisions worth keeping:
+
+- **Advancing is deterministic, not a PM turn.** `Autopilot._advance` calls the
+  verb directly when a step's session finishes, so a long chain costs zero
+  tokens and cannot be hallucinated into a different plan. It also *can't* be an
+  LLM turn: the verify prompt is forbidden from spawning, and advancing is
+  entirely about spawning the next step.
+- **One approval, not one per step.** `start_pipeline` is the gated write; the
+  steps it starts are the plan the operator approved, so `advance_pipeline` is
+  gated only on `readonly` (still rate-limited and audited). It refuses to run
+  step 1, so the gate can't be skipped by calling advance first.
+- **The handoff is the session's final message.** Each step's kickoff carries
+  every earlier step's answer (newest-first until the budget runs out, then
+  presented chronologically) and says outright that its final message is what
+  gets passed on.
+- **`reuse: <n>`** sends a step to step *n*'s existing session instead of a
+  fresh one — how "claude takes codex's feedback" keeps its own research in
+  context. It's also the one sanctioned exception to the persona's
+  never-reuse-a-session rule, because it's the same task's own session.
+- **A baseline fingerprint per step.** A reused session already holds an answer;
+  without recording its hash at step start, the advance logic would read that
+  stale text as the new step's output and skip the work entirely.
+- **The Stop hook is not a promise.** A codex session on a box running two
+  harnesses can lose its turn signal outright (one shared hooks file — see
+  `docs/CODEX-ENGINE.md`), and any dropped frame would wedge a chain forever, so
+  a **settle sweep** (every `CONTROLLER_PIPELINE_SWEEP`s) advances a step whose
+  answer is new, differs from the baseline, and has stopped changing for
+  `CONTROLLER_PIPELINE_IDLE`s. A step whose session has vanished is force-closed.
+
+Guarded by `controller/test_pipeline.py` (the full claude → codex → claude chain
+runs itself against the mock harness, plus both no-hook fallbacks).
+
+### Exposure — what the PM can see (2026-08)
+
+Features kept shipping into the harness that the controller never learned about;
+a verb the model can't see the effect of is a verb it never uses. Closed:
+
+- **Engines.** `engine` now rides in `get_world` / `find` / `sweep` / `get_pins`
+  — but **only when it isn't claude** (absent ⇒ claude, the wire's own
+  convention, so the default costs no budget). `assign(engine=)` joins
+  `spawn(engine=)`, and the ledger records which CLI ran which session.
+- **`get_pins`** — the 📌 board: done-but-unverified work with each session's
+  `test_hint`. A third queue that neither `sweep` (a pin isn't blocked) nor
+  `idle_no_task` (a pin is deliberately parked) should report.
+- **`get_accounts`** — per-machine subscription usage + the codex plan card.
+  Read-only on purpose: the harness re-routes continuously and beats a
+  turn-based PM at it, so the PM's job is to know and to warn.
+- **Project kinds** — `kind:"local"` (a private folder: no gh, no remote, no
+  repo URL) is visible in the snapshot, adoptable via `add_local_project`, and
+  detachable via `remove_project` (which never deletes the folder and refuses gh
+  projects).
+- **Session states** — `background` and `pinned` are now explained in the
+  persona; reading either as "idle work going undone" was the failure mode.
+
+Guarded by `controller/test_engines.py`.
 
 ---
 
@@ -270,8 +346,10 @@ whole stack is proud of being pure stdlib, disk-as-source-of-truth. So:
 - **An append-only JSONL event log** (`.clawd-controller.tasks.jsonl`,
   gitignored, same family as `.clawd-harness.sessions.json`).
 - The log **is** the history: `task_created`, `assigned`, `blocked`, `nudged`,
-  `done`. Fold/replay it on boot to rebuild the ledger in memory (event
-  sourcing; trivial at this scale).
+  `done` — plus `pipeline_created` / `step_started` / `step_done` for multi-step
+  tasks. Fold/replay it on boot to rebuild the ledger in memory (event sourcing;
+  trivial at this scale). Event sourcing is what makes a pipeline restart-safe:
+  where a chain got to is a replay of its own log, not in-process state.
 - One file gives you three things: current state (replay), the **audit trail**
   (free), and time-travel (`grep`). Append-only also dodges mid-write corruption
   of a rewritten doc.

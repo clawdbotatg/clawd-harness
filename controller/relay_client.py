@@ -35,6 +35,7 @@ class RelayMachine:
         self.projects = {}
         self.sessions = {}
         self.last_answer = {}
+        self.accounts = {}          # last `accounts` frame (subscription usage)
         self.connected = True
         self._lock = threading.RLock()
         self._new_lock = threading.Lock()
@@ -50,6 +51,8 @@ class RelayMachine:
                 self.projects = {p["pid"]: p for p in msg.get("projects", [])}
             elif t == "sessions":
                 self.sessions = {s["cid"]: s for s in msg.get("sessions", [])}
+            elif t == "accounts":
+                self.accounts = msg
             elif t == "hook":
                 if msg.get("event") == "Stop":
                     self.last_answer[msg.get("cid")] = (msg.get("data") or {}).get("last", "")
@@ -123,18 +126,28 @@ class RelayMachine:
     def close_session(self, cid):
         return self._send({"type": "close", "cid": cid})
 
+    def pin_session(self, cid, on=True):
+        return self._send({"type": "pin", "cid": cid, "on": bool(on)})
+
     def create_project(self, name):
         return self._send({"type": "createProject", "name": name})
 
     def add_project(self, repo_url):
         return self._send({"type": "addProject", "repoUrl": repo_url})
 
+    def add_local_project(self, path):
+        return self._send({"type": "addLocalProject", "path": path})
+
+    def remove_project(self, pid):
+        return self._send({"type": "removeProject", "pid": pid})
+
     def state(self):
         with self._lock:
             return {"machine": self.machine_id, "connected": self.connected, "boot": None,
                     "projects": [dict(p) for p in self.projects.values()],
                     "sessions": [dict(s) for s in self.sessions.values()],
-                    "last_answer": dict(self.last_answer)}
+                    "last_answer": dict(self.last_answer),
+                    "accounts": dict(self.accounts)}
 
 
 class RelayFleet:

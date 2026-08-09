@@ -88,13 +88,20 @@ it returns **409** mid-turn rather than blocking. Pinned by
 
 ## Autonomy (the write guard)
 
-Write verbs (assign / ask / answer_prompt / interrupt / create|clone project)
-pass through a gate; reads are always free.
+Write verbs (assign / ask / answer_prompt / interrupt / spawn / close / pin /
+create|clone|add|remove project / start_pipeline) pass through a gate; reads are
+always free.
 
 - `readonly` — refuse writes, return a proposal instead.
 - `confirm` (default) — a write returns `needs_confirm`; re-call with
   `confirm=true`. In chat the bot proposes, you say yes, it acts.
 - `auto` — execute immediately.
+
+**One exception, by design: `advance_pipeline`.** `start_pipeline` is the
+approval for the *whole* chain, so the steps it starts don't each stop for a
+second yes — otherwise a pipeline is just a slower conversation. It still refuses
+under `readonly`, is rate-limited, audited like any write, and **refuses to run
+step 1**, so the approval can't be skipped by calling advance first.
 
 Plus a per-target rate limit (`CONTROLLER_RATE_PER_MIN`, default 8) and an audit
 trail: every write appends an `action` event to the ledger.
@@ -144,13 +151,58 @@ endpoint (e.g. behind the relay).
 
 ## The tool surface (read + write)
 
-Read: `get_world`, `get_attention`, `session_digest`, `open_session`,
-`open_project`, `list_tasks`, `get_task`.
+Read: `get_world`, `find`, `transcript_tail`, `peek_screen`, `sweep`,
+`get_attention`, `get_pins`, `get_accounts`, `session_digest`, `open_session`,
+`open_project`, `list_tasks`, `get_task`, `get_step_output`.
 Write: `create_task`, `set_task_status`, `note_task`, `assign`, `ask`,
-`answer_prompt`, `interrupt`, `create_project`, `clone_project`.
+`answer_prompt`, `interrupt`, `spawn`, `close`, `pin`, `create_project`,
+`clone_project`, `add_local_project`, `remove_project`, `create_pipeline`,
+`start_pipeline`, `advance_pipeline`.
 
-Sessions are addressed by `(machine, cid)`, tasks by id. `get_attention` is the
-triage entry point — each item names the `suggested_action` to clear it.
+Sessions are addressed by `(machine, cid)`, tasks by id. `find` is the retrieval
+entry point ("which session is about X" in one call); `sweep` is the check-in
+bundle; `get_attention` is the triage list — each item names the
+`suggested_action` to clear it.
+
+**A verb the persona doesn't mention is a verb that never gets used.** codex
+shipped for a day reachable only from a `spawn` argument
+`prompts/private.md` steered away from, so the PM never once started one. Adding
+a capability means changing three things together: the verb, its MCP description
+(the model reads those verbatim), and the persona.
+
+### Engines
+
+A session runs `claude` or `codex`, fixed at spawn: `spawn(engine=)`,
+`assign(engine=)`, or per pipeline step. In every read shape, `engine` appears
+**only when it isn't claude** — absent means claude, the same convention the wire
+protocol uses for pre-engine harnesses, so the default costs no tool budget.
+The ledger records which CLI ran which session.
+
+### Pipelines (multi-step, multi-engine tasks)
+
+For work that is a *chain* — research it, have something else check that, then
+write it up. A PM turn ends when it replies, so this can't be driven
+conversationally; the plan is recorded up front and executes itself.
+
+```
+create_pipeline(goal, steps)   # steps = [{role, engine, prompt, pid, reuse?}], ≤6
+start_pipeline(task_id)        # WRITE — the ONE approval for the whole chain
+advance_pipeline(task_id)      # normally automatic; by hand only to unstick one
+get_step_output(task_id, n)    # a step's full answer (get_task truncates them)
+```
+
+Each step's kickoff carries every earlier step's final answer, so prompts are
+written as "critique the research above". `reuse: <n>` sends a step to step *n*'s
+own session instead of a fresh one — how "claude takes codex's feedback" keeps
+its research in context, and the one sanctioned exception to the persona's
+never-reuse-a-session rule.
+
+The chain advances when a step's session finishes a turn — via a **direct verb
+call from the autopilot, not an LLM turn**, so a long chain costs no tokens and
+can't be re-planned mid-flight. A **settle sweep** covers a step whose turn-end
+hook never arrives (see the codex caveat in `../docs/CODEX-ENGINE.md`): an answer
+that is new and has stopped changing advances anyway, and a vanished session is
+force-closed. Completion sets the task to `review` and pushes the report.
 
 ## Config (env, or inherited from `.clawd-harness.env`)
 
@@ -165,16 +217,30 @@ triage entry point — each item names the `suggested_action` to clear it.
 | `CONTROLLER_LEDGER` | `../.clawd-controller.tasks.jsonl` | task log |
 | `CONTROLLER_TELEGRAM_TOKEN` | — | bot token (a dedicated, un-polled bot) |
 | `CONTROLLER_TELEGRAM_ALLOW` | `672968601` | csv of allowed Telegram user ids |
+| `CONTROLLER_PIPELINE_IDLE` | `120` | a pipeline step's answer must be unchanged this long before the settle sweep advances it without a turn-end hook |
+| `CONTROLLER_PIPELINE_SWEEP` | `20` | how often that sweep looks |
 
 ## Tests
 
 ```bash
 python3 -m controller.test_controller   # client → world → verbs (mock harness)
+python3 -m controller.test_pm_senses    # find / bounded world / tail / sweep / proxy
+python3 -m controller.test_engines      # what the PM can SEE: engines, pins, plans, kinds
+python3 -m controller.test_pipeline     # the claude → codex → claude chain, self-driving
+python3 -m controller.test_autopilot    # the middle-manager loop + its runaway guards
+python3 -m controller.test_events       # Reactor: hooks → higher-level events
 python3 -m controller.test_mcp          # MCP dispatch (read + write)
 python3 -m controller.test_mcp_stdio    # MCP as a real stdio subprocess
 python3 -m controller.test_threads      # PM conversation threads (store + persist)
 python3 -m controller.test_pm_responsive # PM controls stay live while a turn runs
+python3 -m controller.test_pm_naming    # AI thread titles + running tldr
+python3 -m controller.test_empty_turn   # a silent turn gets one nudge, never '(no result)'
+python3 -m controller.test_relay_fleet  # the trusted-control path through the relay
+python3 -m controller.test_telegram     # Telegram bridge (mock Bot API)
 ```
+
+No test needs a real `claude`, `codex`, relay or network — `mock_harness.py`
+speaks the WS protocol and every engine is a fiction.
 
 ## Files
 

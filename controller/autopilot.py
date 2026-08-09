@@ -11,6 +11,21 @@ Reactor events into **budgeted PM turns**:
   turn_done on a task-linked → a VERIFY turn: judge the work against the
   session                      task's acceptance; set review / nudge once /
                                escalate. (The Phase-3 TODO, finally closed.)
+  turn_done on a PIPELINE    → advance it: record that step's answer and run
+  step                         the next one. **Not** a PM turn — it's a direct
+                               verbs.advance_pipeline call, so a long chain
+                               costs zero tokens and can't be hallucinated. It
+                               also can't be an LLM turn: the verify prompt is
+                               forbidden from spawning, and a pipeline's whole
+                               job is to spawn the next step.
+
+Pipelines also get a **settle sweep**, because the Stop hook is not a promise:
+a codex session on a box running two harnesses can lose its turn signal outright
+(one shared hooks file — docs/CODEX-ENGINE.md), and any missed frame would wedge
+a chain forever. Every few seconds each running step's answer is read; an
+answer that is non-empty, different from what was in that session before the
+step started, and unchanged for `pipeline_idle_s` advances the chain anyway.
+A step whose session has vanished is force-closed rather than left running.
 
 Escalations don't spam the phone: the `escalate` verb queues items here and a
 window flush sends ONE batched digest ("cleared 2, need you on 3"), with
@@ -28,13 +43,16 @@ import collections
 import threading
 import time
 
+from .verbs import out_hash as _hash
+
 
 class Autopilot:
     def __init__(self, run_pm, verbs, ledger, guard, notify=None,
                  enabled=True, toggle_path=None,
                  cooldown_s=300, verify_cooldown_s=900, own_action_s=120,
                  max_per_hour=10, max_per_day=60, digest_window_s=900,
-                 verify_max_per_task=5):
+                 verify_max_per_task=5, pipeline_idle_s=120,
+                 pipeline_sweep_s=20):
         self.run_pm = run_pm            # callable(kind, prompt) -> reply (serialized upstream)
         self.verbs = verbs
         self.ledger = ledger
@@ -49,6 +67,8 @@ class Autopilot:
         self.max_per_day = max_per_day
         self.digest_window_s = digest_window_s
         self.verify_max_per_task = verify_max_per_task
+        self.pipeline_idle_s = pipeline_idle_s
+        self.pipeline_sweep_s = pipeline_sweep_s
 
         self._q = collections.deque()
         self._q_keys = set()             # dedupe (kind, cid) while pending
@@ -59,6 +79,9 @@ class Autopilot:
         self._last_turn_for = {}                    # cid -> ts (triage cooldown)
         self._last_verify = {}                      # task_id -> ts
         self._verify_count = collections.Counter()  # task_id -> auto turns spent
+        self._pipe_lock = threading.Lock()          # one advance at a time
+        self._pipe_settle = {}                      # (tid,n) -> (out_hash, first_seen)
+        self._pipe_sweep_at = 0.0
         self.escalations = []                       # pending digest items
         self._esc_lock = threading.Lock()
         self.recent = collections.deque(maxlen=40)  # (t, kind, target, note) for /api
@@ -146,6 +169,13 @@ class Autopilot:
         while not self._stop:
             self._wake.wait(timeout=5)
             self._wake.clear()
+            now = time.time()
+            if now - self._pipe_sweep_at >= self.pipeline_sweep_s:
+                self._pipe_sweep_at = now
+                try:
+                    self._pipeline_sweep()
+                except Exception as e:
+                    self._log(f"pipeline sweep error: {type(e).__name__}: {e}")
             while not self._stop:
                 with self.lock:
                     if not self._q:
@@ -163,6 +193,15 @@ class Autopilot:
             return
         kind, cid, machine = ev.get("kind"), ev.get("cid"), ev.get("machine")
         now = time.time()
+        # A pipeline step finishing is checked BEFORE own-echo suppression: we
+        # prompted that session ourselves, so its Stop *is* our own echo — and
+        # it is also the exact signal the chain waits on. Suppressing it would
+        # mean every pipeline stalls until the settle sweep rescued it.
+        if kind == "turn_done":
+            task, step = self.ledger.running_step_for_cid(cid)
+            if task:
+                self._advance(task, step, why="turn_done")
+                return
         if self._own_echo(cid):
             self._note(kind, f"{machine}/{str(cid)[:8]}", "skipped: own echo")
             return
@@ -180,6 +219,15 @@ class Autopilot:
             task = self.ledger.get(tid) if tid else None
             if not task or task.get("status") != "in_progress":
                 return
+            if task.get("pipeline"):
+                # A pipeline's progress is never a verify turn. We get here when
+                # a step was already closed by the settle sweep and its Stop
+                # lands afterwards — spending an LLM turn to "verify" a chain
+                # that is mid-flight would both cost tokens and invite the PM to
+                # do the advancing by hand, which the persona forbids.
+                self._note("pipeline", f"{tid} @ {machine}/{str(cid)[:8]}",
+                           "late turn_done, step already closed — no verify turn")
+                return
             if now - self._last_verify.get(tid, 0) < self.verify_cooldown_s:
                 return
             if self._verify_count[tid] >= self.verify_max_per_task:
@@ -191,6 +239,95 @@ class Autopilot:
             self._turns.append(now)
             self._turn("verify", self._verify_prompt(ev, task),
                        f"{tid} @ {machine}/{str(cid)[:8]}")
+
+    # -- pipelines (deterministic — no PM turn, no token budget) -------------------
+    def _advance(self, task, step, why="turn_done", force=False):
+        """Run the pipeline's next step. Serialized, so the Stop event and the
+        settle sweep can't both advance the same chain — whichever gets there
+        second finds no running step and is a harmless no-op."""
+        if not self.verbs:
+            return
+        tid = task["id"]
+        n = (step or {}).get("n")
+        with self._pipe_lock:
+            r = self.verbs.advance_pipeline(tid, force=force)
+        target = f"{tid} step {n}"
+        if not r or not r.get("ok"):
+            why_not = (r or {}).get("error") or (r or {}).get("blocked") or "?"
+            # "no readable answer yet" is the normal state of a step still
+            # working — log it only when we forced, to keep the log honest
+            # without narrating every heartbeat.
+            if force or "no readable answer" not in str(why_not):
+                self._note("pipeline", target, f"not advanced ({why}): {why_not}")
+            return
+        self._pipe_settle.pop((tid, n), None)
+        if r.get("complete"):
+            self._note("pipeline", target,
+                       f"pipeline complete ({r.get('steps_run')} steps)")
+            self._finished(task, r)
+            return
+        nxt = r.get("next") or {}
+        self._note("pipeline", target,
+                   f"→ step {nxt.get('step')} ({nxt.get('role')}/"
+                   f"{nxt.get('engine')}) on {nxt.get('cid')}"
+                   + ("" if nxt.get("ok") else f" FAILED: {nxt.get('error')}"))
+        if not nxt.get("ok"):
+            # the chain is stuck mid-plan — that needs a human, now-ish
+            self.escalate({"question": f"Pipeline {tid} stalled starting step "
+                                       f"{nxt.get('step')}: {nxt.get('error')}",
+                           "machine": task.get("machine"), "urgency": "digest"})
+
+    def _finished(self, task, result):
+        """A pipeline reached its last step. The report is the whole point of
+        having run it, so it goes to the operator rather than sitting in the
+        ledger waiting to be asked for."""
+        tid = task["id"]
+        report = (result.get("report") or "").strip()
+        head = f"✅ pipeline {tid} done — {(task.get('goal') or '')[:120]}"
+        self.notify(head + ("\n\n" + report[:1500] if report else
+                            "\n(no final answer was captured — check the last step)"))
+        self.escalate({"question": f"{head} — task is in `review`; the final "
+                                   f"report is get_step_output('{tid}', "
+                                   f"{result.get('steps_run')})",
+                       "machine": task.get("machine"), "urgency": "digest"})
+
+    def _pipeline_sweep(self):
+        """The no-hook fallback. For every running step: if its session has an
+        answer that is new (≠ the step's baseline) and has stopped changing for
+        `pipeline_idle_s`, advance. If its session is gone, force-close it. This
+        is what keeps a codex step — whose Stop hook may never fire at all —
+        from wedging the chain forever."""
+        if not self.verbs or self._paused_reason():
+            return
+        now = time.time()
+        live = set()
+        for c in (self.verbs.clients or {}).values():
+            try:
+                live.update(s["cid"] for s in c.state()["sessions"])
+            except Exception:
+                continue
+        for task in self.ledger.pipelines():
+            for step in task.get("steps") or []:
+                if step.get("status") != "running":
+                    continue
+                key, cid = (task["id"], step["n"]), step.get("cid")
+                if cid and cid not in live:
+                    self._advance(task, step, why="session gone", force=True)
+                    continue
+                machine = step.get("machine") or task.get("machine")
+                try:
+                    out, _src = self.verbs._step_output(machine, cid)
+                except Exception:
+                    continue
+                h = _hash(out)
+                if not h or h == (step.get("base") or ""):
+                    self._pipe_settle.pop(key, None)      # nothing new yet
+                    continue
+                seen_h, first = self._pipe_settle.get(key, (None, 0.0))
+                if seen_h != h:
+                    self._pipe_settle[key] = (h, now)     # still moving
+                elif now - first >= self.pipeline_idle_s:
+                    self._advance(task, step, why=f"settled {int(now - first)}s")
 
     def _turn(self, kind, prompt, target):
         self._log(f"{kind} turn → {target}")
@@ -285,10 +422,17 @@ class Autopilot:
             pending = len(self._q)
         with self._esc_lock:
             esc = len(self.escalations)
+        pipes = [{"task": t["id"], "step": t.get("step"),
+                  "steps": len(t.get("steps") or []),
+                  "goal": (t.get("goal") or "")[:80]}
+                 for t in self.ledger.pipelines()]
         return {"enabled": self.enabled,
                 "paused": self._paused_reason(),
                 "turns_last_hour": hour, "max_per_hour": self.max_per_hour,
                 "turns_last_day": day, "max_per_day": self.max_per_day,
+                # pipelines advance deterministically — they spend no turn budget
+                "pipelines": pipes,
+                "pipeline_idle_s": self.pipeline_idle_s,
                 "queue": pending, "digest_pending": esc,
                 "digest_window_s": self.digest_window_s,
                 "recent": [{"t": t, "kind": k, "target": tg, "note": n}
