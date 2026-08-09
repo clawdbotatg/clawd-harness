@@ -99,54 +99,40 @@ machine, so it won every ranking it entered. Sixteen live sessions were sitting
 on it. The plan didn't break; it narrowed, and a narrowed plan is invisible to a
 capacity router.
 
-**The signal, and the trap in it.** A plan that *carries* fable advertises a
-weekly fable window in the usage payload **from 0% used** (verified: `sub3` at
-`7d fable 0.0%`). But absence is NOT simply the negative of that — measured
-across the fleet within an hour of the first cut shipping, **the scoped windows
-also drop out when a plan is at its limit**:
+**The signal.** A plan that carries fable advertises a weekly fable window in
+the usage payload **from 0% used** (verified: `sub3` at `7d fable 0.0%`), so
+absence is entitlement, not merely non-use. Confirmed the hard way — a real
+`claude -p --model fable` call under each config dir:
 
-| box | account | reading | fable window |
-|---|---|---|---|
-| clawd-sat | `sub5` | 100% | absent |
-| clawd-gut | `sub4` | 91% | absent |
-| clawd-leftclaw | `sub5` | 15% | `7d fable 0.0%` |
-| clawd-head | `sub4` | 6% | `7d fable 2.0%` |
+| account | fable call | fable window |
+|---|---|---|
+| `sub3` | `OK` | present |
+| `ef` | `OK` | present |
+| `clawdteam` (slop org) | `Fable 5 requires usage credits…` | absent |
 
-The *same* subscription reports differently depending on how hot it is, so a
-naive "no window = no fable" convicts healthy pools for being busy. Worse, 91%
-is **under** the 97% hot bar, so the gate would be the only thing excluding a
-pool that works fine — silently deleting real capacity.
+`_fable_state()` reads `_fetch_usage`'s normalized windows, so it works whether
+the number arrives via the legacy per-model keys or the newer `limits` array.
+Two rules soften it:
 
-So `_fable_state()` is three rules, not one:
-
-1. A fable window present → **capable**, and `record_usage()` stamps
-   `Account.fable_seen` (persisted).
+1. Window present → **capable**, and `record_usage()` stamps
+   `Account.fable_seen` (persisted; same-pool siblings inherit it).
 2. Seen within `FABLE_STICKY` (6h) → still **capable**. Entitlement doesn't
-   flicker between polls; a payload that stops mentioning fable for one reading
-   is a degraded payload, not a downgraded plan. It expires so a *real* plan
-   change is still caught within a day.
-3. Absent, and every window is under `FABLE_TRUST_MAX` (80%) → **incapable**.
-   Otherwise **unknown**, which stays routable.
+   flicker between polls, so one odd payload can't convict a plan we just saw
+   working. It expires, so a *real* plan change is still caught within a day.
+3. Otherwise, a good reading with no fable window → **incapable**. No reading
+   at all → **unknown**, which stays routable.
 
-The asymmetry is deliberate: failing to convict a hot fable-less pool costs one
-turn (and anything ≥ `SUB_HOT` is skipped on capacity anyway), while convicting
-a healthy pool removes capacity the fleet needs. `record_usage()` is the single
-choke point that writes both the snapshot and the sighting — callers must not
-assign `.usage` directly on a good reading, and same-pool siblings inherit the
-stamp.
-
-**It's a heuristic on an undocumented endpoint, so it degrades in one direction
-only.** Three rules make the failure mode survivable:
-
-1. **Only a positive reading convicts.** `_fable_state` is tri-state — no good
-   reading yet → `None` → routable. If Anthropic ever stops emitting scoped
-   limits entirely, "absent means no" would convict the whole fleet at once.
-2. **The gate never strands the router.** `_routable_first()` narrows a roster
-   to capable pools *and falls back to the whole list* when that leaves nothing,
-   logging once. Routing to a fable-less plan is bad; routing nowhere is worse.
-3. **Both overrides exist.** `SUB_NO_FABLE=<names>` blocks a pool the payload
-   still flatters; `SUB_FABLE_OK=<names>` re-admits one the heuristic wrongly
-   convicts. `SUB_REQUIRE_FABLE=0` turns the whole thing off.
+**A wrong turn worth not repeating.** It briefly looked like the scoped windows
+also drop out when a plan is at its limit: `sub4` showed no fable window at 91%
+on clawd-gut while "the same" `sub4` showed `7d fable 2.0%` on clawd-head. They
+were not the same subscription — `sub4` is a **config-dir label**, and those two
+dirs hold logins into different orgs (`18f36efd` vs `94f7f5f0`). The label lied,
+which is exactly the trap [ACCOUNTS-PANEL.md](ACCOUNTS-PANEL.md) documents. The
+91%/100% correlation was coincidence: the fable-less org happened to be hot on
+those boxes. The "only convict on a healthy reading" rule that briefly followed
+was therefore built on nothing, and it re-opened the original bug — a fable-less
+pool at 91% is *under* the 97% hot bar, so nothing else would have skipped it.
+It was removed. **Always compare pools by org uuid, never by label.**
 
 **Where it applies.** `_route_key` gains a leading capability term, so it *sorts*
 rather than filters and any `min(..., key=_route_key)` gets it for free.

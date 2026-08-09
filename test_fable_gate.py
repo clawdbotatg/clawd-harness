@@ -88,18 +88,30 @@ def test_no_reading_is_unknown_not_incapable():
 
 
 @case
-def test_a_limited_plan_hides_its_scoped_windows_and_must_not_convict():
-    """THE false positive, measured across the fleet an hour after the gate
-    shipped: the scoped windows drop out of the payload when a plan is at its
-    limit. `sub4` showed no fable window at 91% used on one box while the same
-    subscription showed `7d fable` on a fresh one. Absence from a maxed-out
-    reading proves nothing, and convicting on it silently deletes real
-    capacity — 91% is UNDER the 97% hot bar, so the gate would be the only
-    thing excluding a pool that works fine."""
-    maxed = acct("sub4-hot", 91.0, fable=False)
-    assert server._reading_trusts_absence(maxed.usage) is False
-    assert maxed.fable() is None, "a limited payload must not convict"
-    assert maxed.routable() is True, "…and an unproven pool stays routable"
+def test_the_label_is_not_the_subscription():
+    """The mistake that produced (and then nearly un-produced) this gate.
+
+    `sub4` on one box and `sub4` on another are CONFIG-DIR LABELS, and they
+    routinely hold logins into different orgs. Reading a "contradiction"
+    between two boxes' same-named accounts is how a correct verdict got
+    diagnosed as a false positive on 2026-08-09 — the fix that followed
+    weakened the gate on a premise that was never true. Pools are compared by
+    ORG uuid, never by name."""
+    a = acct("sub4", 91.0, fable=False, org="18f36efd")     # the fable-less org
+    b = acct("sub4", 6.0, fable=True, org="94f7f5f0")       # a different plan entirely
+    assert a.org != b.org, "same label, different subscription — the whole trap"
+    assert a.fable() is False and b.fable() is True
+    assert a.routable() is False and b.routable() is True
+
+
+@case
+def test_a_hot_reading_still_convicts():
+    """There is NO evidence that being at a limit suppresses the scoped
+    windows (see the note above _fable_state). Gating conviction on a
+    'healthy' reading re-opened the original bug: a fable-less pool at 91% is
+    UNDER the 97% hot bar, so nothing else would have skipped it."""
+    hot = acct("slop-hot", 91.0, fable=False)
+    assert hot.fable() is False and hot.routable() is False
 
 
 @case
@@ -108,7 +120,6 @@ def test_a_healthy_reading_still_convicts():
     fable window and genuinely could not run it (verified with a real
     `claude -p --model fable` call)."""
     healthy = acct("clawdteam", 47.0, fable=False)
-    assert server._reading_trusts_absence(healthy.usage) is True
     assert healthy.fable() is False and healthy.routable() is False
 
 
@@ -179,7 +190,6 @@ def test_capable_pools_still_rank_by_the_normal_rules():
 def test_gate_never_strands_the_router():
     """Routing to a fable-less plan is bad; routing nowhere is worse. With no
     capable pool anywhere, the roster still resolves (on capacity alone)."""
-    # both readings healthy (< FABLE_TRUST_MAX) so both genuinely convict
     m = mgr(acct("a", 70.0, fable=False, reset_in_h=90),
             acct("b", 4.0, fable=False, reset_in_h=10))
     assert all(x.fable() is False for x in m.accounts.values()), "setup"
@@ -220,20 +230,12 @@ def test_meta_reports_the_verdict_to_the_ui():
 def test_route_key_positional_names_match_the_tuple():
     """_maybe_autoswitch indexes _route_key's tuple by these names; a term
     added without moving them would silently compare the wrong fields."""
-    # A pool can no longer be BOTH hot and heuristically convicted — at 98%
-    # the payload is too degraded to trust an absent window (that is the whole
-    # point of _reading_trusts_absence) — so force the verdict by hand to
-    # exercise both flags at once.
-    S, a = server.SessionManager, acct("x", 98.0, reset_in_h=1)
-    server.SUB_NO_FABLE.add("x")
-    try:
-        k = mgr(a)._route_key(a)
-        assert len(k) == 5
-        assert k[S.KEY_CAP] is True and k[S.KEY_HOT] is True
-        assert k[S.KEY_NORESET] is False and k[S.KEY_PCT] == 98.0
-        assert k[S.KEY_RESET] > time.time()
-    finally:
-        server.SUB_NO_FABLE.discard("x")
+    S, a = server.SessionManager, acct("x", 98.0, fable=False, reset_in_h=1)
+    k = mgr(a)._route_key(a)
+    assert len(k) == 5
+    assert k[S.KEY_CAP] is True and k[S.KEY_HOT] is True
+    assert k[S.KEY_NORESET] is False and k[S.KEY_PCT] == 98.0
+    assert k[S.KEY_RESET] > time.time()
 
 
 if __name__ == "__main__":

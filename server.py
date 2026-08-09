@@ -453,12 +453,7 @@ SUB_NO_FABLE = {n.strip() for n in
                 os.environ.get("SUB_NO_FABLE", "").split(",") if n.strip()}
 SUB_FABLE_OK = {n.strip() for n in
                 os.environ.get("SUB_FABLE_OK", "").split(",") if n.strip()}
-# A missing fable window only means "no fable" on a HEALTHY snapshot: the
-# scoped windows also disappear when the plan is at its limit (measured across
-# the fleet the same day this shipped — see _reading_trusts_absence). Don't
-# convict from a reading where any window is at/over this mark…
-FABLE_TRUST_MAX = float(os.environ.get("FABLE_TRUST_MAX", "80"))
-# …and once fable HAS been seen for an account, believe it this long. Plan
+# Once fable HAS been seen for an account, believe it this long. Plan
 # entitlement doesn't flicker between polls; a payload that stops mentioning
 # fable for one reading is a degraded payload, not a downgraded plan. Long
 # enough to ride out a hot 5h window, short enough that a REAL plan change
@@ -1165,26 +1160,21 @@ def _has_fable_window(usage):
     return False
 
 
-def _reading_trusts_absence(usage):
-    """Is this snapshot healthy enough for a MISSING fable window to mean
-    anything?
-
-    No — and this is the correction to the first cut of the gate (2026-08-09,
-    same day): the scoped windows drop out of the payload when the plan is at
-    its limit, not only when the plan lacks the model. Measured across the
-    fleet within an hour of shipping: every pool the gate convicted apart from
-    the genuinely fable-less one was sitting at 91–100% on its 5h window, and
-    the SAME subscription that showed no fable window on a maxed box showed
-    `7d fable 0.0%` on a fresh one. Absence tracks BEING RATE-LIMITED at least
-    as well as it tracks entitlement.
-
-    So a negative verdict is only trusted from a snapshot where nothing is
-    near a cap. The cost of being wrong here is asymmetric: failing to convict
-    a hot fable-less pool loses one turn (and anything ≥ SUB_HOT is skipped by
-    the capacity rules anyway), while convicting a healthy pool silently
-    removes real capacity from the fleet."""
-    used = [w.get("used") for w in (usage or {}).get("windows") or []]
-    return all(isinstance(u, (int, float)) and u < FABLE_TRUST_MAX for u in used)
+# A NOTE ON A THEORY THAT WAS WRONG (2026-08-09, kept so it isn't re-derived):
+# it briefly looked like the scoped windows drop out of the payload when a plan
+# is at its limit — `sub4` showed no fable window at 91% used on one box while
+# "the same" `sub4` showed `7d fable 2.0%` on another. They were not the same
+# subscription. `sub4` is a CONFIG-DIR LABEL, and the two boxes' sub4 dirs hold
+# logins into different orgs (18f36efd vs 94f7f5f0) — the label lied, which is
+# the trap ACCOUNTS-PANEL.md documents. The 91%/100% correlation was
+# coincidence: the fable-less org simply happened to be hot on those boxes.
+# So there is NO evidence that limits suppress the window, and gating the
+# verdict on a "healthy" reading only re-opened the original bug (a fable-less
+# pool at 91% is under SUB_HOT, so nothing else would have skipped it).
+# The stickiness below is the guard that survived, and it is the principled
+# one: a plan that really carries fable advertises it on any healthy poll, so
+# having seen it recently is what protects against a one-off odd payload.
+# ALWAYS compare pools by org uuid, never by label.
 
 
 def _fable_state(usage, seen_at=0.0, now=None):
@@ -1194,13 +1184,12 @@ def _fable_state(usage, seen_at=0.0, now=None):
             (within FABLE_STICKY). Entitlement doesn't flicker minute to
             minute; a payload that momentarily stops mentioning it is far
             more likely to be degraded than the plan to have been downgraded.
-    False = a HEALTHY reading (see _reading_trusts_absence) advertises windows
-            and none of them are fable's, and we haven't seen fable recently.
-    None  = no good reading, or one we don't trust to convict. Callers must
-            treat None as 'yes' — an endpoint change that stopped emitting
-            scoped limits altogether would otherwise convict every pool at
-            once and leave the router with nothing to spend, which is far
-            worse than one turn on the wrong plan.
+    False = a good reading advertises windows, none of them are fable's, and we
+            haven't seen fable for this pool recently.
+    None  = no good reading at all. Callers must treat None as 'yes' — an
+            endpoint change that stopped emitting scoped limits altogether
+            would otherwise convict every pool at once and leave the router
+            with nothing to spend, which is far worse than one wrong turn.
 
     `seen_at` is the epoch seconds of the last observed fable window for this
     account (0 = never), which is what makes the stickiness possible at all —
@@ -1212,8 +1201,6 @@ def _fable_state(usage, seen_at=0.0, now=None):
         return True
     if seen_at and now - seen_at < FABLE_STICKY:
         return True                              # believed recently; a blip, not a downgrade
-    if not _reading_trusts_absence(usage):
-        return None                              # limited payload — absence proves nothing
     return False
 
 
