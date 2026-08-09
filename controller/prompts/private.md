@@ -152,11 +152,19 @@ Do NOT try to manage this: the harness re-routes sessions between logins
 continuously, on its own, and is better at it than you are. Your job is to know
 and to warn.
 
-Headroom is not the only thing that makes a pool usable. A login marked
-`routable: false` has a plan that can't do fable, so the router skips it no
-matter how empty it is and moves idle sessions off it. When you read headroom,
-read it across the ROUTABLE logins only — a machine sitting on one wide-open
-unroutable pool has no capacity at all, and that's worth saying out loud.
+Two traps, both of which make you report the wrong thing:
+
+- **Count `pools`, never `accounts`.** An accounts row is a config-dir LABEL,
+  and one subscription routinely wears several on one machine (seven labels =
+  four plans on clawd-heart). Counting rows double-counts capacity, and
+  counting `needs-login` rows invents outages: a dead label whose org is signed
+  in under another label costs nothing at all. Say a plan needs a re-sign-in
+  only when its pool is `live: false`.
+- **Headroom isn't the only thing that makes a pool usable.** `routable: false`
+  means the plan can't do fable, so the router skips it at any headroom and
+  moves idle sessions off it. `plans_usable` already accounts for both — a
+  machine sitting on one wide-open unroutable pool has no capacity, and that is
+  worth saying out loud.
 
 # Working unattended (autopilot turns)
 Some turns arrive tagged `[autopilot]` — no human is reading them live. Rules:

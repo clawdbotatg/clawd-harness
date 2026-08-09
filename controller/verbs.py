@@ -280,7 +280,17 @@ class Verbs:
 
         A pool carrying `routable: false` is one the router SKIPS regardless of
         headroom (its plan can't do fable). Don't count it as spare capacity —
-        a machine whose only free pool is unroutable is a machine in trouble."""
+        a machine whose only free pool is unroutable is a machine in trouble.
+
+        **Read `pools`, not `accounts`, when you report health.** An `accounts`
+        row is a config-dir LABEL, and one subscription routinely wears several
+        of them on one machine — so counting rows double-counts capacity, and
+        counting `needs-login` rows invents outages that don't exist (a dead
+        label whose org is signed in under another label costs nothing). The
+        `pools` list collapses labels by org uuid: `plans_total` is how many
+        subscriptions the machine actually holds and `plans_usable` how many the
+        router can spend right now. Only say a plan needs a re-sign-in when its
+        pool has `live: false` — every label into it is dead."""
         out = []
         for mid, c in self.clients.items():
             if machine and mid != machine:
@@ -295,6 +305,11 @@ class Verbs:
             for acc in a.get("accounts") or []:
                 row = {"name": acc.get("name"), "status": acc.get("status"),
                        "active": bool(acc.get("active")),
+                       # The label is a FOLDER, not a subscription. One plan
+                       # commonly wears several labels on one machine, so the
+                       # org uuid rides along on every row — see `pools`.
+                       "org": acc.get("orgUuid") or "",
+                       "plan": acc.get("orgName") or "",
                        "usage_pct": acc.get("usagePct"),
                        "headroom": acc.get("headroom")}
                 # Capacity is not the only way a pool goes unusable: a plan
@@ -313,9 +328,37 @@ class Verbs:
                 if acc.get("error"):
                     row["error"] = str(acc["error"])[:120]
                 rows.append(row)
+            # Collapse labels to actual SUBSCRIPTIONS. Counting `accounts`
+            # rows overstates both capacity and breakage: on clawd-heart seven
+            # labels are four plans, and two of the three "needs-login" rows
+            # are duplicate logins into orgs that are signed in under another
+            # label — i.e. nothing is actually offline. Report pools, and only
+            # call a plan dead when EVERY label into it is dead.
+            pools = {}
+            for r in rows:
+                key = r.get("org") or f"?{r['name']}"
+                pl = pools.setdefault(key, {
+                    "plan": r.get("plan") or r["name"], "org": r.get("org") or "",
+                    "labels": [], "live": False, "routable": True,
+                    "usage_pct": None})
+                pl["labels"].append(r["name"])
+                if r["status"] == "ready":
+                    pl["live"] = True
+                    if r.get("routable") is False:
+                        pl["routable"] = False
+                    if r.get("usage_pct") is not None and (
+                            pl["usage_pct"] is None
+                            or r["usage_pct"] < pl["usage_pct"]):
+                        pl["usage_pct"] = r["usage_pct"]
+            pool_rows = list(pools.values())
             m = {"machine": mid, "known": True, "active": a.get("active"),
                  "auto_switch": bool(a.get("auto")),
-                 "would_spawn_on": a.get("best"), "accounts": rows}
+                 "would_spawn_on": a.get("best"),
+                 "pools": pool_rows,
+                 "plans_total": len(pool_rows),
+                 "plans_usable": sum(1 for p in pool_rows
+                                     if p["live"] and p["routable"]),
+                 "accounts": rows}
             cx = a.get("codex") or {}
             if cx:
                 m["codex"] = {"status": cx.get("status"), "plan": cx.get("plan"),
