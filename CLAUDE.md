@@ -136,6 +136,16 @@ user-facing overview; this file orients an agent working **on** the code.
   still in the `<input>` but not yet mirrored into `projectFilter` isn't
   dropped. It calls `renderProjects(projectList)` — literally what a frame does
   — so it touches no session. See "Repaint, don't rebuild" below.
+- **`tools/splashprobe.mjs`** — guards the **splash cooldown** (2026-08-09). The
+  session-entry splash (the RSVP flash of project → machine → title → tldr) is
+  worth ~2s only when you've been *away* from that session; hopping between two
+  tabs re-ran it every hop. Each session now carries a last-looked-at stamp,
+  refreshed every 30s while its tty view is visible (a hidden tab isn't looking)
+  and on climbing out, persisted in `localStorage` (`cc_seen_at`, pruned to the
+  window) so a reload doesn't re-flash what you're staring at; `maybeSplash`
+  fires only past `SPLASH_COOLDOWN_MS` (10 min). The probe lands on the sessions
+  rung and drives `maybeSplash()` against a *fake* session in `sessionList`, so
+  it subscribes to nothing and claims no PTY size.
 - **`tools/tabfilterprobe.mjs`** — guards the **🔎 tab-strip filter** (2026-08-09):
   that it sits at the far right, stays pinned there when the strip scrolls (it's
   `position:sticky`, so tabs pass *under* it), that typing narrows the strip and

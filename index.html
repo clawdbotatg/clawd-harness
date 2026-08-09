@@ -4835,12 +4835,38 @@ function updateTtyStat() {
   ttystatEl.setAttribute('aria-label', 'session state: ' + st.word);
   ttystatEl.hidden = false;
 }
+// -- "have I just been here?" — the splash's cooldown ------------------------
+// Bouncing between two sessions shouldn't re-run the show every hop: the splash
+// earns its ~2s only when you've been AWAY long enough to have lost the thread.
+// So each session carries a last-looked-at stamp, kept fresh while you're
+// actually watching it (visible tty view — a backgrounded tab is not looking),
+// and the splash fires only if that stamp is older than SPLASH_COOLDOWN_MS.
+// Persisted, so a reload doesn't re-flash the session you're staring at. Also
+// subsumes the old 5s double-fire guard (showing the splash stamps it seen).
+const SPLASH_COOLDOWN_MS = 10 * 60 * 1000;
+const SEEN_KEY = 'cc_seen_at';
+let seenAt = (() => { try { return JSON.parse(localStorage.getItem(SEEN_KEY)) || {}; } catch { return {}; } })();
+function seenKey(cid) {
+  // cids are per-harness, so in fleet two machines could collide — key by both.
+  const s = allSessions().find(x => x.cid === cid);
+  const m = FLEET ? ((s && s._machine) || currentMachine) : null;
+  return m ? m + '/' + cid : cid;
+}
+function markSeen(cid) {
+  if (!cid) return;
+  seenAt[seenKey(cid)] = Date.now();
+  const cut = Date.now() - SPLASH_COOLDOWN_MS;             // the map only answers
+  for (const k in seenAt) if (seenAt[k] < cut) delete seenAt[k];   // "recently?" — prune the rest
+  try { localStorage.setItem(SEEN_KEY, JSON.stringify(seenAt)); } catch {}
+}
+function seenRecently(cid) { return Date.now() - (seenAt[seenKey(cid)] || 0) < SPLASH_COOLDOWN_MS; }
 function maybeSplash(cid) {
   if (!cid) return;
   const s = allSessions().find(x => x.cid === cid);
   if (!s) return;
   if (!s.promptCount && !s.desc) return;                 // brand-new: nothing to say yet
-  if (cid === splashCid && Date.now() - splashShownAt < 5000) return;  // double-fire guard
+  if (seenRecently(cid)) { markSeen(cid); return; }      // just been here — no show
+  markSeen(cid);
   splashCid = cid; splashShownAt = Date.now();
   for (const t of splashTimers) clearTimeout(t);
   splashTimers = [];
@@ -6472,7 +6498,7 @@ function setView(view) {
         pm = view === 'pm', pins = view === 'pins';
   // Leaving the terminal view: stop claiming the PTY size (read BEFORE the
   // panel toggles below change what currentView() reports).
-  if (!tty && currentCid && currentView() === 'tty') releaseResize();
+  if (!tty && currentCid && currentView() === 'tty') { releaseResize(); markSeen(currentCid); }
   if (!tty) hideSplash();          // splash lives on the tty — climbing out ends it
   projectsPanel.classList.toggle('hidden', !projects);
   menuPanel.classList.toggle('hidden', !sessions);
@@ -7408,6 +7434,15 @@ setInterval(() => {
 setInterval(() => {
   if (document.hidden || currentView() === 'projects') return;
   renderSessionBar();
+}, 30000);
+
+// Keep the open session's "last looked at" stamp fresh while you're actually
+// watching it, so the splash cooldown measures time AWAY from a session rather
+// than time since you arrived. A hidden tab isn't looking, so the stamp goes
+// stale there and a long absence still earns the flash on return.
+setInterval(() => {
+  if (document.hidden || currentView() !== 'tty' || !currentCid) return;
+  markSeen(currentCid);
 }, 30000);
 
 // Sleep detector — the wake trigger that needs NO browser event. Timers can't
