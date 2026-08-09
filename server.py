@@ -481,6 +481,53 @@ _LIMIT_BANNER_RE = re.compile(
 _ONBOARDING_RE = re.compile(
     r"choose the text style that looks best with your terminal", re.I)
 ONBOARD_SCAN_WINDOW = float(os.environ.get("ONBOARD_SCAN_WINDOW", "180"))
+# Claude's RESUME GATE (CLI 2.1.226): resuming a session that is older than
+# CLAUDE_CODE_RESUME_THRESHOLD_MINUTES (70) AND carries more than
+# CLAUDE_CODE_RESUME_TOKEN_THRESHOLD (100k) estimated tokens opens a modal —
+# titled "This session is 1d 17h old and 438k tokens.", offering three numbered
+# options (summarize / resume as-is / stop asking) with the first preselected
+# — and the session sits there, resumed but frozen, until somebody answers. In
+# a browser harness "somebody" is a human who may be hours away, and EVERY
+# harness resume path hits it (daemon restart, graceful self-restart, account
+# handoff, every rescue respawn) on exactly the long-lived sessions that matter.
+# Option 1 runs plain `/compact` (verified in the CLI bundle: the "compact"
+# branch calls the same slash command _compact_for_pin types), so answering it
+# is the cheap branch as well as the unblocking one.
+#
+# TWO RENDERING FACTS THE NEEDLE DEPENDS ON, both measured, not assumed:
+#  * ink lays this dialog out with CURSOR-FORWARD padding (ESC[nC), not literal
+#    spaces, so stripping ANSI leaves the words RUN TOGETHER —
+#    "Resumefromsummary(recommended)". A spaced needle (as _LIMIT_BANNER_RE can
+#    afford, its banner being one contiguous styled line) matches NOTHING here.
+#    Hence _flat_pty below strips whitespace entirely, on both sides.
+#  * claude's own status file still reads "idle" while the modal is up, so —
+#    unlike the limit banner, which rescue_limit_wall re-confirms against the
+#    usage endpoint — there is NO out-of-band oracle to confirm this one.
+# So the needle carries the whole burden: it demands the full option list AND
+# the live footer, which prose quoting the dialog (this comment; the CLAUDE.md
+# section) does not reproduce in one screen. The blast radius if it ever does
+# false-match is deliberately tiny — one bare CR into an empty composer, which
+# claude ignores — rather than the respawn the onboarding scan risks.
+def _flat_pty(chunk: bytes) -> str:
+    """De-ANSI a PTY chunk and strip whitespace ENTIRELY. The limit/onboarding
+    scans collapse runs to single spaces, which is right for text the CLI emits
+    as one styled line; anything ink lays out in a box arrives space-free
+    instead (the padding is cursor motion, which de-ANSI'ing deletes). Dropping
+    whitespace on both sides is the only form that matches both."""
+    return re.sub(r"\s+", "", _PTY_ANSI_RE.sub(b"", chunk).decode("utf-8", "ignore"))
+
+
+_RESUME_GATE_RE = re.compile(
+    r"resumefromsummary\(recommended\)"
+    r".{0,120}?resumefullsessionas-is"
+    r".{0,120}?entertoconfirm", re.I | re.S)
+RESUME_GATE = os.environ.get("RESUME_GATE", "1") != "0"
+# The modal paints ~0.8s into a resume, before the session can do anything
+# else; the window only has to cover a slow box replaying a huge transcript.
+RESUME_GATE_WINDOW = float(os.environ.get("RESUME_GATE_WINDOW", "120"))
+# Raw-byte window the gate scan re-strips each read. The modal is ~1.5KB of
+# painted bytes; 8KB holds it whole even when a repaint interleaves.
+GATE_RAW_MAX = 8192
 # Paths symlinked from ~/.claude into each account dir so every account runs
 # with the user's full extension environment (same list claw-router shares).
 SHARE_PATHS = ["settings.json", "CLAUDE.md", "commands", "rules", "skills",
@@ -1379,6 +1426,12 @@ class Engine:
     def slim_event(self, s, line):  return None
     def send_settle(self, big): return SEND_SETTLE if big else SEND_SETTLE_MIN
     def bg_probe(self, s):      return ""
+    # The keystroke that answers this CLI's resume gate (see _RESUME_GATE_RE) —
+    # a bare CR, because option 1 ("Resume from summary") is the one already
+    # highlighted and the modal's own footer reads "Enter to confirm". b"" opts
+    # an engine out: codex raises no such modal, and a CR fired at a codex TUI
+    # on a needle we have never seen it paint would be a guess, not a fix.
+    resume_gate_key = b""
     # The CLI's "summarize this conversation to reclaim context" slash command,
     # typed into the TUI when a session is pinned. Both shipped CLIs carry
     # /compact in their command tables; "" would opt an engine out.
@@ -1395,6 +1448,7 @@ class Engine:
 
 class ClaudeEngine(Engine):
     name, bin, routes_accounts = "claude", CLAUDE_BIN, True
+    resume_gate_key = b"\r"                  # verified: CR → "❯ /compact" → Compacting…
 
     def argv(self, s):
         return [self.bin,
@@ -1885,6 +1939,8 @@ class ClaudeSession:
         self._onboard_tail = ""                   # rolling de-ANSI'd PTY text, for the onboarding-screen scan
         self._onboard_deadline = 0.0              # scan window end; start() arms it, a match disarms it
         self._onboard_rescues = 0                 # respawns burned on this cid (carried across; caps the loop)
+        self._gate_raw = b""                      # rolling RAW PTY bytes, for the resume-gate scan
+        self._gate_deadline = 0.0                 # scan window end; a resume start() arms it, a match/send disarms it
         self._started_evt = threading.Event()     # set on SessionStart — "the TUI is up"
         self.last_tool = None
         self.digest = ""                          # volatile "what it's doing now" (LLM, refreshed each Stop)
@@ -2044,6 +2100,13 @@ class ClaudeSession:
         # half-onboarded) — and the _ensure_onboarded seed above covers them.
         self._onboard_deadline = 0.0 if self.resuming \
             else time.time() + ONBOARD_SCAN_WINDOW
+
+        # The resume gate arms on exactly the OPPOSITE spawns: it is a modal
+        # only --resume can raise, so a fresh session must never scan for it.
+        self._gate_raw = b""
+        self._gate_deadline = (time.time() + RESUME_GATE_WINDOW) if (
+            self.resuming and RESUME_GATE and self.eng.resume_gate_key
+            and not self.ceremony) else 0.0
 
         self.settings_path = self.eng.hook_setup(self)
         cmd = self.eng.argv(self)
@@ -2423,6 +2486,12 @@ class ClaudeSession:
         """Raw keystrokes -> PTY."""
         if self.master_fd is None:
             return
+        # Anything reaching the PTY disarms the resume-gate scan: a human at
+        # the keyboard answers the modal themselves, and a harness send must
+        # never have our CR fire between its text and its own submitting CR
+        # (that would post half a prompt). The scan zeroes the deadline BEFORE
+        # calling us, so its own keystroke isn't caught by this.
+        self._gate_deadline = 0.0
         try:
             os.write(self.master_fd, data)
         except OSError:
@@ -2506,6 +2575,11 @@ class ClaudeSession:
                 self._scan_for_limit(chunk)
                 if self._onboard_deadline:
                     self._scan_for_onboarding(chunk)
+            # NOT fenced behind routes_accounts: answering a modal is a TUI
+            # act, not a subscription-router one. Its fence is the Engine's
+            # own resume_gate_key, which is empty everywhere but claude.
+            if self._gate_deadline:
+                self._scan_for_resume_gate(chunk)
         self.alive = False
         # Stamp the account: the poller must not consume this grant for
         # SUB_REFRESH_EXIT_GRACE — the dying claude's last token rotation
@@ -2576,6 +2650,37 @@ class ClaudeSession:
               f"on {self.account} — rescuing", flush=True)
         threading.Thread(target=self.manager.rescue_onboarding, args=(self,),
                          daemon=True).start()
+
+    def _scan_for_resume_gate(self, chunk):
+        """Answer claude's resume gate the moment it paints, so a session that
+        was resumed in the background is already compacted by the time a human
+        opens it — instead of sitting frozen on a modal nobody was there to
+        click. Option 1 is pre-highlighted and runs /compact, so the answer is
+        one bare CR (Engine.resume_gate_key).
+
+        Armed only inside RESUME_GATE_WINDOW seconds of a --resume launch, and
+        one-shot. There is no confirming oracle for this modal (the status file
+        reads "idle" while it is up), so the guard is the needle's narrowness
+        plus a blast radius of one CR into an empty composer."""
+        if time.time() >= self._gate_deadline:
+            self._gate_deadline = 0.0            # window over — stop scanning entirely
+            self._gate_raw = b""
+            return
+        # Buffer RAW bytes and de-ANSI the whole window each time, rather than
+        # flattening per chunk and concatenating the text (what the limit and
+        # onboarding scans do). A chunk boundary can fall inside an escape
+        # sequence, and a half-stripped escape leaks literal junk like "38;5;
+        # 246m" into the middle of the needle — measured: per-chunk flattening
+        # misses the modal entirely at small chunk sizes. Re-stripping a few KB
+        # per read costs nothing and is only armed for one window per resume.
+        self._gate_raw = (self._gate_raw + chunk)[-GATE_RAW_MAX:]
+        if not _RESUME_GATE_RE.search(_flat_pty(self._gate_raw)):
+            return
+        self._gate_deadline = 0.0                # one shot per session object
+        self._gate_raw = b""
+        print(f"[session {self.cid[:8]}] resume gate on {self.account} — "
+              f"accepting 'resume from summary' (auto-/compact)", flush=True)
+        self.write(self.eng.resume_gate_key)
 
     # -- read channel: transcript JSONL -> structured events -------------------
     def _find_transcript(self):

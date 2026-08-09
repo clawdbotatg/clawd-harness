@@ -361,6 +361,42 @@ user-facing overview; this file orients an agent working **on** the code.
   alone. The Stop-side hint refresh is gated on `prompt_count` moving, so the
   turn `/compact` itself ends can't overwrite a good hint with one read off a
   summarized transcript.
+- **The resume gate — the harness presses Enter for you** (2026-08-09). Claude
+  CLI 2.1.226 resumes a session older than 70 min AND over 100k estimated
+  tokens (`CLAUDE_CODE_RESUME_THRESHOLD_MINUTES` / `_TOKEN_THRESHOLD`) onto a
+  modal offering three numbered options — summarize, resume as-is, stop asking
+  — with the first preselected, and then **waits**. In a browser harness nobody
+  is there to press Enter, and *every* resume path hits it (daemon restart,
+  graceful self-restart, account handoff, every rescue respawn) on exactly the
+  long-lived sessions that matter: you'd come back to a session that had been
+  "resumed" hours ago and never moved. Worse, a prompt delivered into that
+  modal isn't inert — the options are **numbered**, so a message starting `3`
+  could pick *Don't ask me again* and its own CR would confirm it.
+  So `_scan_for_resume_gate` (third PTY tripwire, beside the limit banner and
+  the onboarding screen) answers it the moment it paints — **option 1 runs
+  plain `/compact`**, verified in the CLI bundle, so accepting is both the
+  unblocking move and the cheap one. You return to a session that already
+  compacted itself. `RESUME_GATE=0` opts out; `RESUME_GATE_WINDOW` (120s) sizes
+  the arming window. Test: `python3 test_resume_gate.py` (runs against a real
+  885-byte capture of the modal's bytes).
+  Four things here are measured, not assumed, and are the ones to not re-break:
+  **(1)** ink pads this dialog with cursor motion, not spaces, so de-ANSI'd text
+  arrives *space-free* (`Resumefromsummary…`) — `_flat_pty` strips whitespace on
+  both sides, and a spaced needle like `_LIMIT_BANNER_RE`'s matches nothing here;
+  **(2)** the scan buffers **raw bytes** and re-strips the window each read
+  instead of concatenating per-chunk text like the older two scans — a chunk
+  boundary inside an escape sequence leaks junk into the needle and made it miss
+  the modal entirely at small chunk sizes; **(3)** there is **no confirming
+  oracle** — claude's status file still reads `idle` while the modal is up — so
+  unlike `rescue_limit_wall` (which re-confirms against the usage endpoint) the
+  needle guards itself, by demanding the whole option list *and* the live footer;
+  hence the deliberate rule that **no file in this repo quotes that option list
+  verbatim** (a session merely replaying such a file would trip it — the same
+  echo trap that respawn-cycled sub2 in 07-16), which `test_resume_gate.py`
+  enforces by scanning `server.py` and this file; **(4)** arming is the exact
+  mirror of the onboarding scan — **resume-only**, one-shot, and disarmed by any
+  write to the PTY so our CR can never land between a harness send's text and its
+  own submitting CR.
 - **Right model for the right job:** naming is a cheap, frequent, fire-and-forget
   labeler (~900 input tokens, 3×/session, async) — so `BANKR_MODEL` = **`qwen3-coder`**,
   the winner of a full 41-model cost+speed+reliability survey: ~$0.032 per 1,000
