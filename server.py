@@ -2995,6 +2995,7 @@ class SessionManager:
         self.lock = threading.RLock()
         self.all_clients = set()                 # every connected browser
         self.clients_lock = threading.Lock()
+        self._projects_sig = None                # last broadcast projects payload (see broadcast_projects)
         # Graceful self-restart: when a boot-time file (server.py / .env) changes,
         # we flag a pending restart, surface it in every browser, and wait until
         # *all* sessions are idle before tearing down — so no in-flight turn dies.
@@ -4885,8 +4886,27 @@ class SessionManager:
         for c in targets:
             c.send_json(obj)
 
-    def broadcast_projects(self):
-        self.broadcast_all({"type": "projects", "projects": self.projects_meta()})
+    def broadcast_projects(self, force=False):
+        """Fan the project list out — but only when it actually changed.
+
+        Every hook bumps a session's `last_active` (on_hook), and broadcast_sessions
+        chains into here, so an unfiltered version emits a `projects` frame per
+        PreToolUse *and* PostToolUse — a couple per tool call of every running
+        session. The browser answers each one by repainting the projects rung,
+        which is what made the rung churn under the user's hands.
+
+        The fingerprint deliberately EXCLUDES `lastTouched`: it's the warmth
+        timestamp that every hook moves, and nothing renders it — it only feeds
+        the sort, and the list is already sorted here, so a reorder still shows
+        up as a change in pid order. `force=True` bypasses the memo.
+        """
+        meta = self.projects_meta()
+        sig = json.dumps([{k: v for k, v in p.items() if k != "lastTouched"}
+                          for p in meta], sort_keys=True, default=str)
+        if not force and sig == self._projects_sig:
+            return
+        self._projects_sig = sig
+        self.broadcast_all({"type": "projects", "projects": meta})
 
     def broadcast_sessions(self):
         self.broadcast_all({"type": "sessions",

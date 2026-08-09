@@ -470,6 +470,11 @@
   #sessions, #projectlist, #machinelist, #pinboard { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
               padding:14px; display:flex; flex-direction:column; gap:9px;
               width:100%; max-width:780px; align-self:center; }
+  /* Project cards live in their own container so a repaint can reconcile them
+     without emptying #projectlist — which is the scroll container, so clearing
+     it collapses scrollHeight and the browser resets the user's scroll to 0.
+     Mirrors the parent's column layout, so the rung looks identical. */
+  #projcards { display:flex; flex-direction:column; gap:9px; }
   /* 📌 pin board: parked "check on this later" sessions. Cards reuse .scard;
      each carries its own one-line prompt row so you can poke a to-do without
      restoring it to the tab strip. */
@@ -3432,7 +3437,7 @@ function resolveProject(key) {
 }
 
 function selectProject(id) {
-  projectFilter = '';                          // clear the filter on the way in, so coming back shows all projects
+  setProjectFilter('');                        // clear the filter on the way in, so coming back shows all projects
   if (FLEET) { resolveProject(id); return; }   // id is the project identity key
   currentPid = id;
   renderSessions();
@@ -4221,37 +4226,55 @@ function openAccounts() {
   else liveMachines().forEach(m => hsendTo(m.id, { type: 'accountsRefresh' }));
 }
 
-// Direct mode entry point: a `projects` frame for the (single) local harness.
-// Fleet mode never calls this — its rung is driven by mergeProjects/renderProjectRung.
-function renderProjects(list) {
-  projectList = list;
-  // a freshly selected project that vanished (removed) → drop the selection
-  if (currentPid && !list.some(p => p.pid === currentPid)) currentPid = null;
-  renderProjectRung();
+// The projects rung repaints on every `projects` frame, and the server sends one
+// whenever session state moves — during a live turn that is a couple per tool
+// call, times the number of machines in fleet mode, plus the 20s roster
+// heartbeat. So this has to be a REPAINT, not a rebuild. Two things are
+// load-bearing, and both were regressions people felt as "the page is possessed":
+//   • the header + add row are built ONCE and never replaced. A re-created
+//     <input> silently drops whatever the `input` event hasn't mirrored into
+//     projectFilter yet (on touch, composition/dictation lose whole words), and
+//     re-focusing it scrolls the list back to the top.
+//   • the cards are reconciled BY ID so their nodes survive. #projectlist is
+//     itself the scroll container, so emptying it collapses scrollHeight and the
+//     browser clamps scrollTop to 0 — that is what yanked the list upward
+//     several times a second while anything was working.
+// And nothing in here may take focus: *arriving* on the rung focuses the box
+// (setView), a frame landing never does.
+let projLabelEl = null;         // 'projects · N'
+let projCardsEl = null;         // card container — reconciled, never emptied wholesale
+let projFilterInp = null;       // the filter/create box — one node for the app's life
+let projMachineSel = null;      // fleet: the machine select
+let projMachineSig = '';        // roster signature its options were built from
+let wantProjectFocus = false;   // landed on the rung before the box existed — focus it when it appears
+
+// Point the filter box at a value from code (opening a project, submitting).
+// Programmatic writes fire no `input` event, so keep the mirror in step by hand.
+function setProjectFilter(v) {
+  projectFilter = v;
+  if (projFilterInp && projFilterInp.value !== v) projFilterInp.value = v;
+}
+function focusProjectFilter() {
+  // Desktop-only — autofocus on touch would pop the soft keyboard.
+  if (isTouch || !projFilterInp) return;
+  projFilterInp.focus();
+  const n = projFilterInp.value.length;
+  try { projFilterInp.setSelectionRange(n, n); } catch {}
+}
+// Called from setView when we land on the rung. If the chrome hasn't been built
+// yet (boot: we arrive before the first `projects` frame) arm a one-shot instead.
+function focusProjectFilterOnArrival() {
+  if (projFilterInp) focusProjectFilter();
+  else wantProjectFocus = true;
 }
 
-// Render the project rung from normalized rows (unified across machines in fleet
-// mode, 1:1 with the local harness in direct mode).
-function renderProjectRung() {
-  // The machine select can't survive the rebuild below: replacing the element
-  // snaps its native dropdown shut mid-pick (and the fleet roster heartbeat
-  // re-renders this rung ~1s, so it WILL fire while the menu is open). While
-  // the select holds focus, leave the DOM alone — filtering still tracks live
-  // via applyProjectFilter (it re-reads projectRows()), and card contents catch
-  // up on the first render after blur.
-  if (document.activeElement && document.activeElement.tagName === 'SELECT' &&
-      projectsEl.contains(document.activeElement)) { applyProjectFilter(); return; }
-  const rows = projectRows();
-  const selId = selectedProjectId();
-  // Preserve the filter box's focus + caret across the rebuild: fleet broadcasts a
-  // `projects` frame per machine, so this can re-run while you're mid-type.
-  const oldInp = projectsEl.querySelector('#addProject input');
-  const keepFocus = oldInp && document.activeElement === oldInp;
-  const selStart = oldInp ? oldInp.selectionStart : null, selEnd = oldInp ? oldInp.selectionEnd : null;
-  projectsEl.innerHTML = '';
-  const label = document.createElement('div');
-  label.className = 'menutitle'; label.textContent = `projects · ${rows.length}`;
-  projectsEl.appendChild(label);
+// Build the persistent chrome: title, add/search row, card container. Runs once.
+function ensureProjectChrome() {
+  if (projCardsEl) return;
+  projectsEl.textContent = '';
+  projLabelEl = document.createElement('div');
+  projLabelEl.className = 'menutitle';
+  projectsEl.appendChild(projLabelEl);
 
   // add/search row: the box does double duty. As you type it FILTERS the list
   // below (substring match on name); Enter OPENS the project when the filter has
@@ -4262,32 +4285,17 @@ function renderProjectRung() {
   const inp = document.createElement('input');
   inp.placeholder = 'filter projects · or type a name / git URL / local path and click a button';
   inp.value = projectFilter;
+  projFilterInp = inp;
   // Fleet: a machine select that scopes BOTH halves of the row — it filters the
   // list to that box's projects AND targets create/clone at it. 'default/all'
-  // shows everything and creates on the default host (the roster checkbox, else
+  // shows everything and creates on the default host (the ⚙️ setting, else
   // auto-pick). This is the one place to aim a new repo at a specific machine.
-  let msel = null;
   if (FLEET) {
-    msel = document.createElement('select');
-    const workers = machineList.filter(m => m.kind !== 'relay' && isMachineActive(m.id));
-    if (projMachine && !workers.some(m => m.id === projMachine)) projMachine = '';  // picked box left the roster (or was switched off)
-    const defName = defaultCreateMachine();
-    const all = document.createElement('option');
-    all.value = '';
-    all.textContent = 'default/all' + (defName ? ` · new repos → ${defName.replace(/^clawd-/, '')}` : '');
-    msel.appendChild(all);
-    workers.forEach(m => {
-      const o = document.createElement('option');
-      o.value = m.id;
-      o.textContent = `🖥️ ${m.id.replace(/^clawd-/, '')}` + (m.online ? '' : ' · offline');
-      msel.appendChild(o);
-    });
-    msel.value = projMachine;
-    msel.className = projMachine ? 'mfiltered' : '';
-    msel.title = 'filter projects by machine · create/clone lands on the selected machine';
-    msel.onchange = () => {
-      projMachine = msel.value;
-      msel.className = projMachine ? 'mfiltered' : '';
+    projMachineSel = document.createElement('select');
+    projMachineSel.title = 'filter projects by machine · create/clone lands on the selected machine';
+    projMachineSel.onchange = () => {
+      projMachine = projMachineSel.value;
+      projMachineSel.className = projMachine ? 'mfiltered' : '';
       applyProjectFilter();
     };
   }
@@ -4311,7 +4319,7 @@ function renderProjectRung() {
     } else if (kind === 'create') createProject(val);
     else if (kind === 'local') addLocalProject(val);
     else addProjectFromUrl(val);
-    inp.value = ''; projectFilter = ''; applyProjectFilter();
+    setProjectFilter(''); applyProjectFilter();
   };
   createBtn.onclick = () => submit('create');
   cloneBtn.onclick = () => submit('clone');
@@ -4324,121 +4332,179 @@ function renderProjectRung() {
     if (matches.length === 1) selectProject(matches[0].id);  // narrowed to one → open it
   });
   add.appendChild(inp);
-  if (msel) add.appendChild(msel);
+  if (projMachineSel) add.appendChild(projMachineSel);
   arow.appendChild(createBtn); arow.appendChild(cloneBtn); arow.appendChild(localBtn);
   add.appendChild(arow);
   projectsEl.appendChild(add);
 
-  rows.forEach(p => {
-    const busyP = p.status === 'cloning', errP = p.status === 'error';
-    const offline = FLEET && !p.online;         // every machine hosting this project is offline
-    const card = document.createElement('div');
-    card.className = 'scard' + (p.id === selId ? ' active' : '') +
-                     (busyP ? ' cloning' : errP ? ' error' : '') + (offline ? ' offline' : '') +
-                     (p.kind === 'local' ? ' local' : '');
-    card.dataset.id = p.id;
-    if (!busyP && !errP && !offline) card.onclick = () => selectProject(p.id);
+  projCardsEl = document.createElement('div');
+  projCardsEl.id = 'projcards';
+  projectsEl.appendChild(projCardsEl);
 
-    const row = document.createElement('div'); row.className = 'row';
-    const sdot = document.createElement('span');
-    sdot.className = 'sdot' + (busyP ? ' cloning' : errP ? ' err' : offline ? ' dead' : '');
-    const title = document.createElement('span');
-    title.className = 'stitle';
-    const pem = shortEmoji(p.emoji);     // display form — same trimmed badge as this project's tabs
-    title.textContent = (pem ? pem + ' ' : '') + p.name;
-    if (p.emoji && p.emoji !== pem) title.title = p.emoji;
-    row.appendChild(sdot); row.appendChild(title);
-    if (p.pinned) {
-      const tag = document.createElement('span');
-      tag.className = 'scount'; tag.textContent = 'this app'; tag.title = 'the running harness — live-editable';
-      row.appendChild(tag);
-    }
-    if (p.kind === 'local') {
-      const tag = document.createElement('span');
-      tag.className = 'scount slocal'; tag.textContent = '🔒 local';
-      tag.title = 'local folder — private, never touches GitHub or any git remote';
-      row.appendChild(tag);
-    }
-    if (p.machineCount > 1) {                    // multi-machine project: surface the fan-out
-      const mt = document.createElement('span');
-      mt.className = 'scount smach';
-      mt.textContent = `🖥️ ${p.machineCount}`;
-      mt.title = `installed on ${p.machineCount} machines (default: ${p.machineName})`;
-      row.appendChild(mt);
-    } else if (FLEET && p.machineName && !p.pinned) {   // single-machine project: name the box it lives on
-      const mt = document.createElement('span');
-      mt.className = 'scount smach';
-      mt.textContent = `🖥️ ${p.machineName.replace(/^clawd-/, '')}`;
-      mt.title = `only on ${p.machineName}`;
-      row.appendChild(mt);
-    }
-    if (p.waitingCount > 0) {
-      const need = document.createElement('span');
-      need.className = 'scount swait';
-      need.textContent = `⏳ ${p.waitingCount} needs you`;
-      need.title = `${p.waitingCount} session${p.waitingCount === 1 ? '' : 's'} blocked on you`;
-      row.appendChild(need);
-    }
-    if (p.busyCount > 0) {
-      const work = document.createElement('span');
-      work.className = 'scount swork';
-      work.textContent = `▶ ${p.busyCount} working`;
-      work.title = `${p.busyCount} session${p.busyCount === 1 ? '' : 's'} actively working`;
-      row.appendChild(work);
-    }
-    const count = document.createElement('span');
-    count.className = 'scount'; count.textContent = `${p.sessionCount || 0} sess`;
-    row.appendChild(count);
-    card.appendChild(row);
+  if (wantProjectFocus) { wantProjectFocus = false; focusProjectFilter(); }
+}
 
-    const sub = p.kind === 'local' ? p.path : p.repoUrl;   // a local's identity is its path
-    if (sub) {
-      const desc = document.createElement('div');
-      desc.className = 'sdesc'; desc.textContent = sub;
-      card.appendChild(desc);
-    }
-    if (p.kind === 'local' && !busyP) {
-      // eject: detach the registry entry (folder untouched) — locals only;
-      // gh projects keep the delete-the-folder contract
-      const ej = document.createElement('button');
-      ej.className = 'sclose'; ej.textContent = '⏏';
-      ej.title = 'detach this local project (the folder on disk is not touched)';
-      ej.onclick = (e) => {
-        e.stopPropagation();
-        removeLocalProject(FLEET ? p.machineName : null, FLEET ? p.machinePid : p.id, p.name);
-      };
-      card.appendChild(ej);
-    }
-    if (busyP) {
-      const sm = document.createElement('div');
-      sm.className = 'smeta'; sm.textContent = 'cloning…';
-      card.appendChild(sm);
-    } else if (errP) {
-      const se = document.createElement('div');
-      se.className = 'serror'; se.textContent = p.error || 'failed';
-      card.appendChild(se);
-    } else if (offline) {
-      const sm = document.createElement('div');
-      sm.className = 'smeta'; sm.textContent = 'machine offline';
-      card.appendChild(sm);
-    }
+// Fleet only: keep the machine select's options in step with the roster. Rebuilt
+// only when the roster actually changes, and NEVER while the select has focus —
+// replacing its options snaps the native dropdown shut mid-pick, and the roster
+// heartbeat is guaranteed to fire while the menu is open.
+function syncMachineSelect() {
+  if (!projMachineSel) return;
+  if (document.activeElement === projMachineSel) return;
+  const workers = machineList.filter(m => m.kind !== 'relay' && isMachineActive(m.id));
+  if (projMachine && !workers.some(m => m.id === projMachine)) projMachine = '';  // picked box left the roster (or was switched off)
+  const defName = defaultCreateMachine();
+  const sig = (defName || '') + '|' + workers.map(m => m.id + (m.online ? '+' : '-')).join(',');
+  if (sig !== projMachineSig) {
+    projMachineSig = sig;
+    projMachineSel.textContent = '';
+    const all = document.createElement('option');
+    all.value = '';
+    all.textContent = 'default/all' + (defName ? ` · new repos → ${defName.replace(/^clawd-/, '')}` : '');
+    projMachineSel.appendChild(all);
+    workers.forEach(m => {
+      const o = document.createElement('option');
+      o.value = m.id;
+      o.textContent = `🖥️ ${m.id.replace(/^clawd-/, '')}` + (m.online ? '' : ' · offline');
+      projMachineSel.appendChild(o);
+    });
+  }
+  if (projMachineSel.value !== projMachine) projMachineSel.value = projMachine;
+  projMachineSel.className = projMachine ? 'mfiltered' : '';
+}
 
-    projectsEl.appendChild(card);
+// Paint one project card's contents. The card ELEMENT is reused across repaints
+// (see the reconcile below); only its innards are swapped, in one shot, so the
+// list's height never momentarily collapses.
+function fillProjectCard(card, p, selId) {
+  const busyP = p.status === 'cloning', errP = p.status === 'error';
+  const offline = FLEET && !p.online;         // every machine hosting this project is offline
+  card.className = 'scard' + (p.id === selId ? ' active' : '') +
+                   (busyP ? ' cloning' : errP ? ' error' : '') + (offline ? ' offline' : '') +
+                   (p.kind === 'local' ? ' local' : '');
+  card.onclick = (!busyP && !errP && !offline) ? () => selectProject(p.id) : null;
+
+  const frag = document.createDocumentFragment();
+  const row = document.createElement('div'); row.className = 'row';
+  const sdot = document.createElement('span');
+  sdot.className = 'sdot' + (busyP ? ' cloning' : errP ? ' err' : offline ? ' dead' : '');
+  const title = document.createElement('span');
+  title.className = 'stitle';
+  const pem = shortEmoji(p.emoji);     // display form — same trimmed badge as this project's tabs
+  title.textContent = (pem ? pem + ' ' : '') + p.name;
+  if (p.emoji && p.emoji !== pem) title.title = p.emoji;
+  row.appendChild(sdot); row.appendChild(title);
+  if (p.pinned) {
+    const tag = document.createElement('span');
+    tag.className = 'scount'; tag.textContent = 'this app'; tag.title = 'the running harness — live-editable';
+    row.appendChild(tag);
+  }
+  if (p.kind === 'local') {
+    const tag = document.createElement('span');
+    tag.className = 'scount slocal'; tag.textContent = '🔒 local';
+    tag.title = 'local folder — private, never touches GitHub or any git remote';
+    row.appendChild(tag);
+  }
+  if (p.machineCount > 1) {                    // multi-machine project: surface the fan-out
+    const mt = document.createElement('span');
+    mt.className = 'scount smach';
+    mt.textContent = `🖥️ ${p.machineCount}`;
+    mt.title = `installed on ${p.machineCount} machines (default: ${p.machineName})`;
+    row.appendChild(mt);
+  } else if (FLEET && p.machineName && !p.pinned) {   // single-machine project: name the box it lives on
+    const mt = document.createElement('span');
+    mt.className = 'scount smach';
+    mt.textContent = `🖥️ ${p.machineName.replace(/^clawd-/, '')}`;
+    mt.title = `only on ${p.machineName}`;
+    row.appendChild(mt);
+  }
+  if (p.waitingCount > 0) {
+    const need = document.createElement('span');
+    need.className = 'scount swait';
+    need.textContent = `⏳ ${p.waitingCount} needs you`;
+    need.title = `${p.waitingCount} session${p.waitingCount === 1 ? '' : 's'} blocked on you`;
+    row.appendChild(need);
+  }
+  if (p.busyCount > 0) {
+    const work = document.createElement('span');
+    work.className = 'scount swork';
+    work.textContent = `▶ ${p.busyCount} working`;
+    work.title = `${p.busyCount} session${p.busyCount === 1 ? '' : 's'} actively working`;
+    row.appendChild(work);
+  }
+  const count = document.createElement('span');
+  count.className = 'scount'; count.textContent = `${p.sessionCount || 0} sess`;
+  row.appendChild(count);
+  frag.appendChild(row);
+
+  const sub = p.kind === 'local' ? p.path : p.repoUrl;   // a local's identity is its path
+  if (sub) {
+    const desc = document.createElement('div');
+    desc.className = 'sdesc'; desc.textContent = sub;
+    frag.appendChild(desc);
+  }
+  if (p.kind === 'local' && !busyP) {
+    // eject: detach the registry entry (folder untouched) — locals only;
+    // gh projects keep the delete-the-folder contract
+    const ej = document.createElement('button');
+    ej.className = 'sclose'; ej.textContent = '⏏';
+    ej.title = 'detach this local project (the folder on disk is not touched)';
+    ej.onclick = (e) => {
+      e.stopPropagation();
+      removeLocalProject(FLEET ? p.machineName : null, FLEET ? p.machinePid : p.id, p.name);
+    };
+    frag.appendChild(ej);
+  }
+  if (busyP) {
+    const sm = document.createElement('div');
+    sm.className = 'smeta'; sm.textContent = 'cloning…';
+    frag.appendChild(sm);
+  } else if (errP) {
+    const se = document.createElement('div');
+    se.className = 'serror'; se.textContent = p.error || 'failed';
+    frag.appendChild(se);
+  } else if (offline) {
+    const sm = document.createElement('div');
+    sm.className = 'smeta'; sm.textContent = 'machine offline';
+    frag.appendChild(sm);
+  }
+  card.replaceChildren(frag);
+}
+
+// Direct mode entry point: a `projects` frame for the (single) local harness.
+// Fleet mode never calls this — its rung is driven by mergeProjects/renderProjectRung.
+function renderProjects(list) {
+  projectList = list;
+  // a freshly selected project that vanished (removed) → drop the selection
+  if (currentPid && !list.some(p => p.pid === currentPid)) currentPid = null;
+  renderProjectRung();
+}
+
+// Render the project rung from normalized rows (unified across machines in fleet
+// mode, 1:1 with the local harness in direct mode).
+function renderProjectRung() {
+  ensureProjectChrome();
+  const rows = projectRows();
+  const selId = selectedProjectId();
+  projLabelEl.textContent = `projects · ${rows.length}`;
+  syncMachineSelect();
+
+  // Keyed reconcile: a project keeps its card node across repaints, so a badge
+  // change is a text edit rather than a new element — no scroll reset, no
+  // flicker, and card order still follows the warmth sort.
+  const have = new Map();
+  projCardsEl.querySelectorAll('.scard').forEach(c => have.set(c.dataset.id, c));
+  rows.forEach((p, i) => {
+    const key = String(p.id);
+    let card = have.get(key);
+    if (card) have.delete(key);
+    else { card = document.createElement('div'); card.dataset.id = key; }
+    fillProjectCard(card, p, selId);
+    if (projCardsEl.children[i] !== card) projCardsEl.insertBefore(card, projCardsEl.children[i] || null);
   });
+  have.forEach(c => c.remove());     // projects that went away
 
-  applyProjectFilter();          // honor any live filter text after a re-render
-  if (keepFocus) {               // we owned focus before the rebuild — keep it, caret intact
-    inp.focus();
-    try { inp.setSelectionRange(selStart, selEnd); } catch {}
-  }
-  // landing on the projects rung: the box takes focus so you can filter/create
-  // straight away. Desktop-only — autofocus on touch would pop the soft keyboard.
-  // Don't steal focus while typing elsewhere or off this rung.
-  else if (!isTouch && currentView() === 'projects' && document.activeElement !== inp &&
-      !(document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName))) {
-    inp.focus();
-    const n = inp.value.length; try { inp.setSelectionRange(n, n); } catch {}
-  }
+  applyProjectFilter();          // honor any live filter text after a repaint
 }
 
 // Does a row survive the live filters? Text = case-insensitive substring on name;
@@ -6302,10 +6368,11 @@ function setView(view) {
   refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
   syncUrl();                       // keep the URL in step with the depth we're at
   if (tty) showTTY();
-  else if (projects && !isTouch) {  // landing on projects: filter box takes focus (skip touch — avoids popping the soft keyboard)
-    const inp = projectsEl.querySelector('#addProject input');
-    if (inp) { inp.focus(); const n = inp.value.length; try { inp.setSelectionRange(n, n); } catch {} }
-  }
+  // landing on projects: the filter box takes focus (skip touch — avoids popping
+  // the soft keyboard). ARRIVAL is the only thing allowed to focus it; a repaint
+  // never does, or every `projects` frame would yank focus + scroll off whatever
+  // you were doing on the rung.
+  else if (projects) focusProjectFilterOnArrival();
   else if (sessions && !isTouch) box.focus();   // landing on sessions: composer ready so you can type a new prompt straight away
   else if (view === 'transcript') feed.scrollTop = feed.scrollHeight;
   else if (pm) { renderPmFeed(); pmfeed.scrollTop = pmfeed.scrollHeight; }

@@ -130,6 +130,12 @@ user-facing overview; this file orients an agent working **on** the code.
   `default/all` option, and is what `ensureTargetMachine()` targets — a select
   that stores a value nothing reads would look perfectly fine. Same fake-relay
   stub as fleetprobe (no relay, no worker, no passkey).
+- **`tools/rungprobe.mjs`** — guards the **projects rung against its own
+  repaint** (2026-08-09). The rung repaints on every `projects` frame, so it
+  must hold still: scroll position survives, focus is never taken, and text
+  still in the `<input>` but not yet mirrored into `projectFilter` isn't
+  dropped. It calls `renderProjects(projectList)` — literally what a frame does
+  — so it touches no session. See "Repaint, don't rebuild" below.
 
 ## Architecture (one server, multi-project, multi-session)
 - **server.py** — a `SessionManager` owns N `Project`s and N `ClaudeSession`s.
@@ -395,6 +401,24 @@ user-facing overview; this file orients an agent working **on** the code.
   an empty buffer. Touch-scroll mechanics are verified end-to-end by
   `tools/scrollprobe.mjs` (phone-emulated headless Chromium +
   compositor-synthesized pans; safe — it never subscribes to a session).
+- **Repaint, don't rebuild (the projects rung).** A rung repaints on every
+  server frame, and `projects` frames are frequent — session state moves a
+  couple of times per *tool call*, times the number of machines in fleet mode.
+  So `renderProjectRung` may never do `projectsEl.innerHTML = ''`: `#projectlist`
+  is itself the scroll container, so emptying it collapses `scrollHeight` and the
+  browser clamps `scrollTop` to 0 — the list jerks to the top several times a
+  second while anything is working. Instead the header + add row are built **once**
+  (`ensureProjectChrome`) and the cards are reconciled by id (`fillProjectCard`
+  swaps innards, the node survives). Two corollaries that are easy to
+  re-break: **only arrival may focus the filter box** (`setView` →
+  `focusProjectFilterOnArrival`; a repaint that focuses it also scrolls it into
+  view), and **never refill that input from the `projectFilter` mirror** — text
+  the `input` event hasn't mirrored yet is real, and on touch composition and
+  dictation live there, so a rebuild eats whole words. `tools/rungprobe.mjs`
+  asserts all three. The server half is the memo in `broadcast_projects`: every
+  hook bumps `last_active`, so without it a `projects` frame fires per
+  Pre/PostToolUse — the fingerprint excludes `lastTouched` (nothing renders it;
+  it only feeds the sort, and a reorder still changes the pid order).
 - **URL routing** — nav state lives in the **hash** (the `?t=` token stays in the
   query): `#/` projects · `#/p/<pid>` sessions · `#/p/<pid>/s/<cid>` transcript ·
   `…/tty` terminal. So a reload (or a shared link) lands back on the same

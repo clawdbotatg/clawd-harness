@@ -96,11 +96,13 @@ await page.click('#settingsBtn');
 await page.waitForTimeout(500);
 const setOpen = await page.evaluate(() => ({
   open: !document.getElementById('settingsmodal').hidden,
-  rows: [...document.querySelectorAll('#settingsbody .setrow')].map(r => ({
-    t: r.querySelector('.set-t').textContent,
-    ctl: r.querySelector('.settoggle').textContent,
-    disabled: r.querySelector('.settoggle').disabled,
-  })),
+  // not every row is a toggle any more — "where new projects land" is a <select>
+  // (see renderSettings), so read whichever control the row actually carries.
+  rows: [...document.querySelectorAll('#settingsbody .setrow')].map(r => {
+    const ctl = r.querySelector('.settoggle') || r.querySelector('select');
+    return { t: r.querySelector('.set-t').textContent,
+             ctl: ctl ? ctl.textContent : '', disabled: ctl ? ctl.disabled : false };
+  }),
 }));
 console.log('⚙️ settings:           ', JSON.stringify(setOpen));
 
