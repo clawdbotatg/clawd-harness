@@ -460,6 +460,14 @@ SUB_FABLE_OK = {n.strip() for n in
 # reading a full transcript back in. Staged over a few sweeps instead, so the
 # migration can't be the thing that wedges the box. 0 = no cap.
 SUB_CAP_EVAC_BATCH = int(os.environ.get("SUB_CAP_EVAC_BATCH", "4"))
+# How long a pending graceful restart waits for mid-turn work before taking the
+# hit anyway. 0 = wait forever (the old behavior). This exists because "wait for
+# quiet" on a machine somebody actually uses can mean "never": on 2026-08-09 a
+# routing fix sat unapplied on clawd-head for 30+ minutes — the box kept spawning
+# onto the exact plan the fix was written to avoid — while the running process
+# waited on a session that was itself parked on a human. Code that can't land is
+# not a safe default; 20 min is long enough that a normal turn finishes first.
+RESTART_MAX_WAIT = float(os.environ.get("RESTART_MAX_WAIT", "1200"))
 # The CLI's limit banner, as painted in the PTY ("You've hit your session
 # limit · resets …", or the blocking "Stop and wait for limit to reset" menu).
 # Needles are deliberately narrow, and the rescue re-confirms against the live
@@ -3177,9 +3185,13 @@ class SessionManager:
         self._projects_sig = None                # last broadcast projects payload (see broadcast_projects)
         # Graceful self-restart: when a boot-time file (server.py / .env) changes,
         # we flag a pending restart, surface it in every browser, and wait until
-        # *all* sessions are idle before tearing down — so no in-flight turn dies.
+        # nothing is MID-TURN before tearing down — so no in-flight turn dies.
+        # Not "all idle": a session parked on an interactive prompt is waiting
+        # on a human, not computing (see restart_blockers), and treating it as
+        # busy is how a pending restart becomes a permanent one.
         self.restart_pending = False
         self.restart_reason = ""
+        self.restart_since = 0.0                 # when the wait started (for the ceiling)
         self._restarting = False
         self._restart_lock = threading.Lock()
 
@@ -3188,20 +3200,47 @@ class SessionManager:
         with self.lock:
             return sum(1 for s in self.sessions.values() if s.busy and s.alive)
 
-    def request_restart(self, reason):
-        """Flag that a restart is needed; it fires once all sessions are idle.
-        Idempotent — repeated calls just keep the pending state."""
+    def restart_blockers(self):
+        """Sessions that would actually LOSE something to a restart — the bar
+        for holding one back, which is narrower than `busy`.
+
+        What a restart costs a session is specific: SIGTERM cuts an in-flight
+        turn, so a partial reply is dropped and a tool call in progress is
+        cancelled (possibly having already half-applied — the file is written,
+        the model never saw the result). That is worth waiting for.
+
+        `waiting` is NOT that. A session blocked on an interactive prompt has
+        already stopped computing and is parked on a HUMAN; it can sit there
+        for hours. Counting it as mid-turn is what let one stalled permission
+        prompt on clawd-head hold a routing fix unapplied for 30+ minutes on
+        2026-08-09, while that harness kept spawning onto a plan the fix
+        exists to avoid. A restart that never fires is not the safe option.
+
+        Background shells/agents are counted: they are killed outright and,
+        unlike a turn, nothing resumes them."""
+        with self.lock:
+            return [s for s in self.sessions.values()
+                    if s.alive and ((s.busy and not s.waiting) or s.bg)]
+
+    def request_restart(self, reason, force=False):
+        """Flag that a restart is needed; it fires once nothing is mid-turn
+        (see restart_blockers). Idempotent — repeated calls just keep the
+        pending state. `force` fires immediately, cutting whatever is in
+        flight: the button behind it says what it will interrupt, and a
+        restart you can't take is its own outage."""
         with self._restart_lock:
             if self._restarting:
                 return
             first = not self.restart_pending
             self.restart_pending = True
             self.restart_reason = reason
+            if first:
+                self.restart_since = time.time()
         if first:
-            print(f"[restart] pending — {reason} (waiting for all sessions idle)",
+            print(f"[restart] pending — {reason} (waiting for mid-turn sessions)",
                   flush=True)
         self.broadcast_restart()
-        self._maybe_restart()
+        self._maybe_restart(force=force)
 
     def cancel_restart(self):
         with self._restart_lock:
@@ -3209,15 +3248,34 @@ class SessionManager:
                 return
             self.restart_pending = False
             self.restart_reason = ""
+            self.restart_since = 0.0
         print("[restart] cancelled by user", flush=True)
         self.broadcast_restart()
 
-    def _maybe_restart(self):
-        """Fire the restart iff one is pending and nothing is mid-turn."""
+    def _maybe_restart(self, force=False):
+        """Fire the restart iff one is pending and nothing is mid-turn — or the
+        wait has run out of patience.
+
+        The ceiling is the lesson of the 08-09 incident: on a machine where
+        somebody is always working, "wait for quiet" can mean "never", and the
+        code sitting unapplied is exactly the code someone shipped because the
+        running behavior was wrong. After RESTART_MAX_WAIT we take the hit."""
+        blockers = self.restart_blockers()
         with self._restart_lock:
-            if self._restarting or not self.restart_pending or self.busy_count():
+            if self._restarting or not self.restart_pending:
                 return
+            waited = time.time() - (self.restart_since or time.time())
+            timed_out = RESTART_MAX_WAIT > 0 and waited >= RESTART_MAX_WAIT
+            if blockers and not (force or timed_out):
+                return
+            why = ("forced" if force else
+                   f"waited {waited / 60:.0f}m" if timed_out else "all idle")
             self._restarting = True
+        if blockers:
+            names = ", ".join(f"{s.cid[:8]}{' (bg)' if s.bg else ''}"
+                              for s in blockers[:6])
+            print(f"[restart] {why} — cutting {len(blockers)} mid-turn "
+                  f"session(s): {names}", flush=True)
         threading.Thread(target=self._execute_restart, daemon=True).start()
 
     def _execute_restart(self):
@@ -3230,8 +3288,17 @@ class SessionManager:
         os._exit(0)                              # KeepAlive=true → launchd respawns us
 
     def restart_state(self):
+        # `busy` is what HOLDS the restart (mid-turn or background work), not
+        # the raw busy count — the banner's number and its "restart now" button
+        # must agree about what is being waited on, and about what a force cuts.
+        blockers = self.restart_blockers() if self.restart_pending else []
         return {"type": "restart", "pending": self.restart_pending,
-                "reason": self.restart_reason, "busy": self.busy_count()}
+                "reason": self.restart_reason, "busy": len(blockers),
+                "waitedFor": (time.time() - self.restart_since)
+                             if self.restart_pending and self.restart_since else 0,
+                "maxWait": RESTART_MAX_WAIT,
+                "blockers": [{"cid": s.cid, "title": s.title or "",
+                              "bg": s.bg or ""} for s in blockers[:8]]}
 
     def broadcast_restart(self):
         self.broadcast_all(self.restart_state())
@@ -5833,7 +5900,10 @@ class Handler(BaseHTTPRequestHandler):
         elif t == "removeProject":
             MGR.remove_project(frame.get("pid"))
         elif t == "restart":
-            MGR.request_restart(frame.get("reason") or "manual")
+            # force=True is the banner's "restart now" — a deliberate human act
+            # that accepts cutting whatever the banner just told them is running.
+            MGR.request_restart(frame.get("reason") or "manual",
+                                force=bool(frame.get("force")))
         elif t == "restartCancel":
             MGR.cancel_restart()
         elif t in ("input", "send", "resize"):
@@ -5940,6 +6010,12 @@ def watch_ui():
             if m != last[f]:
                 last[f] = m
                 MGR.request_restart(f"{f.name} changed")
+        # Re-check a pending restart on the tick, not only when session state
+        # moves: the RESTART_MAX_WAIT ceiling is a clock, and a box quiet enough
+        # to stop broadcasting `sessions` is exactly the one that would never
+        # re-evaluate it. Cheap — restart_blockers is a list comp over sessions.
+        if MGR.restart_pending:
+            MGR._maybe_restart()
 
 
 def raise_fd_limit(target=10240):

@@ -847,6 +847,7 @@
   <div id="rebootbar" hidden>
     <span class="rb-spin"></span>
     <span id="rebootmsg"></span>
+    <button id="rebootNow" title="Restart now, cutting whatever is mid-turn">restart now</button>
     <button id="rebootCancel" title="Cancel the pending restart">cancel</button>
   </div>
   <div id="rebootovl" hidden><div class="rb-card">
@@ -2587,13 +2588,30 @@ async function doAssertion(m) {
 const rebootbar = document.getElementById('rebootbar');
 const rebootmsg = document.getElementById('rebootmsg');
 const rebootovl = document.getElementById('rebootovl');
+const rebootNow = document.getElementById('rebootNow');
 function renderReboot(m) {
   const wasHidden = rebootbar.hidden;
   if (!m.pending) { rebootbar.hidden = true; if (!wasHidden) refitTTY(); return; }
   const n = m.busy || 0;
-  const wait = n ? `waiting for ${n} session${n > 1 ? 's' : ''} to finish…`
-                 : 'all idle — restarting now…';
+  // The banner names what it is waiting ON, not just how many: "2 sessions"
+  // tells you nothing about whether it is safe to take the restart, and the
+  // whole point of the button beside it is that YOU make that call.
+  const who = (m.blockers || []).map(b => (b.title || b.cid.slice(0, 8))
+                                          + (b.bg ? ` (${b.bg})` : ''));
+  const mins = Math.floor((m.waitedFor || 0) / 60);
+  const held = mins >= 1 ? ` · held ${mins}m` : '';
+  const wait = n
+    ? `waiting on ${n} mid-turn: ${who.slice(0, 3).join(', ')}`
+      + (who.length > 3 ? ` +${who.length - 3}` : '') + held
+    : 'nothing mid-turn — restarting now…';
   rebootmsg.textContent = `restart pending${m.reason ? ' (' + m.reason + ')' : ''} — ${wait}`;
+  // Only offer the force when there IS something to force past; with nothing
+  // mid-turn the restart is already firing and a button would just be a lie.
+  rebootNow.hidden = !n;
+  rebootNow.title = n
+    ? `Restart now — cuts ${n} in-flight turn${n > 1 ? 's' : ''} `
+      + `(${who.join(', ')}). Sessions resume afterwards; a background shell does not.`
+    : '';
   rebootbar.hidden = false;
   if (wasHidden) refitTTY();
 }
@@ -2624,6 +2642,14 @@ function beginUpdate(label, delay) {
 }
 document.getElementById('rebootCancel').onclick = () => {
   hsend({ type: 'restartCancel' });
+};
+rebootNow.onclick = () => {
+  // No confirm dialog: the button's own label and title already say what it
+  // cuts, and the banner is showing the list. Burying the escape hatch behind
+  // a second tap is how it stops getting used at the moment it's needed.
+  rebootNow.disabled = true;
+  rebootNow.textContent = 'restarting…';
+  hsend({ type: 'restart', reason: 'restart now (manual)', force: true });
 };
 
 function handleJson(m) {

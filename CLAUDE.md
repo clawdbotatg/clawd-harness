@@ -246,8 +246,19 @@ user-facing overview; this file orients an agent working **on** the code.
 - **Graceful self-restart** (companion to live-editing): `watch_ui` polls
   `RESTART_FILES` (`server.py`, `.clawd-harness.env` — both read only at boot);
   a change calls `MGR.request_restart(reason)`, which flags `restart_pending`,
-  surfaces a banner in every browser, and **waits until no session is `busy`**
-  before `_execute_restart` SIGTERMs the claude children and `os._exit(0)`s —
+  surfaces a banner in every browser, and **waits until nothing is MID-TURN**
+  (`restart_blockers`, 2026-08-09 — *not* "all idle": a session `waiting` on an
+  interactive prompt is parked on a human and can sit for hours; counting it as
+  busy is how a pending restart becomes a permanent one, and it held a routing
+  fix off clawd-head for 30+ min while that box kept spawning onto the very plan
+  the fix avoids. Genuinely busy turns and `bg` work still block — a turn
+  resumes, a background shell doesn't). Three ways it fires: nothing mid-turn,
+  the **`restart now`** button on the banner (`{type:"restart", force:true}`;
+  the banner names its blockers so the choice is informed), or the
+  `RESTART_MAX_WAIT` (20 min) ceiling — code that can never land is its own
+  outage. `watch_ui` re-checks on the 1s tick, since a quiet box stops
+  broadcasting `sessions` and would never re-evaluate the clock. Then
+  `_execute_restart` SIGTERMs the claude children and `os._exit(0)`s —
   launchd (`KeepAlive=true`) respawns us and sessions `--resume`. So an edit to
   the harness never kills an in-flight turn. The browser auto-reloads on the
   `BOOT_ID` change after reconnect. Manual: WS `{type:"restart"}` /

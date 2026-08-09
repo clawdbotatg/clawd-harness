@@ -69,7 +69,7 @@ viewer** (each with its own `client.cid`).
 | `input` | `data`, `cid?` | Raw keystrokes → PTY. `data` is a UTF-8 string (incl. escape seqs for TUI menus). Falls back to `client.cid` if `cid` omitted. |
 | `send` | `text`, `cid?`, `via?` | High-level: type `text`, wait for the paste to settle, then submit `\r`. Use this to "send a message/prompt". Optional `via` tags the send's origin (`"quick"` = a quick-prompt chip tap) for the server's prompt log; omitted = typed. |
 | `resize` | `cols`, `rows`, `cid?`, `claim?` | A size CLAIM, not a command — one PTY serves many differently-sized viewers, so the server sizes it to a single OWNER. `claim:true` (a deliberate act on that device: opening the tty view, resizing the window) takes ownership; without it the size only applies if the sender already owns the PTY (or nobody does). `input`/`send` from a sized viewer also takes ownership (you drive it, it fits you). `cols`/`rows` of `0` releases the claim (viewer left the tty view / went hidden) — ownership falls back to the most recently sized remaining viewer. Applied changes broadcast `ttySize`. Pre-policy servers treat every frame as an unconditional resize, so old/new mixes degrade to the last-write-wins behavior. |
-| `restart` | `reason?` | Request a graceful self-restart (fires once all sessions idle). |
+| `restart` | `reason?`, `force?` | Request a graceful self-restart. Fires once nothing is **mid-turn** — a genuinely busy turn or live background work; a session merely `waiting` on an interactive prompt is parked on a human and does NOT hold it. `force:true` (the banner's **restart now**) fires immediately, cutting in-flight turns. A pending restart also self-fires after `RESTART_MAX_WAIT` (20 min). |
 | `restartCancel` | — | Cancel a pending restart. |
 | `ping` | `id?` | Liveness probe. Server immediately replies `{type:"pong", id}` (echoing `id`). Lets a client prove the *full* path is live (in fleet: browser→relay→worker→harness and back over the e2e channel) before deciding whether to repaint in place vs. tear down + re-subscribe. A pre-`pong` harness just ignores it — the prober falls back to reconnect on timeout, so it's backward-safe. |
 | `search` | `q`, `scope?`, `limit?`, `id?` | **Controller read query.** Bounded server-side search over live sessions — meta fields (title/desc/tab/digest/blocked_on/lastAnswer; zero I/O) and/or the tail of each session's transcript (`scope`: `meta` \| `transcript` \| `all`, default `all`). Replies `{type:"searchResult", id, q, matches:[{cid,pid,title,lastActive,where,snippet}], scanned, truncated}` **to the sender only**, computed on a worker thread. Hard bounds: `limit` clamped to 40, ≤3 transcript hits/session (newest first), 160-char snippets, last 2MB of each transcript, 5s wall budget (→ `truncated:true`). Sessions scanned most-recently-active first. |
@@ -153,7 +153,9 @@ no-op that would leave the previous session's stream flowing (that's how
 { "type":"sessions", "sessions":[...], "current" }     // re-broadcast on any session change
 { "type":"accounts", "accounts":[...], "active", "auto" }  // subscription logins/usage/active changed
 { "type":"reload" }                                    // index.html changed on disk → browser should reload
-{ "type":"restart", "pending":bool, "reason", "busy":int }   // restart state (banner)
+{ "type":"restart", "pending":bool, "reason", "busy":int,        // restart state (banner)
+  "waitedFor":float, "maxWait":float,                            // seconds pending / ceiling
+  "blockers":[{ "cid", "title", "bg" }...] }                     // WHAT is holding it
 { "type":"restart", "state":"go" }                     // restart firing now (process about to exit)
 ```
 
