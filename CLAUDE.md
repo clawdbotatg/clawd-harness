@@ -190,7 +190,16 @@ user-facing overview; this file orients an agent working **on** the code.
   COOL (< `SUB_HOT` 97% — hop at ~3% left; a pool nearing its 5h session
   wall gets no new work) pool whose WEEKLY window resets soonest (use-it-or-lose-it;
   headroom is only the tie-break — see `_route_key`), debounced via `SUB_*`
-  env knobs. Sessions
+  env knobs. **Capacity isn't the only bar: a pool whose plan can't do
+  **fable** is skipped by every routing decision at any headroom, and idle
+  sessions on it are evacuated** (`SUB_REQUIRE_FABLE`, 2026-08-09 — the slop
+  org went Opus-only and the router kept picking it *because* it was the
+  emptiest pool on the box). Detection is the usage payload's scoped fable
+  window, which a carrying plan advertises from 0% used; it's a heuristic on
+  an undocumented endpoint, so it degrades one way only — unknown never
+  convicts, the gate never strands the router (`_routable_first` falls back
+  to the full roster and logs), and `SUB_FABLE_OK` / `SUB_NO_FABLE` override
+  it by hand. Test: `python3 test_fable_gate.py`. Sessions
   record `account`+`config_dir` at spawn so `--resume` finds the right dir —
   but they don't stay pinned: the sweep hands an idle session off to a
   better pool, both as a drain rescue and as a **rebalance** onto the

@@ -629,6 +629,10 @@
                          font-family:var(--mono); }
   .acct { border:1px solid var(--edge); background:var(--raised); padding:12px 14px; margin-top:10px; }
   .acct.active { border-color:var(--accent); }
+  /* a pool the model gate skips: still listed, still signed in, visibly
+     out of rotation — headroom on a plan that can't run fable is not capacity */
+  .acct.nocap { border-style:dashed; opacity:.72; }
+  .acct.nocap .abig { color:var(--dim) !important; }
   .arow2 { display:flex; align-items:center; gap:10px; }
   .aid { flex:1; min-width:0; }
   .aname { font-weight:700; font-size:14px; }
@@ -3889,8 +3893,12 @@ function renderAccountsPanel(container, info, mid) {
     // the pinned active account in manual mode)
     const routed = info.auto ? members.some(x => x.name === info.best)
                              : members.some(x => x.active);
+    // a pool whose plan can't do fable is skipped by the router (server-side
+    // SUB_REQUIRE_FABLE) — say so on the card rather than leaving a healthy
+    // 90%-headroom number that nothing ever spends looking like an idle option
+    const nocap = live.length > 0 && live.every(x => x.routable === false);
     const card = document.createElement('div');
-    card.className = 'acct' + (routed ? ' active' : '');
+    card.className = 'acct' + (routed ? ' active' : '') + (nocap ? ' nocap' : '');
 
     // headline: identity on the left, the big headroom number on the right
     const row = document.createElement('div'); row.className = 'arow2';
@@ -3936,6 +3944,18 @@ function renderAccountsPanel(container, info, mid) {
 
     // usage windows: bar + % left + reset countdown
     (a.windows || []).forEach(w => card.appendChild(windowRow(w)));
+
+    if (nocap) {
+      const nc = document.createElement('div'); nc.className = 'ahint2';
+      nc.style.color = 'var(--tool)';           // amber: out of rotation, not broken
+      nc.textContent = '⚠ this plan doesn’t carry fable — skipped by the '
+                     + 'router (idle sessions here get moved to a plan that does)';
+      nc.title = 'Detected from the usage endpoint: plans that carry fable '
+               + 'advertise a weekly fable window even at 0% used. Override '
+               + 'with SUB_FABLE_OK=<name>, or turn the gate off with '
+               + 'SUB_REQUIRE_FABLE=0.';
+      card.appendChild(nc);
+    }
 
     // a failing usage poll is data too — say so instead of silently going stale
     if (a.error && a.status === 'ready') {

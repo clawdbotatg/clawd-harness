@@ -85,7 +85,64 @@ never interrupted.
   affects NEW spawns;
   running sessions finish on their old account. Manual override:
   `{type:"accountUse", name}` or the panel's `use` button.
+- **Model-capability gate** (`SUB_REQUIRE_FABLE=1` default, 2026-08-09): a pool
+  whose plan **can't do fable** is skipped by every routing decision no matter
+  how much headroom it has. See the section below.
 - Wire contract: the `accounts` frame + controls in `docs/WS-PROTOCOL.md`.
+
+## The capability gate — headroom is not the only way a pool goes unusable
+
+**What happened.** On 2026-08-09 the `slop@buidlguidl.com` org changed plans:
+Opus only, no Fable. Nothing in the router noticed, because *every* routing rule
+here reads percentages — and the fable-less pool was also the emptiest one on the
+machine, so it won every ranking it entered. Sixteen live sessions were sitting
+on it. The plan didn't break; it narrowed, and a narrowed plan is invisible to a
+capacity router.
+
+**The signal.** A plan that *carries* fable advertises a weekly fable window in
+the usage payload **from 0% used** (verified: `sub3` at `7d fable 0.0%`), so
+absence is entitlement, not merely non-use. `_fable_state()` reads
+`_fetch_usage`'s normalized windows, so it works whether the number arrives via
+the legacy per-model keys or the newer `limits` array.
+
+**It's a heuristic on an undocumented endpoint, so it degrades in one direction
+only.** Three rules make the failure mode survivable:
+
+1. **Only a positive reading convicts.** `_fable_state` is tri-state — no good
+   reading yet → `None` → routable. If Anthropic ever stops emitting scoped
+   limits entirely, "absent means no" would convict the whole fleet at once.
+2. **The gate never strands the router.** `_routable_first()` narrows a roster
+   to capable pools *and falls back to the whole list* when that leaves nothing,
+   logging once. Routing to a fable-less plan is bad; routing nowhere is worse.
+3. **Both overrides exist.** `SUB_NO_FABLE=<names>` blocks a pool the payload
+   still flatters; `SUB_FABLE_OK=<names>` re-admits one the heuristic wrongly
+   convicts. `SUB_REQUIRE_FABLE=0` turns the whole thing off.
+
+**Where it applies.** `_route_key` gains a leading capability term, so it *sorts*
+rather than filters and any `min(..., key=_route_key)` gets it for free.
+`_best_account()` is the choke point every handoff path already goes through
+(both rescues, the sweep, the rebalance, new spawns), so gating it covers
+"where should this go". `_maybe_autoswitch` treats a capability win like an
+exhausted pool — it **bypasses `SUB_DEBOUNCE`**, and can't flap, because the
+target passes the gate and the source doesn't. The signed-out survival paths
+only *reorder* (capability first, then headroom) — they must never exclude.
+
+**Sessions already parked on a convicted pool get moved.** `_handoff_sweep`
+treats an incapable account like a hot one: idle sessions evacuate to `best`.
+Idle-only, behind the same background-work veto as every other optional move —
+a wrong-plan session is worth a respawn, an in-flight turn or a live background
+shell is not. A plan change convicts a *whole pool at once*, which makes this
+the one trigger that can fire on every session simultaneously, so it's staged
+`SUB_CAP_EVAC_BATCH` (4) per sweep rather than respawning the herd.
+
+**In the UI** the account keeps its card on the 🧠 page — signed in, listed,
+manually selectable — drawn dashed and dimmed with the reason. Out of rotation
+is not the same as signed out, and the panel says which. `get_accounts` carries
+`routable: false` + `skipped_because` so the PM doesn't read a greyed-out
+97%-free pool as spare capacity.
+
+Regression test: **`python3 test_fable_gate.py`** (pure ranking helpers — builds
+no `SessionManager`, so it never touches the live registry).
 
 ## Still planned
 

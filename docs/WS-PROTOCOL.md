@@ -252,6 +252,7 @@ no-op that would leave the previous session's stream flowing (that's how
 ### accountMeta
 ```jsonc
 { "name", "email", "status":"ready|pending", "active":bool,
+  "fable":<bool|null>, "routable":bool,
   "usagePct":<float|null>, "headroom":<float|null>,
   "windows":[{ "key", "label", "used":float, "resets":<iso|null> }...],
   "checkedAt":<float|null>, "error":str, "configDir":str }
@@ -262,6 +263,12 @@ no-op that would leave the previous session's stream flowing (that's how
 - `usagePct` = the most-constrained usage window (0–100, from Claude's OAuth
   usage endpoint — **undocumented**, so `null`/stale data must degrade to "no
   opinion"). `headroom` = `100 − usagePct`. `active` = new sessions spawn here.
+- `fable` = does this plan carry Fable? `true`/`false` from the usage payload's
+  scoped weekly window, **`null` = not known yet** (never had a good reading) —
+  consumers must treat `null` as "yes", never as "no". `routable:false` = the
+  router skips this pool regardless of headroom (`SUB_REQUIRE_FABLE`) and
+  evacuates idle sessions from it; the login is still fine and still manually
+  selectable, so render it as out-of-rotation, **not** as signed out.
 - `auto` (top-level) = the harness's local usage-aware auto-switch is on
   (hysteresis + debounce; see `docs/fleet/SUB-ROUTING.md`).
 

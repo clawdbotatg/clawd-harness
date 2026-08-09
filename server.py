@@ -429,6 +429,37 @@ SUB_REFRESH_EXIT_GRACE = float(os.environ.get("SUB_REFRESH_EXIT_GRACE", "900")) 
 # automatic 'continue' (LIMIT_CONTINUE=0 opts out).
 SUB_HOT = float(os.environ.get("SUB_HOT", "97"))                 # % used
 LIMIT_CONTINUE = os.environ.get("LIMIT_CONTINUE", "1") != "0"
+# ── model-capability gate (2026-08-09) ───────────────────────────────────────
+# Headroom is not the only thing that makes a pool usable: a plan can be
+# BILLED for a narrower set of models than the fleet actually works on. The
+# slop@buidlguidl.com org changed plans on 2026-08-09 and stopped carrying
+# Fable — sessions routed there kept running (Opus only) but silently lost the
+# model the work is done on. So capacity routing gets a prerequisite: a pool
+# the fleet can't do its job on is not a cool pool, it's an unusable one.
+#
+# The signal is the usage payload's model-scoped weekly windows. A plan that
+# CARRIES fable advertises a '7d fable' window from 0% used (verified: sub3 at
+# 0.0%), so absence is entitlement, not merely non-use. It stays a heuristic on
+# an undocumented endpoint, so it degrades in the safe direction — see
+# _fable_state: only a GOOD reading that positively lacks the window blocks a
+# pool, unknown never does, and the router never strands itself (if the gate
+# would empty the roster it is ignored for that decision and logged).
+SUB_REQUIRE_FABLE = os.environ.get("SUB_REQUIRE_FABLE", "1") != "0"
+# Manual overrides for when the endpoint lies in either direction — comma-
+# separated ACCOUNT names (not orgs). SUB_NO_FABLE blocks a pool the payload
+# still flatters; SUB_FABLE_OK re-admits one the heuristic wrongly convicts
+# (the escape hatch that keeps a bad guess from costing you the whole fleet).
+SUB_NO_FABLE = {n.strip() for n in
+                os.environ.get("SUB_NO_FABLE", "").split(",") if n.strip()}
+SUB_FABLE_OK = {n.strip() for n in
+                os.environ.get("SUB_FABLE_OK", "").split(",") if n.strip()}
+# How many sessions the capability evacuation may move per sweep. A plan
+# change convicts a whole pool at once, so this is the one handoff trigger
+# that can fire on EVERY session simultaneously — 16 of them were parked on
+# the slop org the day this shipped, and a respawn is a `claude --resume`
+# reading a full transcript back in. Staged over a few sweeps instead, so the
+# migration can't be the thing that wedges the box. 0 = no cap.
+SUB_CAP_EVAC_BATCH = int(os.environ.get("SUB_CAP_EVAC_BATCH", "4"))
 # The CLI's limit banner, as painted in the PTY ("You've hit your session
 # limit · resets …", or the blocking "Stop and wait for limit to reset" menu).
 # Needles are deliberately narrow, and the rescue re-confirms against the live
@@ -1057,6 +1088,29 @@ def _weekly_reset(usage):
     return soonest
 
 
+def _fable_state(usage):
+    """True / False / None — does this pool's plan carry Fable?
+
+    True  = a good reading advertises a fable-scoped window (any group).
+    False = a good reading advertises windows but NONE of them are fable's.
+    None  = we have never had a good reading, so we don't know. Callers must
+            treat None as 'yes' — an endpoint change that stopped emitting
+            scoped limits altogether would otherwise convict every pool at
+            once and leave the router with nothing to spend, which is a far
+            worse failure than one turn on the wrong plan.
+
+    Reads _fetch_usage's normalized windows (key `weekly_scoped_fable`, label
+    `7d fable`) rather than the raw payload, so it stays correct whether the
+    number arrives via the legacy per-model keys or the newer `limits` array."""
+    windows = (usage or {}).get("windows") or []
+    if not windows:
+        return None
+    for w in windows:
+        if "fable" in f"{w.get('key','')} {w.get('label','')}".lower():
+            return True
+    return False
+
+
 def _account_identity(config_dir):
     """Best-effort (email, org_uuid, org_name) from the account's .claude.json
     (the default account's lives at ~/.claude.json, not inside ~/.claude). The
@@ -1188,11 +1242,30 @@ class Account:
                 "ready": self.ready,
                 "created": self.created, "usage": self.usage}
 
+    def fable(self):
+        """Tri-state Fable entitlement for THIS account — the usage payload's
+        verdict, with the manual override lists winning over it."""
+        if self.name in SUB_FABLE_OK:
+            return True
+        if self.name in SUB_NO_FABLE:
+            return False
+        return _fable_state(self.usage)
+
+    def routable(self):
+        """False iff the capability gate says this pool can't do the fleet's
+        work right now. Deliberately NOT folded into `broken`: the account
+        stays listed, signed in, and manually selectable — it is skipped by
+        the router, not evicted from the roster."""
+        return not (SUB_REQUIRE_FABLE and self.fable() is False)
+
     def meta(self, active=False):
         pct = (self.usage or {}).get("pct")
         status = ("pending" if not self.ready
                   else "needs-login" if self.broken else "ready")
         return {"name": self.name, "email": self.email,
+                # Capability, shown alongside headroom: a pool can be wide
+                # open and still be the wrong place to spend a turn.
+                "fable": self.fable(), "routable": self.routable(),
                 "orgUuid": self.org, "orgName": self.org_name,
                 "tier": self.tier,
                 "status": status,
@@ -2990,6 +3063,7 @@ class SessionManager:
         self.accounts = {}                       # name -> Account (subscriptions)
         self.active_account = "default"          # new sessions spawn under this
         self.acct_last_exit = {}                 # account -> ts of last claude exit
+        self._stranded_warned = False            # one-shot: fable gate emptied the roster
         self.last_switch_at = 0.0                # debounce anchor for auto-switch
         self._poll_now = threading.Event()       # kick the usage poller early
         self.lock = threading.RLock()
@@ -3193,9 +3267,13 @@ class SessionManager:
             elif rstate == "absent" \
                     and not e.get("ceremony") \
                     and not (acct_entry and not acct_entry.ready):
+                # Capability first, then headroom — but this list is a
+                # SURVIVAL path (the recorded account is signed out and the
+                # session must resume somewhere), so it only ever reorders.
                 alts = sorted([a for a in self.accounts.values()
                                if a.ready and not a.broken],
-                              key=lambda a: (a.usage or {}).get("pct", 100.0))
+                              key=lambda a: (not a.routable(),
+                                             (a.usage or {}).get("pct", 100.0)))
                 alt = next((a for a in alts
                             if _creds_state(a.config_dir) != "absent"), None)
                 if acct_entry:
@@ -3618,24 +3696,58 @@ class SessionManager:
 
     def _route_key(self, a):
         """Sort key for 'which pool should we spend right now' (lower wins):
-        COOL pools (< SUB_HOT on the most-constrained window — see the
-        never-see-a-rate-limit comment block) before hot ones; among the cool,
-        the soonest WEEKLY reset first (use-it-or-lose-it — see the SUB_*
-        comment block); pct is the fallback when no reset is known, and the
-        tie-break."""
+        CAPABLE pools before ones the model gate rejects (a plan that can't do
+        fable is worth less than any amount of headroom — see
+        SUB_REQUIRE_FABLE); then COOL pools (< SUB_HOT on the most-constrained
+        window — see the never-see-a-rate-limit comment block) before hot ones;
+        among the cool, the soonest WEEKLY reset first (use-it-or-lose-it — see
+        the SUB_* comment block); pct is the fallback when no reset is known,
+        and the tie-break.
+
+        The capability term SORTS, it doesn't filter — callers that must never
+        strand themselves can rank an unfiltered roster and still get the best
+        available pool. Callers reading positional terms (_maybe_autoswitch)
+        index via the KEY_* names below; keep those in step with the tuple."""
         pct = (a.usage or {}).get("pct")
         pct = 100.0 if pct is None else pct
         reset = _weekly_reset(a.usage)
-        return (pct >= SUB_HOT, reset is None, reset or 0.0, pct)
+        return (not a.routable(), pct >= SUB_HOT, reset is None,
+                reset or 0.0, pct)
+
+    # Positional names for _route_key's tuple — see the docstring above.
+    KEY_CAP, KEY_HOT, KEY_NORESET, KEY_RESET, KEY_PCT = range(5)
+
+    def _routable_first(self, accounts):
+        """`accounts` narrowed to pools the capability gate allows — falling
+        back to the WHOLE list when that would leave nothing. Routing to a
+        fable-less plan is bad; routing nowhere is worse, so the gate is a
+        preference of last resort, never a way to strand the fleet."""
+        if not SUB_REQUIRE_FABLE:
+            return list(accounts)
+        ok = [a for a in accounts if a.routable()]
+        if ok:
+            self._stranded_warned = False        # re-arm: say it again if it recurs
+            return ok
+        if accounts and not self._stranded_warned:
+            self._stranded_warned = True
+            print("[accounts] every ready pool fails the fable gate — routing "
+                  "on capacity alone (set SUB_REQUIRE_FABLE=0 to silence, or "
+                  "SUB_FABLE_OK=<name> to trust one)", flush=True)
+        return list(accounts)
 
     def _best_account(self):
         """The ready account the router would spend RIGHT NOW, from cached
         usage that's fresh enough to trust (< 3×USAGE_TTL old): the
         non-exhausted pool whose weekly window resets soonest — NOT the most
-        headroom (that's only the tie-break; see _route_key). None when no
+        headroom (that's only the tie-break; see _route_key), and only from
+        pools the model gate allows (SUB_REQUIRE_FABLE). None when no
         account qualifies — callers fall back to active_account. This is what
         routes each NEW session when auto-routing is on: per-spawn choice,
-        not a sticky default."""
+        not a sticky default.
+
+        Every handoff path (both rescues, the sweep, the rebalance) picks its
+        target through here, so gating this one function is what keeps a
+        fable-less pool from being the answer to 'where should this go'."""
         now = time.time()
         with self.lock:
             fresh = [a for a in self.accounts.values()
@@ -3644,7 +3756,7 @@ class SessionManager:
                      and now - (a.usage or {}).get("checkedAt", 0) < 3 * USAGE_TTL]
         if not fresh:
             return None
-        return min(fresh, key=self._route_key).name
+        return min(self._routable_first(fresh), key=self._route_key).name
 
     def remove_account(self, name):
         """Drop an account from the routing roster. This logs NOTHING out —
@@ -3888,7 +4000,7 @@ class SessionManager:
             return
         now = time.time()
         with self.lock:
-            drained, dead, hot, pcts = set(), set(), set(), {}
+            drained, dead, hot, incapable, pcts = set(), set(), set(), set(), {}
             for a in self.accounts.values():
                 pct = (a.usage or {}).get("pct", 0)
                 pcts[a.name] = pct
@@ -3898,10 +4010,13 @@ class SessionManager:
                     dead.add(a.name)             # an in-flight turn CANNOT finish here
                 if a.broken or pct >= SUB_HOT:
                     hot.add(a.name)              # heating toward the wall — stop feeding it
+                if not a.routable():
+                    incapable.add(a.name)        # plan can't do fable — wrong pool at 0%
             sessions = list(self.sessions.values())
         best = self.accounts.get(self._best_account() or "")
         if not best or best.name in drained:
             return
+        cap_moved = cap_left = 0                 # capability evacuation, this sweep
         for s in sessions:
             if s.ceremony:
                 continue                         # deliberate sign-in — hands off
@@ -3930,6 +4045,21 @@ class SessionManager:
                 # rebalance) aren't worth that; only the drained rescue above
                 # may still take the session.
                 continue
+            # Capability evacuation: a session parked on a plan that can't do
+            # fable is on the wrong pool no matter how much headroom it has —
+            # sessions that were routed there before the plan changed under
+            # them don't come back on their own, because nothing else in the
+            # sweep looks at anything but percentages. Idle-only and behind the
+            # same bg veto above: a wrong-plan session is worth a respawn, an
+            # in-flight turn or a live background shell is not.
+            if s.account in incapable and best.name not in incapable:
+                if SUB_CAP_EVAC_BATCH and cap_moved >= SUB_CAP_EVAC_BATCH:
+                    cap_left += 1
+                    continue                     # next sweep takes the rest
+                cap_moved += 1
+                self._handoff(s, best, f"{s.account} can't do fable on its "
+                                       "current plan — moving to one that can")
+                continue
             # Preemptive evacuation: an idle session on a heating pool moves to
             # a COOL best before the wall, not after (never-see-a-rate-limit).
             if s.account in hot and best.name not in hot:
@@ -3939,6 +4069,11 @@ class SessionManager:
             why = self._rebalance_win(s.account, best)
             if why:
                 self._handoff(s, best, why)
+        if cap_left:
+            print(f"[accounts] fable evacuation: moved {cap_moved} to "
+                  f"{best.name}, {cap_left} still queued (batch cap "
+                  f"{SUB_CAP_EVAC_BATCH}) — the rest follow next sweep",
+                  flush=True)
 
     def _rebalance_win(self, name, best):
         """Reason string when an idle session on healthy pool `name` should
@@ -4295,27 +4430,37 @@ class SessionManager:
         cur_pct = (cur.usage or {}).get("pct")
         if cur_pct is None:
             return
-        best = min(ready, key=self._route_key)
+        best = min(self._routable_first(ready), key=self._route_key)
         if best.name == cur.name:
             return
+        H, N, R = self.KEY_HOT, self.KEY_NORESET, self.KEY_RESET
         cur_k, best_k = self._route_key(cur), self._route_key(best)
         gain = cur_pct - best.usage["pct"]
+        # A capability win bypasses the debounce exactly like an exhausted
+        # pool does: leaving the active account parked on a plan that can't run
+        # the fleet's model is not a marginal headroom call, and there is no
+        # flap risk — the target passes the gate and the source doesn't, so the
+        # ordering can't invert on the next poll.
+        by_cap = cur_k[self.KEY_CAP] and not best_k[self.KEY_CAP]
         # The hot bypass only fires when the TARGET is actually cool —
         # two accounts both over the threshold would otherwise ping-pong every
         # poll (each switch making the other one "best"), debounce ignored.
         # All-hot falls back to the debounced rules below.
-        exhausted = cur_k[0] and not best_k[0]
+        exhausted = cur_k[H] and not best_k[H]
         # Did best win on the weekly-reset clock (sooner reset, or a known
         # reset vs an unknown one)? That ordering only changes when a window
         # actually resets, so debounce alone is enough to prevent flap.
-        by_reset = best_k[:3] < cur_k[:3] and best_k[1:3] != cur_k[1:3]
-        if exhausted or ((by_reset or gain >= SUB_HYSTERESIS)
-                         and time.time() - self.last_switch_at >= SUB_DEBOUNCE):
-            if exhausted:
+        by_reset = best_k[H:R + 1] < cur_k[H:R + 1] and best_k[N:R + 1] != cur_k[N:R + 1]
+        if by_cap or exhausted or ((by_reset or gain >= SUB_HYSTERESIS)
+                                   and time.time() - self.last_switch_at >= SUB_DEBOUNCE):
+            if by_cap:
+                why = (f"{cur.name} can't do fable on its current plan — "
+                       "routing new sessions to a pool that can")
+            elif exhausted:
                 why = ("active exhausted" if cur_pct >= SUB_EXHAUSTED
                        else f"active pool {cur_pct:.0f}% hot — routing around the wall")
-            elif by_reset and not (cur_k[1] or best_k[1]):
-                why = (f"weekly resets {max(1, int((cur_k[2] - best_k[2]) // 3600))}h "
+            elif by_reset and not (cur_k[N] or best_k[N]):
+                why = (f"weekly resets {max(1, int((cur_k[R] - best_k[R]) // 3600))}h "
                        "sooner — spend it before it's forfeited")
             elif by_reset:
                 why = "weekly reset known vs unknown"
@@ -4646,7 +4791,8 @@ class SessionManager:
                 alts = sorted(
                     [x for x in self.accounts.values()
                      if x.ready and not x.broken and x.name != name],
-                    key=lambda x: (x.usage or {}).get("pct", 100.0))
+                    key=lambda x: (not x.routable(),          # capability first…
+                                   (x.usage or {}).get("pct", 100.0)))
             name, acct = "default", None         # last resort: plain ~/.claude
             for alt in alts:
                 st = _creds_state(alt.config_dir)

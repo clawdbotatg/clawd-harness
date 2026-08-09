@@ -276,7 +276,11 @@ class Verbs:
         accounts: the harness routes itself (docs/fleet/SUB-ROUTING.md) and is
         better at it than a turn-based PM — it watches usage continuously and
         hands sessions off mid-flight. Your job is to know, and to say so when a
-        machine has no headroom left."""
+        machine has no headroom left.
+
+        A pool carrying `routable: false` is one the router SKIPS regardless of
+        headroom (its plan can't do fable). Don't count it as spare capacity —
+        a machine whose only free pool is unroutable is a machine in trouble."""
         out = []
         for mid, c in self.clients.items():
             if machine and mid != machine:
@@ -293,6 +297,15 @@ class Verbs:
                        "active": bool(acc.get("active")),
                        "usage_pct": acc.get("usagePct"),
                        "headroom": acc.get("headroom")}
+                # Capacity is not the only way a pool goes unusable: a plan
+                # that stopped carrying fable is skipped by the router at any
+                # headroom (SUB_REQUIRE_FABLE). Without this the PM reads a
+                # greyed-out 97%-free pool as spare capacity and reports the
+                # machine as healthy while the router refuses to spend it.
+                if acc.get("routable") is False:
+                    row["routable"] = False
+                    row["skipped_because"] = ("plan doesn't carry fable — the "
+                                              "router won't spawn or hand off here")
                 wins = [w for w in (acc.get("windows") or []) if w.get("resets")]
                 if wins:
                     row["windows"] = [{"label": w.get("label"), "used": w.get("used"),

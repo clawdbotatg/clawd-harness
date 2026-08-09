@@ -58,6 +58,20 @@ pool and drain it hard while other pools sit half-empty — that's the policy
 working. The 🧠 page's "router →" line says which; the log's switch line says
 why (`weekly resets Nh sooner — spend it before it's forfeited`).
 
+**Eligibility has a prerequisite: the pool's plan must be able to do the
+work.** *(Added 2026-08-09, after the slop@buidlguidl.com org changed to an
+Opus-only plan and the router — which reads nothing but percentages — kept
+routing to it precisely because it was the emptiest pool on the machine.)* A
+plan that no longer carries **fable** is skipped by every routing decision at
+any headroom, and idle sessions already parked on it are moved off. It stays
+signed in, stays listed on the 🧠 page (dashed + dimmed, with the reason), and
+stays manually selectable — **skipped by the router is not signed out**. The
+guarantee has a floor: if *no* pool passes the gate, the router routes on
+capacity alone rather than stranding you, and says so in the log. Knobs:
+`SUB_REQUIRE_FABLE=0` (off), `SUB_FABLE_OK=<name>` (trust one anyway),
+`SUB_NO_FABLE=<name>` (block one anyway). Full mechanism + why the detection
+degrades the way it does: `docs/fleet/SUB-ROUTING.md` → "The capability gate".
+
 ### 3. With headroom on the machine, you are never stuck
 **The guarantee:** if the machine a session runs on holds a working login for
 any pool with headroom, work continues. When a session's pool drains
@@ -174,6 +188,11 @@ I never type around a limit."**
   instead of silently going stale.
 - Identity self-heals: every ~3-min poll re-fetches the token-bound identity,
   so a re-login under an old nickname corrects its own label within minutes.
+- **A card drawn dashed + dimmed** with `⚠ this plan doesn't carry fable` is a
+  pool the router is skipping on capability, not capacity (promise 2). Its
+  headroom number is greyed for the same reason: on that plan it isn't capacity
+  you can spend. The card stays because the login is fine — that's the whole
+  distinction the styling is carrying, so don't "fix" it into a dead card.
 
 ## Changes that implemented this (2026-07-08, chronological)
 

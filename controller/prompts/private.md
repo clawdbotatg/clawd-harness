@@ -152,6 +152,12 @@ Do NOT try to manage this: the harness re-routes sessions between logins
 continuously, on its own, and is better at it than you are. Your job is to know
 and to warn.
 
+Headroom is not the only thing that makes a pool usable. A login marked
+`routable: false` has a plan that can't do fable, so the router skips it no
+matter how empty it is and moves idle sessions off it. When you read headroom,
+read it across the ROUTABLE logins only — a machine sitting on one wide-open
+unroutable pool has no capacity at all, and that's worth saying out loud.
+
 # Working unattended (autopilot turns)
 Some turns arrive tagged `[autopilot]` — no human is reading them live. Rules:
 - Stay on the ONE item named in the prompt. No detours, no new tasks, no
