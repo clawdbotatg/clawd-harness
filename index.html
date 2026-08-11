@@ -174,12 +174,30 @@
   #pinBtn:hover { opacity:1; color:var(--accent); border-color:var(--accent); }
   #pinBtn.show { display:block; }
   #pinBtn.pinned { opacity:.9; color:var(--accent); border-color:var(--accent-dim); }
-  /* quiet grey tag beside the close-✕: the session's 🔑 subscription account
-     (when not the default login) and — fleet mode — which box it lives on */
+  /* tag beside the close-✕: the session's 🔑 subscription account (when not
+     the default login) and — fleet mode — which box it lives on. Same solid
+     pill chrome as the buttons it sits beside: it floats over live terminal
+     text, so a transparent dim label was unreadable the moment output scrolled
+     under it. */
   #machineTag { position:absolute; top:6px; right:84px; z-index:20; display:none;
-                height:30px; line-height:30px; font-size:11px; color:var(--dim);
-                opacity:.7; pointer-events:none; user-select:none; }
+                height:30px; line-height:28px; font-size:11px; color:var(--ink);
+                background:var(--bg); border:1px solid var(--edge); border-radius:6px;
+                padding:0 9px; opacity:.9; pointer-events:none; user-select:none; }
   #machineTag.show { display:block; }
+  /* bottom-right twin of the tag: which MODEL is answering (accent/yellow) and
+     how full its context window is. Fed by refreshSessionTag() off the same
+     `sessions` frames (server tails the transcript for model + input-token
+     sum). ctx color escalates as auto-compact nears: dim → amber ≥70% →
+     red ≥90%. pointer-events:none so it never eats a touch-scroll. */
+  #ttymeta { position:absolute; bottom:6px; right:10px; z-index:20; display:none;
+             gap:8px; align-items:center; font:11px var(--mono);
+             background:var(--bg); border:1px solid var(--edge); border-radius:6px;
+             padding:5px 9px; opacity:.9; pointer-events:none; user-select:none; }
+  #ttymeta.show { display:flex; }
+  #ttymeta .model { color:var(--accent); }
+  #ttymeta .ctx { color:var(--dim); }
+  #ttymeta .ctx.warn { color:var(--accent); }
+  #ttymeta .ctx.crit { color:var(--err); }
   .col { display:flex; flex-direction:column; min-width:0; min-height:0; }
   #left  { flex:1; position:relative; }   /* anchors the #splash overlay */
   #right { flex:1; background:var(--bg); }
@@ -924,6 +942,7 @@
     </section>
     <section class="col" id="left">
       <div id="term"></div>
+      <div id="ttymeta"></div>
       <div id="splash" hidden></div>
     </section>
     <section class="col hidden" id="right">
@@ -6497,6 +6516,7 @@ const menuBtn = document.getElementById('menuBtn');
 const projectsBtn = document.getElementById('projectsBtn');
 const closeBtn = document.getElementById('closeBtn');
 const machineTag = document.getElementById('machineTag');
+const ttymetaEl = document.getElementById('ttymeta');
 closeBtn.onclick = () => closeCurrentSession();
 // Tag beside the close-✕: which subscription account this session burns (🔑, when
 // it isn't the default login) and — fleet mode — which box it lives on. Re-run on
@@ -6518,6 +6538,23 @@ function refreshSessionTag() {
   machineTag.title = [acct && ('running under the ' + acct.slice(3) + ' subscription'),
                       currentMachine || ''].filter(Boolean).join(' · ');
   machineTag.classList.toggle('show', inSession && !!machineTag.textContent);
+  // Bottom-right twin: model (yellow) + context fullness, tty view only.
+  ttymetaEl.textContent = '';
+  const model = s ? prettyModel(s.model) : '';
+  const pct = (s && s.ctxTokens > 0)                     // 200k window assumed
+    ? Math.min(100, Math.round(s.ctxTokens / 2000)) : 0;
+  if (model) {
+    const el = document.createElement('span');
+    el.className = 'model'; el.textContent = model;
+    ttymetaEl.appendChild(el);
+  }
+  if (pct > 0) {
+    const el = document.createElement('span');
+    el.className = 'ctx' + (pct >= 90 ? ' crit' : pct >= 70 ? ' warn' : '');
+    el.textContent = 'ctx ' + pct + '%';
+    ttymetaEl.appendChild(el);
+  }
+  ttymetaEl.classList.toggle('show', v === 'tty' && !!(model || pct));
 }
 function setView(view) {
   const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects',
