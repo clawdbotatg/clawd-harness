@@ -145,6 +145,35 @@ if (geom.ok) {
   if (!r.lastChild) fail('the filter is not the last child of the strip (it must never be re-appended)');
 }
 
+// ---- 5: opening a session clears the filter (2026-08-11) --------------------
+// Clicking a tab is the filter's endpoint — you found what you were narrowing
+// toward — so the strip must come back whole. focusSession is stubbed for the
+// click so the probe still never subscribes to (or resizes) a real session.
+if (geom.ok && geom.tabs > 0) {
+  const r = await page.evaluate(async () => {
+    const bar = document.getElementById('sessionbar');
+    const settle = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const vis = () => [...bar.querySelectorAll('.stab')].filter(t => t.offsetParent !== null);
+    const inp = bar.querySelector('.tfilter input');
+    inp.value = 'zzqqxx-no-such-session';
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    const during = vis().length;
+    const orig = window.focusSession;
+    let focused = 0;
+    window.focusSession = () => { focused++; };
+    try { bar.querySelector('.stab').click(); await settle(); }
+    finally { window.focusSession = orig; }
+    return { during, focused, value: bar.querySelector('.tfilter input').value,
+             after: vis().length, total: bar.querySelectorAll('.stab').length };
+  });
+  console.log('CLICK-CLEARS', JSON.stringify(r));
+  if (r.focused !== 1) fail(`tab click did not route through focusSession (stub saw ${r.focused})`);
+  if (r.value !== '') fail(`clicking a tab left "${r.value}" in the filter box`);
+  else if (r.after !== r.total) fail(`clicking a tab restored ${r.after}/${r.total} tabs`);
+  else pass('clicking a tab clears the filter and restores the strip');
+}
+
 // ---- 2b: the same, squeezed to a phone — the width where the strip actually
 // overflows, so this is where "sticky" earns its keep. -----------------------
 await page.setViewportSize({ width: 380, height: 760 });

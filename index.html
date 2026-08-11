@@ -3212,7 +3212,7 @@ function renderSessionBar(view) {
                     (sessionIsLocal(s) ? ' local' : '') + (mOff ? ' moff' : '');
     tab.title = (s.title || 'new session') +
                 (mOff ? ` — ${s._machine} is offline (cached tab; opens when it returns)` : '');
-    tab.onclick = () => focusSession(s);   // may cross project/machine; cancels any queued new-session send
+    tab.onclick = () => { clearTabFilter(); focusSession(s); };   // may cross project/machine; cancels any queued new-session send; picking a tab is the filter's endpoint, so it clears
     const dot = document.createElement('span');
     dot.className = 'sdot' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '');
     tab.appendChild(dot);
@@ -3300,18 +3300,24 @@ function ensureTabFilter(bar) {
         e.preventDefault();
         const terms = tabFilterTerms();
         const hits = terms.length ? sortedSessions().filter(s => tabFilterHit(s, terms)) : [];
-        if (hits.length === 1) focusSession(hits[0]);
+        if (hits.length === 1) { clearTabFilter(); focusSession(hits[0]); }
       }
     });
     inp.addEventListener('blur', () => { if (!tabFilter.trim()) wrap.classList.remove('open'); });
     const x = document.createElement('span');
     x.className = 'fclear'; x.textContent = '✕'; x.title = 'clear filter';
-    x.onclick = () => { setTabFilter(''); wrap.classList.remove('open'); };
+    x.onclick = () => clearTabFilter();
     wrap.appendChild(ico); wrap.appendChild(inp); wrap.appendChild(x);
     tabFilterEl = wrap; tabFilterInp = inp;
   }
   if (tabFilterEl.parentNode !== bar) bar.appendChild(tabFilterEl);   // PM view wipes the strip
   return tabFilterEl;
+}
+// Opening a session is the filter's natural end — it found what you were
+// looking for — so the strip comes back whole and the box folds away (touch).
+function clearTabFilter() {
+  if (tabFilter) setTabFilter('');
+  if (tabFilterEl) tabFilterEl.classList.remove('open');
 }
 // Programmatic writes fire no `input` event — keep the box and the mirror in step.
 function setTabFilter(v) {
