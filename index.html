@@ -528,6 +528,28 @@
   /* 📌 pin board: parked "check on this later" sessions. Cards reuse .scard;
      each carries its own one-line prompt row so you can poke a to-do without
      restoring it to the tab strip. */
+  /* header row (title + 🔎 filter) sits above the scroll container, aligned to
+     the same 780px column the cards use */
+  #pinhead { display:flex; align-items:center; gap:8px; padding:14px 14px 0;
+             width:100%; max-width:780px; align-self:center; }
+  #pinhead .menutitle { flex:1; padding:0; min-width:0; }
+  #pinhead .tfilter { display:flex; align-items:center; gap:4px; flex:0 0 auto; }
+  #pinhead .ficon { font-size:11px; color:var(--dim); }
+  #pinhead .tfilter input { width:110px; background:var(--raised); color:var(--ink);
+             border:1px solid var(--edge); border-radius:5px; font-size:11px;
+             font-family:var(--mono); padding:2px 6px; }
+  #pinhead .tfilter input::placeholder { color:var(--dim); }
+  #pinhead .tfilter input:focus { outline:none; border-color:var(--accent); width:170px; }
+  #pinhead .tfilter.on input { border-color:var(--accent); color:var(--accent); }
+  #pinhead .tfilter.none input { border-color:var(--err); color:var(--err); }
+  #pinhead .tfilter.on .ficon { color:var(--accent); }
+  #pinhead .fclear { color:var(--dim); cursor:pointer; font-size:11px; padding:0 2px; }
+  #pinhead .fclear:hover { color:var(--err); }
+  @media (pointer:coarse) {
+    #pinhead .tfilter input { font-size:16px; }  /* <16px zooms the page on iOS focus */
+  }
+  /* filtered out — hidden, not removed (cards survive; scroll position too) */
+  #pinboard .pincard.fhide { display:none; }
   .pincard { cursor:pointer; }
   /* bright yellow so which PROJECT a parked to-do belongs to reads at a glance */
   .pincard .pinproj { color:#ffd84d; font-size:11px; font-family:var(--mono); flex:0 0 auto; }
@@ -952,6 +974,16 @@
       <div id="pmfeed"></div>
     </section>
     <section class="col hidden" id="pinsview">
+      <!-- title + 🔎 filter live OUTSIDE #pinboard: the board repaints with
+           innerHTML='' on every sessions frame, and the filter is a live
+           <input> that must survive that (same rule as the tab-strip 🔎). -->
+      <div id="pinhead">
+        <span class="menutitle" id="pintitle">📌 pin board</span>
+        <span class="tfilter" id="pinfilter" hidden>
+          <span class="ficon">🔎</span><input type="text" placeholder="filter" autocomplete="off">
+          <span class="fclear" title="clear filter" hidden>✕</span>
+        </span>
+      </div>
       <div id="pinboard"></div>
     </section>
   </main>
@@ -5443,12 +5475,9 @@ function sessionProjectName(s) {
 function renderPinBoard() {
   const board = document.getElementById('pinboard');
   const list = pinnedSessions();
-  board.innerHTML = '';
-  const label = document.createElement('div');
-  label.className = 'menutitle';
-  label.textContent = `📌 pin board · ${list.length}`;
-  board.appendChild(label);
+  board.innerHTML = '';                 // the 🔎 filter lives in #pinhead, outside this wipe
   if (!list.length) {
+    paintPinFilter(pinFilterTerms(), 0, 0);
     const e = document.createElement('div');
     e.className = 'pinempty';
     e.textContent = 'nothing pinned. open a session and hit the 📌 (top right, next to ✕) ' +
@@ -5459,8 +5488,11 @@ function renderPinBoard() {
   list.forEach(s => {
     const card = document.createElement('div');
     card.className = 'scard pincard' + (sessionIsLocal(s) ? ' local' : '');
+    card.dataset.cid = s.cid;           // applyPinFilter matches cards back to sessions by this
     card.title = 'open this session (it stays pinned)';
-    card.onclick = () => { pendingSendText = null; focusSession(s); };
+    // opening a card is the filter's endpoint — clear it so the board is whole
+    // when you next come back (same contract as clicking a filtered tab)
+    card.onclick = () => { pendingSendText = null; setPinFilter(''); focusSession(s); };
 
     const row = document.createElement('div'); row.className = 'row';
     const sdot = document.createElement('span');
@@ -5545,6 +5577,75 @@ function renderPinBoard() {
 
     board.appendChild(card);
   });
+  applyPinFilter();                     // fresh cards, current filter — re-hide non-matches
+}
+
+// ---- 🔎 filter the pin board ------------------------------------------------
+// Same contract as the tab-strip filter: purely client-side and purely cosmetic
+// (it hides card NODES, touches no session, sends nothing), space-separated
+// words ANDed, Esc clears, Enter opens a filter narrowed to one pin. The box
+// lives in #pinhead — OUTSIDE the #pinboard the repaint wipes — so a `sessions`
+// frame can never blur it mid-word.
+let pinFilter = '';        // live text (this browser only, not persisted)
+function pinFilterTerms() {
+  return pinFilter.trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+// Everything a pin card is "about" — including the 🧪 test hint and the ⏳
+// blocked-on line, since "the word you remember" from a parked to-do is often
+// in what you were asked to go verify.
+function pinFilterHit(s, terms) {
+  const parts = [s.tab, s.title, s.desc, s.digest, s.testHint, s.blocked_on,
+                 s.engine, sessionProjectName(s)];
+  if (FLEET) parts.push(s._machine);
+  const hay = parts.filter(Boolean).join(' ').toLowerCase();
+  return terms.every(t => hay.includes(t));
+}
+function applyPinFilter() {
+  const board = document.getElementById('pinboard');
+  const terms = pinFilterTerms();
+  const list = pinnedSessions();
+  const byCid = new Map(list.map(s => [s.cid, s]));
+  let shown = 0;
+  board.querySelectorAll('.pincard').forEach(card => {
+    const s = byCid.get(card.dataset.cid);
+    const hit = !terms.length || (s && pinFilterHit(s, terms));
+    card.classList.toggle('fhide', !hit);
+    if (hit) shown++;
+  });
+  paintPinFilter(terms, shown, list.length);
+}
+function paintPinFilter(terms, shown, total) {
+  const title = document.getElementById('pintitle');
+  const box = document.getElementById('pinfilter');
+  const on = terms.length > 0;
+  title.textContent = '📌 pin board · ' + (on ? `${shown}/${total}` : total);
+  box.hidden = !total;                  // nothing pinned → nothing to filter
+  box.classList.toggle('on', on);
+  box.classList.toggle('none', on && shown === 0);
+  box.querySelector('.fclear').hidden = !on;
+}
+// Programmatic writes fire no `input` event — keep the box and the mirror in step.
+function setPinFilter(v) {
+  pinFilter = v;
+  const inp = document.querySelector('#pinfilter input');
+  if (inp && inp.value !== v) inp.value = v;
+  applyPinFilter();
+}
+{ // wire the (static, build-once) box — runs once at boot
+  const box = document.getElementById('pinfilter');
+  const inp = box.querySelector('input');
+  inp.addEventListener('input', () => { pinFilter = inp.value; applyPinFilter(); });
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); setPinFilter(''); inp.blur(); }
+    // Enter on a filter narrowed to one pin opens it
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const terms = pinFilterTerms();
+      const hits = terms.length ? pinnedSessions().filter(s => pinFilterHit(s, terms)) : [];
+      if (hits.length === 1) { setPinFilter(''); focusSession(hits[0]); }
+    }
+  });
+  box.querySelector('.fclear').onclick = () => { setPinFilter(''); inp.blur(); };
 }
 
 // Repaint everything 📌: the header button's count, the in-session pin toggle,

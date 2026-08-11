@@ -153,6 +153,16 @@ user-facing overview; this file orients an agent working **on** the code.
   repaint keeps the live `<input>`, its focus, and text the `input` event hasn't
   mirrored yet. It lands on the **sessions rung** (`#/p/self`), where the strip
   already renders, so it subscribes to nothing and claims no PTY size.
+- **`tools/pinfilterprobe.mjs`** — the same 🔎 for the **📌 pin board**
+  (2026-08-11): the filter in `#pinhead` narrows cards by title / tldr / digest /
+  🧪 test hint / ⏳ blocked-on / project (and, fleet, machine). The board is the
+  one rung that still legitimately repaints with `innerHTML=''` (cards carry live
+  per-card prompt inputs, so they're rebuilt wholesale), which is exactly why the
+  filter box lives **outside** `#pinboard` — the probe asserts that placement,
+  the n/total count in the title, AND-narrowing, repaint survival of focus +
+  un-mirrored text, and Enter-on-one-hit opening the pin and clearing the
+  filter. It lands on `#/pins` and filters **fake** pins injected into
+  `sessionList` (the splashprobe pattern), so it touches no real session.
 
 ## Architecture (one server, multi-project, multi-session)
 - **server.py** — a `SessionManager` owns N `Project`s and N `ClaudeSession`s.
