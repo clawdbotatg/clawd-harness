@@ -230,7 +230,14 @@ user-facing overview; this file orients an agent working **on** the code.
   spotted in the PTY stream, triggers an endpoint-confirmed handoff in
   seconds with auto-redeliver / auto-"continue" (`_scan_for_limit` →
   `rescue_limit_wall`, `LIMIT_CONTINUE`) — the never-see-a-rate-limit
-  contract in `EXPECTATIONS.md`. The one carve-out: **sign-in ceremony
+  contract in `EXPECTATIONS.md`. That scan catches **two paints** (2026-08-13):
+  the classic one-line banner (spaced needle) and the newer
+  **extra-usage-credits modal** ("You've reached your <model> limit … uses
+  usage credits" — a blocking ink dialog whose Enter could spend real credits
+  or switch models, painted when a scoped weekly window like Fable's runs
+  dry). ink pads dialogs with cursor motion, so the modal needle matches
+  whitespace-stripped text off a raw-byte window, the resume-gate technique.
+  Test: `python3 test_limit_modal.py`. The one carve-out: **sign-in ceremony
   sessions** (`ClaudeSession.ceremony` — spawned by the 🧠 panel's add /
   re-sign-in buttons) deliberately sit on a broken account, so every
   rescue/handoff path skips them for the session's lifetime; a re-sign-in

@@ -483,8 +483,29 @@ _PTY_ANSI_RE = re.compile(
     rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>]")
 _LIMIT_BANNER_RE = re.compile(
     r"you.?ve hit your [a-z0-9 -]{0,24}limit"    # .? = ' or ’ (the CLI uses either)
+    r"|you.?ve reached your [a-z0-9 .-]{0,32}limit"
     r"|stop and wait for limit to reset"
     r"|ask your admin for more usage", re.I)
+# The newer EXTRA-USAGE-CREDITS wall (2026-08): a model-scoped weekly window
+# (e.g. the Fable weekly) runs dry and the CLI paints a blocking ink dialog —
+# "You've reached your <model> limit … uses usage credits" — with numbered
+# options (continue on credits / switch model) and an Enter-confirms footer.
+# Same trap class as the resume gate: nobody is there to answer it, and a
+# harness-delivered prompt's CR could CONFIRM an option (spend real credits,
+# or silently switch off the model SUB_REQUIRE_FABLE exists to keep). ink pads
+# dialogs with cursor motion, not spaces, so after de-ANSI the words arrive
+# RUN TOGETHER and _LIMIT_BANNER_RE's spaced needles match nothing — this one
+# is matched against _flat_pty (whitespace-stripped) text instead. It demands
+# the credits/weekly context, not just the headline; and like the banner it is
+# confirm-gated by rescue_limit_wall, so quoted text on a cool pool is a no-op.
+_LIMIT_MODAL_RE = re.compile(
+    r"you.?vereachedyour[a-z0-9.-]{0,32}limit"
+    r".{0,400}?(?:usesusagecredits|usageforthisweek|extrausageforpaid)",
+    re.I | re.S)
+# Raw-byte window the limit scan re-strips each read (the resume-gate lesson:
+# per-chunk flattening leaks half-stripped escapes into the needle). The
+# credits dialog is ~1.5KB painted; 8KB holds it whole through a repaint.
+LIMIT_RAW_MAX = 8192
 # Claude's fresh-onboarding screen (theme picker) — painted only when the
 # config dir's .claude.json lacks hasCompletedOnboarding. On a login-holding
 # dir that screen is ALWAYS wrong (the 07-16 ambushes); _scan_for_onboarding
@@ -2000,7 +2021,7 @@ class ClaudeSession:
         self.last_bounce_rescue = 0.0             # cooldown anchor for the bounced-prompt rescue
         self.last_prompt = ""                     # most recent user prompt — redelivered if a limit wall eats it
         self.hooks_at_prompt = 0                  # hook_count when it landed — "did that turn ever progress?"
-        self._limit_tail = ""                     # rolling de-ANSI'd PTY text, for the limit-banner scan
+        self._limit_raw = b""                     # rolling RAW PTY bytes, for the limit banner/modal scan
         self._limit_seen_at = 0.0                 # cooldown anchor for banner-triggered rescues
         self._onboard_tail = ""                   # rolling de-ANSI'd PTY text, for the onboarding-screen scan
         self._onboard_deadline = 0.0              # scan window end; start() arms it, a match disarms it
@@ -2669,18 +2690,25 @@ class ClaudeSession:
         the terminal's weird text': a needle match, not a parse."""
         if self.ceremony:
             return                               # sign-in ceremony: never rescued
-        text = _PTY_ANSI_RE.sub(b"", chunk).decode("utf-8", "ignore")
-        text = re.sub(r"\s+", " ", text)
-        tail = (self._limit_tail + " " + text)[-800:]
-        self._limit_tail = tail[-120:]           # keep enough to bridge a chunk split
-        if not _LIMIT_BANNER_RE.search(tail):
+        # Buffer RAW bytes and re-strip the whole window each read (the
+        # resume-gate lesson: a chunk boundary inside an escape sequence leaks
+        # junk like "38;5;246m" into per-chunk flattened text). Two needles
+        # because the CLI paints walls two ways: the classic banner is one
+        # styled line (real spaces → _LIMIT_BANNER_RE on space-collapsed
+        # text), the extra-usage-credits dialog is an ink box padded with
+        # cursor motion (space-free after de-ANSI → _LIMIT_MODAL_RE on
+        # whitespace-stripped text).
+        self._limit_raw = (self._limit_raw + chunk)[-LIMIT_RAW_MAX:]
+        stripped = _PTY_ANSI_RE.sub(b"", self._limit_raw).decode("utf-8", "ignore")
+        if not (_LIMIT_BANNER_RE.search(re.sub(r"\s+", " ", stripped))
+                or _LIMIT_MODAL_RE.search(re.sub(r"\s+", "", stripped))):
             return
-        self._limit_tail = ""                    # don't re-match this banner from the tail
+        self._limit_raw = b""                    # don't re-match this paint
         now = time.time()
         if now - self._limit_seen_at < BOUNCE_COOLDOWN:
             return
         self._limit_seen_at = now
-        print(f"[session {self.cid[:8]}] limit banner in the PTY on "
+        print(f"[session {self.cid[:8]}] limit banner/modal in the PTY on "
               f"{self.account} — confirming against the endpoint", flush=True)
         threading.Thread(target=self.manager.rescue_limit_wall, args=(self,),
                          daemon=True).start()
