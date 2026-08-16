@@ -1,7 +1,27 @@
 # Demo 1 — iPhone voice agent (OS echo cancellation)
 
-> **Status: not started.** Record the speaker loop test results (README.md)
-> here when done.
+> **Status: built, not yet on a phone (2026-08-16).** Repo:
+> **[clawdbotatg/clawd-iphone-gpt-chat](https://github.com/clawdbotatg/clawd-iphone-gpt-chat)**
+> — BOTH shapes ship in one app behind a segmented control (A · WKWebView wrap
+> primary, B · native AVAudioEngine+WebSocket fallback), so one dev-build
+> session tests both if A echoes. `.voiceChat` set at launch and re-asserted on
+> route changes (WebKit reconfigures the session when getUserMedia starts).
+>
+> **Verified from the Mac:** token server (vendored gpt-voice `serve.py`,
+> ports 8124/8444 to coexist with the reference on 8123/8443,
+> `server/run-server.sh` pulls the key from the credential store at runtime)
+> mints live; headless-Chromium E2E of the wrapped page reached
+> `🟢 live` against real OpenAI (synthesized audio track — this Mac has no TCC
+> mic grant for any Chrome, so getUserMedia hangs even on fake devices).
+> Swift is `swiftc -parse` clean only — **no Xcode on this Mac** (CLT only;
+> installing needs sudo or an Apple ID, neither available to the agent), so it
+> has never been compiled against the iOS SDK.
+>
+> **Speaker loop test: NOT RUN — needs a human + phone.** Steps 1–4 all
+> pending. To run it: install Xcode, open `GPTVoice.xcodeproj`, set your team,
+> run on the iPhone (README there has the 4-step runbook; server was left
+> running on `https://192.168.68.61:8444`). Record per-step PASS/FAIL and
+> which shape (A or B) here.
 
 ## Goal
 
