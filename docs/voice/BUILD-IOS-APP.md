@@ -18,10 +18,10 @@
 > has never been compiled against the iOS SDK.
 >
 > **Speaker loop test: NOT RUN — needs a human + phone.** Steps 1–4 all
-> pending. To run it: install Xcode, open `GPTVoice.xcodeproj`, set your team,
-> run on the iPhone (README there has the 4-step runbook; server was left
-> running on `https://192.168.68.61:8444`). Record per-step PASS/FAIL and
-> which shape (A or B) here.
+> pending. Austin is taking it to a machine that has Xcode — full runbook
+> (server setup with a plain `.env`, build, test, where to record) is
+> **`HANDOFF.md` in the app repo**. Record per-step PASS/FAIL and which
+> shape (A or B) here.
 
 ## Goal
 
