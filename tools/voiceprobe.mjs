@@ -61,7 +61,8 @@ await page.addInitScript(() => {
   navigator.mediaDevices = navigator.mediaDevices || {};
   navigator.mediaDevices.getUserMedia = async (c) => {
     window.__micConstraints = c;
-    return { getTracks: () => [{ stop: () => { window.__micStopped++; } }] };
+    window.__micTrack = { enabled: true, stop: () => { window.__micStopped++; } };
+    return { getTracks: () => [window.__micTrack] };
   };
   window.RTCPeerConnection = class {
     constructor() { this.ontrack = null; window.__pcCount++; }
@@ -163,6 +164,32 @@ try {
   check('function_call_output sent with call_id', outIdx !== -1, JSON.stringify(sent));
   check('response.create follows (the "make it speak" event)', speakIdx > outIdx, JSON.stringify(sent));
   check('tool result carries real data', outIdx !== -1 && sent[outIdx].item.output.includes('all quiet'));
+
+  // 2.5 — speaker-safe half-duplex: while its audio is ACTUALLY playing the mic
+  // is dead (this is the fix for "it hears itself, interrupts itself, loops"),
+  // and 🎧 headphones mode buys barge-in back.
+  await inject({ type: 'output_audio_buffer.started' });
+  check('mic hard-muted while assistant audio plays',
+        await page.evaluate(() => window.__micTrack.enabled === false));
+  await inject({ type: 'output_audio_buffer.stopped' });
+  await page.waitForFunction(() => window.__micTrack.enabled === true, null, { timeout: 2000 });
+  check('mic back after playback (+reverb tail)', true);
+  await page.click('#voicehud .vhp');                       // 🎧 on
+  await inject({ type: 'output_audio_buffer.started' });
+  check('🎧 mode keeps the mic open (barge-in)',
+        await page.evaluate(() => window.__micTrack.enabled === true));
+  await inject({ type: 'output_audio_buffer.stopped' });
+  await page.click('#voicehud .vhp');                       // 🎧 back off (persisted)
+  await page.waitForTimeout(400);
+  // tap-to-interrupt: speakers can't voice-barge (mic is dead), the finger can
+  await inject({ type: 'output_audio_buffer.started' });
+  const sentBefore = await page.evaluate(() => window.__vdc.sent.length);
+  await page.click('#voicehud .vstate');
+  const tail = await page.evaluate(n => window.__vdc.sent.slice(n), sentBefore);
+  check('tap the state word → response.cancel + buffer clear',
+        tail.some(s => s.type === 'response.cancel') && tail.some(s => s.type === 'output_audio_buffer.clear'),
+        JSON.stringify(tail));
+  check('…and the mic reopens instantly', await page.evaluate(() => window.__micTrack.enabled === true));
 
   // 3 — transcripts land as feed bubbles
   await inject({ type: 'conversation.item.input_audio_transcription.completed', transcript: 'what needs me today' });

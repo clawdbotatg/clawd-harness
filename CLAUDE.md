@@ -168,8 +168,13 @@ user-facing overview; this file orients an agent working **on** the code.
   session** (the day-one prod chaos: each extra tap minted another full
   realtime session and the sessions answered each other's speaker output —
   the claim is now synchronous, taps mid-connect are ignored, and the mic
-  demands echo cancellation), the button goes LIVE, a tool-call event
-  executes against the right
+  demands echo cancellation), **the mic is hard-muted while assistant audio
+  actually plays** (half-duplex via `output_audio_buffer.started/stopped` —
+  browser AEC is best-effort and on real speakers the model heard itself,
+  interrupted itself, and looped; 🎧 headphones mode on the HUD buys voice
+  barge-in back, and tapping the HUD state word interrupts by hand —
+  `response.cancel` + `output_audio_buffer.clear`), the button goes LIVE, a
+  tool-call event executes against the right
   `/pm` endpoint and sends **both** data-channel events back (drop
   `response.create` and the model knows the answer but never speaks it),
   transcripts land as feed bubbles, the session survives leaving the PM view,

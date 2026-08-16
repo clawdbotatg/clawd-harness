@@ -520,12 +520,15 @@
   #voicehud .vdot { width:9px; height:9px; border-radius:50%; background:var(--err);
         animation:vpulse 1.2s ease-in-out infinite; }
   @keyframes vpulse { 50% { opacity:.3; } }
-  #voicehud .vstate { font-size:12px; font-weight:700; letter-spacing:.14em;
+  #voicehud .vstate { cursor:pointer; font-size:12px; font-weight:700; letter-spacing:.14em;
         font-family:var(--mono); color:var(--ink); max-width:60vw; overflow:hidden;
         text-overflow:ellipsis; white-space:nowrap; }
   #voicehud .vx { cursor:pointer; color:var(--dim); border:none; background:none;
         font-size:14px; padding:0 2px; }
   #voicehud .vx:hover { color:var(--err); }
+  #voicehud .vhp { cursor:pointer; border:none; background:none; font-size:13px;
+        padding:0 2px; opacity:.35; filter:grayscale(1); }
+  #voicehud .vhp.on { opacity:1; filter:none; }
   /* mobile: collapse header to icon-only buttons so the bar fits + stops over-scrolling */
   @media (pointer: coarse) {
     header { gap:8px; padding:calc(8px + env(safe-area-inset-top, 0px)) 10px 8px; }
@@ -7594,12 +7597,67 @@ function voiceHud(state) {
   let el = document.getElementById('voicehud');
   if (!el) {
     el = document.createElement('div'); el.id = 'voicehud';
-    el.innerHTML = '<span class="vdot"></span><span class="vstate"></span><button class="vx" title="hang up">✕</button>';
+    el.innerHTML = '<span class="vdot"></span><span class="vstate"></span>'
+                 + '<button class="vhp" title="headphones mode — keep the mic open while it talks (barge-in). On speakers leave this OFF or it hears itself.">🎧</button>'
+                 + '<button class="vx" title="hang up">✕</button>';
     el.querySelector('.vx').onclick = pmVoiceStop;
+    el.querySelector('.vhp').onclick = voiceBargeToggle;
+    // tap the state word while it's SPEAKING = barge-in for speaker users: the
+    // mic is deliberately dead then (half-duplex), so the finger does what the
+    // voice can't. Headphones (🎧) users can still just talk over it.
+    el.querySelector('.vstate').onclick = voiceInterrupt;
+    el.querySelector('.vstate').title = 'tap to interrupt while it talks';
     document.body.appendChild(el);
   }
+  el.querySelector('.vhp').classList.toggle('on', voiceBarge());
   el.hidden = false;
   el.querySelector('.vstate').textContent = String(state).toUpperCase();
+}
+// ── speaker-safe half-duplex — the fix for "it hears itself and loops".
+//    Browser AEC is best-effort and on real speakers it fails: the model's own
+//    voice re-enters the mic, semantic VAD reads it as the user talking, it
+//    interrupts itself, answers itself, loops (prod, 08-16, twice). Native apps
+//    (ChatGPT's) get OS-level echo cancellation a web page can't. So: while the
+//    assistant's audio is ACTUALLY PLAYING — OpenAI marks that with WebRTC-only
+//    output_audio_buffer.started/stopped events, which trail response.done by
+//    however much audio is still buffered — the mic track is hard-disabled,
+//    plus a short tail for room reverb. The price is barge-in; the 🎧 HUD
+//    toggle buys it back when you're on headphones (persisted, default off).
+function voiceBarge() { try { return localStorage.getItem('cc_voice_barge') === '1'; } catch { return false; } }
+function voiceBargeToggle() {
+  const on = !voiceBarge();
+  try { localStorage.setItem('cc_voice_barge', on ? '1' : '0'); } catch {}
+  const b = document.querySelector('#voicehud .vhp'); if (b) b.classList.toggle('on', on);
+  // apply to the live session right now: 🎧 on mid-speech opens the mic,
+  // 🎧 off mid-speech shuts it
+  if (pmvc && pmvc.speaking) voiceMicSet(on);
+}
+function voiceMicSet(on) {
+  try { pmvc.mic.getTracks().forEach(t => { t.enabled = on; }); } catch {}
+}
+function voiceInterrupt() {
+  if (!pmvc || !pmvc.speaking || !pmvc.dc || pmvc.dc.readyState !== 'open') return;
+  // cancel the response AND flush the audio still buffered server-side — the
+  // cancel alone lets several queued seconds keep playing
+  pmvc.dc.send(JSON.stringify({ type: 'response.cancel' }));
+  pmvc.dc.send(JSON.stringify({ type: 'output_audio_buffer.clear' }));
+  pmvc.speaking = false;
+  clearTimeout(pmvc.unmuteT); clearTimeout(pmvc.failT);
+  voiceMicSet(true);   // no reverb tail: the audio just stopped and you're mid-thought
+  voiceHud('listening');
+}
+function voiceSpeaking(on) {
+  if (!pmvc) return;
+  clearTimeout(pmvc.unmuteT); clearTimeout(pmvc.failT);
+  pmvc.speaking = on;
+  if (on) {
+    if (!voiceBarge()) voiceMicSet(false);
+    // failsafe: if the stopped event is ever dropped, a dead mic must not be
+    // forever — no single answer plays this long
+    pmvc.failT = setTimeout(() => voiceSpeaking(false), 60000);
+  } else {
+    pmvc.unmuteT = setTimeout(() => { if (pmvc) voiceMicSet(true); }, 300);
+  }
 }
 function voiceHudHide() { const el = document.getElementById('voicehud'); if (el) el.hidden = true; }
 // Voice turns land in the PM feed as bubbles (ephemeral — they belong to the
@@ -7653,7 +7711,11 @@ function voiceEvent(ev) {
   switch (ev.type) {
     case 'input_audio_buffer.speech_started': voiceHud('listening'); break;
     case 'response.created': voiceHud('speaking'); break;
-    case 'response.done': if (pmvc) voiceHud('live'); break;
+    case 'response.done': if (pmvc && !pmvc.speaking) voiceHud('live'); break;
+    // audio ACTUALLY playing out of the speaker — the mute window (see voiceSpeaking)
+    case 'output_audio_buffer.started': voiceSpeaking(true); voiceHud('speaking'); break;
+    case 'output_audio_buffer.stopped':
+    case 'output_audio_buffer.cleared': voiceSpeaking(false); if (pmvc) voiceHud('live'); break;
     case 'conversation.item.input_audio_transcription.completed':
       voiceBubble('user', '🎙 you', ev.transcript); break;
     case 'response.output_audio_transcript.done':
@@ -7719,6 +7781,7 @@ function pmVoiceStop() {
   pmVoiceGen++;                  // any in-flight connect for the old session bails at its next dead() check
   const v = pmvc; pmvc = null;   // null first: dc.onclose re-enters harmlessly
   if (v) {
+    clearTimeout(v.unmuteT); clearTimeout(v.failT);
     try { v.mic.getTracks().forEach(t => t.stop()); } catch {}
     try { v.dc.close(); } catch {}
     try { v.pc.close(); } catch {}
