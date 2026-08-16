@@ -128,6 +128,14 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None,
                 qs = self.path.split("?", 1)[1] if "?" in self.path else ""
                 tid = (parse_qs(qs).get("id") or [None])[0]
                 return self._send(200, router.thread_messages(tid))
+            if path == "/api/voice/lore":
+                # One clawd-md knowledge-base page for the voice model's
+                # read_lore tool (?name=index lists pages). Bounded + sanitized
+                # in voice.read_lore.
+                from . import voice
+                qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+                name = (parse_qs(qs).get("name") or ["index"])[0]
+                return self._send(200, voice.read_lore(name))
             if path == "/api/state":
                 snap = verbs.get_world()
                 # harness link info so the UI can build deep links into sessions
@@ -222,6 +230,18 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None,
                     return self._send(200, router.clear_thread(data.get("id")))
                 finally:
                     chat_lock.release()
+            if path == "/api/voice/token":
+                # Mint an ephemeral OpenAI realtime secret for the 🎙 voice PM
+                # (the real key stays server-side; see controller/voice.py).
+                from . import voice
+                if not voice.enabled():
+                    return self._send(503, {"error": "voice not configured "
+                                            "(OPENAI_API_KEY unset on the controller)"})
+                try:
+                    return self._send(200, voice.mint(verbs))
+                except Exception as e:
+                    return self._send(502, {"error": f"voice mint failed: "
+                                            f"{type(e).__name__}: {e}"})
             if path == "/api/tool":          # invoke a tool by hand (debug page)
                 if not mcp:
                     return self._send(503, {"error": "tool runner unavailable"})

@@ -206,7 +206,7 @@ await page.click('#quickchips button:first-child');   // the 'tldr' chip
 await page.waitForTimeout(700);
 const chipFeed = await page.$eval('#pmfeed', e => e.innerText);
 check('a chip tap sends its prompt into the PM chat',
-      /tldr/.test(chipFeed), chipFeed.replace(/\s+/g, ' ').slice(-120));
+      /tldr/i.test(chipFeed), chipFeed.replace(/\s+/g, ' ').slice(-120));   // /i: the chip yells "TLDR" since 5e1e881
 
 // -- swipe left/right hops between PM threads (same gesture as the session rail) --
 // Synthesize the touch sequence the shared #app swipe handler listens for; it

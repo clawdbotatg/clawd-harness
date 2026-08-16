@@ -163,6 +163,14 @@ user-facing overview; this file orients an agent working **on** the code.
   un-mirrored text, and Enter-on-one-hit opening the pin and clearing the
   filter. It lands on `#/pins` and filters **fake** pins injected into
   `sessionList` (the splashprobe pattern), so it touches no real session.
+- **`tools/voiceprobe.mjs`** — guards the **🎙 voice PM** (2026-08-16): the PM
+  bar's talk button goes LIVE, a tool-call event executes against the right
+  `/pm` endpoint and sends **both** data-channel events back (drop
+  `response.create` and the model knows the answer but never speaks it),
+  transcripts land as feed bubbles, the session survives leaving the PM view,
+  and hang-up stops the mic. `/pm/*`, `api.openai.com`, `getUserMedia`, and
+  `RTCPeerConnection` are all stubbed — no key, no mic, no live controller.
+  Server half: `python3 -m controller.test_voice`.
 
 ## Architecture (one server, multi-project, multi-session)
 - **server.py** — a `SessionManager` owns N `Project`s and N `ClaudeSession`s.
@@ -332,6 +340,16 @@ user-facing overview; this file orients an agent working **on** the code.
   — the shape "research on claude → double-check on codex → claude writes it up"
   needs, since a PM turn ends when it replies. `controller/test_pipeline.py` runs
   that exact chain against the mock harness.
+  **Voice** (2026-08-16): the PM tab's **🎙 talk** button opens a live
+  speech-to-speech session (OpenAI `gpt-realtime` over WebRTC — semantic VAD,
+  barge-in) whose tools run against the same `/pm` endpoints the typed chat
+  uses, with `ask_pm` handing hard/write work to the real PM brain. Server half
+  is `controller/voice.py` (`POST /api/voice/token` mints an ephemeral secret —
+  the real `OPENAI_API_KEY` never leaves the controller; `/api/voice/lore`
+  serves the clawd-md knowledge base from `CONTROLLER_LORE_DIR`). Voice needs
+  HTTPS or 127.0.0.1 for the mic, so production is `h.atg.link`'s PM tab. Deep
+  doc: the "Voice front-end" section of `docs/CONTROLLER.md`; recipe source:
+  github.com/clawdbotatg/gpt-voice `INTEGRATION.md`.
 - **Hooks → turn signal:** injected via `claude --settings <generated>` →
   each hook `curl`s stdin to `POST /hook` → broadcasts `hook` events
   (Stop / UserPromptSubmit / Pre+PostToolUse / SessionStart+End). Drives the

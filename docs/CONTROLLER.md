@@ -338,6 +338,52 @@ step 8**.
 
 ---
 
+## Voice front-end — talk to the PM (2026-08-16)
+
+The PM tab's **🎙 talk** button opens a live voice conversation with the fleet
+PM: native speech-to-speech (OpenAI `gpt-realtime` over WebRTC), semantic VAD
+turn-taking, barge-in. The recipe is the one verified in
+[clawdbotatg/gpt-voice](https://github.com/clawdbotatg/gpt-voice)'s
+`INTEGRATION.md`; the pieces here:
+
+- **`controller/voice.py`** — the server half. `POST /api/voice/token`
+  (reachable as `/pm/api/voice/token` through both proxies, so it inherits the
+  relay's passkey gate) mints an ephemeral client secret; the real
+  `OPENAI_API_KEY` never reaches the browser. The session config is minted
+  fresh each time: a voice-tuned persona **with a live compact fleet snapshot
+  and an identity brief from the clawd-md knowledge base baked in**, semantic
+  VAD, input transcription (opt-in — omitting it silently kills user-side
+  transcripts), and the tool definitions.
+- **The tool split mirrors the model strategy**: the realtime model itself only
+  *reads* — `whats_waiting` (sweep), `fleet_overview` (get_world), `find_it`,
+  `check_pins`, `account_usage`, `read_lore` — all executed **client-side**
+  against the same `/pm/api/tool` endpoint the debug page uses, so the voice
+  layer can never do more than the chat surface allows. Anything that changes
+  the world goes through **`ask_pm`** → `POST /pm/api/chat`, i.e. a real PM
+  brain turn with the full verb surface, autonomy gate, rate limits, and audit
+  ledger intact. The mint response carries an `exec` map (tool name → endpoint
+  kind), so `voice.py` stays the single source of truth for the tool surface.
+- **`/api/voice/lore`** — one bounded page of the clawd-md knowledge base
+  (identity, lore, projects, infra, history) for the `read_lore` tool.
+  `CONTROLLER_LORE_DIR` points at a checkout (default `~/clawd-md`); a missing
+  checkout degrades to "no lore", never an error.
+- **The client** (index.html): mic + `RTCPeerConnection` straight to OpenAI,
+  events on the data channel, and after every tool result **two** events go
+  back — `function_call_output` then `response.create`; without the second the
+  model never speaks the answer. The session survives leaving the PM view (the
+  fixed HUD — one glanceable state word — is the handle and the hang-up), so
+  you can talk while walking the fleet. Transcripts land as ephemeral bubbles
+  in the PM feed.
+- **Knobs**: `OPENAI_API_KEY` (in `.env.controller` on the box) enables it;
+  `CONTROLLER_VOICE_MODEL` (`gpt-realtime` default; `-mini` is ~3× cheaper),
+  `CONTROLLER_VOICE` (marin default; realtime voices only — TTS-only names
+  fail the mint), `CONTROLLER_VOICE_EAGERNESS`, `CONTROLLER_VOICE_SPEED`.
+- **Constraints**: the mic needs a secure context (HTTPS or 127.0.0.1 — so in
+  practice `h.atg.link`), and billing is per audio minute on the OpenAI key.
+- **Tests**: `python3 -m controller.test_voice` (config shape, exec-map
+  coverage, lore sandboxing, keyless 503) + `tools/voiceprobe.mjs` (the whole
+  client loop against stubs).
+
 ## The task ledger — no database
 
 The only genuinely new persistent state. It's tiny (tens of records) and the

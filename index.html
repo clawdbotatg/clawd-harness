@@ -509,6 +509,23 @@
         padding:4px 9px; font-size:11px; font-family:var(--mono); cursor:pointer; }
   #sessionbar .pmctl:hover { border-color:var(--accent); color:var(--accent); }
   #sessionbar select.pmctl { -webkit-appearance:none; appearance:none; padding-right:9px; }
+  #sessionbar .pmctl.vlive { border-color:var(--err); color:var(--err); }
+  /* 🎙 voice HUD — one glanceable word while a voice session is live; follows
+     you across rungs (position:fixed) so you can talk while driving the fleet */
+  #voicehud { position:fixed; top:calc(8px + env(safe-area-inset-top, 0px)); left:50%;
+        transform:translateX(-50%); z-index:80; display:flex; align-items:center; gap:9px;
+        padding:7px 13px; border-radius:20px; background:var(--panel);
+        border:1px solid var(--err); box-shadow:0 4px 18px rgba(0,0,0,.35); }
+  #voicehud[hidden] { display:none; }
+  #voicehud .vdot { width:9px; height:9px; border-radius:50%; background:var(--err);
+        animation:vpulse 1.2s ease-in-out infinite; }
+  @keyframes vpulse { 50% { opacity:.3; } }
+  #voicehud .vstate { font-size:12px; font-weight:700; letter-spacing:.14em;
+        font-family:var(--mono); color:var(--ink); max-width:60vw; overflow:hidden;
+        text-overflow:ellipsis; white-space:nowrap; }
+  #voicehud .vx { cursor:pointer; color:var(--dim); border:none; background:none;
+        font-size:14px; padding:0 2px; }
+  #voicehud .vx:hover { color:var(--err); }
   /* mobile: collapse header to icon-only buttons so the bar fits + stops over-scrolling */
   @media (pointer: coarse) {
     header { gap:8px; padding:calc(8px + env(safe-area-inset-top, 0px)) 10px 8px; }
@@ -1527,6 +1544,10 @@ let pmLoaded = false, pmBusy = false;
 // allowed (the server no longer blocks it), so the spinner and the reply must
 // follow the SENDING thread, not whatever you happen to be looking at.
 let pmBusyTid = null;
+// 🎙 voice PM state — {pc, dc, mic, audio, exec} while a realtime session is
+// live, else null. Declared up top (like the rest) so renderPmBar can read it
+// on the boot render, before the voice code further down has executed.
+let pmvc = null;
 let pmState = { models: [], model: '', backend: 'bankr' };  // /api/state cache for the model picker
 // PM thinking-spinner state (declared early — hoisted render fns touch it at boot)
 let pmThinkEl = null, pmThinkTimer = null, pmSpinTimer = null, pmThinkStart = 0, pmSpinFrame = 0;
@@ -7436,6 +7457,14 @@ function renderPmBar(bar, wasHidden) {
   });
   const ctl = (txt, title, fn) => { const b = document.createElement('button'); b.className = 'pmctl'; b.textContent = txt; b.title = title; b.onclick = fn; bar.appendChild(b); };
   ctl('＋ new', 'New PM thread', pmNew);
+  // 🎙 the voice PM — one tap, talk, it answers out loud (see pmVoiceStart below)
+  const vb = document.createElement('button');
+  vb.className = 'pmctl' + (pmVoiceLive() ? ' vlive' : '');
+  vb.textContent = pmVoiceLive() ? '🎙 live' : '🎙 talk';
+  vb.title = pmVoiceLive() ? 'Voice session live — tap to hang up'
+                           : 'Talk to the PM (realtime voice)';
+  vb.onclick = pmVoiceToggle;
+  bar.appendChild(vb);
   ctl('🛠', 'PM debug (prompt, tools, raw data)', () => window.open(PM_BASE + '/debug', '_blank'));
   // model picker — only meaningful for the bankr backend (claude-code -p drives
   // its own model). Fed from the cached /api/state (pmRefreshBadge keeps it warm).
@@ -7542,6 +7571,131 @@ async function pmSend(text) {
   try { pmApplyThreads(await pmApi('/api/threads')); } catch (e) {}   // refresh tab titles + counts (bar only)
   if (currentView() === 'pm') box.focus();
 }
+// ── 🎙 Voice PM — talk to the fleet PM out loud (OpenAI gpt-realtime, WebRTC).
+//    The controller mints an ephemeral secret (POST /pm/api/voice/token — the
+//    real key never reaches the browser) with the persona + tool definitions;
+//    audio rides a peer connection straight to OpenAI, and every JSON event
+//    arrives on the data channel. Tool calls are executed HERE against the same
+//    /pm endpoints the typed chat uses (the token's `exec` map says which), so
+//    voice can see and do everything the PM tab can — including handing writes
+//    to the real PM brain via ask_pm. The session survives leaving the PM view
+//    (the fixed HUD is the handle), so you can talk while driving the fleet.
+function pmVoiceLive() { return !!pmvc; }   // pmvc declared with the PM state up top
+function pmVoiceToggle() { pmVoiceLive() ? pmVoiceStop() : pmVoiceStart(); }
+function voiceHud(state) {
+  let el = document.getElementById('voicehud');
+  if (!el) {
+    el = document.createElement('div'); el.id = 'voicehud';
+    el.innerHTML = '<span class="vdot"></span><span class="vstate"></span><button class="vx" title="hang up">✕</button>';
+    el.querySelector('.vx').onclick = pmVoiceStop;
+    document.body.appendChild(el);
+  }
+  el.hidden = false;
+  el.querySelector('.vstate').textContent = String(state).toUpperCase();
+}
+function voiceHudHide() { const el = document.getElementById('voicehud'); if (el) el.hidden = true; }
+// Voice turns land in the PM feed as bubbles (ephemeral — they belong to the
+// audio conversation, not a stored thread), but only while you're looking at it.
+function voiceBubble(cls, who, text) {
+  if (currentView() !== 'pm' || !text) return;
+  bubble(cls, who, text.trim(), true, pmfeed);
+  pmfeed.scrollTop = pmfeed.scrollHeight;
+}
+async function voiceToolExec(name, args) {
+  const spec = pmvc && pmvc.exec && pmvc.exec[name];
+  if (!spec) return { error: 'unknown tool: ' + name };
+  try {
+    if (spec.kind === 'verb') {
+      const r = await pmApi('/api/tool', pmPost({ name: spec.name, args: args || {} }));
+      return r.result !== undefined ? r.result : r;
+    }
+    if (spec.kind === 'chat') {
+      const r = await pmApi('/api/chat', pmPost({ message: (args && args.question) || '' }));
+      return { reply: r.reply || r.error || '(no reply)' };
+    }
+    if (spec.kind === 'lore')
+      return await pmApi('/api/voice/lore?name=' + encodeURIComponent((args && args.name) || 'index'));
+  } catch (e) { return { error: 'tool failed: ' + (e && e.message || e) }; }
+  return { error: 'unhandled tool kind' };
+}
+async function voiceHandleTool(ev) {
+  let args = {}; try { args = JSON.parse(ev.arguments || '{}'); } catch {}
+  voiceHud(ev.name === 'ask_pm' ? 'asking the pm…' : 'working');
+  if (currentView() === 'pm') {   // show the call like a session's tool bubble
+    const d = bubble('tool', 'tool', '', false, pmfeed);
+    const nm = document.createElement('span'); nm.className = 'toolname'; nm.textContent = '🎙 ' + ev.name;
+    d.lastChild.appendChild(nm);
+    d.lastChild.appendChild(document.createTextNode(' ' + summarizeInput(args)));
+    pmfeed.scrollTop = pmfeed.scrollHeight;
+  }
+  const out = await voiceToolExec(ev.name, args);
+  if (!pmvc || pmvc.dc.readyState !== 'open') return;   // hung up mid-tool
+  let s = typeof out === 'string' ? out : JSON.stringify(out);
+  if (s.length > 20000) s = s.slice(0, 20000) + ' …(truncated)';
+  // BOTH events, in order — without response.create the model knows the answer
+  // but never speaks it (gpt-voice INTEGRATION.md trap #2).
+  pmvc.dc.send(JSON.stringify({ type: 'conversation.item.create',
+    item: { type: 'function_call_output', call_id: ev.call_id, output: s } }));
+  pmvc.dc.send(JSON.stringify({ type: 'response.create' }));
+  voiceHud('live');
+}
+function voiceEvent(ev) {
+  switch (ev.type) {
+    case 'input_audio_buffer.speech_started': voiceHud('listening'); break;
+    case 'response.created': voiceHud('speaking'); break;
+    case 'response.done': if (pmvc) voiceHud('live'); break;
+    case 'conversation.item.input_audio_transcription.completed':
+      voiceBubble('user', '🎙 you', ev.transcript); break;
+    case 'response.output_audio_transcript.done':
+      voiceBubble('assistant', '🎙 pm', ev.transcript); break;
+    case 'response.function_call_arguments.done': voiceHandleTool(ev); break;
+    case 'error': console.warn('[voice]', ev.error); break;
+  }
+}
+async function pmVoiceStart() {
+  if (pmvc) return;
+  voiceHud('connecting');
+  try {
+    const tr = await fetch(PM_BASE + '/api/voice/token', pmPost({}));
+    const tok = await tr.json();
+    if (!tr.ok || !tok.value) throw new Error(tok.error || 'no voice token');
+    // mic prompt after the mint (fail cheap first); needs HTTPS or 127.0.0.1
+    const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const pc = new RTCPeerConnection();
+    const audio = new Audio(); audio.autoplay = true;   // allowed: we're inside a click
+    pc.ontrack = e => { audio.srcObject = e.streams[0]; };
+    pc.addTrack(mic.getTracks()[0], mic);
+    const dc = pc.createDataChannel('oai-events');
+    pmvc = { pc, dc, mic, audio, exec: tok.exec || {} };
+    dc.onmessage = e => { let ev; try { ev = JSON.parse(e.data); } catch { return; } voiceEvent(ev); };
+    dc.onclose = () => { if (pmvc && pmvc.dc === dc) pmVoiceStop(); };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const resp = await fetch('https://api.openai.com/v1/realtime/calls', {
+      method: 'POST', body: offer.sdp,
+      headers: { Authorization: 'Bearer ' + tok.value, 'Content-Type': 'application/sdp' } });
+    if (!resp.ok) throw new Error('realtime connect failed: ' + resp.status);
+    await pc.setRemoteDescription({ type: 'answer', sdp: await resp.text() });
+    voiceHud('live');
+    if (currentView() === 'pm') renderSessionBar('pm');   // light the 🎙 button
+  } catch (e) {
+    pmVoiceStop();
+    voiceHud('✕ ' + (e && e.message || e));   // brief on-screen why, then gone
+    setTimeout(() => { if (!pmvc) voiceHudHide(); }, 5000);
+  }
+}
+function pmVoiceStop() {
+  const v = pmvc; pmvc = null;   // null first: dc.onclose re-enters harmlessly
+  if (v) {
+    try { v.mic.getTracks().forEach(t => t.stop()); } catch {}
+    try { v.dc.close(); } catch {}
+    try { v.pc.close(); } catch {}
+    try { v.audio.srcObject = null; } catch {}
+  }
+  voiceHudHide();
+  if (currentView() === 'pm') renderSessionBar('pm');
+}
+
 // The #status chip is the PM launcher; keep its attention badge fresh and, while
 // the PM view is open, poll the thread list so titles/counts track live.
 async function pmRefreshBadge() {
