@@ -8,16 +8,28 @@
 > |---|---|---|
 > | 0 synthetic pipeline | **PASS** 40.8 dB settled | **PASS** 44.4 dB |
 > | 1 remote-track tap | **PASS — plain tap works** (0.356 RMS, no workaround needed) | **PASS only via element consumer** (plain tap all-zero) |
-> | 2 speaker echo through canceller | **PASS** 17.4 dB settled / 33.3 peak (2nd run, post-fix) | not runnable (box CoreAudio wedged) |
+> | 2 speaker echo through canceller | **PASS — 26.2 dB settled, steady** (22:05 matrix run, with delay tracker; all 3 variants over the 12 dB bar) | not runnable (box CoreAudio wedged) |
 >
-> The first iPhone test-2 run FAILED at 8.5 dB with ERLE sawtoothing
-> 1→26→1 dB — root cause was ours, not iOS's: an empty far-input quantum
-> (iOS Safari hiccups these constantly) advanced only the near ring and then
-> "resynced", shifting echo alignment every hiccup and forcing MDF
-> re-convergence. Fix: zero-pad far whenever near advances, sample-lockstep
-> forever (aec-worklet.js). Remaining: the README speaker loop test on the
-> live demo (Austin, in progress) — pipeline verified end-to-end against real
-> OpenAI from desktop (tools/e2eprobe.mjs, all green).
+> Getting test 2 to pass took three findings, in order:
+> **(1)** empty far-input quanta (iOS hiccups these constantly) must be
+> zero-padded in sample-lockstep with the near ring, never "resynced" —
+> the first cut shifted alignment on every hiccup (ERLE sawtooth, 8.5 dB
+> FAIL). **(2)** the doc's predicted hard part is real: the iPhone's echo
+> delay is large (~77ms) and can jump; speex MDF can't chase a moving
+> delay, so `aec/aec-align.js` cross-correlates 1kHz near/far envelopes and
+> re-aligns the far queue — but ONLY outside the filter's comfort zone
+> (>60ms or non-causal), because shifting small residuals re-shocks a
+> converged filter (measured 44→3 dB); big shifts also reset the filter.
+> With the tracker: steady 24–30 dB, no sawtooth, and AGC-on turned out
+> FINE (26.2 vs 19.7 dB agc-off — the earlier AGC suspicion was really
+> misalignment). **(3)** with the mic capturing, iOS routes WebAudio output
+> onto the quiet call-audio path — play the speaker signal through an
+> `<audio>` element (the demo's assistant voice already does).
+> `aec/test_worklet.mjs` runs the real worklet through converge → delay
+> jump → shift as the Node regression gate. Remaining: the README speaker
+> loop test on the live demo (Austin, in progress) — pipeline verified
+> end-to-end against real OpenAI from desktop (tools/e2eprobe.mjs, all
+> green).
 >
 > Repo:
 > **github.com/clawdbotatg/clawd-wasm-gpt-voice** (fork of gpt-voice; runs on
