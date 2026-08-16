@@ -359,7 +359,10 @@ user-facing overview; this file orients an agent working **on** the code.
   serves the clawd-md knowledge base from `CONTROLLER_LORE_DIR`). Voice needs
   HTTPS or 127.0.0.1 for the mic, so production is `h.atg.link`'s PM tab. Deep
   doc: the "Voice front-end" section of `docs/CONTROLLER.md`; recipe source:
-  github.com/clawdbotatg/gpt-voice `INTEGRATION.md`.
+  github.com/clawdbotatg/gpt-voice `INTEGRATION.md`. **Full-duplex on device
+  speakers needs OS-level echo cancellation a browser can't reach — the three
+  build-out experiments (native iOS shell, native macOS companion, WASM AEC)
+  are specced as agent handoff docs in [`docs/voice/`](docs/voice/).**
 - **Hooks → turn signal:** injected via `claude --settings <generated>` →
   each hook `curl`s stdin to `POST /hook` → broadcasts `hook` events
   (Stop / UserPromptSubmit / Pre+PostToolUse / SessionStart+End). Drives the

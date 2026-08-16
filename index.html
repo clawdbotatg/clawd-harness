@@ -7623,7 +7623,17 @@ function voiceHud(state) {
 //    however much audio is still buffered — the mic track is hard-disabled,
 //    plus a short tail for room reverb. The price is barge-in; the 🎧 HUD
 //    toggle buys it back when you're on headphones (persisted, default off).
-function voiceBarge() { try { return localStorage.getItem('cc_voice_barge') === '1'; } catch { return false; } }
+function voiceBarge() {
+  // An explicit 🎧 choice wins. Otherwise: desktop defaults to full-duplex
+  // (Chrome-on-a-laptop AEC is the same engine Meet trusts on speakers), touch
+  // defaults to speaker-safe half-duplex (phone browsers get no OS-level AEC —
+  // that's what the native builds in docs/voice/ are for).
+  try {
+    const v = localStorage.getItem('cc_voice_barge');
+    if (v === '1' || v === '0') return v === '1';
+  } catch {}
+  return !isTouch;
+}
 function voiceBargeToggle() {
   const on = !voiceBarge();
   try { localStorage.setItem('cc_voice_barge', on ? '1' : '0'); } catch {}
