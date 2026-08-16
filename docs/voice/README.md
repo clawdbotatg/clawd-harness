@@ -1,78 +1,67 @@
-# Voice PM — the full-duplex problem, and three builds to solve it
+# Voice demos — does GPT-style full-duplex talking work in each environment?
 
-## Context (read first, it's short)
+## What these are
 
-The harness has a working voice front-end to the fleet PM: the PM tab's **🎙
-talk** button opens an OpenAI `gpt-realtime` session over WebRTC (semantic VAD,
-tool calls against the `/pm` endpoints, `ask_pm` for real PM turns). Server
-half: `controller/voice.py`; client: the "Voice PM" block in `index.html`;
-design doc: the "Voice front-end" section of `docs/CONTROLLER.md`; the verified
-base recipe: [clawdbotatg/gpt-voice](https://github.com/clawdbotatg/gpt-voice)
-`INTEGRATION.md`.
+Three **standalone demos**. Not harness features, not products — each is the
+smallest possible "voice agent I can talk to" (OpenAI `gpt-realtime`: semantic
+VAD, barge-in, natural turn-taking) built in a different environment, to answer
+one question per environment: **does the smart turn-taking survive a real
+device speaker there?**
 
-**The problem:** on a device speaker, the model's own voice re-enters the mic.
-Semantic VAD reads it as the user talking → it interrupts itself → answers
-itself → feedback loop ("three voices, stacked chaos" — happened in prod
-2026-08-16, twice). Browser echo cancellation (`getUserMedia
-echoCancellation:true`) is best-effort: decent on desktop Chrome, weak-to-absent
-on phone browsers. Native apps (ChatGPT's) fix this with **OS-level acoustic
-echo cancellation (AEC)** that a web page cannot reach: `AVAudioSession
-.voiceChat` on iOS, the CoreAudio VoiceProcessingIO unit on macOS.
+The thing being tested is the turn-taking itself — it knows when to talk, when
+to wait through your pauses, and stops when you interrupt. That magic dies the
+moment the model hears its own voice out of the speaker (it interrupts itself
+and loops — reproduced in prod 2026-08-16). Browsers can't reach the OS-level
+echo cancellation native apps get, so: three environments, three echo
+strategies, may the best one win.
 
-**Current mitigation (shipped, works, but is a compromise):** half-duplex —
-the mic track is hard-disabled while assistant audio actually plays
-(`output_audio_buffer.started/stopped`), tap-the-HUD to interrupt, and a 🎧
-toggle for full-duplex (default ON on desktop, OFF on touch). See
-`tools/voiceprobe.mjs` for the exact contract.
+| # | Demo | Echo strategy | Doc |
+|---|------|---------------|-----|
+| 1 | iPhone app | iOS `AVAudioSession.voiceChat` (OS/hardware AEC) | [BUILD-IOS-APP.md](BUILD-IOS-APP.md) |
+| 2 | Mac app | CoreAudio VoiceProcessingIO (FaceTime's AEC) | [BUILD-DESKTOP-APP.md](BUILD-DESKTOP-APP.md) |
+| 3 | Chrome + WASM | our own canceller (speexdsp WASM in an AudioWorklet) | [BUILD-WASM-AEC.md](BUILD-WASM-AEC.md) |
 
-**Why this matters:** the natural turn-taking — knowing when to talk, when to
-wait, being interruptible mid-sentence — *is* the product. Wake words, STT, TTS
-are all commodity. Full-duplex on a speaker is the bar.
+Each demo is a separate repo, buildable by one agent with no knowledge of the
+others. Keep them TINY: a start/stop button, a state indicator, transcripts if
+cheap. No tools beyond maybe `flip_coin`, no auth, no persistence, no design
+pass. The demo exists to be talked to for ten minutes and judged.
 
-## The three builds
+## The canonical working reference
 
-Each is a self-contained experiment with its own handoff doc, sized for one
-agent to build and verify independently. They are ordered by expected
-payoff-per-effort.
+**github.com/clawdbotatg/gpt-voice** — a verified-working browser
+implementation (~150 lines Python server, ~250 HTML/JS): token minting, WebRTC
+session, semantic VAD, tool round-trip. Its `INTEGRATION.md` documents the
+exact API shapes and the traps (both-events-after-a-tool, transcription is
+opt-in, token is top-level `value`, realtime-only voice names). **Every demo
+should crib from it** — it is the known-good baseline these demos vary from.
 
-| # | Build | Doc | Bet |
-|---|-------|-----|-----|
-| 1 | Native iPhone shell (Capacitor + `AVAudioSession.voiceChat`) | [BUILD-IOS-APP.md](BUILD-IOS-APP.md) | OS AEC makes the existing web UI full-duplex on the phone speaker |
-| 2 | Native macOS voice companion (Swift + VoiceProcessingIO) | [BUILD-DESKTOP-APP.md](BUILD-DESKTOP-APP.md) | OS AEC on the Mac, always-on menu-bar PM |
-| 3 | WASM software AEC in the browser | [BUILD-WASM-AEC.md](BUILD-WASM-AEC.md) | No native app at all — cancel the echo in JS/WASM |
+## Shared rules
 
-**Do not build Electron for this** — Electron is Chromium, same AEC as the
-browser, zero gain. A PWA likewise changes nothing.
+- **The key**: `OPENAI_API_KEY` from the environment, minted into ephemeral
+  client secrets by a local token server (gpt-voice's `serve.py` already does
+  this — reuse it). Never bake the real key into an app binary or a web page.
+  For on-device iPhone testing, `serve.py` on the Mac + its `ensure_cert()`
+  self-signed-HTTPS-on-LAN trick is the proven path.
+- **Session config**: `gpt-realtime` (or `-mini` for cheap iteration), voice
+  `marin`, `semantic_vad` + `eagerness: auto`, input transcription on. Same
+  shape as gpt-voice's `serve.py`.
+- **Cost**: ~$0.06–0.11/min full model, ~1/3 that for mini. A demo session is
+  pennies; don't engineer around cost.
 
-## Shared acceptance test (all three builds)
+## The acceptance test (same for all three)
 
-The **speaker loop test**, on the target device, device speaker at a normal
-volume, no headphones:
+**The speaker loop test** — on the target device, built-in speaker, normal
+volume, NO headphones:
 
-1. Start a voice session, ask a question with a long answer ("tell me about
-   the fleet in detail").
-2. While it is talking: **stay silent.** PASS = it finishes and goes back to
-   listening. FAIL = it interrupts itself / new responses spawn from its own
-   voice.
-3. While it is talking: **interrupt it by voice** ("stop, different question").
-   PASS = it stops within ~a second and takes your turn.
-4. Ten-turn conversation. PASS = zero self-triggered responses.
+1. Ask a question with a long answer ("explain how sourdough works in detail").
+   Stay silent while it talks. **PASS = it finishes and returns to listening;
+   FAIL = it reacts to its own voice (interrupts itself, spawns responses).**
+2. Interrupt it mid-answer by voice ("stop — different question"). PASS = it
+   stops within ~a second and takes your turn.
+3. Talk with natural pauses — trail off with "umm…" mid-sentence. PASS = it
+   waits instead of jumping in.
+4. Hold a ten-turn conversation. PASS = zero self-triggered turns.
 
-A build that passes 1–4 on speaker has beaten the browser. Record results in
-the build doc's Status section.
-
-## Shared plumbing every build can reuse
-
-- **Token mint**: `POST /pm/api/voice/token` → `{value, exec, ...}` (ephemeral
-  OpenAI secret + tool→endpoint map). Reachable on the fleet origin
-  (`https://h.atg.link`, passkey-gated) or from a locally-run controller
-  (`python3 -m controller serve` → `http://127.0.0.1:8799/api/voice/token`).
-  The real `OPENAI_API_KEY` must stay server-side.
-- **Tools**: execute against `/pm/api/tool` (POST `{name, args}`), `ask_pm` →
-  `/pm/api/chat` (POST `{message}`, takes 1–3 min), lore → `/pm/api/voice/lore`.
-  After every tool result send BOTH `conversation.item.create`
-  (`function_call_output`) and `response.create` on the data channel, or the
-  model never speaks the answer.
-- **Session config** is minted server-side (`controller/voice.py`) — persona,
-  semantic VAD, transcription, tool defs. Native clients get all of it for free
-  by using the minted secret.
+Record PASS/FAIL per step in the build doc's Status block. A demo that passes
+all four on speaker has matched the ChatGPT-app experience in that environment
+— and tells us where the real voice product should live.

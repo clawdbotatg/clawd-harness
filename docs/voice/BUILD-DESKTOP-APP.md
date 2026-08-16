@@ -1,78 +1,64 @@
-# Build 2 — native macOS voice companion (Swift + VoiceProcessingIO)
+# Demo 2 — Mac voice agent (FaceTime's echo cancellation)
 
-> **Status: not started.** Owner: (assign an agent). Record the speaker loop
-> test result here when done.
+> **Status: not started.** Record the speaker loop test results (README.md)
+> here when done — including the Chrome baseline.
 
-## The bet
+## Goal
 
-macOS's CoreAudio **voice-processing I/O unit** (`kAudioUnitSubType_VoiceProcessingIO`,
-or `AVAudioEngine` with `setVoiceProcessingEnabled(true)` on the input node)
-gives the same OS-level echo cancellation FaceTime uses. A small native app
-that does the *audio loop* natively — mic in through VPIO, assistant audio out
-through the same engine — can be fully full-duplex on the Mac's open speakers.
+The smallest possible native Mac app you can talk to: OpenAI `gpt-realtime`
+(semantic VAD, barge-in), with macOS's OS-level echo cancellation — the
+CoreAudio voice-processing unit FaceTime uses. Ten minutes of natural
+conversation on the Mac's open speakers is the whole product.
 
-Read `docs/voice/README.md` first (problem statement + the acceptance test).
+Read `docs/voice/README.md` in clawd-harness first (context + the acceptance
+test), and crib API mechanics from **github.com/clawdbotatg/gpt-voice** (the
+verified-working reference; its `INTEGRATION.md` lists the traps).
 
-**Important honesty note:** desktop Chrome's own AEC is decent (the web UI now
-defaults 🎧 ON on desktop for exactly that reason). Before building, run the
-README speaker loop test in Chrome on the target Mac. If Chrome already
-passes, this build's value is not AEC — it's the always-on companion UX
-(menu-bar, global hotkey, wake word later). Decide scope accordingly and note
-the Chrome baseline result in Status.
+## Do this first: the Chrome baseline
 
-## Shape of the build
+Run the reference gpt-voice web demo in desktop Chrome on the same Mac,
+speakers on, and run the README speaker loop test. Desktop Chrome's AEC is the
+same engine Google Meet trusts, and it may already pass. Record that result in
+Status FIRST — the native build's value is measured against it. (Even if
+Chrome passes, finish the native demo: it's also the seed of an always-on
+menu-bar agent, and its AEC quality under louder volume / worse rooms is the
+interesting comparison.)
 
-- **New repo** (`clawdbotatg/clawd-voice-mac`). Swift, no Electron — Electron
-  is Chromium and gains nothing (see README).
-- **Menu-bar app** (LSUIElement), one window optional. v1 UI is: an icon, a
-  start/stop item, a state word (LIVE/LISTENING/SPEAKING). The fleet's visual
-  UI stays in the browser; this app is ears+mouth only.
-- **Audio path**: `AVAudioEngine`, input node with
-  `setVoiceProcessingEnabled(true)` (this turns on AEC/AGC/NS), output through
-  the same engine. Capture PCM16 mono 24kHz for OpenAI; render the incoming
-  audio deltas.
-- **Transport — use WebSocket, not WebRTC.** Native WebRTC on macOS means
-  vendoring the libwebrtc framework: heavy, slow to build, and unnecessary —
-  the OpenAI Realtime API speaks the same events over WSS with base64 PCM
-  audio (`input_audio_buffer.append`, `response.output_audio.delta`, ...).
-  With VPIO doing AEC locally, the WebRTC stack buys nothing. One caveat to
-  verify early: the `output_audio_buffer.*` events are WebRTC-only — over WS
-  you track playback state yourself (you're rendering the audio, so you know).
-- **Token + tools**: run the controller locally on the Mac —
-  `python3 -m controller serve` in a clawd-harness checkout (it drives the
-  local harness at `ws://127.0.0.1:8787` by default) — then:
-  - mint: `POST http://127.0.0.1:8799/api/voice/token` → `{value, exec}`
-  - connect WSS to OpenAI with `Authorization: Bearer <value>`
-  - tool calls: dispatch per the `exec` map — `verb` → POST
-    `http://127.0.0.1:8799/api/tool {name, args}`, `chat` → `/api/chat`
-    (blocks 1–3 min; keep the audio loop alive meanwhile), `lore` →
-    `/api/voice/lore?name=…`. Send BOTH `conversation.item.create`
-    (function_call_output) and `response.create` after each result.
-  No OpenAI key ever lives in the app.
+## Build shape
 
-## Semantic VAD over WS — verify, don't assume
+**New repo** (suggest `clawdbotatg/gpt-voice-mac`). Swift. **No Electron, no
+webview** — Electron is Chromium (same AEC as the browser, tells us nothing),
+and the point of this demo is the native audio path:
 
-The minted session config (built in `controller/voice.py`) carries
-`semantic_vad` + transcription. Over WebSocket you must stream mic audio
-continuously (`input_audio_buffer.append`) and let the server VAD commit turns.
-Verify interruption behavior: on `input_audio_buffer.speech_started` while
-playing, stop local playback and send `response.cancel` — that is barge-in,
-and with VPIO's AEC the speech_started should only ever be the human.
+- **Audio**: `AVAudioEngine`; `inputNode.setVoiceProcessingEnabled(true)`
+  (this is the whole trick — it enables AEC/noise suppression/AGC via
+  `kAudioUnitSubType_VoiceProcessingIO`), output through the same engine.
+  Capture PCM16 mono 24kHz for OpenAI; play the response deltas.
+- **Transport**: OpenAI Realtime over **WebSocket**, not WebRTC — same events,
+  base64 PCM (`input_audio_buffer.append` in, `response.output_audio.delta`
+  out). Vendoring libwebrtc buys nothing when the OS is doing the AEC.
+  Caveat: `output_audio_buffer.*` events are WebRTC-only; over WS you track
+  playback state yourself (you're the one rendering audio).
+- **Barge-in**: on `input_audio_buffer.speech_started` while audio is playing,
+  flush the local playback queue and send `response.cancel`. With the OS AEC
+  running, `speech_started` should only ever be the human — that assumption
+  IS the test.
+- **Session config**: mirror gpt-voice's `serve.py` (`gpt-realtime`, voice
+  `marin`, `semantic_vad` + `eagerness: auto`, transcription on).
+- **UI**: menu-bar item (LSUIElement) or one tiny window — start/stop and a
+  state word. Nothing else.
+
+## Key handling
+
+`OPENAI_API_KEY` from the environment (or mint ephemeral secrets via the
+gpt-voice `serve.py` running locally). Fine for a local demo binary; don't
+commit the key anywhere.
 
 ## Definition of done
 
-1. Menu-bar app runs on the Mac mini (clawd-heart), starts/stops a session.
-2. **The speaker loop test in `README.md` passes on open Mac speakers** —
-   including voice barge-in (step 3) — with the Chrome baseline recorded for
-   comparison.
-3. A tool round-trip works end-to-end by voice ("what needs me?" → sweep →
-   spoken answer).
-4. `ask_pm` works: hand it an order, keep chatting, hear the result when the
-   PM turn lands.
-
-## What NOT to do
-
-- No Electron, no embedded browser (see README — zero AEC gain).
-- Don't vendor libwebrtc unless the WS path measurably fails.
-- Don't reimplement the persona/tools client-side — the mint response is the
-  single source of truth; the app is a dumb, well-behaved audio terminal.
+1. Builds and runs on the Mac (Xcode or `swift build`; no signing ceremony
+   needed for a local app).
+2. **The README speaker loop test passes on open Mac speakers** — all four
+   steps, especially voice barge-in while it's mid-sentence.
+3. Status block updated: per-step PASS/FAIL, side-by-side with the Chrome
+   baseline from step one.
