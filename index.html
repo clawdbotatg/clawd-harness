@@ -6354,6 +6354,9 @@ box.addEventListener('paste', (e) => {
 }));
 sendBtn.onclick = sendMessage;
 box.addEventListener('keydown', (e) => {
+  // Touch: Enter inserts a newline (the ➤ button sends) — a soft keyboard has
+  // no Shift+Enter, so Enter-submits would make multi-line messages impossible.
+  if (isTouch) return;
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 });
 // Raw passthrough when the user types directly in the terminal (desktop always;
