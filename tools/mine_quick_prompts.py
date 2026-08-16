@@ -46,6 +46,8 @@ def mine_send_log(counts, chip_taps, max_len):
                 t = (rec.get("text") or "").strip()
                 if not t or len(t) > max_len or NOISE.match(t):
                     continue
+                if rec.get("via") == "auto":
+                    continue        # harness-fired (auto-tldr), not the human speaking
                 n += 1
                 if rec.get("via") == "quick":
                     chip_taps[norm(t)] += 1     # counted apart: taps ≠ organic typing

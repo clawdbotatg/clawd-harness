@@ -248,6 +248,33 @@ TEST_MODEL = os.environ.get("TEST_HINT_MODEL", "") or ""
 # the door for a turn that's still finishing. PIN_COMPACT=0 opts out.
 PIN_COMPACT      = os.environ.get("PIN_COMPACT", "1") != "0"
 PIN_COMPACT_WAIT = float(os.environ.get("PIN_COMPACT_WAIT", "900"))   # s to wait for idle
+# Auto-TLDR (2026-08-16): you prompt a session from a browser, walk away, and
+# come back to a wall of text — wishing someone had tapped the "tldr" chip
+# while you were gone. So the harness does: when a turn ends with a long reply
+# and NOBODY is subscribed to the session, it sends the chip's prompt itself.
+# Three fences keep it from running away: it's armed only by a BROWSER send
+# (the frame's `via` tag — controller/pipeline prompts never carry one, so
+# PM-orchestrated sessions are untouched and pipeline chaining can't be
+# corrupted by an injected turn); the arm is CONSUMED at the next Stop, so
+# one human prompt buys at most one auto-tldr and the tldr turn itself can
+# never re-trigger; and anyone actually watching (a live subscriber, checked
+# again after a short grace) suppresses it. AUTO_TLDR=0 opts the box out.
+AUTO_TLDR       = os.environ.get("AUTO_TLDR", "1") != "0"
+AUTO_TLDR_TEXT  = os.environ.get("AUTO_TLDR_TEXT", "tldr")
+AUTO_TLDR_MIN   = int(os.environ.get("AUTO_TLDR_MIN", "350"))   # shorter never fires
+AUTO_TLDR_LONG  = int(os.environ.get("AUTO_TLDR_LONG", "900"))  # one-paragraph wall
+AUTO_TLDR_DELAY = float(os.environ.get("AUTO_TLDR_DELAY", "3")) # grace before sending
+
+
+def wants_auto_tldr(text):
+    """Is this reply a 'wall of text'? More than one real paragraph (and long
+    enough that a summary buys anything), or a single monster paragraph. Pure
+    so test_auto_tldr.py can pin the thresholds."""
+    t = (text or "").strip()
+    if len(t) < AUTO_TLDR_MIN:
+        return False
+    paras = [p for p in re.split(r"\n\s*\n", t) if p.strip()]
+    return len(paras) >= 2 or len(t) >= AUTO_TLDR_LONG
 # Project *emoji codes*: every project gets a short 1–3 emoji badge (AI-picked
 # from its README / files / commits) shown on its card, the sessions rung, and
 # every session tab — so a glance at the tab strip tells you which project each
@@ -2031,6 +2058,7 @@ class ClaudeSession:
         self._started_evt = threading.Event()     # set on SessionStart — "the TUI is up"
         self.last_tool = None
         self.digest = ""                          # volatile "what it's doing now" (LLM, refreshed each Stop)
+        self.auto_tldr_armed = False              # volatile: browser send seen, no Stop yet (AUTO_TLDR)
         self.blocked_on = None                    # the open question if it ended asking the human (LLM)
         self.last_answer = ""                     # last Stop's assistant message — durable (backfilled on resume)
         self.settings_path = None
@@ -2337,6 +2365,14 @@ class ClaudeSession:
             if self.eng.routes_accounts:
                 threading.Thread(target=self.manager.maybe_handoff, args=(self,),
                                  daemon=True).start()
+            # The absent reader's chip tap: a browser-armed prompt just ended
+            # in a wall of text and nobody is subscribed — tap "tldr" for them.
+            # The arm is consumed HERE, hit or miss, so a stale arm can never
+            # fire on some later (possibly controller-driven) turn.
+            armed, self.auto_tldr_armed = self.auto_tldr_armed, False
+            if (AUTO_TLDR and armed and not self.ceremony and not self.pinned
+                    and not self.clients and wants_auto_tldr(data["last"])):
+                threading.Thread(target=self._auto_tldr, daemon=True).start()
         elif ev == "Notification":
             # Fires both for "needs your permission / input" (mid-turn, busy) and
             # for a 60s-idle nudge (turn already Stopped, not busy). Only the
@@ -2632,6 +2668,24 @@ class ClaudeSession:
               f"{SEND_WATCHDOG:.0f}s on {self.account} — suspecting a walled "
               f"plan; pty tail: {tail!r}", flush=True)
         self.manager.rescue_bounced_prompt(self, text, pre_hooks)
+
+    def _auto_tldr(self):
+        """Deliver the AUTO_TLDR chip tap (armed + gated in on_hook's Stop).
+        A short grace re-checks everything that can change at the Stop
+        boundary: a viewer arriving to read the wall themselves, a new prompt
+        (any hook moves hook_count), or the session going busy/away — all of
+        those win and the tap is dropped. Sent as a normal message on purpose:
+        it's a real prompt, so the bounce watchdog / limit rescues cover it
+        like anything a human sends."""
+        pre_hooks = self.hook_count
+        time.sleep(AUTO_TLDR_DELAY)
+        if (not self.alive or self.busy or self.waiting or self.clients
+                or self.hook_count != pre_hooks):
+            return
+        print(f"[session {self.cid[:8]}] auto-tldr: long reply, nobody "
+              f"watching — sending {AUTO_TLDR_TEXT!r}", flush=True)
+        log_prompt(self, AUTO_TLDR_TEXT, "auto")
+        self.send_message(AUTO_TLDR_TEXT)
 
     # -- read channel: raw PTY bytes -> subscribed clients ---------------------
     def _pump_pty(self):
@@ -6007,6 +6061,12 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"[ws {s.cid[:8]}] send: {txt[:60]!r}", flush=True)
                 s.bump_owner(client)
                 log_prompt(s, txt, frame.get("via", ""))
+                # A browser send always carries a `via` tag ('typed'/'quick');
+                # controller/pipeline sends never do — that asymmetry is the
+                # whole arming gate for AUTO_TLDR. Asking for a tldr yourself
+                # doesn't arm (its long reply would just tldr again).
+                s.auto_tldr_armed = (bool(frame.get("via"))
+                                     and txt.strip().lower() != AUTO_TLDR_TEXT)
                 s.send_message(txt)
             elif t == "resize":
                 s.claim_resize(client, frame.get("cols"), frame.get("rows"),

@@ -1650,8 +1650,11 @@ function flushOutbound() {
 // Send now if the link is live; if it's down, queue + kick a reconnect so the
 // text is delivered the moment we're back (and kept in the outbox for a reload).
 // `via` tags the send's origin (e.g. 'quick' for a quick-prompt chip) so the
-// server's prompt log can rank chips vs typed prompts.
+// server's prompt log can rank chips vs typed prompts. It defaults to 'typed'
+// so EVERY browser send carries the tag — the server arms its auto-tldr on
+// exactly that (controller sends have no via, so they never arm it).
 function deliverSend(cid, full, recover, via) {
+  via = via || 'typed';
   stashOutbox(cid, recover);
   if (!hsend({ type: 'send', text: full, via })) { outbound.push({ cid, full, via }); scheduleReconnect(0); return; }
   // hsend "succeeded" — but a socket killed during sleep still reads OPEN and

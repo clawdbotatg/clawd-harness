@@ -476,6 +476,19 @@ user-facing overview; this file orients an agent working **on** the code.
   last run 2026-06, next ≈2026-09.** The script reuses `server.NAME_SYS_PROMPT`
   and the `.clawd-harness.env` creds, so it never drifts from the app or hardcodes
   a key.
+- **Auto-TLDR** (2026-08-16): come back to a wall of text and wish someone had
+  tapped "tldr" while you were gone — so the harness does. On Stop, if the
+  reply is long (`wants_auto_tldr`: ≥2 real paragraphs or one huge one) and
+  **nobody is subscribed** to the session, it sends the chip's prompt itself.
+  Armed only by a **browser** send (`via` tag on the `send` frame — controller/
+  pipeline prompts carry none, so PM-driven sessions are never injected into),
+  consumed at the next Stop (one auto-tldr per human prompt; the tldr turn
+  can't re-trigger), skipped for ceremony/pinned sessions, and re-checked after
+  a short grace so a viewer arriving at the Stop boundary wins. Logged with
+  `via:"auto"` (excluded from chip mining). Knobs: `AUTO_TLDR=0` opts out,
+  `AUTO_TLDR_TEXT/MIN/LONG/DELAY`. Test: `python3 test_auto_tldr.py`. Known
+  limit: an idle-but-subscribed desktop tab left on the session suppresses it
+  (subscription is the "someone's looking" signal; phones drop theirs on lock).
 - **Quick-prompt chips:** the one-tap buttons on the session-name line above the
   composer (`QUICK_PROMPTS` array in index.html) — the things the user actually
   says most ("tldr", "okay what is next?", "yes, go", …), ordered most→least
