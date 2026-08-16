@@ -56,11 +56,15 @@ const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, ser
 // server→client events and read what the client sent back.
 await page.addInitScript(() => {
   window.__micStopped = 0;
+  window.__micConstraints = null;
+  window.__pcCount = 0;
   navigator.mediaDevices = navigator.mediaDevices || {};
-  navigator.mediaDevices.getUserMedia = async () =>
-    ({ getTracks: () => [{ stop: () => { window.__micStopped++; } }] });
+  navigator.mediaDevices.getUserMedia = async (c) => {
+    window.__micConstraints = c;
+    return { getTracks: () => [{ stop: () => { window.__micStopped++; } }] };
+  };
   window.RTCPeerConnection = class {
-    constructor() { this.ontrack = null; }
+    constructor() { this.ontrack = null; window.__pcCount++; }
     addTrack() {}
     createDataChannel(name) {
       const dc = {
@@ -81,6 +85,7 @@ await page.addInitScript(() => {
 // -- fake controller + fake OpenAI -------------------------------------------
 const json = (route, body) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
 const toolCalls = [];   // every POST /pm/api/tool body
+let tokenMints = 0;     // every POST /pm/api/voice/token
 
 await page.route('**/pm/**', async route => {
   const url = new URL(route.request().url());
@@ -91,11 +96,17 @@ await page.route('**/pm/**', async route => {
                                                harness: { base: '', token: '', port: 8787 } });
   if (p === '/api/threads') return json(route, { threads: [{ id: 't1', title: 'alpha', archived: false, count: 0, msgs: 0, current: true }], current: 't1', archived_count: 0 });
   if (p === '/api/thread/messages') return json(route, { messages: [] });
-  if (p === '/api/voice/token') return json(route, {
-    value: 'ek_test_secret', expires_at: 9999999999,
-    exec: { whats_waiting: { kind: 'verb', name: 'sweep' },
-            read_lore: { kind: 'lore' }, ask_pm: { kind: 'chat' } },
-    model: 'gpt-realtime', voice: 'marin' });
+  if (p === '/api/voice/token') {
+    // Slow mint on purpose: it opens the connecting window in which the 08-16
+    // chaos lived — extra taps during it must NOT mint extra sessions.
+    tokenMints++;
+    await new Promise(r => setTimeout(r, 400));
+    return json(route, {
+      value: 'ek_test_secret', expires_at: 9999999999,
+      exec: { whats_waiting: { kind: 'verb', name: 'sweep' },
+              read_lore: { kind: 'lore' }, ask_pm: { kind: 'chat' } },
+      model: 'gpt-realtime', voice: 'marin' });
+  }
   if (p === '/api/tool') { const b = post(); toolCalls.push(b); return json(route, { tool: b.name, args: b.args, result: { attention: [], note: 'all quiet' } }); }
   if (p === '/api/chat') return json(route, { reply: 'pm did the thing', trace: [] });
   if (p.startsWith('/api/voice/lore')) return json(route, { page: 'soul', text: 'crab lore' });
@@ -117,13 +128,24 @@ try {
   await page.goto(`http://127.0.0.1:${PORT}/?t=${token}#/pm`, { waitUntil: 'networkidle', timeout: 15000 });
   await page.waitForSelector('#pmfeed', { state: 'visible', timeout: 8000 });
 
-  // 1 — the button, and a click that goes live
+  // 1 — the button; a NERVOUS TRIPLE-TAP must still yield exactly one session.
+  // (2026-08-16 in prod: the mint takes seconds, extra taps each minted another
+  // full realtime session, and the sessions answered each other's speaker
+  // output — "three voices, stacked chaos". The claim is now synchronous.)
   const talk = page.locator('#sessionbar .pmctl', { hasText: '🎙' }).first();
   check('🎙 talk button in the PM bar', await talk.count() === 1);
   await talk.click();
+  await page.waitForTimeout(80);      // land the next taps INSIDE the connecting window
+  await talk.click();
+  await talk.click();
   await page.waitForFunction(() =>
     document.querySelector('#voicehud .vstate')?.textContent === 'LIVE', null, { timeout: 5000 });
-  check('click → HUD reaches LIVE', true);
+  check('triple-tap → HUD reaches LIVE', true);
+  await page.waitForTimeout(600);     // any ghost session would finish minting by now
+  check('…and exactly ONE token minted', tokenMints === 1, `mints=${tokenMints}`);
+  check('…and exactly ONE peer connection', await page.evaluate(() => window.__pcCount) === 1);
+  check('mic asked for echo cancellation',
+        await page.evaluate(() => window.__micConstraints?.audio?.echoCancellation === true));
   check('SDP answer applied', await page.evaluate(() => window.__answerSdp === 'v=0 fake-answer'));
   check('button flips to live', await page.locator('#sessionbar .pmctl.vlive').count() === 1);
 

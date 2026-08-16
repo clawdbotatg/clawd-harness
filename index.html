@@ -7460,9 +7460,10 @@ function renderPmBar(bar, wasHidden) {
   // 🎙 the voice PM — one tap, talk, it answers out loud (see pmVoiceStart below)
   const vb = document.createElement('button');
   vb.className = 'pmctl' + (pmVoiceLive() ? ' vlive' : '');
-  vb.textContent = pmVoiceLive() ? '🎙 live' : '🎙 talk';
-  vb.title = pmVoiceLive() ? 'Voice session live — tap to hang up'
-                           : 'Talk to the PM (realtime voice)';
+  vb.textContent = !pmvc ? '🎙 talk' : (pmvc.connecting ? '🎙 …' : '🎙 live');
+  vb.title = !pmvc ? 'Talk to the PM (realtime voice)'
+                   : (pmvc.connecting ? 'Connecting… (✕ on the pill cancels)'
+                                      : 'Voice session live — tap to hang up');
   vb.onclick = pmVoiceToggle;
   bar.appendChild(vb);
   ctl('🛠', 'PM debug (prompt, tools, raw data)', () => window.open(PM_BASE + '/debug', '_blank'));
@@ -7581,7 +7582,14 @@ async function pmSend(text) {
 //    to the real PM brain via ask_pm. The session survives leaving the PM view
 //    (the fixed HUD is the handle), so you can talk while driving the fleet.
 function pmVoiceLive() { return !!pmvc; }   // pmvc declared with the PM state up top
-function pmVoiceToggle() { pmVoiceLive() ? pmVoiceStop() : pmVoiceStart(); }
+function pmVoiceToggle() {
+  // Taps while a connect is in flight are noise, not intent — ignore them (the
+  // HUD ✕ cancels). Treating them as toggles would tear down the connect a
+  // nervous double-tap just started; treating them as starts caused the 08-16
+  // chaos (see pmVoiceStart).
+  if (pmvc && pmvc.connecting) return;
+  pmVoiceLive() ? pmVoiceStop() : pmVoiceStart();
+}
 function voiceHud(state) {
   let el = document.getElementById('voicehud');
   if (!el) {
@@ -7628,8 +7636,10 @@ async function voiceHandleTool(ev) {
     d.lastChild.appendChild(document.createTextNode(' ' + summarizeInput(args)));
     pmfeed.scrollTop = pmfeed.scrollHeight;
   }
+  const v = pmvc;   // pin OUR session: a slow tool must never send its result
+                    // into a session started after we were hung up on
   const out = await voiceToolExec(ev.name, args);
-  if (!pmvc || pmvc.dc.readyState !== 'open') return;   // hung up mid-tool
+  if (!v || pmvc !== v || !v.dc || v.dc.readyState !== 'open') return;   // hung up mid-tool
   let s = typeof out === 'string' ? out : JSON.stringify(out);
   if (s.length > 20000) s = s.slice(0, 20000) + ' …(truncated)';
   // BOTH events, in order — without response.create the model knows the answer
@@ -7652,39 +7662,61 @@ function voiceEvent(ev) {
     case 'error': console.warn('[voice]', ev.error); break;
   }
 }
+let pmVoiceGen = 0;   // bumps on every start AND stop — continuations from a cancelled connect bail out
 async function pmVoiceStart() {
   if (pmvc) return;
+  // Claim the session SYNCHRONOUSLY, before the first await. The 08-16 chaos:
+  // connect takes seconds, the old code only set pmvc at the END of it, and the
+  // button gave no feedback — so every extra tap sailed past the `if (pmvc)`
+  // guard and minted ANOTHER full realtime session. N sessions all hear the
+  // same mic, and each one's speaker output is user speech to the others: they
+  // answer each other in a feedback pile-up ("three voices, stacked chaos").
+  // One session, ever; `dead()` makes a cancel mid-connect actually cancel.
+  const gen = ++pmVoiceGen;
+  const dead = () => pmVoiceGen !== gen;
+  pmvc = { connecting: true };
   voiceHud('connecting');
+  if (currentView() === 'pm') renderSessionBar('pm');   // button shows 🎙 … immediately
   try {
     const tr = await fetch(PM_BASE + '/api/voice/token', pmPost({}));
     const tok = await tr.json();
+    if (dead()) return;
     if (!tr.ok || !tok.value) throw new Error(tok.error || 'no voice token');
-    // mic prompt after the mint (fail cheap first); needs HTTPS or 127.0.0.1
-    const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const pc = new RTCPeerConnection();
-    const audio = new Audio(); audio.autoplay = true;   // allowed: we're inside a click
+    // mic prompt after the mint (fail cheap first); needs HTTPS or 127.0.0.1.
+    // Echo cancellation is spelled out, not assumed: the model must never hear
+    // its own voice off the speakers (the other half of the 08-16 chaos).
+    const mic = await navigator.mediaDevices.getUserMedia({ audio: {
+      echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    if (dead()) { try { mic.getTracks().forEach(t => t.stop()); } catch {} return; }
+    pmvc.mic = mic; pmvc.exec = tok.exec || {};
+    const pc = pmvc.pc = new RTCPeerConnection();
+    const audio = pmvc.audio = new Audio(); audio.autoplay = true;   // allowed: we're inside a click
     pc.ontrack = e => { audio.srcObject = e.streams[0]; };
     pc.addTrack(mic.getTracks()[0], mic);
-    const dc = pc.createDataChannel('oai-events');
-    pmvc = { pc, dc, mic, audio, exec: tok.exec || {} };
-    dc.onmessage = e => { let ev; try { ev = JSON.parse(e.data); } catch { return; } voiceEvent(ev); };
-    dc.onclose = () => { if (pmvc && pmvc.dc === dc) pmVoiceStop(); };
+    const dc = pmvc.dc = pc.createDataChannel('oai-events');
+    dc.onmessage = e => { if (dead()) return; let ev; try { ev = JSON.parse(e.data); } catch { return; } voiceEvent(ev); };
+    dc.onclose = () => { if (!dead()) pmVoiceStop(); };
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     const resp = await fetch('https://api.openai.com/v1/realtime/calls', {
       method: 'POST', body: offer.sdp,
       headers: { Authorization: 'Bearer ' + tok.value, 'Content-Type': 'application/sdp' } });
+    if (dead()) return;   // cancelled mid-handshake — stop() already closed pc/mic
     if (!resp.ok) throw new Error('realtime connect failed: ' + resp.status);
     await pc.setRemoteDescription({ type: 'answer', sdp: await resp.text() });
+    if (dead()) return;
+    pmvc.connecting = false;
     voiceHud('live');
     if (currentView() === 'pm') renderSessionBar('pm');   // light the 🎙 button
   } catch (e) {
+    if (dead()) return;
     pmVoiceStop();
     voiceHud('✕ ' + (e && e.message || e));   // brief on-screen why, then gone
     setTimeout(() => { if (!pmvc) voiceHudHide(); }, 5000);
   }
 }
 function pmVoiceStop() {
+  pmVoiceGen++;                  // any in-flight connect for the old session bails at its next dead() check
   const v = pmvc; pmvc = null;   // null first: dc.onclose re-enters harmlessly
   if (v) {
     try { v.mic.getTracks().forEach(t => t.stop()); } catch {}

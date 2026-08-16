@@ -163,8 +163,13 @@ user-facing overview; this file orients an agent working **on** the code.
   un-mirrored text, and Enter-on-one-hit opening the pin and clearing the
   filter. It lands on `#/pins` and filters **fake** pins injected into
   `sessionList` (the splashprobe pattern), so it touches no real session.
-- **`tools/voiceprobe.mjs`** — guards the **🎙 voice PM** (2026-08-16): the PM
-  bar's talk button goes LIVE, a tool-call event executes against the right
+- **`tools/voiceprobe.mjs`** — guards the **🎙 voice PM** (2026-08-16): a
+  **nervous triple-tap during the seconds-long connect mints exactly ONE
+  session** (the day-one prod chaos: each extra tap minted another full
+  realtime session and the sessions answered each other's speaker output —
+  the claim is now synchronous, taps mid-connect are ignored, and the mic
+  demands echo cancellation), the button goes LIVE, a tool-call event
+  executes against the right
   `/pm` endpoint and sends **both** data-channel events back (drop
   `response.create` and the model knows the answer but never speaks it),
   transcripts land as feed bubbles, the session survives leaving the PM view,
