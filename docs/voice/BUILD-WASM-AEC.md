@@ -1,7 +1,25 @@
 # Demo 3 — browser voice agent with WASM echo cancellation
 
-> **Status (2026-08-16): built + desktop-verified; iPhone spike handed to
-> Austin's phone, results pending.** Repo:
+> **Status (2026-08-16): SPIKE PASSED on iPhone — both kill-criterion
+> questions answered YES.** Per-device results (spike-results.jsonl in the
+> repo has the raw records):
+>
+> | test | iPhone (iOS 18.7 Safari) | desktop Chrome 147 |
+> |---|---|---|
+> | 0 synthetic pipeline | **PASS** 40.8 dB settled | **PASS** 44.4 dB |
+> | 1 remote-track tap | **PASS — plain tap works** (0.356 RMS, no workaround needed) | **PASS only via element consumer** (plain tap all-zero) |
+> | 2 speaker echo through canceller | **PASS** 17.4 dB settled / 33.3 peak (2nd run, post-fix) | not runnable (box CoreAudio wedged) |
+>
+> The first iPhone test-2 run FAILED at 8.5 dB with ERLE sawtoothing
+> 1→26→1 dB — root cause was ours, not iOS's: an empty far-input quantum
+> (iOS Safari hiccups these constantly) advanced only the near ring and then
+> "resynced", shifting echo alignment every hiccup and forcing MDF
+> re-convergence. Fix: zero-pad far whenever near advances, sample-lockstep
+> forever (aec-worklet.js). Remaining: the README speaker loop test on the
+> live demo (Austin, in progress) — pipeline verified end-to-end against real
+> OpenAI from desktop (tools/e2eprobe.mjs, all green).
+>
+> Repo:
 > **github.com/clawdbotatg/clawd-wasm-gpt-voice** (fork of gpt-voice; runs on
 > ports 8127/8447 on the Mac — 8123 was already taken by the original
 > gpt-voice). `spike.html` is the spike; results auto-POST to `/report` →
