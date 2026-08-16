@@ -1,8 +1,44 @@
 # Demo 3 — browser voice agent with WASM echo cancellation
 
-> **Status: not started.** Record the spike + speaker loop test results
-> (README.md) here when done. Highest-risk demo of the three — it has an
-> explicit kill criterion; a well-documented failure is a successful outcome.
+> **Status (2026-08-16): built + desktop-verified; iPhone spike handed to
+> Austin's phone, results pending.** Repo:
+> **github.com/clawdbotatg/clawd-wasm-gpt-voice** (fork of gpt-voice; runs on
+> ports 8127/8447 on the Mac — 8123 was already taken by the original
+> gpt-voice). `spike.html` is the spike; results auto-POST to `/report` →
+> `spike-results.jsonl`.
+>
+> - **Canceller (numeric): PASS.** speexdsp mdf+preprocess → standalone wasm
+>   (67KB, emscripten, no JS glue, 4 WASI stubs). `node aec/test_aec.mjs`:
+>   ~68dB ERLE settled on a simulated 12ms/-6dB echo at 48kHz, 200ms tail.
+>   Trap found: a pure stacked-sine far end makes MDF converge then mistrack
+>   (40dB → 10dB) — test with speech-shaped noise, which is also what real
+>   speech does.
+> - **Spike test 0 (synthetic pipeline, added): PASS on desktop Chrome** —
+>   real worklet + wasm vs a simulated 50ms/-6dB echo inside the graph, ~44dB
+>   settled. No mic/speaker needed; run it first on every device.
+> - **Spike test 1 (remote-track tap): PASS on desktop Chrome, with a
+>   mandatory workaround** — the plain `MediaStreamAudioSourceNode` tap of a
+>   remote WebRTC track reads all-zero **even on desktop Chrome**; attaching
+>   the stream to an `<audio>` element (muted is fine) makes the tap live
+>   (peakRMS 0.36). The demo therefore keeps the remote stream on its audio
+>   element (it's also the speaker output). iPhone: pending.
+> - **Spike test 2 (speaker loop through the canceller): not runnable on the
+>   build Mac** — its CoreAudio is wedged system-wide (`AudioQueueStart
+>   -66681` from afplay/say/Chrome; needs a sudo coreaudiod kick nobody has
+>   the password for right now). iPhone: pending — that's the device that
+>   matters.
+> - **Demo integration: done** (`index.html` 🔇 toggle, default on): raw mic →
+>   worklet → cleaned track to the peer connection, remote tapped as
+>   reference, live ERLE readout, auto-fallback to browser AEC.
+>   `tools/demoprobe.mjs` (stubbed token/SDP/WebRTC/mic) all green;
+>   `tools/spikeprobe.mjs --no-audio-out` drives the spike page on machines
+>   with broken audio out.
+> - **README speaker loop test (the acceptance bar): pending the iPhone run.**
+>   Austin was pinged on Telegram with https://192.168.68.61:8447/spike.html
+>   (LAN HTTPS, self-signed) + the demo URL.
+>
+> Highest-risk demo of the three — it has an explicit kill criterion; a
+> well-documented failure is a successful outcome.
 
 ## Goal
 
