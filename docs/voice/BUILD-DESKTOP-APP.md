@@ -1,7 +1,23 @@
 # Demo 2 — Mac voice agent (FaceTime's echo cancellation)
 
-> **Status: not started.** Record the speaker loop test results (README.md)
-> here when done — including the Chrome baseline.
+> **Status (2026-08-16): built + protocol-verified; speaker loop test BLOCKED
+> on a human unlocking the Mac.** The app exists —
+> **github.com/clawdbotatg/clawd-mac-gpt-voice** (Swift, AVAudioEngine + VPIO
+> via `setVoiceProcessingEnabled(true)` on both IO nodes, gpt-realtime over
+> WebSocket, semantic VAD, barge-in). Verified live against the real API in
+> its TCC-free fake-mic mode: correct HEARD/SAID transcripts, turn-taking,
+> and the barge-in flush+cancel path.
+>
+> Neither the Chrome baseline nor the native speaker loop test could run yet:
+> the Mac's screen has been locked since 2026-08-15 ~21:00, which (a) keeps
+> the macOS mic-consent dialogs from rendering — Chrome's getUserMedia and the
+> app's `AVCaptureDevice.requestAccess` both hang forever — and (b) starves
+> every *new* CoreAudio output client of IO cycles (`say`, `afplay`,
+> AVAudioEngine: 0 render callbacks machine-wide). To finish: unlock the Mac,
+> click **Allow** on all queued microphone dialogs, then re-run both tests
+> (drivers ready: `baseline.mjs` / `nativetest.mjs`, which use `say` through
+> the speakers as the human voice) and replace this block with the two
+> side-by-side 4-step PASS/FAIL tables.
 
 ## Goal
 
