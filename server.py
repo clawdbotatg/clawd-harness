@@ -260,7 +260,9 @@ PIN_COMPACT_WAIT = float(os.environ.get("PIN_COMPACT_WAIT", "900"))   # s to wai
 # never re-trigger; and anyone actually watching (a live subscriber, checked
 # again after a short grace) suppresses it. AUTO_TLDR=0 opts the box out.
 AUTO_TLDR       = os.environ.get("AUTO_TLDR", "1") != "0"
-AUTO_TLDR_TEXT  = os.environ.get("AUTO_TLDR_TEXT", "tldr")
+AUTO_TLDR_TEXT  = os.environ.get("AUTO_TLDR_TEXT",
+                                 "TLDR, use simple plain english and as few "
+                                 "words as possible. NO SLOP.")
 AUTO_TLDR_MIN   = int(os.environ.get("AUTO_TLDR_MIN", "350"))   # shorter never fires
 AUTO_TLDR_LONG  = int(os.environ.get("AUTO_TLDR_LONG", "900"))  # one-paragraph wall
 AUTO_TLDR_DELAY = float(os.environ.get("AUTO_TLDR_DELAY", "3")) # grace before sending
@@ -6064,9 +6066,10 @@ class Handler(BaseHTTPRequestHandler):
                 # A browser send always carries a `via` tag ('typed'/'quick');
                 # controller/pipeline sends never do — that asymmetry is the
                 # whole arming gate for AUTO_TLDR. Asking for a tldr yourself
-                # doesn't arm (its long reply would just tldr again).
+                # (the chip, or anything tldr-shaped) doesn't arm — summarizing
+                # a summary is the one loop this could build.
                 s.auto_tldr_armed = (bool(frame.get("via"))
-                                     and txt.strip().lower() != AUTO_TLDR_TEXT)
+                                     and not txt.strip().lower().startswith("tldr"))
                 s.send_message(txt)
             elif t == "resize":
                 s.claim_resize(client, frame.get("cols"), frame.get("rows"),

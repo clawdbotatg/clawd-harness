@@ -45,7 +45,10 @@ check("many single-\\n lines are ONE paragraph (a list isn't a wall)",
 
 print("knobs:")
 check("feature defaults ON (the user asked to try it)", server.AUTO_TLDR)
-check("the tap is the chip's text", server.AUTO_TLDR_TEXT == "tldr")
+check("the tap is tldr-shaped (the arming guard keys on this prefix)",
+      server.AUTO_TLDR_TEXT.lower().startswith("tldr"))
+check("the tap demands the no-slop style",
+      "NO SLOP" in server.AUTO_TLDR_TEXT)
 check("MIN below LONG (the two-paragraph path must be reachable)",
       server.AUTO_TLDR_MIN < server.AUTO_TLDR_LONG)
 
