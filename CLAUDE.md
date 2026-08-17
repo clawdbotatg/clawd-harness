@@ -274,6 +274,18 @@ user-facing overview; this file orients an agent working **on** the code.
   [`docs/fleet/ACCOUNTS-PANEL.md`](docs/fleet/ACCOUNTS-PANEL.md) (key trap: one
   email can hold seats in several orgs — the ORG is the usage pool); probe:
   `python3 tools/usage_probe.py [config_dir]`.
+- **Shared kit (`share/`)** (2026-08-16): repo-shipped skills + CLIs that every
+  session on every machine must have — today the **todo skill + CLI** for
+  Austin's shared list (`todo.atg.link`). `_sync_shared_kit()` runs at boot:
+  `share/skills/*` → `~/.claude/skills/` (the `SHARE_PATHS` symlink fans it
+  into every account dir; accounts with a *real* skills dir get a direct copy)
+  and `share/bin/*` → `~/bin` (0755). Push-to-main distributes it fleet-wide
+  because a `server.py` change restarts every box. The repo copy is canonical
+  (local edits are overwritten — edit `share/`, not `~/.claude/skills/`). The
+  **token never rides git**: it lives in `~/.clawd-todo.env`, placed once per
+  machine (ADD-MACHINE.md Step 1c); a kit-but-no-token box warns in the boot
+  log. Test: `python3 test_shared_kit.py` (includes a share/-is-credential-free
+  tripwire — this repo is public).
 - **Self-project:** the harness always injects *itself* as a **pinned** project
   (`SELF_PID="self"`, `path=HERE`, top of the list, never persisted —
   re-injected each boot) so you can open a session and **live-edit the running

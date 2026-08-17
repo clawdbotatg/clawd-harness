@@ -1296,6 +1296,77 @@ def _link_shared_paths(config_dir):
             pass
 
 
+# ── shared kit (share/) ──────────────────────────────────────────────────────
+# Machine-level agent kit shipped IN the repo: skills + CLIs every session on
+# every machine should have (today: the `todo` skill + CLI for Austin's shared
+# list at todo.atg.link). Push-to-main is the fleet's only automatic
+# distribution channel, so the harness installs these at boot:
+# share/skills/* → ~/.claude/skills/ (which the SHARE_PATHS symlink already
+# fans into every account dir) and share/bin/* → ~/bin (0755). The repo copy
+# is canonical — same contract as the rest of the deploy — so local edits are
+# overwritten; change the repo copy instead. Secrets never ride this path: the
+# todo token lives in ~/.clawd-todo.env, placed once per machine by hand (see
+# docs/fleet/ADD-MACHINE.md); a box that has the kit but not the token gets a
+# warning line in the log instead of a broken-silent skill.
+SHARE_DIR = HERE / "share"
+
+
+def _sync_shared_kit(home=None, accounts_dir=None):
+    """Install share/ onto this machine. Idempotent; returns changed paths.
+    `home`/`accounts_dir` exist for tests only."""
+    home = Path(home) if home is not None else Path.home()
+    accounts_dir = Path(accounts_dir) if accounts_dir is not None else ACCOUNTS_DIR
+    changed = []
+
+    def _put(src, dst, mode=None):
+        try:
+            data = src.read_bytes()
+            if dst.exists() and not dst.is_symlink() and dst.read_bytes() == data:
+                if mode is not None:
+                    dst.chmod(mode)
+                return
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dst.parent / (dst.name + ".tmp")
+            tmp.write_bytes(data)
+            tmp.chmod(mode if mode is not None else 0o644)
+            tmp.replace(dst)
+            changed.append(str(dst))
+        except OSError as e:
+            print(f"[kit] {dst}: {e}", flush=True)
+
+    skills_src = SHARE_DIR / "skills"
+    if skills_src.is_dir():
+        # ~/.claude/skills covers every symlinked account; an account whose
+        # skills/ is a REAL dir opted out of the symlink, so copy in directly.
+        roots = [home / ".claude" / "skills"]
+        try:
+            for acc in sorted(accounts_dir.iterdir()):
+                sk = acc / "skills"
+                if sk.is_dir() and not sk.is_symlink():
+                    roots.append(sk)
+        except OSError:
+            pass
+        for f in sorted(skills_src.rglob("*")):
+            if f.is_file():
+                for root in roots:
+                    _put(f, root / f.relative_to(skills_src))
+
+    bin_src = SHARE_DIR / "bin"
+    if bin_src.is_dir():
+        for f in sorted(bin_src.iterdir()):
+            if f.is_file():
+                _put(f, home / "bin" / f.name, mode=0o755)
+
+    if changed:
+        print(f"[kit] installed/updated: {', '.join(changed)}", flush=True)
+    if (skills_src / "todo").is_dir() and not (home / ".clawd-todo.env").exists():
+        print("[kit] ⚠ todo skill is installed but ~/.clawd-todo.env is missing "
+              "— sessions can't reach todo.atg.link until the token file is "
+              "placed (TODO_URL + TODO_TOKEN; see share/skills/todo/SKILL.md)",
+              flush=True)
+    return changed
+
+
 def _share_projects(config_dir):
     """Point <account>/projects at the shared ~/.claude/projects store so
     EVERY account sees EVERY session transcript: --resume works under any
@@ -6187,6 +6258,7 @@ def raise_fd_limit(target=10240):
 
 def main():
     raise_fd_limit()
+    _sync_shared_kit()
     MGR.load()
     threading.Thread(target=watch_ui, daemon=True).start()
     threading.Thread(target=MGR.poll_accounts_loop, daemon=True).start()

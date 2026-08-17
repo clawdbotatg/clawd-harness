@@ -119,6 +119,28 @@ keys — no manual restart needed. Verify naming is live:
 cd ~/clawd/clawd-harness && python3 -c "import server; print('naming on:', bool(server.BANKR_API_KEY and server.BANKR_BASE_URL))"
 ```
 
+### Step 1c — place the todo token (`~/.clawd-todo.env`)
+
+The harness ships a machine-level agent kit from the repo's `share/` dir at
+every boot: the **todo skill** (Austin's shared list at `todo.atg.link`) into
+`~/.claude/skills/` (fanned into every account dir by the shared-paths
+symlink) and the **`todo` CLI** into `~/bin/`. Those arrive with the clone —
+but the **token does not** (the repo is public). Until you place it, every
+session on this machine knows *about* the list but can't reach it, and the
+boot log warns: `[kit] ⚠ todo skill is installed but ~/.clawd-todo.env is
+missing`.
+
+Copy it from any existing machine (same two lines everywhere):
+
+```bash
+scp <any-working-machine>:~/.clawd-todo.env ~/
+chmod 600 ~/.clawd-todo.env
+~/bin/todo        # should print Austin's open items
+```
+
+The file is just `TODO_URL=https://todo.atg.link` + `TODO_TOKEN=<token>`; the
+token is also in the laptop's credential store under "clawd-todo".
+
 ## Step 2 — install the worker's one dependency: `cryptography`
 
 The harness and relay are pure stdlib, but the **worker needs
