@@ -1,8 +1,20 @@
 # Demo 3 — browser voice agent with WASM echo cancellation
 
-> **Status (2026-08-16): SPIKE PASSED on iPhone — both kill-criterion
-> questions answered YES.** Per-device results (spike-results.jsonl in the
-> repo has the raw records):
+> **FINAL VERDICT (2026-08-17): FAILED the acceptance test.** The spike
+> passed — every component works — but the README speaker-loop test failed
+> live: sessions self-interrupted at 15–26 dB of measured cancellation
+> (OpenAI's VAD hears the residual), and the echo-gate mitigation that
+> stopped the self-interruption made the conversation feel gated and
+> unnatural, "nothing like the GPT chat experience" (Austin, live on
+> iPhone). **The documented conclusion: speex-grade linear AEC in a browser
+> cannot reach speaker-grade suppression on iOS, and nonlinear gating
+> sacrifices the naturalness that is the entire point. Full-duplex speaker
+> voice needs OS-level AEC — build demo 1 (iOS shell) / demo 2 (Mac
+> app).** What follows is the build history and per-step data; the repo
+> (clawdbotatg/clawd-wasm-gpt-voice) remains a working flagged experiment —
+> fine with headphones, fine on desktop, not natural on a phone speaker.
+>
+> Spike results (these all PASSED — the gap was spike→live):
 >
 > | test | iPhone (iOS 18.7 Safari) | desktop Chrome 147 |
 > |---|---|---|
