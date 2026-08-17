@@ -1,6 +1,13 @@
 # Demo 1 — iPhone voice agent (OS echo cancellation)
 
-> **Status: built, not yet on a phone (2026-08-16).** Repo:
+> **Status: on Austin's iPhone 17 Pro (2026-08-16). Shape A FAILED the echo
+> test** — built-in speaker, it hears its own output and loops (loop test
+> step 1 FAIL; steps 2–4 not run — pointless once it self-triggers). Shape B
+> (native) test pending. Build notes: compiled clean first try; signed with
+> the existing dev cert under the `com.example.reactapp` bundle id (no Xcode
+> account on the build Mac, so no new profile could be minted); the baked-in
+> default server URL was the old Mac's IP — fixed to require typing your own.
+> Repo:
 > **[clawdbotatg/clawd-iphone-gpt-chat](https://github.com/clawdbotatg/clawd-iphone-gpt-chat)**
 > — BOTH shapes ship in one app behind a segmented control (A · WKWebView wrap
 > primary, B · native AVAudioEngine+WebSocket fallback), so one dev-build
