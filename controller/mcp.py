@@ -52,7 +52,9 @@ TOOLS = [
         _S({"machine": _STR, "cid": _STR}, ["machine", "cid"])),
     ("sweep", "One-call check-in bundle: the ranked attention queue enriched "
         "with transcript-tail evidence, deep links, and a suggested clearing "
-        "verb per item, plus rollups (idle sessions with no task, stale "
+        "verb per item, plus rollups (`working`: sessions actively mid-turn "
+        "right now — name these when asked 'how's everything', they are "
+        "neither attention nor idle; idle sessions with no task; stale "
         "in-progress tasks). Use when the operator says 'check in on "
         "everything' / 'what needs me'. Items on a non-claude session carry "
         "`engine` — worth knowing, because a codex session's badge can go silent "

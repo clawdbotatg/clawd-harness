@@ -161,6 +161,24 @@ def main():
               what="c1 to clear from attention")
     check("attention queue surfaces a block; answer_prompt clears it", t_attention_and_answer)
 
+    def t_sweep_sees_working():
+        # A mid-turn session is neither attention nor idle — without the
+        # `working` rollup a sweep-driven "how's everything?" answer reads a
+        # busy fleet as a quiet one (the 2026-08-17 PM-blindness report).
+        mock.state.set_session("c1", busy=True, status="working", digest="crunching")
+        mock.state.broadcast(mock.state.sessions_frame())
+        _wait(lambda: any(w["cid"] == "c1" and w["status"] == "working"
+                          for w in verbs.sweep()["working"]),
+              what="c1 to appear in sweep's working rollup")
+        w = next(w for w in verbs.sweep()["working"] if w["cid"] == "c1")
+        assert w["machine"] == "self" and w["digest"] == "crunching", w
+        assert all(i["cid"] != "c1" for i in verbs.sweep()["idle_no_task"])
+        mock.state.set_session("c1", busy=False, status="idle")
+        mock.state.broadcast(mock.state.sessions_frame())
+        _wait(lambda: all(w["cid"] != "c1" for w in verbs.sweep()["working"]),
+              what="c1 to leave the working rollup")
+    check("sweep's working rollup tracks a mid-turn session", t_sweep_sees_working)
+
     def t_rate_limit():
         g = Guard(autonomy="auto", rate_per_min=3)
         v = Verbs(world, ledger, clients, g)

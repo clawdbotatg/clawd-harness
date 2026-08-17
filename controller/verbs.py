@@ -228,9 +228,10 @@ class Verbs:
     def sweep(self, max_items=20):
         """The one-call check-in bundle: the attention queue enriched with
         evidence (a short transcript tail for high items), deep links, and a
-        suggested clearing verb — plus rollups (idle sessions with no task,
-        in-progress tasks whose sessions are gone). Read-only: acting on it
-        stays with the persona + the autonomy gate."""
+        suggested clearing verb — plus rollups (sessions actively working
+        right now, idle sessions with no task, in-progress tasks whose
+        sessions are gone). Read-only: acting on it stays with the persona +
+        the autonomy gate."""
         max_items = max(1, min(int(max_items or 20), 30))
         items = self.world.attention(limit=max_items)
         enriched = 0
@@ -245,12 +246,23 @@ class Verbs:
                 r = c.transcript_tail(it["cid"], n=3, chars=200) if c else None
                 if isinstance(r, dict) and not r.get("error"):
                     it["tail"] = r.get("events", [])
-        idle_no_task, stale_tasks = [], []
+        idle_no_task, stale_tasks, working = [], [], []
         live_cids = set()
         for mid, c in self.clients.items():
             for s in c.state()["sessions"]:
                 live_cids.add(s["cid"])
-                if (self.world._status(s) == "idle" and not s.get("pinned")
+                st = self.world._status(s)
+                if st in ("working", "background"):
+                    # actively-running work: without this rollup a sweep-driven
+                    # "how's everything?" answer literally cannot see sessions
+                    # that are mid-turn (they're not attention, not idle) and
+                    # reads a busy fleet as a quiet one
+                    row = {"machine": mid, "cid": s["cid"], "status": st,
+                           "title": (s.get("title") or s["cid"])[:60]}
+                    if s.get("digest"):
+                        row["digest"] = s["digest"][:80]
+                    working.append(row)
+                elif (st == "idle" and not s.get("pinned")
                         and not self.ledger.task_for_cid(s["cid"])):
                     idle_no_task.append({"machine": mid, "cid": s["cid"],
                                          "title": (s.get("title") or s["cid"])[:60]})
@@ -262,6 +274,7 @@ class Verbs:
         for it in items:
             counts[it["sev"]] = counts.get(it["sev"], 0) + 1
         return {"ok": True, "counts": counts, "items": items,
+                "working": working[:15],
                 "idle_no_task": idle_no_task[:15],
                 "stale_tasks": stale_tasks[:10]}
 

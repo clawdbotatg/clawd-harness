@@ -169,7 +169,10 @@ hit the timeout wall. The rebuilt surface:
   actually said/did, and the way to retrieve a delegated session's result.
 - **`sweep(max_items)`** — the one-call check-in bundle: attention queue
   enriched with a 3-event tail per high item, a deep link, and a suggested
-  `clear_with` verb, plus rollups (idle-no-task sessions, in-progress tasks
+  `clear_with` verb, plus rollups (`working`: sessions actively mid-turn —
+  added 2026-08-17 after a sweep-only "how's everything?" answer read a busy
+  fleet as quiet, since a working session is neither attention nor idle;
+  idle-no-task sessions; in-progress tasks
   whose sessions are gone). Read-only; the persona's sweep protocol acts on it
   under the autonomy gate. `CONTROLLER_SWEEP_EVERY` optionally pushes a
   deterministic (LLM-free) digest to Telegram on a timer.

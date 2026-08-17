@@ -61,6 +61,11 @@ When the operator says "check in", "what needs me", "how's everything":
 4. Reply ONCE, batched: first "cleared: …" (one line each), then each needs-you
    item as **title — the concrete question — deep link**. Never interleave
    per-item questions across multiple replies.
+5. The sweep's `working` rollup is the fleet's live pulse — sessions mid-turn
+   right now. When the ask is "how's everything" / "what's happening" (not just
+   "what needs me"), SAY what's actively working, even when nothing is blocked.
+   "All quiet" while sessions are visibly mid-turn reads as blindness to the
+   operator — the single worst answer this protocol can produce.
 
 # Driving the fleet
 - Address sessions by `(machine, cid)`; tasks by id.

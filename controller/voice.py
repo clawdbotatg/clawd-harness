@@ -53,12 +53,16 @@ IDENTITY_MAX = 1_600
 _TOOLS = [
     ("whats_waiting",
      "What needs the operator right now, fleet-wide: the ranked attention "
-     "queue (blocked sessions with the actual open question), idle sessions, "
-     "stuck tasks. Call this for 'what's up / anything need me?'.",
+     "queue (blocked sessions with the actual open question), plus a "
+     "`working` list of sessions actively mid-turn, idle sessions, stuck "
+     "tasks. Call this for 'what's up / anything need me?'.",
      {}, [], {"kind": "verb", "name": "sweep"}),
     ("fleet_overview",
      "Compact live map of the whole fleet: machines, projects, sessions with "
-     "status and one-line digests. Optionally scope to one machine.",
+     "status and one-line digests. Call this for 'what's running / what are "
+     "my sessions doing?' — the in-prompt snapshot ages the moment the "
+     "session starts, so answer status questions from THIS, not from memory. "
+     "Optionally scope to one machine.",
      {"machine": {"type": "string", "description": "machine id to scope to"}},
      [], {"kind": "verb", "name": "get_world"}),
     ("find_it",
@@ -143,13 +147,37 @@ def _identity_brief():
 
 
 def _fleet_snapshot(verbs):
+    """One line per machine, bounded by construction. The old shape —
+    json.dumps(get_world()) chopped at SNAPSHOT_MAX — silently amputated
+    whole machines mid-JSON on a busy fleet, and the realtime model answered
+    "what's running?" from the amputated prompt instead of calling a tool:
+    the operator's working sessions simply didn't exist to it."""
     try:
-        snap = json.dumps(verbs.get_world())
+        w = verbs.get_world()
     except Exception as e:
         return f"(fleet snapshot unavailable: {e})"
-    if len(snap) > SNAPSHOT_MAX:
-        snap = snap[:SNAPSHOT_MAX] + "…(truncated — call fleet_overview for the full map)"
-    return snap
+    lines = []
+    for m in w.get("machines", []):
+        working = []
+        for p in m.get("projects", []):
+            for s in p.get("sessions", []):
+                if s.get("status") in ("working", "background"):
+                    working.append(s.get("title") or s.get("cid", "?"))
+        bits = []
+        if m.get("working") or m.get("background"):
+            names = "; ".join(working[:3]) + ("…" if len(working) > 3 else "")
+            bits.append(f"{m.get('working', 0) + m.get('background', 0)} working ({names})")
+        if m.get("blocked"):
+            bits.append(f"{m['blocked']} BLOCKED")
+        if m.get("idle"):
+            bits.append(f"{m['idle']} idle")
+        if not m.get("connected"):
+            bits.append("OFFLINE")
+        lines.append(f"- {m['id']}: " + (", ".join(bits) or "no sessions"))
+    if w.get("attention_count"):
+        lines.append(f"needs the operator: {w['attention_count']} item(s) — whats_waiting has them")
+    snap = "\n".join(lines)
+    return snap[:SNAPSHOT_MAX] if len(snap) > SNAPSHOT_MAX else snap
 
 
 def instructions(verbs):
