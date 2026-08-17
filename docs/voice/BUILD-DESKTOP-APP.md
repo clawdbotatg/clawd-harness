@@ -1,23 +1,57 @@
 # Demo 2 — Mac voice agent (FaceTime's echo cancellation)
 
-> **Status (2026-08-16): built + protocol-verified; speaker loop test BLOCKED
-> on a human unlocking the Mac.** The app exists —
-> **github.com/clawdbotatg/clawd-mac-gpt-voice** (Swift, AVAudioEngine + VPIO
-> via `setVoiceProcessingEnabled(true)` on both IO nodes, gpt-realtime over
-> WebSocket, semantic VAD, barge-in). Verified live against the real API in
-> its TCC-free fake-mic mode: correct HEARD/SAID transcripts, turn-taking,
-> and the barge-in flush+cancel path.
+> **Status (2026-08-17): the app WORKS live (VP AEC on — it hears, answers,
+> and barge-in fires) — but the automated speaker-loop test FAILED, twice,
+> audibly, with the user in the room, and was hard-stopped. The 4-step
+> PASS/FAIL tables this block was supposed to hold do not exist.** Honest
+> account, so the next attempt doesn't repeat it:
 >
-> Neither the Chrome baseline nor the native speaker loop test could run yet:
-> the Mac's screen has been locked since 2026-08-15 ~21:00, which (a) keeps
-> the macOS mic-consent dialogs from rendering — Chrome's getUserMedia and the
-> app's `AVCaptureDevice.requestAccess` both hang forever — and (b) starves
-> every *new* CoreAudio output client of IO cycles (`say`, `afplay`,
-> AVAudioEngine: 0 render callbacks machine-wide). To finish: unlock the Mac,
-> click **Allow** on all queued microphone dialogs, then re-run both tests
-> (drivers ready: `baseline.mjs` / `nativetest.mjs`, which use `say` through
-> the speakers as the human voice) and replace this block with the two
-> side-by-side 4-step PASS/FAIL tables.
+> **What works** (github.com/clawdbotatg/clawd-mac-gpt-voice): after three
+> real bugs were found and fixed on live hardware, the native app runs with
+> voice processing enabled and holds a working conversation — speech
+> detected, transcribed, answered, barge-in flush+cancel firing. The bugs,
+> each of which cost a debugging round:
+> 1. **VPIO init fails (-10875) if the graph touches `mainMixerNode`.**
+>    Wire the source node **directly to `outputNode`** at the device's
+>    native format (resample in the render callback). Symptom bundle: the
+>    input tap reports a phantom **4-ch** format and `kAUInitialize` dies on
+>    the output unit. Flaps with hidden coreaudiod state — passes can be
+>    followed by fails with the identical binary.
+> 2. **`AVAudioConverter` silently emits all-zero frames** (no error) when
+>    fed the VP tap's 4-ch format. The API heard pure silence while every
+>    local counter looked healthy. Fixed with a manual ch0 → mono 24k
+>    downsample.
+> 3. Mic level via the workaround path was ~10× too quiet for server VAD —
+>    added `VOICEMAC_MIC_GAIN`.
+>
+> **Why the automated test cannot work as designed:** macOS VP AEC uses
+> **all system output** as its echo reference, so `say` through the Mac
+> speakers — the test's fake human — is cancelled as echo. The app is deaf
+> to the test *by design of the very feature under test*. The workaround
+> (play `say` through the Yeti X's own output jack, which VP doesn't
+> reference) produced quiet, muffled audio: mishears ("Froid", "好"), filler
+> answers, phantom speech-starts, no measurable barge latency. Run 2's
+> "passes" (steps 1/3) are vacuous — the app heard nothing at all in run 1
+> and garbage in run 2.
+>
+> **The process failure:** each run talks through the open speakers for
+> ~8 minutes. That ran twice (plus a mid-run harness restart that re-ran
+> it), while the user was at the machine, without a fresh warning of how
+> long and how loud it would be. The user issued a hard stop; everything
+> audible was killed. Also burned: ~2 hours on macOS mic permissions —
+> the unlock-time TCC dialogs auto-denied everything, and Chrome holds a
+> hidden mic deny that survives every visible Settings toggle
+> (`tccutil reset Microphone com.google.Chrome`, run by the user, is the
+> only fix — never done, so the **Chrome baseline never ran** either; one
+> partial run before Chrome lost its debug port did reach 🟢 live and
+> answered, so the web path is believed fine but is unmeasured).
+>
+> **How to actually finish:** the README's speaker loop test needs a
+> **real human voice** (or a genuinely independent second speaker) — that's
+> what it was written for. The app is one command away
+> (`env $(grep '^OPENAI_API_KEY' ../gpt-voice/.env) VOICEMAC_AUTOSTART=1 ./.build/debug/VoiceMac`):
+> talk to it, interrupt it, score the four steps by ear, then write the two
+> tables. Do not resurrect the `say`-loop for the native app.
 
 ## Goal
 
