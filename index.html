@@ -275,6 +275,26 @@
   #splash .sp-lock .f-title { color:var(--accent); }
   #splash .sp-meta { color:var(--dim); font-size:clamp(11px, 1.3vw, 16px); max-width:100%;
                      white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* Dead veil: an ended/vanished session must be unmissable. A killed or
+     registry-popped session used to leave a pure black terminal with only a
+     tiny 'session ended' in the meta strip — the "long dead tty view" mystery.
+     Same island styling as the splash so it reads as family; tap dismisses
+     (any final output behind stays readable), swipe/breadcrumb still leave. */
+  #deadveil { position:absolute; inset:0; z-index:29; display:flex; align-items:center;
+              justify-content:center; padding:20px 16px; pointer-events:none; }
+  #deadveil[hidden] { display:none; }
+  #deadveil .dv-box { pointer-events:auto; cursor:pointer; background:var(--bg);
+                      border:1px solid var(--edge); border-radius:10px;
+                      box-shadow:0 10px 50px rgba(0,0,0,.75);
+                      padding:clamp(16px, 2.6vh, 30px) clamp(18px, 2.6vw, 40px);
+                      width:min(78%, 900px); display:flex; flex-direction:column;
+                      align-items:center; gap:clamp(8px, 1.4vh, 16px); }
+  #deadveil .dv-word { font-weight:700; line-height:1.1; color:var(--err);
+                       font-size:clamp(40px, 9vw, 110px); }
+  #deadveil .dv-title { color:var(--accent); font-weight:600;
+                        font-size:clamp(14px, 1.8vw, 24px); max-width:100%;
+                        white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #deadveil .dv-hint { color:var(--dim); font-size:clamp(11px, 1.3vw, 16px); }
   #term { flex:1; min-height:0; padding:6px 4px 0 8px; background:#000; touch-action:pan-y;
           overflow:hidden; }
   /* bottom-justify the TTY: the xterm grid fills #term (so the PTY size claude sees is the
@@ -986,6 +1006,7 @@
       <div id="term"></div>
       <div id="ttymeta"></div>
       <div id="splash" hidden></div>
+      <div id="deadveil" hidden></div>
     </section>
     <section class="col hidden" id="right">
       <div id="feed"></div>
@@ -2541,6 +2562,7 @@ function handleMachineJson(machine, m) {
     }
     renderNeedsBar();                    // any machine's blocked sessions → the needs-you bar
     renderPinsUI();                      // any machine's pins → the 📌 count/board
+    checkViewedGone();                   // viewed session dead/vanished → dead veil, not a black tty
     return;
   }
   if (m.type === 'accounts') {
@@ -2777,6 +2799,7 @@ function handleJson(m) {
     refreshSessionTag();                  // account may have just landed for the open session
     renderPinsUI();                       // 📌 count/board tracks pin state live
     resolvePendingNav();                  // …or a session
+    checkViewedGone();                    // viewed session dead/vanished → dead veil, not a black tty
   } else if (m.type === 'accounts') {
     accountsInfo = m;                     // subscription logins + headroom (direct mode)
     renderAccountsBody();                 // repaint the 🧠 overlay if it's open
@@ -2866,10 +2889,12 @@ function handleJson(m) {
     hideThinking();
     meta.textContent = 'session ended';
     setStatus('🔴', 'ended', 'ended');
+    showDeadVeil(m.cid, false);      // don't leave a black void with six-point type
   } else if (m.type === 'error') {
     // e.g. a subscribe for a cid this box doesn't know (subscribe_client): the
     // server detached us rather than leaking the previous stream — surface it.
     meta.textContent = m.error || 'error';
+    checkViewedGone();               // subscribe to a vanished cid → the big "gone" veil
   }
 }
 
@@ -4873,6 +4898,14 @@ function subscribe(cid, opts) {
   if (activeType) { activeType.finish(); activeType = null; }
   highlightCard(cid);
   updateTtyStat();             // activity box tracks the session we just switched to
+  deadVeilDismissed = null;    // fresh entry: a dead session veils again until tapped
+  // Lenient on-entry check: veil a KNOWN-dead session immediately, but treat
+  // "not listed" as pending, not gone — a just-spawned session is subscribed
+  // before its first `sessions` frame lands, and flashing "gone" over it would
+  // be wrong. A truly vanished cid is caught by the subscribe error frame and
+  // the next sessions frame (checkViewedGone), both of which judge for real.
+  { const ds = allSessions().find(x => x.cid === cid);
+    if (ds && ds.alive === false) showDeadVeil(cid, false); else hideDeadVeil(); }
   syncComposer();              // load this session's own draft (bring back text from before a reload)
   hsend({ type: 'subscribe', cid });
   armHelloWatch(cid);          // hello = the subscribe ACK; re-send if it never lands
@@ -4974,6 +5007,7 @@ function maybeSplash(cid) {
   if (!cid) return;
   const s = allSessions().find(x => x.cid === cid);
   if (!s) return;
+  if (s.alive === false) return;                         // dead: the veil tells the story, no RSVP show
   if (!s.promptCount && !s.desc) return;                 // brand-new: nothing to say yet
   if (seenRecently(cid)) { markSeen(cid); return; }      // just been here — no show
   markSeen(cid);
@@ -5067,6 +5101,53 @@ function hideSplash(focus) {
   if (focus && !isTouch && currentView() === 'tty') box.focus();
 }
 splashEl.onclick = () => hideSplash(true);               // read it? tap it away
+
+// ── dead veil: make an ended/vanished session unmissable ─────────────────────
+// The old behavior: a session that died (exit frame) or was closed out of the
+// registry (its cid simply stops appearing in `sessions` frames) left the tty
+// view a silent black void — the only tell was a tiny meta-line string. The
+// veil is a big splash-style island naming the state: "ended" (dead but still
+// listed — its last screen may sit behind, so tap-to-dismiss keeps it readable)
+// or "gone" (the harness no longer knows the cid at all). Re-checked on every
+// sessions frame, subscribe, and view change; a tap parks it for that cid.
+const deadveil = document.getElementById('deadveil');
+let deadVeilCid = null, deadVeilGone = false, deadVeilDismissed = null;
+function showDeadVeil(cid, gone) {
+  if (deadVeilDismissed === cid) return;                       // tapped away this visit
+  if (!deadveil.hidden && deadVeilCid === cid && deadVeilGone === gone) return;  // already up — sessions frames are frequent, don't rebuild
+  deadVeilCid = cid; deadVeilGone = gone;
+  hideSplash();                                                // no RSVP show over a tombstone
+  const s = allSessions().find(x => x.cid === cid);
+  const title = (s && (s.title || s.desc)) || document.getElementById('sessiondesc').textContent || '';
+  deadveil.innerHTML = '';
+  const box = document.createElement('div'); box.className = 'dv-box';
+  const word = document.createElement('div'); word.className = 'dv-word';
+  word.textContent = gone ? 'gone' : 'ended';
+  box.appendChild(word);
+  if (title) { const t = document.createElement('div'); t.className = 'dv-title'; t.textContent = title; box.appendChild(t); }
+  const hint = document.createElement('div'); hint.className = 'dv-hint';
+  hint.textContent = (gone ? 'this session no longer exists' : 'this session has ended')
+                   + ' · tap to dismiss' + (isTouch ? ' · swipe → to leave' : '');
+  box.appendChild(hint);
+  deadveil.appendChild(box);
+  deadveil.hidden = false;
+}
+function hideDeadVeil() { if (!deadveil.hidden) deadveil.hidden = true; }
+deadveil.onclick = () => { deadVeilDismissed = deadVeilCid; hideDeadVeil(); };
+// Judge the viewed session against the latest snapshot. Deliberately silent
+// (no veil) until a snapshot exists — a boot/reconnect gap must not paint
+// "gone" over a session that's merely not listed *yet*.
+function checkViewedGone() {
+  if (!currentCid || !inSessionView()) { hideDeadVeil(); return; }
+  if (FLEET) {
+    const pm = perMachine[currentMachine];
+    if (!pm || !pm.gotSessions || !isMachineActive(currentMachine)) return;
+  } else if (!gotSessions) return;
+  const s = allSessions().find(x => x.cid === currentCid);
+  if (!s) showDeadVeil(currentCid, true);
+  else if (s.alive === false) showDeadVeil(currentCid, false);
+  else hideDeadVeil();
+}
 
 // Every session for the OPEN project, gathered across all the machines that host
 // it (fleet) — each entry tagged with `_machine` so a card can badge it and
@@ -6700,6 +6781,7 @@ function setView(view) {
   // panel toggles below change what currentView() reports).
   if (!tty && currentCid && currentView() === 'tty') { releaseResize(); markSeen(currentCid); }
   if (!tty) hideSplash();          // splash lives on the tty — climbing out ends it
+  if (!tty) hideDeadVeil(); else checkViewedGone();   // dead veil likewise; arriving re-judges
   projectsPanel.classList.toggle('hidden', !projects);
   menuPanel.classList.toggle('hidden', !sessions);
   leftPanel.classList.toggle('hidden', !tty);

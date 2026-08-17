@@ -146,6 +146,17 @@ user-facing overview; this file orients an agent working **on** the code.
   fires only past `SPLASH_COOLDOWN_MS` (10 min). The probe lands on the sessions
   rung and drives `maybeSplash()` against a *fake* session in `sessionList`, so
   it subscribes to nothing and claims no PTY size.
+- **`tools/deadveilprobe.mjs`** — guards the **dead veil** (2026-08-16): a
+  session that dies (exit frame) or vanishes from the registry (its cid stops
+  appearing in `sessions` frames) used to leave the tty view a silent black
+  void — the "long dead tty view" mystery; the only tell was tiny meta-line
+  text. Now a big splash-style island says **"ended"** (dead but still listed —
+  tap dismisses so any final output behind stays readable) or **"gone"** (cid
+  unknown), re-judged on every sessions frame and silent until a snapshot
+  exists so boot/reconnect gaps never mislabel a live session. The probe
+  asserts both words, splash suppression on dead sessions, tap-parks-per-cid,
+  re-arm on fresh entry, and the exit-frame path — against a fake session with
+  `inSessionView` stubbed, so it subscribes to nothing and claims no PTY size.
 - **`tools/tabfilterprobe.mjs`** — guards the **🔎 tab-strip filter** (2026-08-09):
   that it sits at the far right, stays pinned there when the strip scrolls (it's
   `position:sticky`, so tabs pass *under* it), that typing narrows the strip and
