@@ -495,6 +495,18 @@ FABLE_STICKY = float(os.environ.get("FABLE_STICKY", "21600"))     # 6h
 # reading a full transcript back in. Staged over a few sweeps instead, so the
 # migration can't be the thing that wedges the box. 0 = no cap.
 SUB_CAP_EVAC_BATCH = int(os.environ.get("SUB_CAP_EVAC_BATCH", "4"))
+# Per-sweep ceiling on account handoffs, across EVERY reason (drained rescue,
+# capability evacuation, hot evacuation, rebalance). A handoff respawns the
+# session with --resume, so each one re-ingests that session's whole context —
+# cheap for one session, a bill for ten at once. Before this, only the
+# capability path was batched, so a plan hitting the wall evacuated every
+# session in a single sweep: 10 simultaneous context re-ingests landed on the
+# fresh pool, spent enough of it to drain that pool too, and the next sweep
+# marched everyone back. The logs showed the ping-pong plainly — sub4->clawd
+# 89 times, clawd->sub4 67 times in one day. The sweep re-runs every ~15s, so
+# a small cap still clears a 10-session evacuation inside a minute; it just
+# arrives as a queue instead of a herd. 0 = unlimited (old behaviour).
+SUB_HANDOFF_BATCH = int(os.environ.get("SUB_HANDOFF_BATCH", "2"))
 # How long a pending graceful restart waits for mid-turn work before taking the
 # hit anyway. 0 = wait forever (the old behavior). This exists because "wait for
 # quiet" on a machine somebody actually uses can mean "never": on 2026-08-09 a
@@ -4408,6 +4420,22 @@ class SessionManager:
         if not best or best.name in drained:
             return
         cap_moved = cap_left = 0                 # capability evacuation, this sweep
+        moved = deferred = 0                     # shared per-sweep handoff budget
+
+        def take_slot():
+            """Consume one of this sweep's handoff slots. False = budget spent;
+            the caller leaves the session where it is and the next sweep (~15s)
+            picks it up."""
+            nonlocal moved
+            if SUB_HANDOFF_BATCH and moved >= SUB_HANDOFF_BATCH:
+                return False
+            moved += 1
+            return True
+
+        # Rescues before optional moves: a session on a drained plan cannot run
+        # a turn at all, so it should win the budget over a rebalance that is
+        # only an optimisation.
+        sessions.sort(key=lambda s: 0 if s.account in drained else 1)
         for s in sessions:
             if s.ceremony:
                 continue                         # deliberate sign-in — hands off
@@ -4426,6 +4454,9 @@ class SessionManager:
                           f"{int(now - s.last_active)}s on dead plan {s.account} — "
                           "treating as stuck", flush=True)
                     s.busy = False
+                if not take_slot():
+                    deferred += 1
+                    continue
                 self._handoff(s, best)
                 continue
             if s.busy:
@@ -4447,6 +4478,9 @@ class SessionManager:
                 if SUB_CAP_EVAC_BATCH and cap_moved >= SUB_CAP_EVAC_BATCH:
                     cap_left += 1
                     continue                     # next sweep takes the rest
+                if not take_slot():
+                    deferred += 1
+                    continue
                 cap_moved += 1
                 self._handoff(s, best, f"{s.account} can't do fable on its "
                                        "current plan — moving to one that can")
@@ -4454,12 +4488,23 @@ class SessionManager:
             # Preemptive evacuation: an idle session on a heating pool moves to
             # a COOL best before the wall, not after (never-see-a-rate-limit).
             if s.account in hot and best.name not in hot:
+                if not take_slot():
+                    deferred += 1
+                    continue
                 self._handoff(s, best, f"pool {pcts.get(s.account, 0):.0f}% hot "
                                        "— evacuating before the limit wall")
                 continue
             why = self._rebalance_win(s.account, best)
             if why:
+                if not take_slot():
+                    deferred += 1
+                    continue
                 self._handoff(s, best, why)
+        if deferred:
+            print(f"[accounts] handoff budget: moved {moved} to {best.name}, "
+                  f"{deferred} deferred to a later sweep (batch cap "
+                  f"{SUB_HANDOFF_BATCH}) — spreading the context re-ingests",
+                  flush=True)
         if cap_left:
             print(f"[accounts] fable evacuation: moved {cap_moved} to "
                   f"{best.name}, {cap_left} still queued (batch cap "
