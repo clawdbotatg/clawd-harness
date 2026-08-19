@@ -811,6 +811,60 @@ def _ensure_onboarded(config_dir):
     return True
 
 
+def _ensure_trusted(config_dir, workdir):
+    """Pre-accept claude's per-folder trust dialog for this session's cwd.
+
+    The CLI paints a blocking "Is this a project you created or one you
+    trust?" modal the first time a LOGIN meets a WORKSPACE, remembered as
+    `projects["<abs cwd>"].hasTrustDialogAccepted: true` in that login's
+    .claude.json (verified against the live file and the 2.1.234 bundle,
+    which itself tells headless users to set exactly that key). In this
+    harness the human already chose the folder — every cwd is a repo they
+    created/cloned via the projects layer — so the question is answered
+    before it can be asked. Without this, every freshly cloned project AND
+    every account handoff (new config dir = never-trusted path) parks the
+    session on the modal.
+
+    Same discipline as _ensure_onboarded: a dir with NO .claude.json is a
+    pending sign-in ceremony and is left strictly alone — creating the file
+    would flip _opens_normal_tui's fresh-dir detection. Seeds both abspath
+    and realpath when they differ (macOS /tmp → /private/tmp: node's cwd is
+    symlink-resolved, ours may not be). Returns True iff it wrote."""
+    cfg = _claude_config_file(config_dir)
+    if not cfg.exists():
+        return False                    # never-signed-in dir — not ours to create
+    try:
+        data = json.loads(cfg.read_text())
+    except (OSError, ValueError):
+        return False                    # unreadable/foreign file — not ours to rewrite
+    if not isinstance(data, dict):
+        return False
+    paths = {os.path.abspath(workdir), os.path.realpath(workdir)}
+    projects = data.setdefault("projects", {})
+    dirty = False
+    for p in paths:
+        entry = projects.setdefault(p, {})
+        if not (isinstance(entry, dict) and entry.get("hasTrustDialogAccepted")):
+            if not isinstance(entry, dict):
+                entry = projects[p] = {}
+            entry["hasTrustDialogAccepted"] = True
+            dirty = True
+    if not dirty:
+        return False
+    tmp = cfg.with_name(cfg.name + ".trust-seed.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2))
+        os.replace(tmp, cfg)
+    except OSError as e:
+        print(f"[creds {config_dir or '~/.claude'}] trust seed WRITE FAILED "
+              f"({e}) — this spawn may open on the folder-trust dialog",
+              flush=True)
+        return False
+    print(f"[creds {config_dir or '~/.claude'}] folder trust seeded for "
+          f"{os.path.abspath(workdir)} (trust dialog suppressed)", flush=True)
+    return True
+
+
 def _opens_normal_tui(config_dir):
     """True iff a spawn into this dir will paint claude's NORMAL TUI (so a
     `/login` has to be typed into it) rather than the CLI's own login /
@@ -1707,8 +1761,12 @@ class ClaudeEngine(Engine):
             # (config_dir or ~/.claude) never look.
             env.pop("CLAUDE_CONFIG_DIR", None)
         # Guarantee claude never opens onto the onboarding/theme screen when
-        # the dir already holds a login.
+        # the dir already holds a login…
         _ensure_onboarded(s.config_dir)
+        # …nor onto the per-folder trust dialog: every cwd here was chosen by
+        # the human via the projects layer, and a handoff to a fresh account
+        # re-asks it for every path that login has never seen.
+        _ensure_trusted(s.config_dir, s.workdir())
 
     def hook_setup(self, s):
         return s._write_hook_settings()
