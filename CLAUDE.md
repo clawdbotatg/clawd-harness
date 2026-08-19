@@ -461,6 +461,20 @@ user-facing overview; this file orients an agent working **on** the code.
   compacted itself. `RESUME_GATE=0` opts out; `RESUME_GATE_WINDOW` (120s) sizes
   the arming window. Test: `python3 test_resume_gate.py` (runs against a real
   885-byte capture of the modal's bytes).
+  **Since 2026-08-18 the scan is a dormant backstop, not the normal path:**
+  "cheap" above meant one CR — the accepted option still runs a full-context
+  `/compact` turn, billed to whatever pool the session resumed onto, which at
+  handoff-sweep scale was the dominant per-move token cost. So the harness now
+  suppresses the modal at the source: every claude child gets
+  `CLAUDE_CODE_RESUME_THRESHOLD_MINUTES` pinned huge (the CLI's own age floor
+  for painting it, verified in the 2.1.235 bundle), so harness-initiated
+  resumes come back as-is, token-free. `RESUME_MODAL_SUPPRESS=0` opts out; an
+  operator's own export of the var wins. The knob is undocumented and the
+  feature is server-side-flagged, so it degrades one way — if the CLI ignores
+  it, the scan still answers exactly as before. Test:
+  `python3 test_resume_suppress.py`. (Context: the on-demand routing plan,
+  `docs/fleet/ON-DEMAND-SUB-ROUTING-PLAN.md`, removes the idle handoffs
+  themselves; this kills the per-move compaction cost independently.)
   Four things here are measured, not assumed, and are the ones to not re-break:
   **(1)** ink pads this dialog with cursor motion, not spaces, so de-ANSI'd text
   arrives *space-free* (`Resumefromsummary…`) — `_flat_pty` strips whitespace on

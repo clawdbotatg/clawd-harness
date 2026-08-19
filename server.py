@@ -601,6 +601,18 @@ RESUME_GATE = os.environ.get("RESUME_GATE", "1") != "0"
 # The modal paints ~0.8s into a resume, before the session can do anything
 # else; the window only has to cover a slow box replaying a huge transcript.
 RESUME_GATE_WINDOW = float(os.environ.get("RESUME_GATE_WINDOW", "120"))
+# Better than answering the modal: don't let it paint. The CLI only shows it
+# when the session's age and size clear env-tunable floors (verified in the
+# 2.1.235 bundle: CLAUDE_CODE_RESUME_THRESHOLD_MINUTES ?? 70, and a token
+# floor ?? 1e5), so a huge minutes floor in the child env means no modal —
+# and no auto-/compact turn, which bills a full-context model turn to the
+# pool a handoff just moved onto. Every resume here is harness-initiated
+# (daemon restart, graceful restart, handoff, rescue); nobody is at the
+# keyboard wanting a summarize offer. Undocumented knob on a server-side-
+# flagged feature, so it degrades one way: if the CLI ever ignores it, the
+# gate scan above still answers the modal exactly as before.
+RESUME_MODAL_SUPPRESS = os.environ.get("RESUME_MODAL_SUPPRESS", "1") != "0"
+RESUME_MODAL_FLOOR_MIN = "525600"                    # one year, in minutes
 # Raw-byte window the gate scan re-strips each read. The modal is ~1.5KB of
 # painted bytes; 8KB holds it whole even when a repaint interleaves.
 GATE_RAW_MAX = 8192
@@ -1663,6 +1675,11 @@ class ClaudeEngine(Engine):
         # buffer and a phone's touch pan finds nothing to scroll. Pin inline
         # rendering — the seed/ring/scrollback contract depends on it.
         env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] = "1"
+        if RESUME_MODAL_SUPPRESS:
+            # Suppress the resume modal at the source (see the knob's comment
+            # block). setdefault so an operator export still wins.
+            env.setdefault("CLAUDE_CODE_RESUME_THRESHOLD_MINUTES",
+                           RESUME_MODAL_FLOOR_MIN)
         if s.config_dir:                     # non-default subscription account
             env["CLAUDE_CONFIG_DIR"] = s.config_dir
         else:
