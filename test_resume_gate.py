@@ -63,10 +63,12 @@ def check(name, cond, detail=""):
 def fake_session(engine="claude", armed=True, window=None):
     """A stand-in with only what _scan_for_resume_gate touches. `sent` collects
     keystrokes so a test can assert exactly one bare CR left the harness."""
+    import threading
     s = types.SimpleNamespace(
         cid="deadbeef-cafe", account="sub3", sent=[],
         _gate_raw=b"",
         _gate_deadline=(time.time() + (window or server.RESUME_GATE_WINDOW)) if armed else 0.0,
+        _gate_resolved_evt=threading.Event(),   # the scan resolves it on match/expiry
         eng=types.SimpleNamespace(
             resume_gate_key=server.ClaudeEngine.resume_gate_key if engine == "claude"
             else server.Engine.resume_gate_key),

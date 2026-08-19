@@ -433,6 +433,25 @@ SEND_WATCHDOG = float(os.environ.get("SEND_WATCHDOG", "10"))
 # (incl. same-day resets) from churning respawns.
 SUB_REBALANCE = os.environ.get("SUB_REBALANCE", "1") != "0"
 SUB_REBALANCE_MARGIN = float(os.environ.get("SUB_REBALANCE_MARGIN", "21600"))  # s
+# ── on-demand routing (2026-08-19) ───────────────────────────────────────────
+# Rollout stages 1–2 of docs/fleet/ON-DEMAND-SUB-ROUTING-PLAN.md: pick the
+# account at the moment a prompt needs a model, instead of eagerly re-parking
+# idle sessions between pools. Stage 1 (the `prompt_route` decision log) is
+# always on — every browser/auto prompt logs what preflight decided, so a box
+# can be read for a while before anyone flips the switch. ROUTE_ON_PROMPT=1
+# makes the decisions real: a prompt whose session sits on a worse pool
+# triggers a single-session handoff and delivers exactly once after the
+# replacement is READY (SessionStart fired AND the resume gate resolved — the
+# addenda race: delivering on "started" alone can type the prompt into the
+# CLI's numbered resume modal and disarm the very scan that answers it).
+# WAIT bounds that readiness barrier; on timeout the delivery proceeds and
+# logs — the bound must never strand a prompt. SETTLE is the same paint pause
+# every rescue redelivery takes between SessionStart and typing.
+# The eager sweep and post-Stop movement still run — removing them is rollout
+# stage 4+, after this path has soaked (see the plan's Rollout section).
+SUB_ROUTE_ON_PROMPT = os.environ.get("SUB_ROUTE_ON_PROMPT", "0") == "1"
+SUB_ROUTE_WAIT   = float(os.environ.get("SUB_ROUTE_WAIT", "25"))    # s
+SUB_ROUTE_SETTLE = float(os.environ.get("SUB_ROUTE_SETTLE", "2"))   # s
 # After a session's claude exits, its final token rotation may still be
 # settling (or, if it was killed mid-refresh, stranded server-side) — the
 # poller must not consume that account's refresh grant until the dust
@@ -2158,6 +2177,8 @@ class ClaudeSession:
         self._gate_raw = b""                      # rolling RAW PTY bytes, for the resume-gate scan
         self._gate_deadline = 0.0                 # scan window end; a resume start() arms it, a match/send disarms it
         self._started_evt = threading.Event()     # set on SessionStart — "the TUI is up"
+        self._gate_resolved_evt = threading.Event()  # resume gate answered/expired/never-armed —
+                                                     # "safe to type a prompt" (see wait_ready)
         self.last_tool = None
         self.digest = ""                          # volatile "what it's doing now" (LLM, refreshed each Stop)
         self.auto_tldr_armed = False              # volatile: browser send seen, no Stop yet (AUTO_TLDR)
@@ -2324,6 +2345,15 @@ class ClaudeSession:
         self._gate_deadline = (time.time() + RESUME_GATE_WINDOW) if (
             self.resuming and RESUME_GATE and self.eng.resume_gate_key
             and not self.ceremony) else 0.0
+        if not self._gate_deadline or RESUME_MODAL_SUPPRESS:
+            # Nothing to wait for before typing: the gate never armed (fresh
+            # spawn, other engine, ceremony), or suppression keeps the modal
+            # from painting at all — the scan stays armed as a backstop, but a
+            # delivery need not wait out its window. Armed WITHOUT suppression,
+            # the event is set by whichever comes first: the scan answering,
+            # the window expiring, or any write to the PTY (which disarms the
+            # scan for good — resolved either way).
+            self._gate_resolved_evt.set()
 
         self.settings_path = self.eng.hook_setup(self)
         cmd = self.eng.argv(self)
@@ -2715,12 +2745,29 @@ class ClaudeSession:
         # the keyboard answers the modal themselves, and a harness send must
         # never have our CR fire between its text and its own submitting CR
         # (that would post half a prompt). The scan zeroes the deadline BEFORE
-        # calling us, so its own keystroke isn't caught by this.
+        # calling us, so its own keystroke isn't caught by this. A disarmed
+        # scan can never fire again, so the gate is RESOLVED from here — this
+        # is also how the scan's own answering CR flips the event.
         self._gate_deadline = 0.0
+        self._gate_resolved_evt.set()
         try:
             os.write(self.master_fd, data)
         except OSError:
             pass
+
+    def wait_ready(self, timeout=20.0):
+        """Safe-to-type barrier for a freshly (re)spawned session: SessionStart
+        has fired AND the resume gate is RESOLVED (answered, expired, or never
+        armed / suppressed). Waiting on _started_evt alone is the addenda race:
+        the resume modal can paint after SessionStart, and the first write
+        disarms the scan — so a prompt delivered on "started" can land in a
+        NUMBERED modal with the scan dead. True = ready; False = timed out
+        (callers log and proceed — a bound that strands a prompt is worse than
+        the race it guards, and the wait itself never writes to the PTY)."""
+        deadline = time.time() + timeout
+        started = self._started_evt.wait(timeout)
+        resolved = self._gate_resolved_evt.wait(max(0.0, deadline - time.time()))
+        return started and resolved
 
     def send_message(self, text: str, control: bool = False):
         """High-level: type a message, let the paste settle, then submit (CR).
@@ -2787,7 +2834,10 @@ class ClaudeSession:
         print(f"[session {self.cid[:8]}] auto-tldr: long reply, nobody "
               f"watching — sending {AUTO_TLDR_TEXT!r}", flush=True)
         log_prompt(self, AUTO_TLDR_TEXT, "auto")
-        self.send_message(AUTO_TLDR_TEXT)
+        # Through the same preflight as a human send: it's a real model prompt
+        # and must not bounce off an exhausted pool (plan's Auto-TLDR section).
+        # One turn either way — a move re-delivers THIS text once, never twice.
+        self.manager.send_prompt(self.cid, AUTO_TLDR_TEXT, via="auto")
 
     # -- read channel: raw PTY bytes -> subscribed clients ---------------------
     def _pump_pty(self):
@@ -2915,6 +2965,7 @@ class ClaudeSession:
         if time.time() >= self._gate_deadline:
             self._gate_deadline = 0.0            # window over — stop scanning entirely
             self._gate_raw = b""
+            self._gate_resolved_evt.set()        # no modal inside the window = resolved
             return
         # Buffer RAW bytes and de-ANSI the whole window each time, rather than
         # flattening per chunk and concatenating the text (what the limit and
@@ -3419,6 +3470,8 @@ class SessionManager:
         self.active_account = "default"          # new sessions spawn under this
         self.acct_last_exit = {}                 # account -> ts of last claude exit
         self._stranded_warned = False            # one-shot: fable gate emptied the roster
+        self._route_locks = {}                   # cid -> Lock: serializes prompt preflight,
+                                                 # so two sends can't race one handoff
         self.last_switch_at = 0.0                # debounce anchor for auto-switch
         self._poll_now = threading.Event()       # kick the usage poller early
         self.lock = threading.RLock()
@@ -4172,6 +4225,177 @@ class SessionManager:
         if not fresh:
             return None
         return min(self._routable_first(fresh), key=self._route_key).name
+
+    # -- prompt-time preflight (ON-DEMAND-SUB-ROUTING-PLAN.md, stages 1–2) -----
+    # The plan's shape: a prompt is the only proof a session needs a model, so
+    # the routing decision belongs to the moment of delivery — not to a poller
+    # re-parking idle sessions (each move re-ingests context for nobody). The
+    # decision LOG is always on; SUB_ROUTE_ON_PROMPT makes the moves real.
+
+    def _route_lock(self, cid):
+        """The per-session routing lock. Serializes prompt preflight per cid so
+        two simultaneous sends can't mint two replacement processes or deliver
+        either prompt twice. Rescue paths joining this lock is stage 4+ — until
+        then their cooldowns (last_bounce_rescue / last_handoff) keep the old
+        mutual exclusion."""
+        with self.lock:
+            return self._route_locks.setdefault(cid, threading.Lock())
+
+    def _pool_key(self, a):
+        """Headroom-first sort key for PROMPT-TIME routing (lower wins):
+        capable, then cool (< SUB_HOT), then MOST remaining headroom, with the
+        weekly-reset clock only breaking ties. Deliberately the inverse
+        emphasis of _route_key (reset-soonest first), which keeps governing
+        spawn-time choice and the eager sweep while they exist — the plan
+        records the reversal, don't 'fix' either to match the other."""
+        pct = (a.usage or {}).get("pct")
+        pct = 100.0 if pct is None else pct
+        reset = _weekly_reset(a.usage)
+        return (not a.routable(), pct >= SUB_HOT, pct, reset is None, reset or 0.0)
+
+    def _prompt_pool(self):
+        """Best usable ORGANIZATION pool for a prompt right now, or None when
+        no fresh reading exists (routing on a blind guess is the one thing the
+        plan forbids). Accounts sharing an organizationUuid share one limit,
+        so they collapse to a single representative before ranking — a second
+        config dir is a login alias, never extra capacity."""
+        now = time.time()
+        with self.lock:
+            fresh = [a for a in self.accounts.values()
+                     if a.ready and not a.broken
+                     and (a.usage or {}).get("pct") is not None
+                     and now - (a.usage or {}).get("checkedAt", 0) < 3 * USAGE_TTL]
+        if not fresh:
+            return None
+        pools = {}
+        for a in fresh:
+            k = a.org or ("\x00solo:" + a.name)  # orgless: each dir is its own pool
+            cur = pools.get(k)
+            if cur is None or a.name < cur.name:  # deterministic representative
+                pools[k] = a
+        return min(self._routable_first(list(pools.values())), key=self._pool_key)
+
+    def _route_decision(self, s):
+        """(decision, target Account|None, reason) for delivering session
+        `s`'s next prompt — a pure read, moves nothing. The plan's selection
+        order: dead/incapable current moves to any better usable pool, hot
+        moves to a cool one, healthy-to-healthy only past SUB_HYSTERESIS,
+        stale usage stays put, same-org never moves."""
+        now = time.time()
+        cur = self.accounts.get(s.account)
+        best = self._prompt_pool()
+        if best is None:
+            return ("stay", None, "no fresh usable pool to compare — not moving blind")
+        cur_u = (cur.usage or {}) if cur else {}
+        cur_fresh = (cur_u.get("pct") is not None
+                     and now - (cur_u.get("checkedAt") or 0) < 3 * USAGE_TTL)
+        cur_pct = 100.0 if cur_u.get("pct") is None else cur_u["pct"]
+        cur_dead = (cur is None or cur.broken
+                    or (cur_fresh and cur_pct >= SUB_EXHAUSTED))
+        if cur and cur.org and best.org and cur.org == best.org:
+            return ("stay", None, "best pool shares this org — one limit, a move buys nothing")
+        if best.name == s.account:
+            return ("stay", None, "already on the best pool")
+        best_pct = (best.usage or {}).get("pct", 100.0)
+        if cur_dead:
+            if best_pct < SUB_EXHAUSTED:
+                return ("move", best, "current plan drained or refused")
+            return ("stay", None, "current plan drained but nowhere usable to go")
+        if cur and not cur.routable() and best.routable():
+            return ("move", best, "current plan can't run the fleet's model")
+        if not cur_fresh:
+            return ("stay", None, "current usage stale — keeping the usable pool we have")
+        if cur_pct >= SUB_HOT:
+            if best_pct < SUB_HOT:
+                return ("move", best, f"pool {cur_pct:.0f}% hot and a cool pool exists")
+            return ("stay", None, "every pool is hot — a lateral hop buys nothing")
+        if cur_pct - best_pct >= SUB_HYSTERESIS:
+            return ("move", best, f"target has {cur_pct - best_pct:.0f} points more headroom")
+        return ("stay", None, "healthy pool; headroom gap under hysteresis")
+
+    def _log_route(self, s, decision, best, reason, via="", prompt_id="",
+                   applied=False):
+        """Stage 1: one structured line per routing decision — greppable as
+        `[route]`, machine-readable after it. `applied` False = the flag is
+        off (or the move was vetoed) and this is what preflight WOULD do; the
+        rollout reads these before anyone flips SUB_ROUTE_ON_PROMPT."""
+        cur = self.accounts.get(s.account)
+        print("[route] " + json.dumps({
+            "event": "prompt_route", "cid": s.cid, "prompt_id": prompt_id,
+            "via": via,
+            "source": s.account, "source_org": (cur.org if cur else "") or "",
+            "source_pct": (cur.usage or {}).get("pct") if cur else None,
+            "target": best.name if best else None,
+            "target_org": (best.org or "") if best else None,
+            "target_pct": (best.usage or {}).get("pct") if best else None,
+            "requested_model": "fable" if SUB_REQUIRE_FABLE else "any",
+            "decision": decision, "reason": reason, "applied": bool(applied),
+        }), flush=True)
+
+    def _route_handoff(self, s, target, why):
+        """The plan's explicit-result handoff primitive: ("stayed"|"moved"|
+        "failed", session). Wraps _handoff — which re-checks busy/alive/
+        ceremony and may decline — and answers from the registry, the one
+        authority on which object owns the cid now."""
+        self._handoff(s, target, why)
+        fresh = self.sessions.get(s.cid)
+        if fresh is s:
+            return ("stayed", s)
+        if fresh and fresh.alive:
+            return ("moved", fresh)
+        return ("failed", fresh or s)
+
+    def send_prompt(self, cid, text, via="", control=False):
+        """Manager-owned prompt delivery — routing and delivery as ONE
+        operation under the per-session lock (the plan's preflight). Returns
+        True iff the prompt was typed into a live session exactly once.
+
+        The carve-outs fall through to plain delivery untouched: control
+        sends are TUI slash commands, not prompts; ceremony sessions sit on
+        broken accounts on purpose; a non-routing engine must never be moved
+        between Anthropic plans; router off = nothing to decide."""
+        s = self.sessions.get(cid)
+        if not s:
+            return False
+        if control or s.ceremony or not s.eng.routes_accounts \
+                or not SUB_AUTOSWITCH:
+            s.send_message(text, control=control)
+            return True
+        with self._route_lock(cid):
+            s = self.sessions.get(cid) or s      # re-resolve: a rescue may have swapped the object
+            decision, best, reason = self._route_decision(s)
+            if decision == "move" and (s.busy or not s.alive):
+                # A mid-turn session queues the text in its composer exactly
+                # as today; routing belongs to the NEXT idle prompt.
+                decision, best, reason = "stay", None, "session mid-turn — deliver in place"
+            if decision == "move" and (s.bg or s.eng.bg_probe(s)):
+                # A respawn kills live background shells/agents. Deliver in
+                # place; if the pool is truly dead the send watchdog + bounce
+                # rescue still act on real evidence (the plan's emergency rule).
+                decision, best, reason = "stay", None, "live background work — a respawn would kill it"
+            prompt_id = uuid.uuid4().hex[:8]
+            applied = bool(SUB_ROUTE_ON_PROMPT and decision == "move" and best)
+            self._log_route(s, decision, best, reason, via=via,
+                            prompt_id=prompt_id, applied=applied)
+            if applied:
+                state, fresh = self._route_handoff(
+                    s, best, why=f"prompt-time: {reason}")
+                if state == "moved":
+                    if not fresh.wait_ready(SUB_ROUTE_WAIT):
+                        print(f"[route {cid[:8]}] moved session not ready in "
+                              f"{SUB_ROUTE_WAIT:.0f}s — delivering anyway",
+                              flush=True)
+                    time.sleep(SUB_ROUTE_SETTLE)  # let the TUI finish painting
+                    s = self.sessions.get(cid) or fresh
+                elif state == "failed":
+                    print(f"[route {cid[:8]}] handoff failed — prompt not "
+                          "delivered", flush=True)
+                    return False
+                # "stayed": _handoff declined (busy/dead re-check) — in place.
+            if not s.alive:
+                return False
+            s.send_message(text)
+            return True
 
     def remove_account(self, name):
         """Drop an account from the routing roster. This logs NOTHING out —
@@ -6203,7 +6427,19 @@ class Handler(BaseHTTPRequestHandler):
                 # a summary is the one loop this could build.
                 s.auto_tldr_armed = (bool(frame.get("via"))
                                      and not txt.strip().lower().startswith("tldr"))
-                s.send_message(txt)
+                # Delivery goes through the manager's prompt preflight (route
+                # decision logged always; moves only under SUB_ROUTE_ON_PROMPT).
+                # With the flag on, a move can hold delivery for seconds — a
+                # thread keeps this client's WS reader loop responsive; off,
+                # the inline call blocks exactly as long as send_message always
+                # has (the settle sleep), so the profile is unchanged.
+                if SUB_ROUTE_ON_PROMPT:
+                    threading.Thread(target=MGR.send_prompt,
+                                     args=(s.cid, txt),
+                                     kwargs={"via": frame.get("via", "")},
+                                     daemon=True).start()
+                else:
+                    MGR.send_prompt(s.cid, txt, via=frame.get("via", ""))
             elif t == "resize":
                 s.claim_resize(client, frame.get("cols"), frame.get("rows"),
                                bool(frame.get("claim")))
