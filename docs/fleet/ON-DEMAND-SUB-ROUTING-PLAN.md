@@ -43,6 +43,19 @@ The existing regression test records the observed failure: ten sessions moved in
 batches, and logs showed 89 moves in one direction and 67 back. Those resumed sessions
 burned capacity even when no user was waiting for them.
 
+Where the tokens actually go (review, 2026-08-18): step 3's `--resume` replay is
+local and free — the CLI sends nothing until the next turn. The dominant burn is
+the harness's own resume gate (`_scan_for_resume_gate`), which answers the CLI's
+resume modal by accepting the recommended choice: a `/compact`, a full model turn
+over the whole context, billed to the DESTINATION pool, for every moved session
+old and large enough to trip the modal (≥70 min and ≥100k estimated tokens —
+exactly the sessions the sweep herds). As of 2026-08-18 the harness suppresses
+the modal at the source for its own respawns (`RESUME_MODAL_SUPPRESS` raises
+`CLAUDE_CODE_RESUME_THRESHOLD_MINUTES` in the child env; the gate scan stays
+armed as the backstop), which removes most of that per-move cost ahead of this
+plan. The plan remains correct: every move still cold-starts the prompt cache
+and burns respawn churn for nobody.
+
 ## Target behavior
 
 ```text
@@ -90,7 +103,11 @@ Movement rules:
 - Never move between two account directories in the same organization.
 This intentionally changes the existing `_route_key()` policy. Today it prefers the
 soonest weekly reset and uses headroom as a tie-breaker. The target policy prefers
-headroom and uses reset time as the tie-breaker.
+headroom and uses reset time as the tie-breaker. Record the reversal in
+`SUB-ROUTING.md` and `EXPECTATIONS.md` as a decision — the old use-it-or-lose-it
+rule was also deliberate, and an unrecorded flip invites a future "fix" back. Note
+that moving pools also cold-starts the prompt cache, so the first turn after any
+move costs more than staying; that cost belongs inside the `SUB_HYSTERESIS` margin.
 
 ## Prompt-time preflight
 
@@ -120,6 +137,26 @@ The WebSocket `send` branch should call this operation instead of calling
 
 Do not put routing inside raw `write()` or control sends. Keystrokes, slash commands,
 login ceremonies, and terminal resize events must not trigger account changes.
+
+Step 8 is not sufficient on its own (review, 2026-08-18): `_started_evt` fires on
+SessionStart, but the resume modal can paint after that — and ANY harness write to
+the PTY zeroes `_gate_deadline` (see `write()`), disarming the gate scan. Delivering
+on "started" can therefore type the prompt into a numbered modal, where a message
+starting with a digit can select an option. After a handoff, preflight must wait for
+the gate to RESOLVE — answered, window expired, or suppression active — not merely
+for the session to start; add a gate-resolved event beside `_started_evt`. The
+existing rescue redeliveries (`_started_evt.wait(20)` then send) carry the same
+latent race and should move onto the same wait.
+
+Two carve-outs the preflight must inherit from the current router:
+
+- **Engine fencing.** Preflight adds routing to every send, so it must sit behind
+  `Engine.routes_accounts`: a codex session falls straight through to plain
+  delivery, always.
+- **Ceremony sessions.** Sign-in ceremony sessions deliberately sit on broken
+  accounts; preflight skips them for their whole lifetime, exactly as every current
+  rescue path does. "Onboarding repair" below is a different mechanism and does not
+  cover this.
 
 ## Auto-TLDR
 
@@ -345,6 +382,10 @@ Rollback must be one flag change. Keep active limit rescue enabled during every 
 - [ ] Write failing on-demand-routing tests.
 - [ ] Add the per-session lock and explicit handoff result.
 - [ ] Add prompt preflight and exactly-once delivery.
+- [ ] Wait on resume-gate resolution (not just `_started_evt`) before any
+      post-handoff delivery, and move the existing rescue redeliveries onto the
+      same wait.
+- [ ] Fence preflight behind `Engine.routes_accounts`; skip ceremony sessions.
 - [ ] Route Auto-TLDR through the same path.
 - [ ] Remove eager idle and post-Stop movement.
 - [ ] Preserve active rescue and onboarding repair.
