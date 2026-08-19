@@ -6,6 +6,12 @@
 
 > Planned waste fix: [ON-DEMAND-SUB-ROUTING-PLAN.md](ON-DEMAND-SUB-ROUTING-PLAN.md)
 > moves account selection to prompt time and removes eager idle-session respawns.
+> Rollout stages 1–2 are BUILT (2026-08-19): every browser/auto prompt logs a
+> `prompt_route` decision (`[route]` lines, stage 1 — always on), and
+> `SUB_ROUTE_ON_PROMPT=1` makes the decisions real (`send_prompt` preflight:
+> per-session lock, headroom-first `_pool_key`, org-UUID pooling, delivery
+> gated on `wait_ready` — SessionStart AND resume-gate resolution). The eager
+> sweep still runs until stage 4+ soak. Test: `python3 test_on_demand_routing.py`.
 
 **Status: Phases 0–2 + the local switch rule are BUILT (in the harness).**
 The fleet-wide relay brain (Phases 3–4) and mid-session handoff (Phase 5) are
