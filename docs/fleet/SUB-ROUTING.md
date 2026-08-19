@@ -4,6 +4,9 @@
 > that's [ACCOUNTS-PANEL.md](ACCOUNTS-PANEL.md). This doc is the routing
 > machinery behind the numbers.
 
+> Planned waste fix: [ON-DEMAND-SUB-ROUTING-PLAN.md](ON-DEMAND-SUB-ROUTING-PLAN.md)
+> moves account selection to prompt time and removes eager idle-session respawns.
+
 **Status: Phases 0–2 + the local switch rule are BUILT (in the harness).**
 The fleet-wide relay brain (Phases 3–4) and mid-session handoff (Phase 5) are
 still plans. Mechanisms were studied from
