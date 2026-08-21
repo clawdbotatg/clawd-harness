@@ -2280,6 +2280,12 @@ class ClaudeSession:
         fresh = ClaudeSession(self.manager, **kw)
         fresh.last_handoff = self.last_handoff
         fresh._onboard_rescues = self._onboard_rescues
+        # Live (non-persisted) state the respawn must also keep: the PTY
+        # geometry. Not a ctor param — it belongs to whoever is viewing, not
+        # to the session — but the replacement must open at the same dims
+        # (start() reads them) or the viewer's screen comes back mangled.
+        # The OWNER rides across in adopt_viewers().
+        fresh.tty_cols, fresh.tty_rows = self.tty_cols, self.tty_rows
         return fresh
 
     def workdir(self):
@@ -2370,7 +2376,12 @@ class ClaudeSession:
     # -- lifecycle -------------------------------------------------------------
     def start(self):
         master, slave = pty.openpty()
-        self._set_winsize(master, ROWS, COLS)
+        # Open at the geometry this session already has — an in-place respawn
+        # (handoff / onboarding heal) carries the viewer's dims across in
+        # clone_for_respawn, so claude boots straight into the phone's width
+        # instead of painting a 120-col frame that the phone then renders
+        # shredded. Fresh sessions still get the COLS×ROWS defaults.
+        self._set_winsize(master, self.tty_rows or ROWS, self.tty_cols or COLS)
 
         env = dict(os.environ)
         env["TERM"] = "xterm-256color"
@@ -3488,6 +3499,32 @@ class ClaudeSession:
             self.clients.discard(client)
         if self.tty_owner is client:             # size owner left → next viewer takes over
             self._owner_fallback()
+
+    def adopt_viewers(self, old):
+        """In-place respawn under the SAME cid (account handoff, onboarding
+        heal): move `old`'s viewers onto this session — and the PTY size
+        ownership that goes with them. The 2026-08-20 phone screenshot: a
+        handoff respawned the session at the 120×34 defaults with
+        tty_owner=None, the carried-over phone got a hello at the wrong dims,
+        armed staleGeomReplay and waited for a ttySize frame that never came
+        (it only sends maintenance resizes, and nothing re-applied its
+        claim) — so every line's tail wrapped. Size is applied BEFORE the
+        re-subscribe so the hello already carries the right dims and the
+        replay is clean; _apply_size is a no-op when clone_for_respawn
+        already started us at the owner's geometry (no SIGWINCH, no ring
+        drop). A viewer that switched away mid-respawn is not carried."""
+        with old.clients_lock:
+            viewers = list(old.clients)
+            old.clients.clear()
+        kept = [c for c in viewers if c.cid == self.cid and not c.dead]
+        owner = old.tty_owner if (old.tty_owner in kept and old.tty_owner.tty_size) else None
+        if owner is None:                        # owner gone → most recently sized survivor
+            owner = max((c for c in kept if c.tty_size), key=lambda c: c.tty_ts, default=None)
+        if owner is not None:
+            self._set_owner(owner)
+        for c in kept:
+            self.subscribe(c)
+        return kept
 
     def _to_subscribers_bytes(self, data: bytes):
         with self.clients_lock:
@@ -5014,12 +5051,7 @@ class SessionManager:
             self.sessions[s.cid] = fresh
         s.kill()
         fresh.start()
-        with s.clients_lock:                     # carry the viewers across
-            viewers = list(s.clients)
-            s.clients.clear()
-        for c in viewers:
-            if c.cid == fresh.cid:
-                fresh.subscribe(c)
+        fresh.adopt_viewers(s)                   # carry the viewers + PTY size owner across
         self.save_registry()
         self.broadcast_sessions()
         if bounced:
@@ -5132,12 +5164,7 @@ class SessionManager:
             self.sessions[s.cid] = fresh
         s.kill()                                 # SIGTERM the drained claude (exit broadcast suppressed)
         fresh.start()
-        with s.clients_lock:                     # carry the viewers across
-            viewers = list(s.clients)
-            s.clients.clear()
-        for c in viewers:
-            if c.cid == fresh.cid:               # skip a viewer that switched away mid-handoff
-                fresh.subscribe(c)
+        fresh.adopt_viewers(s)                   # carry the viewers + PTY size owner across
         self.save_registry()
         self.broadcast_sessions()
 

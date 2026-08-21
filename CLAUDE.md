@@ -581,7 +581,16 @@ user-facing overview; this file orients an agent working **on** the code.
   `claim_resize` in server.py + the `resize`/`ttySize` rows in
   `docs/WS-PROTOCOL.md`. Don't regress this to last-resize-wins: it's what
   stopped a background desktop tab from yanking the terminal down to/up from
-  phone size mid-use. Attaching to a PTY another device sized (`hello` dims ≠
+  phone size mid-use. **The geometry + owner must also survive an in-place
+  respawn** (2026-08-20): handoff / onboarding-heal rebuild the session under
+  the same cid, and the first cut opened the new PTY at the 120×34 boot
+  defaults with no owner — the carried-over phone got a hello at the wrong
+  dims and then waited forever for a `ttySize` nothing would send (every line's
+  tail wrapped: the "looks broken again" screenshot). `clone_for_respawn`
+  carries `tty_cols/rows`, `start()` opens at them, and `adopt_viewers()` is
+  the ONE place viewers move across (owner first, then re-subscribe, so the
+  hello is already right). Don't reintroduce a hand-rolled carry loop. Test:
+  `python3 test_respawn_size.py`. Attaching to a PTY another device sized (`hello` dims ≠
   ours) renders that device's replay mangled — once our claim is applied the
   client auto re-subscribes for a clean replay (`staleGeomReplay` in
   index.html), so no manual reload. The server also drops the ring buffer

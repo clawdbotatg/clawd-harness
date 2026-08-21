@@ -2862,7 +2862,16 @@ function handleJson(m) {
     updateBreadcrumb(m.title || '');
     highlightCard(m.cid);
     setBusy(m.busy, null);
+    const wasOwner = ttyOwned;
     ttyOwned = (m.cols === term.cols && m.rows === term.rows);   // hello carries the PTY's current size
+    // We OWNED the size and a hello we didn't ask for says the PTY is now
+    // some other geometry, with no ttySize frame having handed it to anyone:
+    // the session was replaced under us (handoff/rescue respawn). Re-assert
+    // the claim — the user is looking at this screen on this device. A
+    // device that legitimately took the size sends a ttySize first, which
+    // clears ttyOwned before any hello, so this can't steal from it.
+    if (wasOwner && !ttyOwned && currentView() === 'tty' && document.visibilityState === 'visible')
+      setTimeout(() => { if (currentCid === m.cid) sendResize(true); }, 50);
     // Mismatch ⇒ the replay we're rendering was painted for ANOTHER device's
     // geometry (e.g. laptop attaching to a phone-sized PTY) — it'll look mangled.
     // Arm a one-shot: once OUR size claim is applied (ttySize below), claude
