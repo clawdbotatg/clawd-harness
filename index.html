@@ -295,6 +295,7 @@
                         font-size:clamp(14px, 1.8vw, 24px); max-width:100%;
                         white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   #deadveil .dv-hint { color:var(--dim); font-size:clamp(11px, 1.3vw, 16px); }
+  #deadveil .dv-wait .dv-word { color:var(--accent); }   /* "starting…" — a wait, not a death */
   #term { flex:1; min-height:0; padding:6px 4px 0 8px; background:#000; touch-action:pan-y;
           overflow:hidden; }
   /* bottom-justify the TTY: the xterm grid fills #term (so the PTY size claude sees is the
@@ -1415,6 +1416,7 @@ let pendingNewFocus = false;    // a `new` we issued — its focus should switch
                                 // (the value 'tty' also forces the terminal view:
                                 //  the sign-in ceremony is a TUI flow)
 let pendingSendText = null;     // text typed on the sessions list — delivered once the new session boots
+let flushRetryTimer = null;     // flushPendingSend re-check while the focus hasn't named a cid yet
 let lastWrittenHash = '';       // the hash we last wrote, so hashchange ignores our own writes
 
 // PWA: register the network-only service worker so the app is installable
@@ -2165,6 +2167,7 @@ const e2eChans = {};   // machine -> { status, session, queue, sendChain, recvCh
 // crypto handshake is unchanged — so it costs nothing in security.
 const e2eFailUntil = {};            // machine -> epoch ms; suppresses BACKGROUND passkey retries after a failure
 const E2E_FAIL_COOLDOWN_MS = 30000;
+const E2E_RESUME_REPLY_MS = 10000;   // silent resume round-trip budget (no passkey involved)
 const e2eCfFails = {};              // machine -> consecutive resume-confirm mismatches; ≥2 = diverged material, clear it
 function e2eDeferred() { let r, j; const p = new Promise((res, rej) => { r = res; j = rej; }); p.resolve = r; p.reject = j; return p; }
 function e2ePin(m) { try { return localStorage.getItem('cc_e2e_pin_' + m); } catch { return null; } }
@@ -2252,8 +2255,13 @@ async function e2eEnsure(machine, opts = {}) {
   // machine that just failed — that's the reload storm. Only an explicit user
   // gesture (no opts.auto) retries before the cooldown lapses. See e2eFailUntil.
   if (opts.auto && (e2eFailUntil[machine] || 0) > Date.now()) { e2eLog(machine, 'cooldown blocks auto retry (' + e2eWhy(opts) + ')'); return Promise.reject(new Error('cooldown')); }
+  // Frames queued on an attempt that never opened (stale, or failed) belong to
+  // THIS machine, not to that attempt — carry them, or a `new`/`send` typed into
+  // a securing gap is silently lost when the channel is replaced (2026-08-20).
+  const carried = (cur && cur.status !== 'open' && cur.queue && cur.queue.length) ? cur.queue.splice(0) : [];
+  if (carried.length) e2eLog(machine, 'carrying ' + carried.length + ' queued frame(s) from #' + cur.inst);
   const ch = e2eChans[machine] = { status: 'handshaking', started: Date.now(), inst: ++e2eInstSeq,
-    session: null, queue: [], pendingCtl: null,
+    session: null, queue: carried, pendingCtl: null,
     sendChain: Promise.resolve(), recvChain: Promise.resolve(),
     dSH: e2eDeferred(), dSD: e2eDeferred(), dRes: e2eDeferred() };
   e2eLog(machine, '#' + ch.inst, 'start (' + e2eWhy(opts) + ')', cur ? 'prev=' + cur.status : 'fresh');
@@ -2265,7 +2273,14 @@ async function e2eEnsure(machine, opts = {}) {
         meta.textContent = 'resuming ' + machine + '…';
         ch.phase = 'resume'; ch.resumeId = rs.id;
         e2eSendCtlTracked(ch, machine, { t: 'e2e.resume', id: rs.id });
-        const r = await ch.dRes;                                  // {rn, cf}
+        // One round-trip, no human in the loop — a reply that hasn't come back in
+        // E2E_RESUME_REPLY_MS is lost (a flap ate it, a half-open worker link),
+        // not slow. Without this the channel sat 'handshaking' for the full 90s
+        // stale window while every hsend "joined in-flight" — the 2026-08-20
+        // blank-tty-after-idle: the whole fleet resumed in the same second, 92s
+        // after the socket authed. Timing out is a hiccup (material kept, no
+        // passkey cooldown — see the outer catch), so the next ensure retries.
+        const r = await Promise.race([ch.dRes, e2eTimeout(E2E_RESUME_REPLY_MS)]);   // {rn, cf}
         ch.pendingCtl = null;
         const master = b64uDec(rs.master), rn = b64uDec(r.rn);
         if (!E2E._eq(await E2E.resumeConfirm(master, rn), b64uDec(r.cf))) throw new Error('resume-cf');
@@ -2326,7 +2341,10 @@ async function e2eEnsure(machine, opts = {}) {
     e2eLog(machine, '#' + ch.inst, 'FAILED:', (e && e.message) || e);
     ch.status = 'failed'; ch.pendingCtl = null;
     hidePasskey(machine);   // release the modal, else a dead handshake leaves it stuck over the app
-    e2eFailUntil[machine] = Date.now() + E2E_FAIL_COOLDOWN_MS;   // no auto-retry storm; user gesture still retries
+    // The cooldown exists to stop passkey storms. A failure in the SILENT resume
+    // phase showed no prompt, so retrying it costs nothing — let the relist chain
+    // re-resume right away instead of parking the machine for 30s.
+    if (ch.phase !== 'resume') e2eFailUntil[machine] = Date.now() + E2E_FAIL_COOLDOWN_MS;   // no auto-retry storm; user gesture still retries
     if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
     else { meta.textContent = 'secure channel failed: ' + ((e && e.message) || e); console.error('[e2e] handshake failed for', machine, e); }
     throw e;
@@ -2812,6 +2830,7 @@ function handleJson(m) {
     if (pendingNewFocus) {
       const wantTty = pendingNewFocus === 'tty';
       pendingNewFocus = false;
+      clearNewFocusWatch(); hideDeadVeil();   // the spawn came back — drop the "starting…" island
       openSession(m.cid);                 // subscribe + drop to the transcript
       if (wantTty) setView('tty');        // sign-in ceremony: the login TUI needs the terminal
       // openSession→subscribe clears the feed, so show the queued box now (after).
@@ -3830,6 +3849,7 @@ function addAccount(mid, name) {
   term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
   if (activeType) { activeType.finish(); activeType = null; }
   accountSend(mid, { type: 'accountAdd', name });
+  armNewFocusWatch(mid);           // same void risk as newSession()
 }
 
 function accountAge(ts) {
@@ -5138,7 +5158,7 @@ deadveil.onclick = () => { deadVeilDismissed = deadVeilCid; hideDeadVeil(); };
 // (no veil) until a snapshot exists — a boot/reconnect gap must not paint
 // "gone" over a session that's merely not listed *yet*.
 function checkViewedGone() {
-  if (!currentCid || !inSessionView()) { hideDeadVeil(); return; }
+  if (!currentCid || !inSessionView()) { if (!pendingNewFocus) hideDeadVeil(); return; }   // (a pending `new` owns the veil — see armNewFocusWatch)
   if (FLEET) {
     const pm = perMachine[currentMachine];
     if (!pm || !pm.gotSessions || !isMachineActive(currentMachine)) return;
@@ -5147,6 +5167,57 @@ function checkViewedGone() {
   if (!s) showDeadVeil(currentCid, true);
   else if (s.alive === false) showDeadVeil(currentCid, false);
   else hideDeadVeil();
+}
+
+// ── spawn watch: a `new` that never comes back must not be a black void ──────
+// newSession() drops into the tty view BEFORE the server's focus reply names the
+// cid — by design (it blanks the leaving session's screen). In fleet mode the
+// `new` frame rides the machine's E2E channel; if that channel is still securing
+// (or the worker/harness is gone) the frame sits in a queue while the view shows
+// a cursor on black: no cid, no name, no way to tell a slow spawn from a dead
+// one. 2026-08-20: a viewer came back after a long idle, the fleet-wide resume
+// round stalled ~90s, the user hit ＋, typed a prompt into that gap, waited on
+// the void, reloaded — and both the session and the prompt were gone. So: paint
+// a "starting…" island the moment we ask, and if no focus lands within
+// NEW_FOCUS_WAIT_MS stand down loudly — purge the undelivered new/send from the
+// channel queue (no ghost session minutes later), climb back to the sessions
+// rung, and hand the text back to the composer (the cc_pendingsend copy is only
+// spent once a real cid exists — see flushPendingSend).
+let NEW_FOCUS_WAIT_MS = 30000;
+let newFocusTimer = null;
+function armNewFocusWatch(machine) {
+  clearTimeout(newFocusTimer);
+  const mid = machine || (FLEET ? currentMachine : null);
+  showSpawnVeil(mid);
+  meta.textContent = 'starting a session' + (mid ? ' on ' + mid : '') + '…';
+  newFocusTimer = setTimeout(() => {
+    newFocusTimer = null;
+    if (!pendingNewFocus) return;
+    pendingNewFocus = false;
+    hideDeadVeil();
+    if (FLEET && mid && e2eChans[mid] && e2eChans[mid].queue) {
+      e2eChans[mid].queue = e2eChans[mid].queue.filter(f => !(f.type === 'new' || f.type === 'send' || f.type === 'accountAdd'));
+    }
+    pendingSendText = null;          // a late focus must not also deliver the text we're handing back
+    // Only climb if we're still parked on the void — a session opened by hand
+    // in the meantime stays put (the text waits in cc_pendingsend for the rung).
+    if (inSessionView() && !currentCid) setView('sessions');   // syncComposer → new:<pid> → takePending()
+    meta.textContent = "couldn't start a session" + (mid ? ' on ' + mid : '') + ' — nothing was sent; your message is back in the box';   // after setView: the rung repaints meta
+  }, NEW_FOCUS_WAIT_MS);
+}
+function clearNewFocusWatch() { if (newFocusTimer) { clearTimeout(newFocusTimer); newFocusTimer = null; } }
+function showSpawnVeil(mid) {
+  deadVeilCid = null; deadVeilGone = false;
+  hideSplash();
+  deadveil.innerHTML = '';
+  const box = document.createElement('div'); box.className = 'dv-box dv-wait';
+  const word = document.createElement('div'); word.className = 'dv-word'; word.textContent = 'starting…';
+  box.appendChild(word);
+  const hint = document.createElement('div'); hint.className = 'dv-hint';
+  hint.textContent = 'spawning a session' + (mid ? ' on ' + mid : '') + (FLEET ? ' · securing the channel first if needed' : '');
+  box.appendChild(hint);
+  deadveil.appendChild(box);
+  deadveil.hidden = false;
 }
 
 // Every session for the OPEN project, gathered across all the machines that host
@@ -5291,7 +5362,13 @@ function newSession(targetMachine, engine) {
   currentCid = null;               // anything still streaming for the old cid is now stale
   term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
   if (activeType) { activeType.finish(); activeType = null; }
-  hsend({ type: 'new', pid: currentPid, engine: engine || 'claude' });
+  if (!hsend({ type: 'new', pid: currentPid, engine: engine || 'claude' })) {
+    // socket down / no machine: nothing was asked, so don't open the void
+    pendingNewFocus = false;
+    meta.textContent = 'not connected — try again in a moment';
+    return;
+  }
+  armNewFocusWatch();              // "starting…" now; stand down loudly if no focus ever lands
   setView(DEEP_VIEW);              // server replies with a focus → subscribe once it's spawned
 }
 
@@ -6212,6 +6289,11 @@ function clearPending() { pendingMsgs = []; pendingEl.innerHTML = ''; }
 // guarded so whichever runs first wins and the other no-ops.
 function flushPendingSend() {
   if (!pendingSendText || !ws || ws.readyState !== 1) return;
+  // No session yet (the focus hasn't landed — channel still securing, harness
+  // slow or gone): a send now goes nowhere AND would spend the reload-recovery
+  // copy below. Hold the text and re-check; armNewFocusWatch stands the spawn
+  // down if the focus never comes, and SessionStart re-fires us when it does.
+  if (!currentCid) { clearTimeout(flushRetryTimer); flushRetryTimer = setTimeout(flushPendingSend, 2000); return; }
   hsend({ type: 'send', text: pendingSendText });
   stashOutbox(currentCid, pendingSendText);  // now bound to a real session — hold until confirmed
   stashPending(null);                        // it's the outbox's job to recover it now
@@ -6335,8 +6417,18 @@ function syncComposer() {
   let v = '';
   try {
     v = localStorage.getItem(draftKey(id)) || '';
-    if (!v) v = String(id).startsWith('new:') ? takePending()                          // sessions composer recovers a queued send
-                                              : (sessionStorage.getItem(outboxKey(id)) || '');  // session recovers an unconfirmed send (per-tab)
+    if (!v && String(id).startsWith('new:')) {
+      // The sessions composer recovers a queued send — but only once the project
+      // is KNOWN. At boot the rung paints before the projects frame lands, so the
+      // context is briefly the placeholder `new:_`; taking the pending text there
+      // and then switching to `new:<pid>` swept it into a draft slot nothing ever
+      // reads again (2026-08-20: "reloaded and my message was gone"). Anything a
+      // past boot already swept that way is handed back here, once.
+      if (id !== 'new:_') {
+        v = takePending();
+        if (!v) { v = localStorage.getItem(draftKey('new:_')) || ''; if (v) localStorage.removeItem(draftKey('new:_')); }
+      }
+    } else if (!v) v = sessionStorage.getItem(outboxKey(id)) || '';   // session recovers an unconfirmed send (per-tab)
   } catch {}
   box.value = v;
   autosizeBox();                             // size to the restored draft (or shrink back if empty)

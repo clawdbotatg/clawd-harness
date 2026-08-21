@@ -3,9 +3,10 @@
 // Read-only: clicks tabs only, never types or sends anything.
 import { chromium } from 'playwright-core';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = '/Users/clawd/clawd-harness';
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));   // the repo this probe lives in, whatever the box
 const CID_A = 'faf00d8c-be9f-4449-8ece-0f078987b5ed';   // "Fix harness flashing" (self)
 
 function findChromium() {

@@ -192,6 +192,29 @@ user-facing overview; this file orients an agent working **on** the code.
   and hang-up stops the mic. `/pm/*`, `api.openai.com`, `getUserMedia`, and
   `RTCPeerConnection` are all stubbed — no key, no mic, no live controller.
   Server half: `python3 -m controller.test_voice`.
+- **`tools/spawnprobe.mjs`** — guards the **spawn watch** (2026-08-20): a `new`
+  that never comes back must not be a black void, and the prompt typed into it
+  must never be lost. `newSession()` drops into the tty view *before* the
+  server's `focus` names a cid (by design — it blanks the leaving session's
+  screen); in fleet mode the `new` rides the machine's E2E channel, so a channel
+  still securing (or a worker/harness that's gone) left a cursor on black with
+  no cid, no name, and no way to tell slow from dead. The day it bit: a viewer
+  back from a long idle, the fleet-wide resume round stalled ~90s (see
+  `fleet/CLAUDE.md`, `E2E_RESUME_REPLY_MS`), ＋ and a prompt went into that
+  gap, a reload later both were gone. Now `armNewFocusWatch` paints a
+  "starting…" island (the dead-veil element, accent-coloured) the moment we
+  ask and, if no focus lands in `NEW_FOCUS_WAIT_MS` (30s), stands down loudly:
+  purges the undelivered new/send from the channel queue (no ghost session
+  minutes later), climbs back to the sessions rung, and hands the text back to
+  the composer. Two text-loss holes closed with it: `flushPendingSend`'s 8s
+  fallback used to fire the queued text at a **null cid** and spend the
+  reload-recovery copy doing it (now it holds until a session exists), and a
+  reload landed on the sessions rung **before the projects frame**, so the
+  composer context was the placeholder `new:_` — it took the pending text,
+  then the switch to `new:<pid>` swept it into a draft slot nothing reads
+  (now the placeholder never takes it, and anything already swept is handed
+  back once). Direct mode against a stubbed WebSocket that never answers a
+  `new` — no harness, no relay, no session touched.
 
 ## Architecture (one server, multi-project, multi-session)
 - **server.py** — a `SessionManager` owns N `Project`s and N `ClaudeSession`s.

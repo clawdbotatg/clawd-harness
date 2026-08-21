@@ -11,9 +11,10 @@
 // view (and no resize claim) is ever opened. Nothing is sent.
 import { chromium } from 'playwright-core';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = '/Users/clawd/clawd-harness';
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));   // the repo this probe lives in, whatever the box
 
 function findChromium() {
   const cache = join(process.env.HOME, 'Library/Caches/ms-playwright');

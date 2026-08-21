@@ -33,6 +33,17 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     The relay needs **no** crypto for this (blind passthrough); `cryptography`
 >     is a **worker-only** dep. Tests: `test_e2e.py`, `test_e2e_mitm.py`,
 >     `test_e2e_interop.py` (Python↔browser byte-for-byte via `node`).
+>     **A silent resume is time-boxed** (2026-08-20, `E2E_RESUME_REPLY_MS` 10s in
+>     `index.html`): it's one round-trip with no human in it, so a reply that
+>     hasn't come back is lost, not slow. Before this the channel sat
+>     `handshaking` for the full 90s stale window while every `hsend` "joined
+>     in-flight" — a viewer back from a long idle watched the whole fleet resume
+>     in the same second, 92s after auth, and a `new` + prompt typed into that
+>     gap died on the replaced channel. A resume-phase failure keeps the material,
+>     skips the passkey cooldown (nothing was prompted), and the relist chain
+>     re-resumes; frames queued on an attempt that never opened are carried into
+>     its replacement. The client half of the blank-tty story is
+>     `armNewFocusWatch` (root `CLAUDE.md`, `tools/spawnprobe.mjs`).
 >   - ***Active machines* — the passkey budget** (2026-08-08). "One per machine
 >     per day" MULTIPLIES: N boxes on the roster = **N+1 ceremonies** every
 >     morning (the edge gate plus one E2E handshake each), even when you only
