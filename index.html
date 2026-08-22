@@ -908,7 +908,7 @@
   <header>
     <img id="logo" src="favicon.png" alt="clawd-harness" />
     <div id="dot"></div>
-    <h1 id="brand" title="All machines">clawd-harness</h1>
+    <h1 id="brand" title="All sessions">clawd-harness</h1>
     <span class="meta" id="meta">connecting…</span>
     <span class="spacer"></span>
     <!-- one control strip, left→right: projects · sessions · machines · subscriptions
@@ -6950,7 +6950,15 @@ pinBtn.onclick = () => {
 };
 document.getElementById('reloadBtn').onclick = () => location.reload();   // manual escape hatch — draft + hash survive a reload
 machinesBtn.onclick = () => openMachines();          // 🖥️ roster page (no longer a rung)
-document.getElementById('brand').onclick = () => navTo('projects');
+// The top-left title = "show me everything I'm working on": the sessions rung
+// with NO project selected, which renderSessions lists as every unpinned session
+// across every project/machine (the same set as the tab strip). It used to go to
+// the projects rung, which the Projects button already does.
+document.getElementById('brand').onclick = () => {
+  currentProjectKey = null; currentPid = null;
+  navTo('sessions');
+  renderSessions();   // setView doesn't repaint a rung you're already on; the scope just changed
+};
 if (!FLEET) machinesBtn.style.display = 'none';   // no machines rung when talking to a harness directly
 pendingNav = parseHash();        // restore project / session / depth from the URL…
 setView(pendingNav.view);        // …optimistically; resolvePendingNav refines once data lands
