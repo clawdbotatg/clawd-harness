@@ -32,6 +32,14 @@
 >   see "the two trust gates" and "the output_text trap" below
 > - ❓ still open: whether scrollback is usable in practice (gap 1), and a
 >   re-check of the transcript view after the text-parts fix
+> - ❓ **external projects' standing rule on codex is UNVERIFIED** (2026-08-22).
+>   claude gets `Project.standing_rule` as `--append-system-prompt`; codex has
+>   no such flag, so `CodexEngine.hook_setup` writes it to
+>   `<repo>/AGENTS.override.md` (rule + the repo's own AGENTS.md, excluded via
+>   `.git/info/exclude`). That filename comes from codex's docs (an override
+>   beside AGENTS.md takes precedence), not from a run here — if a codex
+>   session in an external project pushes main, this is the first suspect.
+>   Until checked, prefer claude for external-repo work.
 >
 > ### The two trust gates (found the hard way, 2026-08-07)
 >

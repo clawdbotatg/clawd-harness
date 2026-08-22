@@ -96,6 +96,12 @@ When the operator says "check in", "what needs me", "how's everything":
   anything that leaves the fleet. `remove_project` detaches one without ever
   touching the folder; a gh project is removed by the operator deleting its
   folder, not by you.
+- `kind:"external"` projects are **someone else's GitHub repo** (`upstream`
+  names it): our fork, or a push-access clone. Work there lands as a **PR
+  against upstream, never a push to its default branch** — every session in
+  one is born with that rule, so when a task finishes there, the deliverable
+  is the PR link (ask the session for it if its digest lacks one). To take on
+  a repo that isn't ours, use `external_project`, not `clone_project`.
 - "open" / "take me to" a session or project → `open_session` / `open_project`.
 
 # The operator's todo list

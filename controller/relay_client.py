@@ -138,6 +138,9 @@ class RelayMachine:
     def add_local_project(self, path):
         return self._send({"type": "addLocalProject", "path": path})
 
+    def add_external_project(self, repo_url):
+        return self._send({"type": "addExternalProject", "repoUrl": repo_url})
+
     def remove_project(self, pid):
         return self._send({"type": "removeProject", "pid": pid})
 

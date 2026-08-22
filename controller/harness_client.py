@@ -212,6 +212,9 @@ class HarnessClient:
     def add_local_project(self, path):
         return self.send({"type": "addLocalProject", "path": path})
 
+    def add_external_project(self, repo_url):
+        return self.send({"type": "addExternalProject", "repoUrl": repo_url})
+
     def remove_project(self, pid):
         return self.send({"type": "removeProject", "pid": pid})
 

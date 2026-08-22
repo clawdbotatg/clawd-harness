@@ -217,6 +217,19 @@ def _make_handler(state):
                 cid, on = f.get("cid"), f.get("on", True)
                 state.set_session(cid, pinned=(1.0 if on else 0.0),
                                   testHint=("go verify it by hand" if on else ""))
+            elif t == "addExternalProject":
+                url = (f.get("repoUrl") or "").rstrip("/")
+                with state.lock:
+                    n = len(state.projects) + 1
+                    pid = f"X{n}"
+                    nm = url.split("/")[-1] or pid
+                    state.projects[pid] = {
+                        "pid": pid, "name": nm, "path": f"/mock/projects/{nm}",
+                        "repoUrl": f"https://github.com/clawdbotatg/{nm}",
+                        "upstream": url, "defaultBranch": "main",
+                        "kind": "external", "status": "ready", "sessionCount": 0,
+                        "busyCount": 0, "waitingCount": 0, "pinned": False}
+                state.broadcast(state.projects_frame())
             elif t == "addLocalProject":
                 path = f.get("path") or ""
                 with state.lock:

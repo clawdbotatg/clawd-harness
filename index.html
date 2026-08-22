@@ -30,6 +30,8 @@
           /* local (private folder) projects: violet where clawdbotatg repos are amber,
              so you always know which world a card/session belongs to */
           --local:#a78bfa; --local-dim:#4c3a78; --local-bg:#120c1e;
+          /* external (someone else's GitHub repo, fork-and-PR discipline): teal */
+          --ext:#4fd1c5; --ext-dim:#27605a; --ext-bg:#081615;
           /* the second engine: codex sessions read green against claude's amber,
              so which CLI you're talking to is never a guess */
           --codex:#4fb477;
@@ -773,6 +775,11 @@
   .scard.local.active { border-color:var(--local); background:#0e0c14; }
   .scount.slocal { color:var(--local); border-color:var(--local-dim); background:var(--local-bg); }
   .scard.local .row { padding-right:20px; }   /* room for the ⏏ eject in the corner */
+  /* external project — a fork (or push-access clone) of someone else's repo */
+  .scard.external { border-color:var(--ext-dim); }
+  .scard.external:hover { border-color:var(--ext); }
+  .scard.external.active { border-color:var(--ext); background:#0a1312; }
+  .scount.sext { color:var(--ext); border-color:var(--ext-dim); background:var(--ext-bg); }
   .scard .row { display:flex; align-items:center; gap:9px; }
   .scard .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }   /* square LED */
   .scard .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
@@ -3281,7 +3288,7 @@ function refreshBreadcrumb(view) {
     if (proj) {
       const p = document.createElement('span'); p.className = 'sd-project';
       const pe = currentProjectEmoji();
-      p.textContent = (currentProjectIsLocal() ? '🔒 ' : '') + (pe ? pe + ' ' : '') + proj + ' ';
+      p.textContent = (currentProjectIsLocal() ? '🔒 ' : currentProjectIsExternal() ? '🔀 ' : '') + (pe ? pe + ' ' : '') + proj + ' ';
       descEl.appendChild(p);
     }
     const t = document.createElement('span'); t.className = 'sd-title'; t.textContent = title;
@@ -3485,6 +3492,12 @@ function currentProjectIsLocal() {
   const p = (projectList || []).find(p => p.pid === currentPid);
   return !!p && p.kind === 'local';
 }
+// …and an external (fork-and-PR) one? Drives the 🔀 badge on the session header.
+function currentProjectIsExternal() {
+  if (FLEET) { const g = unifiedProjects.get(currentProjectKey); return !!g && g.kind === 'external'; }
+  const p = (projectList || []).find(p => p.pid === currentPid);
+  return !!p && p.kind === 'external';
+}
 
 // Rebuild `unifiedProjects` from every machine's cached project list. Counts come
 // straight from each projectMeta (sessionCount/busy/waiting), so this needs only
@@ -3500,9 +3513,10 @@ function mergeProjects() {
     for (const p of (perMachine[mid].projectList || [])) {
       const key = projectKey(p, mid);
       let g = map.get(key);
-      if (!g) { g = { key, name: p.name || '', repoUrl: p.repoUrl || '', kind: p.kind || 'gh', path: p.path || '', pinned: false, lastTouched: 0, emoji: '', emojiVotes: [], machines: [] }; map.set(key, g); }
+      if (!g) { g = { key, name: p.name || '', repoUrl: p.repoUrl || '', kind: p.kind || 'gh', path: p.path || '', upstream: p.upstream || '', pinned: false, lastTouched: 0, emoji: '', emojiVotes: [], machines: [] }; map.set(key, g); }
       if (!g.name && p.name) g.name = p.name;
       if (!g.repoUrl && p.repoUrl) g.repoUrl = p.repoUrl;
+      if (!g.upstream && p.upstream) { g.upstream = p.upstream; g.kind = 'external'; }  // any box holding it as external makes the card external
       if (p.emoji) g.emojiVotes.push([mid, p.emoji]);   // each box badges the repo on its own; elected below
       if (p.pinned) g.pinned = true;
       if ((p.lastTouched || 0) > g.lastTouched) g.lastTouched = p.lastTouched || 0;  // warmth = warmest machine
@@ -3623,7 +3637,7 @@ function projectRows() {
   let rows;
   if (!FLEET) {
     rows = projectList.map(p => ({ id: p.pid, name: p.name, repoUrl: p.repoUrl,
-      kind: p.kind || 'gh', path: p.path || '', emoji: p.emoji || '',
+      kind: p.kind || 'gh', path: p.path || '', emoji: p.emoji || '', upstream: p.upstream || '',
       pinned: p.pinned, sessionCount: p.sessionCount || 0, busyCount: p.busyCount || 0,
       waitingCount: p.waitingCount || 0, status: p.status, error: p.error,
       lastTouched: p.lastTouched || 0, machineCount: 1, online: true }));
@@ -3631,7 +3645,7 @@ function projectRows() {
     rows = [...unifiedProjects.values()].map(g => {
       const def = pickMachineEntry(g);               // counts reflect the machine you'd open (default-machine semantics)
       return { id: g.key, name: g.name, repoUrl: g.repoUrl, pinned: g.pinned,
-        kind: g.kind || 'gh', path: g.path || '', emoji: g.emoji || '',
+        kind: g.kind || 'gh', path: g.path || '', emoji: g.emoji || '', upstream: g.upstream || '',
         sessionCount: def ? def.sessionCount : 0, busyCount: def ? def.busyCount : 0,
         waitingCount: def ? def.waitingCount : 0, status: def ? def.status : '', error: '',
         lastTouched: g.lastTouched || 0,
@@ -3792,6 +3806,21 @@ function addLocalProjectOnMachine(machineId, path) {
   if (!path || !isMachineOnline(machineId)) return;
   hsendTo(machineId, { type: 'addLocalProject', path });
   meta.textContent = `adding local folder on ${machineId}…`;
+}
+// External project: any GitHub repo → the server forks it (or clones it when we
+// already hold push access), adds an `upstream` remote, and every session in it
+// is born with the branch-and-PR rule. Async — status rides the projects frame.
+function addExternalProject(url) {
+  url = (url || '').trim();
+  if (!url) return;
+  hsend({ type: 'addExternalProject', repoUrl: url });
+  meta.textContent = 'checking access + forking/cloning…';
+}
+function addExternalProjectOnMachine(machineId, url) {
+  url = (url || '').trim();
+  if (!url || !isMachineOnline(machineId)) return;
+  hsendTo(machineId, { type: 'addExternalProject', repoUrl: url });
+  meta.textContent = `forking/cloning on ${machineId}…`;
 }
 // Detach a LOCAL project (server refuses the verb for gh projects). The folder on
 // disk is never touched — this only forgets the registry entry + closes sessions.
@@ -4607,6 +4636,12 @@ function ensureProjectChrome() {
   const cloneBtn = document.createElement('button'); cloneBtn.textContent = '⤓ clone URL';
   const localBtn = document.createElement('button'); localBtn.textContent = '📁 local path';
   localBtn.title = 'register an existing folder on the machine — private, never touches GitHub';
+  // external: someone else's GitHub repo. The server forks it (or clones it
+  // when we already hold push access) and every session in it is born with
+  // the branch-and-PR rule — work lands as a PR against upstream, never a
+  // push to the default branch.
+  const extBtn = document.createElement('button'); extBtn.textContent = '🔀 external';
+  extBtn.title = 'fork (or clone, if we can push) any GitHub repo — sessions work on branches and open PRs against upstream, never push its default branch';
   const submit = (kind) => {
     const val = inp.value;
     if (FLEET && kind === 'local' && !projMachine) {
@@ -4614,19 +4649,26 @@ function ensureProjectChrome() {
       meta.textContent = 'pick a machine in the dropdown first — a local path lives on one box';
       return;
     }
+    if (kind === 'external' && !/github\.com|^[\w.-]+\/[\w.-]+$/.test(val.trim())) {
+      meta.textContent = 'external needs a GitHub URL (or owner/repo) — the fork/PR flow is gh-driven';
+      return;
+    }
     if (FLEET && projMachine) {
       if (!isMachineOnline(projMachine)) { meta.textContent = `${projMachine} is offline`; return; }
       if (kind === 'create') createProjectOnMachine(projMachine, val);
       else if (kind === 'local') addLocalProjectOnMachine(projMachine, val);
+      else if (kind === 'external') addExternalProjectOnMachine(projMachine, val);
       else cloneProjectOnMachine(projMachine, val);
     } else if (kind === 'create') createProject(val);
     else if (kind === 'local') addLocalProject(val);
+    else if (kind === 'external') addExternalProject(val);
     else addProjectFromUrl(val);
     setProjectFilter(''); applyProjectFilter();
   };
   createBtn.onclick = () => submit('create');
   cloneBtn.onclick = () => submit('clone');
   localBtn.onclick = () => submit('local');
+  extBtn.onclick = () => submit('external');
   inp.addEventListener('input', () => { projectFilter = inp.value; applyProjectFilter(); });
   inp.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
@@ -4636,7 +4678,7 @@ function ensureProjectChrome() {
   });
   add.appendChild(inp);
   if (projMachineSel) add.appendChild(projMachineSel);
-  arow.appendChild(createBtn); arow.appendChild(cloneBtn); arow.appendChild(localBtn);
+  arow.appendChild(createBtn); arow.appendChild(cloneBtn); arow.appendChild(localBtn); arow.appendChild(extBtn);
   add.appendChild(arow);
   projectsEl.appendChild(add);
 
@@ -4684,7 +4726,7 @@ function fillProjectCard(card, p, selId) {
   const offline = FLEET && !p.online;         // every machine hosting this project is offline
   card.className = 'scard' + (p.id === selId ? ' active' : '') +
                    (busyP ? ' cloning' : errP ? ' error' : '') + (offline ? ' offline' : '') +
-                   (p.kind === 'local' ? ' local' : '');
+                   (p.kind === 'local' ? ' local' : p.kind === 'external' ? ' external' : '');
   card.onclick = (!busyP && !errP && !offline) ? () => selectProject(p.id) : null;
 
   const frag = document.createDocumentFragment();
@@ -4706,6 +4748,14 @@ function fillProjectCard(card, p, selId) {
     const tag = document.createElement('span');
     tag.className = 'scount slocal'; tag.textContent = '🔒 local';
     tag.title = 'local folder — private, never touches GitHub or any git remote';
+    row.appendChild(tag);
+  }
+  if (p.kind === 'external') {
+    const tag = document.createElement('span');
+    tag.className = 'scount sext'; tag.textContent = '🔀 external';
+    const forked = !!p.upstream && normRepo(p.upstream) !== normRepo(p.repoUrl);
+    tag.title = (forked ? 'our fork of ' : 'push-access clone of ') + (p.upstream || 'an external repo') +
+                ' — sessions branch + open PRs against upstream, never push its default branch';
     row.appendChild(tag);
   }
   if (p.machineCount > 1) {                    // multi-machine project: surface the fan-out
@@ -4745,6 +4795,12 @@ function fillProjectCard(card, p, selId) {
     const desc = document.createElement('div');
     desc.className = 'sdesc'; desc.textContent = sub;
     frag.appendChild(desc);
+  }
+  if (p.kind === 'external' && p.upstream && normRepo(p.upstream) !== normRepo(p.repoUrl)) {
+    // fork: name where the PRs go, since origin (above) is only our copy
+    const up = document.createElement('div');
+    up.className = 'sdesc'; up.textContent = 'PRs → ' + p.upstream;
+    frag.appendChild(up);
   }
   if (p.kind === 'local' && !busyP) {
     // eject: detach the registry entry (folder untouched) — locals only;
@@ -7252,7 +7308,7 @@ function renderSpotlight() {
     r.className = 'spotrow' + (i === spotSel ? ' sel' : '');
     const nm = document.createElement('span'); nm.className = 'sname'; nm.textContent = p.name;
     const mt = document.createElement('span'); mt.className = 'smeta2';
-    mt.textContent = [p.kind === 'local' ? '🔒 local' : '',
+    mt.textContent = [p.kind === 'local' ? '🔒 local' : p.kind === 'external' ? '🔀 external' : '',
                       p.pinned ? 'this app'
                                : (FLEET && p.machineName ? p.machineName.replace(/^clawd-/, '') : ''),
                       `${p.sessionCount || 0} sess`].filter(Boolean).join(' · ');

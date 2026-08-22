@@ -19,7 +19,8 @@ import urllib.parse
 
 WRITE_VERBS = {"assign", "ask", "answer_prompt", "interrupt",
                "create_project", "clone_project", "spawn", "close",
-               "start_pipeline", "pin", "add_local_project", "remove_project"}
+               "start_pipeline", "pin", "add_local_project", "remove_project",
+               "external_project"}
 
 # Engines a session can run under (server.py ENGINES). A missing/unknown value
 # means claude everywhere — old registry rows and pre-engine harnesses.
@@ -1009,6 +1010,26 @@ class Verbs:
                     "pinned": bool(on)}
         return self._gate("pin", {"machine": machine, "cid": cid, "on": bool(on),
                                   "confirm": confirm}, do)
+
+    def external_project(self, machine, repo_url, confirm=False):
+        """Adopt SOMEONE ELSE'S GitHub repo as an **external project** on that
+        machine: the harness forks it (or clones it when we already hold push
+        access), adds an `upstream` remote, fast-forwards the default branch
+        from upstream at every spawn, and every session in it is born with a
+        standing rule — never push the default branch, work on a branch, open
+        a PR against upstream, report the PR link. Use this (not clone_project)
+        for any repo that isn't ours to push to."""
+        def do():
+            c = self.clients.get(machine)
+            if not c:
+                return {"ok": False, "error": f"no such machine: {machine}"}
+            return {"ok": c.add_external_project(repo_url), "machine": machine,
+                    "repo": repo_url,
+                    "note": "async: the card goes cloning → ready (or error with "
+                            "the reason) — re-read get_world; sessions in it "
+                            "land work as PRs against upstream"}
+        return self._gate("external_project", {"machine": machine, "repo_url": repo_url,
+                                               "confirm": confirm}, do)
 
     def add_local_project(self, machine, path, confirm=False):
         """Adopt an EXISTING folder on that machine's disk as a **private local

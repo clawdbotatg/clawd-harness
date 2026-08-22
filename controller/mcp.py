@@ -189,6 +189,14 @@ TOOLS = [
         "so pin things that are parked, not mid-thought. WRITE.",
         _S({"machine": _STR, "cid": _STR, "on": _BOOL, "confirm": _BOOL},
            ["machine", "cid"])),
+    ("external_project", "Adopt SOMEONE ELSE'S GitHub repo as an EXTERNAL project "
+        "on that machine: forked if we lack push access (else cloned), `upstream` "
+        "remote added, default branch synced from upstream at every spawn, and "
+        "every session in it carries a standing rule — never push the default "
+        "branch, branch + open a PR against upstream, report the PR link. Use "
+        "this, not clone_project, for any repo that isn't ours. WRITE.",
+        _S({"machine": _STR, "repo_url": _STR, "confirm": _BOOL},
+           ["machine", "repo_url"])),
     ("add_local_project", "Adopt an existing folder on that machine's disk as a "
         "PRIVATE local project: sessions run in it normally, but the harness "
         "never runs gh/git-remote against it and it has no repo URL. Use when "
@@ -297,6 +305,9 @@ class MCPServer:
         if name == "pin":
             return v.pin(a["machine"], a["cid"], a.get("on", True),
                          a.get("confirm", False))
+        if name == "external_project":
+            return v.external_project(a["machine"], a["repo_url"],
+                                      a.get("confirm", False))
         if name == "add_local_project":
             return v.add_local_project(a["machine"], a["path"],
                                        a.get("confirm", False))

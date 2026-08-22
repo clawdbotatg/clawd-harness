@@ -251,6 +251,29 @@ user-facing overview; this file orients an agent working **on** the code.
   forced `""` in the Project ctor, and its path leaves the machine only inside
   E2E fleet frames. (The session inside it is still a full `claude` agent — the
   guarantee is about the harness, not a sandbox.)
+  **Fourth kind: external repos** (`kind:"external"`, teal, the 🔀 button —
+  2026-08-22): someone else's GitHub repo. `addExternalProject{repoUrl}` runs
+  one `gh repo view --json viewerPermission,…` in the provisioning thread and
+  decides from it: no push access → `gh repo fork <url> --clone` (origin = our
+  fork under `GH_OWNER`, upstream = the source); push access → plain clone
+  with an `upstream` remote added, so every external project has the same
+  remote shape. The project records `upstream` + `default_branch`
+  (`Project.upstream`/`default_branch`, broadcast as `upstream`/
+  `defaultBranch`). Two things then hold for every session in it: **(1) it is
+  born with a standing rule** (`Project.standing_rule` → claude gets it as
+  `--append-system-prompt`, recomputed on every start so handoff/restart
+  respawns carry it; codex gets it as an `AGENTS.override.md` written into
+  the repo + listed in `.git/info/exclude`, never `.gitignore`) — never
+  commit/push the default branch, branch from `upstream/<default>`, push the
+  branch to origin, `gh pr create --repo <upstream>`, report the PR link;
+  **(2) it never starts stale** — `create_session` runs `_external_sync`
+  synchronously before the spawn (`git fetch upstream`; ff-merge the default
+  branch only when it's checked out and clean, nudge the fork's copy along;
+  bounded by `EXTERNAL_SYNC_TIMEOUT`, `EXTERNAL_SYNC=0` opts out). It lives
+  under `projects/` so removal is the gh delete-the-folder contract. Pasting
+  the URL of a repo already cloned as `gh` converts it in place. PM verb:
+  `external_project`. Test: `python3 test_external_project.py` (mocked gh +
+  real temp git repos; nothing leaves the machine).
 - **Accounts (subscription routing):** the harness can hold N Claude
   subscription logins at once — each account = a config dir under
   `~/.clawd-accounts/<name>` (`CLAUDE_CONFIG_DIR` isolates the credential

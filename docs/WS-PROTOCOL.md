@@ -65,6 +65,7 @@ viewer** (each with its own `client.cid`).
 | `createProject` | `name` | Create a new public GitHub repo under `GH_OWNER` and adopt it (async; status broadcasts via `projects`). |
 | `addProject` | `repoUrl` | Clone a repo and adopt it (async). Input normalized: full URL as-is; `owner/repo` and bare `repo` resolved against github.com. |
 | `addLocalProject` | `path` | Register an EXISTING folder anywhere on the machine's disk (absolute or `~` path) as a **private local project** (`kind:"local"`): sessions run inside it like any project, but the harness never runs gh/git-remote operations on it and never stores/broadcasts a repo URL. Synchronous — the project appears `ready` immediately. Rejected (with an `error` frame to the sender) for: non-directories, `/` or `~` itself, paths under `projects/` (auto-managed) or the harness's own dir (the pinned self-project). Re-adding the same resolved path is a no-op. |
+| `addExternalProject` | `repoUrl` | Adopt SOMEONE ELSE'S GitHub repo as an **external project** (`kind:"external"`). Async: the provisioning thread runs `gh repo view --json viewerPermission,defaultBranchRef,…` and decides — no push access → `gh repo fork <url> --clone` (origin = our fork under `GH_OWNER`, `upstream` = the source); push access → plain clone + an `upstream` remote pointing at the same repo, so every external project has the same remote shape. Records `upstream` + `defaultBranch`. Every session spawned in it is born with a standing rule (never commit/push the default branch; branch from `upstream/<default>`; push the branch to origin; `gh pr create --repo <upstream>`; report the PR link), and the server fast-forwards the default branch from upstream before each spawn so sessions never start stale. Lives under `projects/`, so removal is the delete-the-folder contract. Non-GitHub input is rejected with an `error` frame to the sender; re-adding a URL already cloned as a plain `gh` project converts it in place. |
 | `removeProject` | `pid` | Detach a `kind:"local"` project: drop its registry entry and close its sessions. **Never touches the folder on disk.** Silently ignored for gh projects (they keep the delete-the-folder contract below) and the pinned self-project. |
 | `input` | `data`, `cid?` | Raw keystrokes → PTY. `data` is a UTF-8 string (incl. escape seqs for TUI menus). Falls back to `client.cid` if `cid` omitted. |
 | `send` | `text`, `cid?`, `via?` | High-level: type `text`, wait for the paste to settle, then submit `\r`. Use this to "send a message/prompt". Optional `via` tags the send's origin (`"quick"` = a quick-prompt chip tap) for the server's prompt log; omitted = typed. |
@@ -178,8 +179,11 @@ no-op that would leave the previous session's stream flowing (that's how
 ```jsonc
 { "pid", "name", "path", "repoUrl", "status":"ready|cloning|error",
   "error", "sessionCount":int, "busyCount":int, "waitingCount":int,
-  "created":float, "pinned":bool, "kind":"gh|local", "lastTouched":float,
-  "emoji":str }
+  "created":float, "pinned":bool, "kind":"gh|local|external", "lastTouched":float,
+  "emoji":str, "upstream":str, "defaultBranch":str }
+// upstream/defaultBranch: set only for kind:"external" — upstream is the SOURCE
+// repo (where PRs go); repoUrl is where we push (our fork, or the source itself
+// when we hold push access). Both "" on every other kind.
 // kind absent (old server) ⇒ "gh". kind:"local" always has repoUrl:"" —
 // enforced in the Project constructor, a local can never carry a remote URL.
 // emoji = the project's AI-picked 1–3 emoji identity badge; "" until the

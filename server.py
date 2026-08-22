@@ -354,6 +354,23 @@ LOCAL_GONE = float(os.environ.get("LOCAL_GONE", "30"))
 # mount can hang, and reconcile shares the ~1s watch loop with UI reload /
 # restart watching — so locals are only statted every few seconds.
 LOCAL_SCAN_EVERY = float(os.environ.get("LOCAL_SCAN_EVERY", "5"))
+# Project kinds: gh = a clawdbotatg repo (create/clone), local = a private
+# folder registered in place, external = SOMEONE ELSE'S GitHub repo — forked
+# when we lack push access, cloned when we have it; sessions in it are born
+# with a standing branch-and-PR rule (Project.standing_rule) and its default
+# branch is fast-forwarded from upstream at every spawn. An external project
+# lives under projects/ like a gh one, so it keeps the delete-the-folder
+# removal contract.
+PROJECT_KINDS = ("gh", "local", "external")
+# How long a spawn into an external project waits for `git fetch upstream` +
+# the ff merge before giving up and starting the session anyway (stale beats
+# no session). The fetch runs synchronously in the spawn path on purpose: a
+# session that starts working while the fetch is still in flight is the exact
+# "starts stale" the sync exists to prevent.
+EXTERNAL_SYNC_TIMEOUT = float(os.environ.get("EXTERNAL_SYNC_TIMEOUT", "25"))
+# 0 opts out of the spawn-time sync (the standing rule still tells the agent to
+# fetch upstream before branching, so it degrades to "the agent syncs").
+EXTERNAL_SYNC = os.environ.get("EXTERNAL_SYNC", "1") != "0"
 # The harness always offers *itself* as a pinned project (path = HERE, outside
 # PROJECTS_DIR) so you can open a session and live-edit the app you're running.
 # Stable sentinel pid so its sessions resume across restarts; never persisted to
@@ -1646,6 +1663,105 @@ def _remote_repo_exists(slug):
         return False
 
 
+def _normalize_repo_url(raw):
+    """Accept a full git URL/path, an `owner/repo` shorthand, or a bare `repo`
+    name — the latter two resolve against github.com (bare → GH_OWNER), so
+    typing `slop-computer-live` means github.com/clawdbotatg/slop-computer-live."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    if not re.match(r"^(https?://|git@|ssh://|file://|/|~)", raw):
+        raw = (f"https://github.com/{raw}" if "/" in raw
+               else f"https://github.com/{GH_OWNER}/{raw}")
+    return raw
+
+
+# viewerPermission values that mean "we can push" (the rest: TRIAGE, READ, none)
+_GH_PUSH_PERMS = ("ADMIN", "MAINTAIN", "WRITE")
+
+
+def _gh_repo_info(url):
+    """One `gh repo view --json …` for an EXTERNAL add: push access, default
+    branch, canonical slug. Returns (info_dict, "") or (None, error). Kept to
+    a single call because it sits on the user's click — everything the
+    fork-or-clone decision needs rides in this one payload."""
+    fields = "viewerPermission,defaultBranchRef,nameWithOwner,url,isFork,parent"
+    try:
+        r = subprocess.run(["gh", "repo", "view", url, "--json", fields],
+                           capture_output=True, text=True, timeout=25)
+    except Exception as e:
+        return None, f"gh repo view failed: {e}"
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "gh repo view failed").strip()
+        if "auth" in err.lower():
+            err += " (is `gh` authenticated in the server's environment?)"
+        return None, err[-300:]
+    try:
+        j = json.loads(r.stdout or "{}")
+    except Exception as e:
+        return None, f"gh repo view: unreadable JSON ({e})"
+    return {"slug": j.get("nameWithOwner") or "",
+            "url": j.get("url") or url,
+            "push": (j.get("viewerPermission") or "").upper() in _GH_PUSH_PERMS,
+            "perm": j.get("viewerPermission") or "",
+            "default_branch": ((j.get("defaultBranchRef") or {}).get("name") or ""),
+            "is_fork": bool(j.get("isFork"))}, ""
+
+
+def _git(path, *args, timeout=30):
+    """Run one git command in `path`; returns (rc, combined output)."""
+    try:
+        r = subprocess.run(["git", *args], cwd=path, capture_output=True,
+                           text=True, timeout=timeout)
+        return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
+    except Exception as e:
+        return 1, str(e)
+
+
+def _external_sync(path, default_branch, name="", budget=None):
+    """Bring an external project's default branch up to upstream before a
+    session starts in it. Always fetches `upstream` (so `upstream/<default>`
+    is fresh to branch from); fast-forwards the default branch ONLY when it is
+    checked out and clean (a feature branch in progress, or local edits, are
+    left exactly as they are — the rule is "never stale", not "never dirty");
+    and, when we're on a fork, nudges the fork's default branch along too so
+    PR diffs stay minimal. Best-effort throughout: any failure is logged and
+    the session still spawns. Returns a one-line summary for the log."""
+    budget = EXTERNAL_SYNC_TIMEOUT if budget is None else budget
+    tag = f"[project {name or os.path.basename(path)}]"
+    br = default_branch or "main"
+    rc, out = _git(path, "fetch", "upstream", "--prune", timeout=budget)
+    if rc != 0:
+        msg = f"upstream fetch failed: {out[-160:]}"
+        print(f"{tag} sync: {msg}", flush=True)
+        return msg
+    rc, cur = _git(path, "rev-parse", "--abbrev-ref", "HEAD", timeout=5)
+    if rc != 0 or cur != br:
+        msg = f"fetched upstream; on `{cur or '?'}`, left {br} alone"
+        print(f"{tag} sync: {msg}", flush=True)
+        return msg
+    rc, dirty = _git(path, "status", "--porcelain", timeout=10)
+    if rc != 0 or dirty:
+        msg = f"fetched upstream; {br} has local changes, not fast-forwarded"
+        print(f"{tag} sync: {msg}", flush=True)
+        return msg
+    rc, out = _git(path, "merge", "--ff-only", f"upstream/{br}", timeout=30)
+    if rc != 0:
+        msg = f"fetched upstream; {br} diverged from upstream/{br}, not fast-forwarded"
+        print(f"{tag} sync: {msg}", flush=True)
+        return msg
+    moved = "Already up to date" not in out
+    # fork: keep origin/<default> trailing upstream too (best-effort, quiet —
+    # a push rejection here never matters to the session, it's cosmetic)
+    rc, o_url = _git(path, "remote", "get-url", "origin", timeout=5)
+    rc2, u_url = _git(path, "remote", "get-url", "upstream", timeout=5)
+    if moved and rc == 0 and rc2 == 0 and o_url != u_url:
+        _git(path, "push", "origin", br, timeout=30)
+    msg = f"{br} fast-forwarded to upstream/{br}" if moved else f"{br} already at upstream/{br}"
+    print(f"{tag} sync: {msg}", flush=True)
+    return msg
+
+
 # ── project: a git repo under PROJECTS_DIR that sessions run inside ───────────
 class Project:
     """One git repo we drive. Owns no processes itself — it's the workdir N
@@ -1653,14 +1769,19 @@ class Project:
 
     def __init__(self, pid, name, path, repo_url="", status="ready",
                  error="", created=0.0, pinned=False, kind="gh",
-                 emoji="", emoji_at=0.0):
+                 emoji="", emoji_at=0.0, upstream="", default_branch=""):
         self.pid = pid
         self.name = name
         self.path = path                         # abs path to the repo
-        self.kind = kind if kind in ("gh", "local") else "gh"
+        self.kind = kind if kind in PROJECT_KINDS else "gh"
         # local = a private folder registered in place: it must never carry a
         # remote URL, no matter which code path constructs it
         self.repo_url = "" if self.kind == "local" else _scrub_url_creds(repo_url)
+        # external = someone else's GitHub repo (see add_external_project):
+        # `upstream` is the SOURCE repo URL (where PRs go); repo_url is what we
+        # push to (our fork, or the source itself when we hold push access).
+        self.upstream = _scrub_url_creds(upstream) if self.kind == "external" else ""
+        self.default_branch = default_branch if self.kind == "external" else ""
         self.status = status                     # ready | cloning | error
         self.error = error
         self.error_at = 0.0                      # when status flipped to error (in-memory only)
@@ -1675,7 +1796,8 @@ class Project:
         return {"pid": self.pid, "name": self.name, "path": self.path,
                 "repo_url": self.repo_url, "status": self.status,
                 "created": self.created, "kind": self.kind,
-                "emoji": self.emoji, "emoji_at": self.emoji_at}
+                "emoji": self.emoji, "emoji_at": self.emoji_at,
+                "upstream": self.upstream, "default_branch": self.default_branch}
 
     def meta(self, session_count=0, busy_count=0, waiting_count=0, last_touched=0.0):
         return {"pid": self.pid, "name": self.name, "path": self.path,
@@ -1684,7 +1806,58 @@ class Project:
                 "busyCount": busy_count, "waitingCount": waiting_count,
                 "created": self.created, "pinned": self.pinned,
                 "kind": self.kind, "lastTouched": last_touched,
-                "emoji": self.emoji}
+                "emoji": self.emoji,
+                "upstream": self.upstream, "defaultBranch": self.default_branch}
+
+    def is_external(self):
+        return self.kind == "external"
+
+    @staticmethod
+    def _slug(url):
+        """`owner/repo` from a github URL ("" when it isn't one)."""
+        m = re.search(r"github\.com[/:]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", url or "")
+        return f"{m.group(1)}/{m.group(2)}" if m else ""
+
+    def upstream_slug(self):
+        return self._slug(self.upstream)
+
+    def fork_slug(self):
+        return self._slug(self.repo_url)
+
+    def standing_rule(self):
+        """The rule every session in an EXTERNAL project is born with. Written
+        for the agent, not the human: concrete remotes, concrete commands, and
+        the one prohibition that matters — the default branch is read-only."""
+        if not self.is_external():
+            return ""
+        up, mine = self.upstream_slug() or self.upstream, self.fork_slug() or self.repo_url
+        br = self.default_branch or "main"
+        forked = bool(up) and up != mine
+        head = f"{mine.split('/')[0]}:<branch>" if forked and "/" in mine else "<branch>"
+        where = (f"a FORK (`origin` = {mine}) of the upstream repo `upstream` = {up}"
+                 if forked else f"the upstream repo {up} (`origin`; you have push access)")
+        return (
+            "# External repo — standing rule (injected by the clawd harness)\n"
+            f"This working directory is {where}. The upstream default branch is `{br}`.\n"
+            "\n"
+            f"- NEVER commit to or push `{br}` (or any upstream branch directly). "
+            f"`{br}` is read-only here: it tracks `upstream/{br}` and the harness "
+            "fast-forwards it from upstream at every session start.\n"
+            f"- ALWAYS work on a feature branch cut from `upstream/{br}`: "
+            f"`git fetch upstream && git switch -c <branch> upstream/{br}`. "
+            f"If you find yourself on `{br}` with changes, move them to a branch "
+            f"(`git switch -c <branch>`) before committing.\n"
+            "- Push the branch to `origin` (`git push -u origin <branch>`) and open a "
+            f"pull request against upstream: `gh pr create --repo {up} --base {br} "
+            f"--head {head} --title ... --body ...`. One PR per task; push further "
+            "commits to the same branch to update it.\n"
+            "- When the work is done, REPORT THE PR LINK (the `https://github.com/.../pull/N` "
+            "URL `gh pr create` prints) in your final message. Work that isn't in a PR "
+            "isn't done.\n"
+            "- Do not merge your own PR, do not force-push shared branches, and do not "
+            "rewrite history that has already been pushed.\n"
+            "- Follow the upstream repo's own CONTRIBUTING / AGENTS / CLAUDE guidance "
+            "where it exists; this rule only adds the branch-and-PR discipline.\n")
 
 
 # ── Engines: what differs between one agent CLI and another ───────────────────
@@ -1735,9 +1908,17 @@ class ClaudeEngine(Engine):
     resume_gate_key = b"\r"                  # verified: CR → "❯ /compact" → Compacting…
 
     def argv(self, s):
-        return [self.bin,
+        argv = [self.bin,
                 ("--resume" if s.resuming else "--session-id"), s.session_id,
                 "--settings", s.settings_path]
+        rule = s.standing_rule()
+        if rule:
+            # External project: the branch-and-PR rule rides as an appended
+            # SYSTEM prompt — above CLAUDE.md, survives compaction, touches no
+            # file in the (someone else's) repo. Recomputed on every start, so
+            # a handoff/restart respawn carries it too.
+            argv += ["--append-system-prompt", rule]
+        return argv
 
     def env(self, s, env):
         # Claude Code can render its whole TUI in the ALTERNATE screen buffer —
@@ -1828,6 +2009,17 @@ class CodexEngine(Engine):
     def hook_setup(self, s):
         _ensure_codex_hooks()
         _ensure_codex_trusted(s.workdir())
+        rule = s.standing_rule()
+        if rule:
+            # codex has no --append-system-prompt; its project instructions
+            # come from AGENTS.md in the cwd, and an AGENTS.override.md beside
+            # it takes precedence. We write the rule there (prefixed to the
+            # repo's own AGENTS.md text, so nothing upstream wrote is lost) and
+            # hide it from git via .git/info/exclude — never .gitignore, which
+            # would be a change to someone else's repo. See docs/CODEX-ENGINE.md
+            # ("what isn't verified") — the override filename is from codex's
+            # docs, not observed here.
+            _ensure_codex_external_doc(s.workdir(), rule)
         return None
 
     def transcript_globs(self, s):
@@ -1843,6 +2035,54 @@ class CodexEngine(Engine):
 
 
 ENGINES = {"claude": ClaudeEngine(), "codex": CodexEngine()}
+
+
+_EXT_DOC_MARK = "<!-- clawd-harness external-project rule; regenerated each spawn -->"
+
+
+def _ensure_codex_external_doc(path, rule):
+    """Write `<repo>/AGENTS.override.md` = our standing rule + the repo's own
+    AGENTS.md (if any), and list it in .git/info/exclude so no `git add -A`
+    in the session can sweep it into a PR. Refuses to touch a file the repo
+    itself tracks under that name (someone else's override is not ours to
+    rewrite) — logged, the session then runs without the codex-side rule."""
+    try:
+        doc = os.path.join(path, "AGENTS.override.md")
+        rc, tracked = _git(path, "ls-files", "--error-unmatch", "AGENTS.override.md",
+                           timeout=5)
+        if rc == 0:
+            print(f"[external] {path}: AGENTS.override.md is tracked upstream — "
+                  "not overwriting; codex session runs WITHOUT the PR rule", flush=True)
+            return False
+        own = ""
+        agents = os.path.join(path, "AGENTS.md")
+        if os.path.isfile(agents):
+            with open(agents, encoding="utf-8", errors="replace") as f:
+                own = f.read()
+        body = _EXT_DOC_MARK + "\n" + rule + ("\n\n---\n\n" + own if own.strip() else "")
+        tmp = doc + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.replace(tmp, doc)
+        # .git may be a FILE for a linked worktree — resolve the real git dir
+        rc, gitdir = _git(path, "rev-parse", "--git-common-dir", timeout=5)
+        if rc == 0 and gitdir:
+            gitdir = gitdir if os.path.isabs(gitdir) else os.path.join(path, gitdir)
+            info = os.path.join(gitdir, "info")
+            os.makedirs(info, exist_ok=True)
+            excl = os.path.join(info, "exclude")
+            have = ""
+            if os.path.isfile(excl):
+                with open(excl, encoding="utf-8", errors="replace") as f:
+                    have = f.read()
+            if "AGENTS.override.md" not in have:
+                with open(excl, "a", encoding="utf-8") as f:
+                    f.write(("" if have.endswith("\n") or not have else "\n")
+                            + "AGENTS.override.md\n")
+        return True
+    except Exception as e:
+        print(f"[external] {path}: could not write AGENTS.override.md: {e}", flush=True)
+        return False
 
 
 def _codex_hook_command():
@@ -2292,6 +2532,18 @@ class ClaudeSession:
         """Where this session's claude runs — its project's repo path."""
         proj = self.manager.projects.get(self.pid)
         return proj.path if proj else WORKDIR
+
+    def project(self):
+        return self.manager.projects.get(self.pid)
+
+    def standing_rule(self):
+        """The project-level rule this session is born with ("" for most
+        projects; the branch-and-PR rule for kind="external"). Ceremony
+        sessions are exempt — a sign-in screen needs no git discipline."""
+        if self.ceremony:
+            return ""
+        proj = self.project()
+        return proj.standing_rule() if proj else ""
 
     def _fallback_title(self):
         if self.first_prompt:
@@ -3720,7 +3972,9 @@ class SessionManager:
                         path=e["path"], repo_url=repo_url,
                         status=e.get("status", "ready") if e.get("status") != "cloning" else "ready",
                         created=e.get("created", 0.0), kind=kind,
-                        emoji=e.get("emoji", ""), emoji_at=e.get("emoji_at", 0.0))
+                        emoji=e.get("emoji", ""), emoji_at=e.get("emoji_at", 0.0),
+                        upstream=e.get("upstream", ""),
+                        default_branch=e.get("default_branch", ""))
             if missing:
                 p.status, p.error, p.error_at = "error", "folder missing", time.time()
             self.projects[p.pid] = p
@@ -5315,10 +5569,7 @@ class SessionManager:
         `owner/repo` shorthand, or a bare `repo` name — the latter two are
         resolved against github.com (bare names assume GH_OWNER), so typing
         `slop-computer-live` clones github.com/clawdbotatg/slop-computer-live."""
-        repo_url = (repo_url or "").strip()
-        if not re.match(r"^(https?://|git@|ssh://|file://|/|~)", repo_url):
-            repo_url = (f"https://github.com/{repo_url}" if "/" in repo_url
-                        else f"https://github.com/{GH_OWNER}/{repo_url}")
+        repo_url = _normalize_repo_url(repo_url)
         base = _safe_name(re.sub(r"\.git$", "", repo_url.rstrip("/").split("/")[-1]))
         existing = self._readopt(base)
         if existing:
@@ -5334,6 +5585,127 @@ class SessionManager:
         threading.Thread(target=self._provision, args=(p, cmd, "clone"),
                          daemon=True).start()
         return p
+
+    def add_external_project(self, raw):
+        """Adopt SOMEONE ELSE'S GitHub repo as a kind="external" project. The
+        fork-or-clone decision is `gh repo view`'s viewerPermission: no push
+        access → `gh repo fork --clone` (origin = our fork, upstream = the
+        source); push access → a plain clone with an `upstream` remote added
+        so every external project has the same remote shape. Either way the
+        project records the upstream URL + default branch, every session in
+        it is born with Project.standing_rule, and its default branch is
+        synced from upstream at each spawn. The gh call and the clone both
+        run in the provisioning thread (status cloning → ready|error), so the
+        click returns immediately. Returns (project, "") or (None, error).
+
+        Re-adding a URL whose folder is already a project: an external one is
+        simply returned; a plain `gh` clone at that path is CONVERTED in
+        place (kind flipped, upstream remote ensured) — the user asked for the
+        PR discipline on this repo, and the folder is the same repo."""
+        url = _normalize_repo_url(raw)
+        if not url:
+            return None, "empty URL"
+        if not re.search(r"github\.com[/:]", url):
+            return None, ("external needs a GitHub URL (or owner/repo) — the "
+                          "fork/PR flow is `gh`-driven")
+        base = _safe_name(re.sub(r"\.git$", "", url.rstrip("/").split("/")[-1]))
+        path = str(PROJECTS_DIR / base)
+        want = Project._slug(url).lower()
+        collide = False                          # name taken by a DIFFERENT repo
+        with self.lock:
+            for p in list(self.projects.values()):
+                if p.path != path:
+                    continue
+                if p.kind == "external" and p.status != "error":
+                    # same repo (by upstream OR by our fork's URL) → reuse it;
+                    # a different owner's repo that merely shares the name
+                    # gets its own folder below (`name-2`)
+                    if want in (p.upstream_slug().lower(), p.fork_slug().lower()):
+                        return p, ""
+                    collide = True
+                    break
+                if p.status == "error" and not os.path.isdir(path):
+                    self.projects.pop(p.pid, None)   # failed corpse → retry fresh
+                    break
+                if p.kind == "gh" and p.status == "ready":
+                    p.kind, p.upstream = "external", url
+                    print(f"[project {p.name}] gh clone converted to external "
+                          f"(upstream {url})", flush=True)
+                    threading.Thread(target=self._provision_external,
+                                     args=(p, url, False), daemon=True).start()
+                    return p, ""
+                return None, f"{base} is already a {p.kind} project here"
+        present = (os.path.isdir(path) and bool(os.listdir(path))
+                   and not collide)             # adopt a stray folder in place…
+        safe = base if present else self._unique_project_name(base)   # …else name-2
+        path = str(PROJECTS_DIR / safe)
+        p = Project(pid=str(uuid.uuid4()), name=safe, path=path, repo_url=url,
+                    status="cloning", created=time.time(), kind="external",
+                    upstream=url)
+        with self.lock:
+            self.projects[p.pid] = p
+        self.broadcast_projects()
+        threading.Thread(target=self._provision_external,
+                         args=(p, url, not present), daemon=True).start()
+        return p, ""
+
+    def _provision_external(self, project, url, clone):
+        """Provisioning thread for add_external_project: gh view → fork or
+        clone (when `clone`; an existing folder is adopted in place) → ensure
+        the `upstream` remote → record upstream/default branch → ready. Any
+        failure lands the card on error with the reason (the reconcile loop
+        expires a folder-less error entry after ERROR_LINGER, like a failed
+        clone)."""
+        def fail(err):
+            project.status, project.error = "error", (err or "failed")[-300:]
+            project.error_at = time.time()
+            print(f"[project {project.name}] external FAILED: {project.error}",
+                  flush=True)
+            self.save_registry()
+            self.broadcast_projects()
+        info, err = _gh_repo_info(url)
+        if info is None:
+            return fail(err)
+        src = info["url"] or url
+        project.upstream = src
+        project.default_branch = info["default_branch"] or "main"
+        if clone:
+            if info["push"]:
+                cmd = ["git", "clone", src, project.name]
+                how = f"clone (push access: {info['perm']})"
+            else:
+                cmd = ["gh", "repo", "fork", src, "--clone", "--", project.name]
+                how = f"fork (access: {info['perm'] or 'none'})"
+            print(f"[project {project.name}] external → {how}", flush=True)
+            try:
+                r = subprocess.run(cmd, cwd=str(PROJECTS_DIR), capture_output=True,
+                                   text=True, timeout=300)
+            except Exception as e:
+                return fail(str(e))
+            if r.returncode != 0 or not os.path.isdir(os.path.join(project.path, ".git")):
+                e = (r.stderr or r.stdout or "failed").strip()
+                if "auth" in e.lower():
+                    e += " (is `gh` authenticated in the server's environment?)"
+                return fail(e)
+        elif not os.path.isdir(os.path.join(project.path, ".git")):
+            return fail("folder exists but is not a git repo")
+        # remote shape: origin = where we push, upstream = where PRs go
+        rc, have = _git(project.path, "remote", timeout=5)
+        remotes = set(have.split()) if rc == 0 else set()
+        if "upstream" not in remotes:
+            _git(project.path, "remote", "add", "upstream", src, timeout=5)
+        else:
+            _git(project.path, "remote", "set-url", "upstream", src, timeout=5)
+        project.repo_url = _git_remote_url(project.path) or src
+        project.status, project.error = "ready", ""
+        forked = Project._slug(project.repo_url) != Project._slug(src)
+        print(f"[project {project.name}] external ok — origin {project.repo_url} "
+              f"({'fork' if forked else 'direct'}), upstream {src}, "
+              f"default {project.default_branch}", flush=True)
+        self.save_registry()
+        self.broadcast_projects()
+        # first sync now, so the first session's spawn-time sync is a no-op
+        _external_sync(project.path, project.default_branch, project.name)
 
     def add_local_project(self, raw):
         """Register an existing folder anywhere on this machine's disk as a
@@ -5488,6 +5860,12 @@ class SessionManager:
         proj = self.projects[pid]
         if proj.kind == "local" and proj.status == "error":
             return None                          # folder missing — Popen on a dead cwd would fail
+        if proj.kind == "external" and proj.status == "ready" and EXTERNAL_SYNC \
+                and not ceremony:
+            # Never start stale: bring the default branch up to upstream
+            # BEFORE the session exists. Synchronous by design (bounded by
+            # EXTERNAL_SYNC_TIMEOUT) — see the knob's comment.
+            _external_sync(proj.path, proj.default_branch, proj.name)
         engine = engine if engine in ENGINES else "claude"
         if not ENGINES[engine].routes_accounts:
             # Engines outside the subscription router (codex) spawn plainly:
@@ -6484,6 +6862,11 @@ class Handler(BaseHTTPRequestHandler):
             if lerr:
                 client.send_json({"type": "error",
                                   "error": f"addLocalProject: {lerr}"})
+        elif t == "addExternalProject":
+            _, xerr = MGR.add_external_project(frame.get("repoUrl", ""))
+            if xerr:
+                client.send_json({"type": "error",
+                                  "error": f"addExternalProject: {xerr}"})
         elif t == "removeProject":
             MGR.remove_project(frame.get("pid"))
         elif t == "restart":
