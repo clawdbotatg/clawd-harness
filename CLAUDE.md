@@ -285,7 +285,13 @@ user-facing overview; this file orients an agent working **on** the code.
   COOL (< `SUB_HOT` 97% — hop at ~3% left; a pool nearing its 5h session
   wall gets no new work) pool whose WEEKLY window resets soonest (use-it-or-lose-it;
   headroom is only the tie-break — see `_route_key`), debounced via `SUB_*`
-  env knobs. **Capacity isn't the only bar: a pool whose plan can't do
+  env knobs. **Freshness ranks, it doesn't filter** (2026-08-22): readings
+  < 3×`USAGE_TTL` are ranked first, but when every fresh pool is hot a
+  stale-but-cool one (< `USAGE_STALE_TRUST`, 12h) is routed to instead of a
+  fresh-but-walled one — heart spawned onto a 100% plan while its only
+  cool pool sat on a 2h-old reading (idle sessions hold the grant, so the
+  poller can't renew its token). `_candidates`/`_pick_pool`;
+  test: `python3 test_stale_route.py`. **Capacity isn't the only bar: a pool whose plan can't do
   **fable** is skipped by every routing decision at any headroom, and idle
   sessions on it are evacuated** (`SUB_REQUIRE_FABLE`, 2026-08-09 — the slop
   org went Opus-only and the router kept picking it *because* it was the

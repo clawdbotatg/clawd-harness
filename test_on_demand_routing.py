@@ -86,6 +86,8 @@ class FakeMgr:
     _route_lock = server.SessionManager._route_lock
     _pool_key = server.SessionManager._pool_key
     _prompt_pool = server.SessionManager._prompt_pool
+    _candidates = server.SessionManager._candidates
+    _pick_pool = server.SessionManager._pick_pool
     _route_decision = server.SessionManager._route_decision
     _routable_first = server.SessionManager._routable_first
     _log_route = server.SessionManager._log_route
@@ -98,6 +100,7 @@ class FakeMgr:
         self.sessions = {s.cid: s for s in sessions}
         self._route_locks = {}
         self._stranded_warned = False
+        self._stale_route_noted = ""
         self.moves = []                       # (cid, src, dst)
         self.handoff_delay = 0.0              # widen the race window in tests
         self.decline_handoff = False

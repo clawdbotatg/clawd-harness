@@ -403,6 +403,15 @@ USAGE_TTL       = float(os.environ.get("USAGE_TTL", "180"))     # s between usag
 # freshness filter. Past it, the pool goes blind and drops from routing until
 # a poll succeeds again — old numbers on a pool under active burn are a guess.
 USAGE_RL_TRUST  = float(os.environ.get("USAGE_RL_TRUST", "1800"))
+# How old a COOL reading may be and still be routed to when every FRESH pool
+# is hot. Freshness is a ranking tier, not a filter (2026-08-22, heart): the
+# 3×TTL filter alone collapsed the candidate set to the fresh-but-dead pools
+# and spawned onto a 100% plan while the one pool with headroom sat at 83%
+# on a 2h-old reading — stale only because its idle sessions hold the grant
+# (single-consumer rule) and never renewed the access token. Root cause v3's
+# symptom, a different cause. A session landing on the stale pool renews
+# the token, so the reading heals itself.
+USAGE_STALE_TRUST = float(os.environ.get("USAGE_STALE_TRUST", "43200"))
 # Local routing rule (direct mode; the fleet relay will own this fleet-wide):
 # among COOL pools (< SUB_HOT below — was < EXHAUSTED until the 07-11 wall
 # incident), spend the one whose WEEKLY window resets soonest — weekly headroom
@@ -3817,6 +3826,7 @@ class SessionManager:
         self.active_account = "default"          # new sessions spawn under this
         self.acct_last_exit = {}                 # account -> ts of last claude exit
         self._stranded_warned = False            # one-shot: fable gate emptied the roster
+        self._stale_route_noted = ""             # last pool routed to on a stale reading (log once)
         self._route_locks = {}                   # cid -> Lock: serializes prompt preflight,
                                                  # so two sends can't race one handoff
         self.last_switch_at = 0.0                # debounce anchor for auto-switch
@@ -4552,28 +4562,73 @@ class SessionManager:
                   "SUB_FABLE_OK=<name> to trust one)", flush=True)
         return list(accounts)
 
+    def _candidates(self):
+        """(fresh, stale_cool): the ready, non-broken accounts that hold a
+        usage reading, split by age. `fresh` (< 3×USAGE_TTL) is what every
+        router path ranks first. `stale_cool` is the fallback tier — readings
+        older than that but younger than USAGE_STALE_TRUST and still under
+        SUB_HOT. A fresh reading that says 100% is *certain* failure; a stale
+        one that said 83% is a good bet and, if wrong, costs one bounce that
+        the tripwires already handle. Filtering the stale tier out entirely
+        is how heart spawned onto a walled plan on 2026-08-22."""
+        now = time.time()
+        with self.lock:
+            have = [a for a in self.accounts.values()
+                    if a.ready and not a.broken
+                    and (a.usage or {}).get("pct") is not None]
+        fresh, stale = [], []
+        for a in have:
+            age = now - (a.usage.get("checkedAt") or 0)
+            if age < 3 * USAGE_TTL:
+                fresh.append(a)
+            elif age < USAGE_STALE_TRUST and a.usage["pct"] < SUB_HOT:
+                stale.append(a)
+        return fresh, stale
+
+    def _pick_pool(self, fresh, stale, key):
+        """min(fresh, key) — unless that pick is hot or incapable and the
+        stale-cool tier holds something better. Logs the stale route once
+        per target (re-armed when a fresh pick resumes), because a stale
+        route is a poller problem announcing itself, not a quiet success."""
+        def ok(a):
+            return (a is not None and a.routable()
+                    and (a.usage or {}).get("pct", 100.0) < SUB_HOT)
+        best = min(self._routable_first(fresh), key=key) if fresh else None
+        if ok(best) or not stale:
+            if best is not None:
+                self._stale_route_noted = ""
+            return best
+        alt = min(self._routable_first(stale), key=key)
+        if not ok(alt) and best is not None:
+            return best
+        if getattr(self, "_stale_route_noted", "") != alt.name:
+            self._stale_route_noted = alt.name
+            age = (time.time() - (alt.usage.get("checkedAt") or 0)) / 60
+            bp = (best.usage or {}).get("pct") if best else None
+            print(f"[accounts] every fresh pool is hot"
+                  f"{f' (best fresh: {best.name} {bp:.0f}%)' if best else ''}"
+                  f" — routing to {alt.name} on a {age:.0f}-min-old reading "
+                  f"({alt.usage['pct']:.0f}%); a session there renews its "
+                  "token and the reading heals", flush=True)
+        return alt
+
     def _best_account(self):
-        """The ready account the router would spend RIGHT NOW, from cached
-        usage that's fresh enough to trust (< 3×USAGE_TTL old): the
+        """The ready account the router would spend RIGHT NOW: the
         non-exhausted pool whose weekly window resets soonest — NOT the most
         headroom (that's only the tie-break; see _route_key), and only from
-        pools the model gate allows (SUB_REQUIRE_FABLE). None when no
-        account qualifies — callers fall back to active_account. This is what
-        routes each NEW session when auto-routing is on: per-spawn choice,
-        not a sticky default.
+        pools the model gate allows (SUB_REQUIRE_FABLE). Fresh readings
+        (< 3×USAGE_TTL) rank first; a stale-but-cool reading is the fallback
+        when every fresh pool is hot (_candidates / _pick_pool). None when no
+        account holds a reading at all — callers fall back to active_account.
+        This is what routes each NEW session when auto-routing is on:
+        per-spawn choice, not a sticky default.
 
         Every handoff path (both rescues, the sweep, the rebalance) picks its
         target through here, so gating this one function is what keeps a
         fable-less pool from being the answer to 'where should this go'."""
-        now = time.time()
-        with self.lock:
-            fresh = [a for a in self.accounts.values()
-                     if a.ready and not a.broken
-                     and (a.usage or {}).get("pct") is not None
-                     and now - (a.usage or {}).get("checkedAt", 0) < 3 * USAGE_TTL]
-        if not fresh:
-            return None
-        return min(self._routable_first(fresh), key=self._route_key).name
+        fresh, stale = self._candidates()
+        best = self._pick_pool(fresh, stale, self._route_key)
+        return best.name if best else None
 
     # -- prompt-time preflight (ON-DEMAND-SUB-ROUTING-PLAN.md, stages 1–2) -----
     # The plan's shape: a prompt is the only proof a session needs a model, so
@@ -4604,25 +4659,24 @@ class SessionManager:
 
     def _prompt_pool(self):
         """Best usable ORGANIZATION pool for a prompt right now, or None when
-        no fresh reading exists (routing on a blind guess is the one thing the
-        plan forbids). Accounts sharing an organizationUuid share one limit,
-        so they collapse to a single representative before ranking — a second
-        config dir is a login alias, never extra capacity."""
-        now = time.time()
-        with self.lock:
-            fresh = [a for a in self.accounts.values()
-                     if a.ready and not a.broken
-                     and (a.usage or {}).get("pct") is not None
-                     and now - (a.usage or {}).get("checkedAt", 0) < 3 * USAGE_TTL]
-        if not fresh:
-            return None
-        pools = {}
-        for a in fresh:
-            k = a.org or ("\x00solo:" + a.name)  # orgless: each dir is its own pool
-            cur = pools.get(k)
-            if cur is None or a.name < cur.name:  # deterministic representative
-                pools[k] = a
-        return min(self._routable_first(list(pools.values())), key=self._pool_key)
+        no reading exists at all (routing on a blind guess is the one thing
+        the plan forbids — a stale-but-cool reading is not blind, see
+        _candidates). Accounts sharing an organizationUuid share one limit,
+        so they collapse to a single representative before ranking — a
+        second config dir is a login alias, never extra capacity."""
+        def collapse(accts):
+            pools = {}
+            for a in accts:
+                k = a.org or ("\x00solo:" + a.name)  # orgless: each dir is its own pool
+                cur = pools.get(k)
+                if cur is None or a.name < cur.name:  # deterministic representative
+                    pools[k] = a
+            return list(pools.values())
+        fresh, stale = self._candidates()
+        # an org with a fresh reading never falls back to a sibling's stale one
+        fresh_orgs = {a.org for a in fresh if a.org}
+        stale = [a for a in stale if a.org not in fresh_orgs]
+        return self._pick_pool(collapse(fresh), collapse(stale), self._pool_key)
 
     def _route_decision(self, s):
         """(decision, target Account|None, reason) for delivering session
@@ -5175,6 +5229,7 @@ class SessionManager:
         if (not best or best.name == s.account
                 or (acct and acct.org and best.org and acct.org == best.org)
                 or (best.usage or {}).get("pct", 100.0) >= SUB_EXHAUSTED):
+            self._stay_put_log(s, best, "prompt bounced off a dead plan")
             self.broadcast_accounts()
             return                               # nowhere better to go — stay put
         s.last_bounce_rescue = time.time()
@@ -5198,6 +5253,22 @@ class SessionManager:
             print(f"[handoff {s.cid[:8]}] redelivering the bounced prompt "
                   f"({len(prompt)} chars) under {fresh.account}", flush=True)
             fresh.send_message(prompt)
+
+    def _stay_put_log(self, s, best, what):
+        """A rescue that found nowhere to go must say so — on 2026-08-22 the
+        limit tripwire fired twice on heart and went silent both times while
+        a cool pool sat one stale reading away. One line, with what the
+        router saw, so the next reader starts at checkedAt ages (the
+        EXPECTATIONS.md debugging rule) instead of at the tripwire."""
+        fresh, stale = self._candidates()
+        def fmt(a):
+            age = (time.time() - (a.usage.get("checkedAt") or 0)) / 60
+            return f"{a.name} {a.usage['pct']:.0f}%/{age:.0f}m"
+        print(f"[session {s.cid[:8]}] {what} on {s.account} — nowhere better "
+              f"to go (router's best: "
+              f"{fmt(best) if best else 'none'}; fresh: "
+              f"{', '.join(map(fmt, fresh)) or '-'}; stale-cool: "
+              f"{', '.join(map(fmt, stale)) or '-'})", flush=True)
 
     def rescue_limit_wall(self, s):
         """The CLI just painted its limit banner in this session's terminal
@@ -5239,6 +5310,7 @@ class SessionManager:
         if (not best or best.name == s.account
                 or (acct and acct.org and best.org and acct.org == best.org)
                 or (best.usage or {}).get("pct", 100.0) >= SUB_EXHAUSTED):
+            self._stay_put_log(s, best, "limit banner confirmed")
             self.broadcast_accounts()
             return                               # nowhere better to go — stay put
         bounced = s.busy and s.hook_count == s.hooks_at_prompt and s.last_prompt.strip()

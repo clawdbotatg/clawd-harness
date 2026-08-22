@@ -52,8 +52,9 @@ def mgr(*accounts):
     m = types.SimpleNamespace(
         accounts={a.name: a for a in accounts},
         lock=server.threading.RLock(),
-        _stranded_warned=False)
-    for meth in ("_route_key", "_routable_first", "_best_account"):
+        _stranded_warned=False, _stale_route_noted="")
+    for meth in ("_route_key", "_routable_first", "_best_account",
+                 "_candidates", "_pick_pool"):
         setattr(m, meth, getattr(server.SessionManager, meth).__get__(m))
     m.KEY_CAP = server.SessionManager.KEY_CAP
     return m

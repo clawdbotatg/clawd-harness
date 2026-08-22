@@ -40,8 +40,10 @@ Austin's direction, after the old bar left ~6% of a weekly window to expire
 unspent. See "the session wall" below.)* Among
 **cool** pools,
 every new session spawns under the one whose **weekly (7d) window resets soonest**, on
-that machine, at that instant (fresh poll, not stale cache; stale = >3×TTL is
-ignored). Rationale, in Austin's words: a 50% pool and a 60% pool are *both
+that machine, at that instant (fresh poll first; a reading older than 3×TTL
+is a **fallback tier**, not ignored — see 2026-08-22 below: when every fresh
+pool is hot, a stale-but-cool pool younger than `USAGE_STALE_TRUST` (12 h)
+is routed to rather than a fresh-but-walled one). Rationale, in Austin's words: a 50% pool and a 60% pool are *both
 eligible* — weekly headroom is use-it-or-lose-it, so **drain the one that
 resets soonest first**; picking by raw headroom spreads load evenly and
 forfeits capacity at every reset. Once a pool's week resets, its clock jumps
@@ -259,6 +261,12 @@ account — the manual re-sign-in):
 | commit | what |
 |---|---|
 | (this) | **hop point retuned 10% → 3% left (Austin):** `SUB_HOT` 90 → 97, `SUB_EXHAUSTED` 95 → 99 (the drained bar must stay above the hot bar or the flee-to-merely-hot band inverts). Trigger: austingriffith sat HOT at 6% left with its weekly reset 29h out — the old bar forfeited that headroom by design. Trade-off accepted: thinner margin means the endgame poll + banner/bounce/watchdog rescues carry more of the never-see-a-rate-limit load |
+
+**2026-08-22** (heart — promise 3 breached on a box with headroom):
+
+| commit | what |
+|---|---|
+| (this) | **freshness is a ranking tier, not a filter.** A ＋ new session on heart spawned onto the `clawd` dir (the EF org, polled at **100%** seconds earlier) and painted "You've hit your weekly limit"; `try again` bounced too; `_scan_for_limit` fired twice and went **silent**. The one pool on the box with headroom — `sub3` (clawd org, 83%) — had a reading **1.8 h old**: its 7 sessions were idle, and under the single-consumer rule the poller only uses the stored access token for an account with live sessions, which had expired and nothing renewed it ("access token stale — a live claude session renews it on its next turn" — true, and useless while they idle). `_best_account` / `_prompt_pool` filtered it out as stale, the candidate set collapsed to {EF 100%, slop 99%}, and every path — spawn, prompt preflight ("current plan drained but nowhere usable to go"), `rescue_limit_wall` — picked a dead pool or stayed put. Root cause v3's **symptom** with a new cause; v3's own debugging rule (check `checkedAt` ages first) found it in one read. Fix: `_candidates()` splits ready pools into fresh (< 3×TTL) and **stale-cool** (< `USAGE_STALE_TRUST`, < `SUB_HOT`); `_pick_pool` takes the fresh best unless it's hot/incapable and a stale-cool pool exists — a fresh 100% is *certain* failure, a stale 83% is a good bet whose worst case is one bounce the tripwires already handle, and the session that lands there renews the token so the reading heals itself. Logged once per stale target (`every fresh pool is hot — routing to sub3 on a 110-min-old reading`). Both rescues now log their stay-put instead of returning silently (`nowhere better to go (router's best: …; fresh: …; stale-cool: …)`). Test: `test_stale_route.py` (the incident verbatim + the bounds). Rule restated: **the 3×TTL bar decides which reading to trust FIRST, never whether a cool pool exists at all** |
 
 **End-state verified 2026-07-09 afternoon:** all four pools (austingriffith
 20x · Ethereum Foundation 5x · clawd 20x · slop 5x) live with real numbers
@@ -580,8 +588,11 @@ is.
    — did the router try? what did it see?
 3b. **Routing to the wrong pool specifically:** check usage `checkedAt`
    ages in `.clawd-harness.sessions.json` before reading any routing code —
-   stale snapshots (> ~9 min) silently drop accounts from the candidate
-   set (root cause v3). A wall of `refresh blocked in transit (HTTP 429)`
+   stale snapshots (> ~9 min) rank BELOW fresh ones and, since 2026-08-22,
+   are only routed to when every fresh pool is hot (the log says so:
+   `every fresh pool is hot — routing to … on a N-min-old reading`); a
+   stale-cool pool more than `USAGE_STALE_TRUST` (12 h) old is dropped
+   entirely (root cause v3). A wall of `refresh blocked in transit (HTTP 429)`
    lines = the refresh client is being identity-blocked again.
 3c. **A rate limit was SEEN (banner flashed / message bounced):** grep the
    log for which layer caught it, in order — `limit banner in the PTY`
