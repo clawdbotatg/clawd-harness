@@ -5779,19 +5779,25 @@ class SessionManager:
         # first sync now, so the first session's spawn-time sync is a no-op
         _external_sync(project.path, project.default_branch, project.name)
 
-    def add_local_project(self, raw):
-        """Register an existing folder anywhere on this machine's disk as a
-        PRIVATE local project (kind="local"): sessions run inside it like any
+    def add_local_project(self, raw, create=False):
+        """Register a folder anywhere on this machine's disk as a PRIVATE
+        local project (kind="local"): sessions run inside it like any
         project, but the harness never runs gh/git-remote operations on it and
         never stores/broadcasts a repo URL for it. Lives only in the registry
         (it can't be disk-discovered); removed via removeProject, never by the
-        disk reconcile. Returns (project, "") or (None, error)."""
+        disk reconcile.
+
+        The folder normally must already exist. A MISSING path is answered
+        with the sentinel error "confirm_create:<abspath>" (the WS handler
+        turns it into a `localProjectMissing` frame; the UI shows an
+        are-you-sure naming the absolute path + machine); the retry with
+        create=True then mkdir -p's it and registers it. Every path guard
+        runs BEFORE any mkdir, so create can never be talked into /, ~,
+        projects/ or the harness dir. Returns (project, "") or (None, err)."""
         raw = (raw or "").strip()
         if not raw:
             return None, "empty path"
         path = os.path.realpath(os.path.expanduser(raw))
-        if not os.path.isdir(path):
-            return None, f"not a directory: {path}"
         home = os.path.realpath(os.path.expanduser("~"))
         if path in ("/", home):
             return None, "refusing to register / or your home folder itself"
@@ -5801,6 +5807,16 @@ class SessionManager:
         here = os.path.realpath(str(HERE))
         if path == here or path.startswith(here + os.sep):
             return None, "that's the harness itself (the pinned project)"
+        if not os.path.isdir(path):
+            if os.path.exists(path):
+                return None, f"exists but is not a directory: {path}"
+            if not create:
+                return None, f"confirm_create:{path}"
+            try:
+                os.makedirs(path, exist_ok=True)
+            except OSError as e:
+                return None, f"mkdir failed: {e}"
+            print(f"[project] created local folder {path}", flush=True)
         with self.lock:
             for p in self.projects.values():
                 if os.path.realpath(p.path) == path:
@@ -6930,8 +6946,14 @@ class Handler(BaseHTTPRequestHandler):
         elif t == "addProject":
             MGR.add_project(frame.get("repoUrl", ""))
         elif t == "addLocalProject":
-            _, lerr = MGR.add_local_project(frame.get("path", ""))
-            if lerr:
+            _, lerr = MGR.add_local_project(frame.get("path", ""),
+                                            create=bool(frame.get("create")))
+            if lerr.startswith("confirm_create:"):
+                # missing folder → let the human decide; the UI confirms the
+                # absolute path + machine, then retries with create:true
+                client.send_json({"type": "localProjectMissing",
+                                  "path": lerr.split(":", 1)[1]})
+            elif lerr:
                 client.send_json({"type": "error",
                                   "error": f"addLocalProject: {lerr}"})
         elif t == "addExternalProject":

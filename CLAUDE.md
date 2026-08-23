@@ -241,9 +241,13 @@ user-facing overview; this file orients an agent working **on** the code.
   one you delete its repo folder under `projects/` yourself and the reconcile
   loop follows within ~1s (the pinned self-project lives outside `projects/`, so
   it's never touched). **Third kind: local private projects** (`kind:"local"`,
-  violet in the UI vs the amber that means clawdbotatg repo) — an existing
+  violet in the UI vs the amber that means clawdbotatg repo) — a
   folder anywhere on the machine's disk, registered via `addLocalProject{path}`
-  (the 📁 button). Lives only in the registry (invisible to the disk reconcile),
+  (the 📁 button). A path that doesn't exist yet round-trips a confirm
+  (`localProjectMissing` frame → UI are-you-sure naming the absolute path +
+  machine → retry with `create:true` → `mkdir -p`); every path guard runs
+  before any mkdir, so create can't be aimed at `/`, `~`, `projects/` or the
+  harness dir. Test: `python3 test_local_create.py`. Lives only in the registry (invisible to the disk reconcile),
   detached via `removeProject{pid}` (the card's ⏏ — never touches the folder),
   and never auto-dropped: a missing path flips it to error after `LOCAL_GONE`
   (~30s) and heals when the path returns. Privacy is a **harness-level

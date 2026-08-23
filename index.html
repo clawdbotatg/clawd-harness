@@ -2600,6 +2600,12 @@ function handleMachineJson(machine, m) {
     refreshSessionTag();               // 🔑 tag names the plan, not the folder label
     return;
   }
+  if (m.type === 'localProjectMissing') {
+    // must be handled HERE, not behind the currentMachine gate below — the 📁
+    // add row targets projMachine, which need not be the machine we're viewing.
+    confirmCreateLocal(machine, m.path);
+    return;
+  }
   if (m.type === 'error' && /harness link closed|no local harness/i.test(m.error || '')) {
     // The worker's local harness connection died — the deploy/graceful-restart
     // signature: the worker↔relay socket stays up so nothing else flaps. Re-list
@@ -2925,6 +2931,10 @@ function handleJson(m) {
     meta.textContent = 'session ended';
     setStatus('🔴', 'ended', 'ended');
     showDeadVeil(m.cid, false);      // don't leave a black void with six-point type
+  } else if (m.type === 'localProjectMissing') {
+    // 📁 local path pointed at a folder that doesn't exist → ask, then retry
+    // with create:true (direct mode; the fleet path rides handleMachineJson).
+    confirmCreateLocal(null, m.path);
   } else if (m.type === 'error') {
     // e.g. a subscribe for a cid this box doesn't know (subscribe_client): the
     // server detached us rather than leaking the previous stream — surface it.
@@ -3794,18 +3804,35 @@ function cloneProjectOnMachine(machineId, url) {
   hsendTo(machineId, { type: 'addProject', repoUrl: url });
   meta.textContent = `cloning onto ${machineId}…`;
 }
-// Register an existing folder (an absolute or ~ path on the machine's disk) as a
-// PRIVATE local project — the harness never touches GitHub/git remotes for it.
-function addLocalProject(path) {
+// Register a folder (an absolute or ~ path on the machine's disk) as a PRIVATE
+// local project — the harness never touches GitHub/git remotes for it. A path
+// that doesn't exist yet comes back as `localProjectMissing`; confirmCreateLocal
+// asks, then retries with create:true so the server mkdir -p's it.
+function addLocalProject(path, create) {
   path = (path || '').trim();
   if (!path || !ensureTargetMachine()) return;
-  hsend({ type: 'addLocalProject', path });
+  hsend(create ? { type: 'addLocalProject', path, create: true }
+               : { type: 'addLocalProject', path });
 }
-function addLocalProjectOnMachine(machineId, path) {
+function addLocalProjectOnMachine(machineId, path, create) {
   path = (path || '').trim();
   if (!path || !isMachineOnline(machineId)) return;
-  hsendTo(machineId, { type: 'addLocalProject', path });
+  hsendTo(machineId, create ? { type: 'addLocalProject', path, create: true }
+                            : { type: 'addLocalProject', path });
   meta.textContent = `adding local folder on ${machineId}…`;
+}
+// The server found no folder at the path you typed. Creating a directory on a
+// (possibly remote) box is a real act, so name exactly what and where and make
+// the human say yes before the create:true retry. `machine` is null in direct mode.
+function confirmCreateLocal(machine, path) {
+  if (!path) return;
+  const where = machine ? `on machine "${machine}"` : 'on this machine';
+  if (!confirm(`That folder doesn't exist yet.\n\nCreate ${path}\n(plus any missing parent folders) ${where} and start a private local project inside it?`)) {
+    meta.textContent = 'local project cancelled — nothing created';
+    return;
+  }
+  if (machine) addLocalProjectOnMachine(machine, path, true);
+  else addLocalProject(path, true);
 }
 // External project: any GitHub repo → the server forks it (or clones it when we
 // already hold push access), adds an `upstream` remote, and every session in it
@@ -4635,7 +4662,7 @@ function ensureProjectChrome() {
   const createBtn = document.createElement('button'); createBtn.textContent = '＋ create';
   const cloneBtn = document.createElement('button'); cloneBtn.textContent = '⤓ clone URL';
   const localBtn = document.createElement('button'); localBtn.textContent = '📁 local path';
-  localBtn.title = 'register an existing folder on the machine — private, never touches GitHub';
+  localBtn.title = 'register a folder on the machine — private, never touches GitHub; a missing folder offers to create it';
   // external: someone else's GitHub repo. The server forks it (or clones it
   // when we already hold push access) and every session in it is born with
   // the branch-and-PR rule — work lands as a PR against upstream, never a
