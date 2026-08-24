@@ -130,6 +130,15 @@ launchctl kickstart -k gui/$(id -u)/com.clawd.fleet-worker   # reload to pick it
 The worker prints its identity fingerprint + passkey count at startup; the
 browser shows the worker fingerprint on first pin (verify it once).
 
+**Security keys (YubiKey).** A FIDO2 key is enrolled the same way (create at the
+h.atg.link origin, e.g. from Chromium on a Linux box). Add `"uv": false` to its
+entry to make it **touch-only** (no PIN) — the worker then skips the
+user-verification check for that credential only; platform passkeys keep UV.
+Chromium on Linux needs `libfido2` for the key to show up. **Lost/stolen key:**
+delete its entry from `.clawd-fleet.passkeys.json` on the relay and every worker
+(`python3 -c "import json;p='.clawd-fleet.passkeys.json';c=json.load(open(p));json.dump([x for x in c if x['id']!='<ID>'],open(p,'w'))"`),
+kick the workers — revoked.
+
 ## Tests (from `fleet/`, no browser)
 `cd fleet && python3 test_webauthn.py` · `test_relay_passkey.py` · `fleet_smoke.py`
 · `fleet_proxy_smoke.py` · `test_e2e.py` · `test_e2e_mitm.py` · `test_e2e_interop.py` (needs `node`)

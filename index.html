@@ -2218,7 +2218,10 @@ function e2eGetAssertionNow(machine, challengeBytes) {
   const get = () => navigator.credentials.get({ publicKey: {
     challenge: challengeBytes, rpId: req.rpId || location.hostname,
     allowCredentials: (req.credentialIds || []).map(id => ({ id: b64uDec(id), type: 'public-key' })),
-    userVerification: 'required', timeout: 60000,
+    // 'preferred' (not 'required'): platform passkeys still verify (Face ID); a
+    // touch-only security key enrolled with "uv": false just needs a tap — the
+    // worker enforces UV per credential (fleet/worker.py make_passkey_verifier).
+    userVerification: 'preferred', timeout: 60000,
   } }).then(a => ({ credentialId: b64uEnc(a.rawId), clientDataJSON: b64uEnc(a.response.clientDataJSON),
     authenticatorData: b64uEnc(a.response.authenticatorData), signature: b64uEnc(a.response.signature) }));
   return new Promise((resolve) => {

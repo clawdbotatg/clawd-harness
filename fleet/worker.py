@@ -172,8 +172,10 @@ def _save_passkeys(creds):
 
 def make_passkey_verifier():
     """A WorkerHandshake verify callback: validates a channel-bound assertion
-    against an enrolled credential, requires user-verification (biometric), and
-    enforces sign-count monotonicity. Returns truthy on success."""
+    against an enrolled credential, requires user-verification (biometric/PIN)
+    unless the credential is enrolled with ``"uv": false`` (a touch-only security
+    key — e.g. a PIN-less YubiKey; deleting its entry from the passkeys file revokes
+    it), and enforces sign-count monotonicity. Returns truthy on success."""
     lock = threading.Lock()
 
     def verify(assertion, challenge_bytes):
@@ -186,7 +188,8 @@ def make_passkey_verifier():
             ok, _reason = webauthn.verify_assertion(
                 pubkey, assertion.get("clientDataJSON", ""),
                 assertion.get("authenticatorData", ""), assertion.get("signature", ""),
-                e2emod.b64u(challenge_bytes), RP_ID, ORIGIN, require_uv=True)
+                e2emod.b64u(challenge_bytes), RP_ID, ORIGIN,
+                require_uv=bool(cred.get("uv", True)))
             if not ok:
                 return False
             try:
