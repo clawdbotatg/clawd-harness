@@ -51,6 +51,11 @@
   header { display:flex; align-items:center; gap:11px;
            padding:calc(7px + env(safe-area-inset-top, 0px)) 12px 7px;
            border-bottom:1px solid var(--edge); background:var(--panel); }
+  /* the left cluster (logo · dot · brand · breadcrumb) is the SACRIFICIAL side:
+     it shrinks to nothing and crops so the emoji strip on the right always fits
+     on screen — the icons never overflow, the logo does */
+  #hleft { display:flex; align-items:center; gap:11px; flex:1 1 0; min-width:0; overflow:hidden; }
+  header .hbtn { flex:0 0 auto; }
   #logo { width:22px; height:22px; flex:0 0 auto; display:block; border:1px solid var(--edge); }
   header h1 { font-size:13px; margin:0; font-weight:600; letter-spacing:.5px; text-transform:lowercase; cursor:pointer; }
   header h1:hover { color:var(--accent); }
@@ -553,11 +558,20 @@
   #voicehud .vhp { cursor:pointer; border:none; background:none; font-size:13px;
         padding:0 2px; opacity:.35; filter:grayscale(1); }
   #voicehud .vhp.on { opacity:1; filter:none; }
-  /* mobile: collapse header to icon-only buttons so the bar fits + stops over-scrolling */
+  /* mobile: collapse header to icon-only buttons so the bar fits + stops over-scrolling.
+     Tight gaps/padding: 9 emoji chips must fit a 375px phone with #hleft cropped to 0. */
   @media (pointer: coarse) {
-    header { gap:8px; padding:calc(8px + env(safe-area-inset-top, 0px)) 10px 8px; }
-    .hbtn { padding:6px 8px; }
+    header { gap:6px; padding:calc(8px + env(safe-area-inset-top, 0px)) 8px 8px; }
+    #hleft { gap:6px; }
+    .hbtn { padding:6px 7px; }
     #brand { display:none; }
+  }
+  /* ultra-narrow (320px-class): squeeze harder — every icon still beats the logo */
+  @media (pointer: coarse) and (max-width: 359px) {
+    header { gap:4px; padding-left:6px; padding-right:6px; }
+    #hleft { gap:4px; }
+    .hbtn { padding:5px 5px; }
+    header .bico { font-size:13px; }
   }
   /* projects (top rung) + sessions (next rung): both are scrollable card lists */
   #menu, #projects, #machines, #pinsview, #ironsview, #ironview { flex:1; background:var(--bg); }
@@ -992,11 +1006,12 @@
 <body>
 <div id="app">
   <header>
-    <img id="logo" src="favicon.png" alt="clawd-harness" />
-    <div id="dot"></div>
-    <h1 id="brand" title="All sessions">clawd-harness</h1>
-    <span class="meta" id="meta">connecting…</span>
-    <span class="spacer"></span>
+    <div id="hleft">
+      <img id="logo" src="favicon.png" alt="clawd-harness" />
+      <div id="dot"></div>
+      <h1 id="brand" title="All sessions">clawd-harness</h1>
+      <span class="meta" id="meta">connecting…</span>
+    </div>
     <!-- one control strip, left→right: projects · sessions · machines · subscriptions
          · PM · pins · settings · reload. All the same square emoji chip (.hbtn);
          only 📌 carries a count. -->
