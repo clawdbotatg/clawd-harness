@@ -3835,6 +3835,7 @@ class SessionManager:
         self.all_clients = set()                 # every connected browser
         self.clients_lock = threading.Lock()
         self._projects_sig = None                # last broadcast projects payload (see broadcast_projects)
+        self.irons = {}                          # iid -> iron dict (named group of projects; see iron_create)
         # Graceful self-restart: when a boot-time file (server.py / .env) changes,
         # we flag a pending restart, surface it in every browser, and wait until
         # nothing is MID-TURN before tearing down — so no in-flight turn dies.
@@ -3995,6 +3996,23 @@ class SessionManager:
         se = reg.get("self_emoji") or {}
         self.projects[SELF_PID].emoji = se.get("emoji", "")
         self.projects[SELF_PID].emoji_at = se.get("emoji_at", 0.0)
+
+        # Irons hydrate after the project loop so membership can be validated:
+        # a registry can outlive a repo folder deleted while we were down, and
+        # a pid the project loop dropped must not linger in an iron. An iron
+        # whose pids all vanished is still kept — the grouping (title/desc)
+        # outlives any one repo.
+        for e in reg.get("irons", []):
+            if not isinstance(e, dict) or not e.get("id") or not str(e.get("title", "")).strip():
+                continue
+            iid = str(e["id"])
+            self.irons[iid] = {
+                "id": iid, "title": str(e["title"]).strip()[:80],
+                "desc": str(e.get("desc", ""))[:400],
+                "tags": [str(t)[:24] for t in (e.get("tags") or [])
+                         if str(t).strip()][:8],
+                "pids": [p for p in (e.get("pids") or []) if p in self.projects],
+                "created": e.get("created", 0.0)}
 
         for e in reg.get("accounts", []):
             if not e.get("name"):
@@ -4239,6 +4257,8 @@ class SessionManager:
             with self.lock:
                 p = self.projects.pop(pid, None)
                 cids = [c for c, s in self.sessions.items() if s.pid == pid]
+                if p and self._iron_forget_pid(pid):
+                    self.broadcast_irons()
             if not p:
                 continue
             what = ("failed clone/create entry expired" if p.status == "error"
@@ -4382,7 +4402,8 @@ class SessionManager:
                     "sessions": [s.to_registry() for s in self._ordered()],
                     "accounts": [a.to_registry() for a in self._ordered_accounts()],
                     "active_account": self.active_account,
-                    "last_switch_at": self.last_switch_at}
+                    "last_switch_at": self.last_switch_at,
+                    "irons": [dict(i) for i in self.irons.values()]}
         # Atomic write: a crash/power-cut mid-write must never leave a
         # truncated registry — _read_registry would fall back to {} and the
         # very next save would pave the wreckage over with an empty state
@@ -5841,14 +5862,101 @@ class SessionManager:
                 return False
             self.projects.pop(pid, None)
             cids = [c for c, s in self.sessions.items() if s.pid == pid]
+            iron_changed = self._iron_forget_pid(pid)
         for cid in cids:
             self.close(cid, _broadcast=False)
         print(f"[project {p.name}] local project detached "
               f"(folder untouched: {p.path})", flush=True)
+        if iron_changed:
+            self.broadcast_irons()
         self.save_registry()
         self.broadcast_projects()
         self.broadcast_sessions()
         return True
+
+    # -- irons: named groups of projects ---------------------------------------
+    # An iron ("irons in the fire") bundles projects into one trackable effort:
+    # the UI's iron view shows every session from every member project. Pure
+    # metadata — plain dicts persisted in the registry, one iron per project.
+    # These ops serve DIRECT mode; in fleet mode the browser stores irons
+    # relay-side (they must span machines), so a fleet harness never sees them.
+
+    def irons_meta(self):
+        with self.lock:
+            irons = sorted((dict(i) for i in self.irons.values()),
+                           key=lambda i: i.get("created", 0.0))
+        return {"type": "irons", "irons": irons}
+
+    def broadcast_irons(self):
+        self.broadcast_all(self.irons_meta())
+
+    def iron_create(self, title, desc="", tags=None):
+        title = (title or "").strip()[:80]
+        if not title:
+            return None
+        iron = {"id": uuid.uuid4().hex[:12], "title": title,
+                "desc": (desc or "").strip()[:400],
+                "tags": [t.strip()[:24] for t in (tags or [])
+                         if isinstance(t, str) and t.strip()][:8],
+                "pids": [], "created": time.time()}
+        with self.lock:
+            self.irons[iron["id"]] = iron
+        self.save_registry()
+        self.broadcast_irons()
+        return iron
+
+    def iron_update(self, iid, title=None, desc=None, tags=None):
+        with self.lock:
+            iron = self.irons.get(iid)
+            if not iron:
+                return False
+            if title is not None and title.strip():
+                iron["title"] = title.strip()[:80]
+            if desc is not None:
+                iron["desc"] = desc.strip()[:400]
+            if tags is not None:
+                iron["tags"] = [t.strip()[:24] for t in tags
+                                if isinstance(t, str) and t.strip()][:8]
+        self.save_registry()
+        self.broadcast_irons()
+        return True
+
+    def iron_delete(self, iid):
+        with self.lock:
+            if self.irons.pop(iid, None) is None:
+                return False
+        self.save_registry()
+        self.broadcast_irons()
+        return True
+
+    def iron_assign(self, pid, iid):
+        """Put a project in an iron (iid="" → just remove it from any). One
+        iron per project, so assignment clears it from every other iron."""
+        with self.lock:
+            if pid not in self.projects:
+                return False
+            if iid and iid not in self.irons:
+                return False
+            for iron in self.irons.values():
+                if pid in iron["pids"] and iron["id"] != iid:
+                    iron["pids"].remove(pid)
+            if iid:
+                tgt = self.irons[iid]
+                if pid not in tgt["pids"]:
+                    tgt["pids"].append(pid)
+        self.save_registry()
+        self.broadcast_irons()
+        return True
+
+    def _iron_forget_pid(self, pid):
+        """Drop a vanished project from every iron. Caller (reconcile /
+        remove_project) owns save + broadcast. Returns True if anything moved."""
+        changed = False
+        for iron in self.irons.values():
+            if pid in iron["pids"]:
+                iron["pids"].remove(pid)
+                changed = True
+        return changed
 
     def _provision(self, project, cmd, kind):
         """Run a clone/create in PROJECTS_DIR, then flip the project's status."""
@@ -6222,6 +6330,7 @@ class SessionManager:
                           "sessions": self.sessions_meta(),
                           "current": self.default_cid()})
         client.send_json(self.accounts_meta())
+        client.send_json(self.irons_meta())
         if self.restart_pending:                 # a late joiner still sees the banner
             client.send_json(self.restart_state())
 
@@ -6921,6 +7030,7 @@ class Handler(BaseHTTPRequestHandler):
             client.send_json({"type": "sessions",
                               "sessions": MGR.sessions_meta(),
                               "current": MGR.default_cid()})
+            client.send_json(MGR.irons_meta())
         elif t == "new":
             s = MGR.create_session(frame.get("pid"),
                                    account=frame.get("account"),
@@ -6963,6 +7073,18 @@ class Handler(BaseHTTPRequestHandler):
                                   "error": f"addExternalProject: {xerr}"})
         elif t == "removeProject":
             MGR.remove_project(frame.get("pid"))
+        elif t == "ironCreate":
+            it = MGR.iron_create(frame.get("title", ""), frame.get("desc", ""),
+                                 frame.get("tags") or [])
+            if it and frame.get("pid"):          # picker's create-and-assign
+                MGR.iron_assign(frame.get("pid"), it["id"])
+        elif t == "ironUpdate":
+            MGR.iron_update(frame.get("id"), title=frame.get("title"),
+                            desc=frame.get("desc"), tags=frame.get("tags"))
+        elif t == "ironDelete":
+            MGR.iron_delete(frame.get("id"))
+        elif t == "ironAssign":
+            MGR.iron_assign(frame.get("pid"), frame.get("iron") or "")
         elif t == "restart":
             # force=True is the banner's "restart now" — a deliberate human act
             # that accepts cutting whatever the banner just told them is running.

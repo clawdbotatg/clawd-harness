@@ -192,6 +192,18 @@ user-facing overview; this file orients an agent working **on** the code.
   and hang-up stops the mic. `/pm/*`, `api.openai.com`, `getUserMedia`, and
   `RTCPeerConnection` are all stubbed — no key, no mic, no live controller.
   Server half: `python3 -m controller.test_voice`.
+- **`tools/ironprobe.mjs`** — guards the **🔥 irons layer** (2026-08-26): the
+  button sits left of the "projects" title and opens `#/irons`; creating an
+  iron sends an **irons-only** relay `prefs` frame (a frame that also carried
+  `inactive` would clobber the machines deny-list — the relay merges
+  per-field, `fleet/test_relay_prefs.py` guards that half); a project card's
+  🔥 opens the modal picker and assignment stores the cross-machine
+  projectKey; the iron page (`#/i/<id>`) shows every session from every
+  member project across machines with 📌 pinned members at the END; the
+  static create form survives a repaint with focus + un-mirrored text; and in
+  direct mode the harness `irons` frame renders + assignment goes out as
+  `ironAssign` (registry-backed — `python3 test_irons.py` guards that half).
+  Both modes run against the stubbed WebSocket; no session touched.
 - **`tools/spawnprobe.mjs`** — guards the **spawn watch** (2026-08-20): a `new`
   that never comes back must not be a black void, and the prompt typed into it
   must never be lost. `newSession()` drops into the tty view *before* the
@@ -593,6 +605,21 @@ user-facing overview; this file orients an agent working **on** the code.
   send log + transcript store, ranks candidates), then reorder/extend the array
   by hand — custom chips are welcome, it's just an array edit. Last mined
   2026-08.
+- **🔥 Irons** (2026-08-26): a level ABOVE projects — an iron is a **named
+  group of projects** ("irons in the fire": title, description, tags) for
+  tracking one effort that spans repos. The 🔥 button left of the "projects"
+  title opens `#/irons`; an iron's own page (`#/i/<id>`) shows one tab row of
+  **every session from every member project across machines**, 📌 pinned ones
+  at the end, plus member-project chips. Assignment is the 🔥 corner button on
+  each project card (modal picker; one iron per project; most projects stay
+  loose). Member refs are `projectRows().id` — the **projectKey** in fleet (a
+  gh repo groups once across boxes), the **pid** in direct mode. Storage is
+  server-side so all devices agree: fleet rides the relay `prefs` frame
+  (second field, per-field merge — see `clean_irons` in `fleet/relay.py`);
+  direct lives in the harness registry (`iron*` WS ops → `irons` broadcasts,
+  membership auto-cleaned when a project vanishes). Pin board untouched.
+  Tests: `python3 test_irons.py`, `python3 fleet/test_relay_prefs.py`,
+  `cd tools && node ironprobe.mjs`.
 - **index.html** — single page. A 4-level swipe stack — **projects → sessions →
   transcript → tty** (`LEVELS`); swipe right climbs out, left dives in. Projects
   page = card list + an add row (name → create repo, git URL → clone). Sessions

@@ -141,6 +141,50 @@ def main():
         send1({"type": "prefs", "inactive": []})
         cleared = wait_for(in1, lambda f: f.get("type") == "prefs")
         check("clearing the list switches everything back on", cleared and cleared.get("inactive") == [])
+
+        # 6. 🔥 irons ride the same frame as a SECOND field — and per-field merge
+        #    is load-bearing: an irons-only write must not blow away the deny-list
+        #    (and vice versa), because the client sends them separately.
+        send1({"type": "prefs", "inactive": ["clawd-heart"]})
+        wait_for(in1, lambda f: f.get("type") == "prefs" and f.get("inactive") == ["clawd-heart"])
+        in1.clear(); in2.clear()
+        iron = {"id": "iabc123", "title": "voice", "desc": "all the voice work",
+                "tags": ["speech"], "keys": ["github.com/clawdbotatg/gpt-voice"], "created": 1}
+        send1({"type": "prefs", "irons": [iron]})
+        got = wait_for(in1, lambda f: f.get("type") == "prefs" and f.get("irons"))
+        check("irons echo back to the writer", got and got["irons"][0]["title"] == "voice"
+              and got["irons"][0]["keys"] == ["github.com/clawdbotatg/gpt-voice"])
+        check("an irons-only write KEEPS the deny-list", got and got.get("inactive") == ["clawd-heart"])
+        got2 = wait_for(in2, lambda f: f.get("type") == "prefs" and f.get("irons"))
+        check("irons reach the other device too", got2 and got2["irons"][0]["id"] == "iabc123")
+        in1.clear()
+        send1({"type": "prefs", "inactive": []})
+        back = wait_for(in1, lambda f: f.get("type") == "prefs")
+        check("an inactive-only write KEEPS the irons", back and back.get("irons")
+              and back["irons"][0]["id"] == "iabc123")
+        disk = json.loads(PREFS.read_text())
+        check("irons written to disk", disk.get("irons") and disk["irons"][0]["title"] == "voice")
+
+        # 7. irons are sanitized like everything a mobile persists on this box:
+        #    junk entries dropped, dupes dropped, texts clipped, members bounded
+        in1.clear()
+        send1({"type": "prefs", "irons": [
+            {"id": "ok1", "title": "  keep  ", "tags": ["a", 7, "  "], "keys": ["k1", 9, {"x": 1}]},
+            {"id": "ok1", "title": "dupe id"},          # duplicate id → dropped
+            {"id": "", "title": "no id"},               # bad id → dropped
+            {"id": "ok2", "title": "   "},              # blank title → dropped
+            "not-a-dict", 42,
+            {"id": "ok3", "title": "t" * 500, "desc": "d" * 5000},
+        ]})
+        san2 = wait_for(in1, lambda f: f.get("type") == "prefs" and f.get("irons") is not None)
+        irons = (san2 or {}).get("irons") or []
+        check("junk iron entries never reach the set",
+              [i["id"] for i in irons] == ["ok1", "ok3"])
+        check("member keys / tags are typed + bounded",
+              irons and irons[0]["keys"] == ["k1"] and irons[0]["tags"] == ["a"]
+              and irons[0]["title"] == "keep")
+        check("over-long texts are clipped",
+              len(irons) == 2 and len(irons[1]["title"]) == 80 and len(irons[1]["desc"]) == 400)
     finally:
         for s in socks:
             try:

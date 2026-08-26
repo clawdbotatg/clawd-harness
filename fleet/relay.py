@@ -232,12 +232,45 @@ def clean_inactive(ids):
     return out
 
 
+# Irons: named groups of projects ("irons in the fire"), stored relay-side so
+# the phone and the desktop see the same groups (same reason as `inactive`).
+# The relay treats them as an opaque-ish blob: members are the projectKeys the
+# fleet UI already routes on, so a gh repo groups once across machines. Same
+# bounded-not-trusted stance as clean_inactive — titles and repo keys sit in
+# plaintext on this shared box (like the roster), session content never does.
+MAX_IRONS = 64
+MAX_IRON_MEMBERS = 256
+
+
+def clean_irons(irons):
+    out, seen = [], set()
+    for e in (irons or [])[:MAX_IRONS]:
+        if not isinstance(e, dict):
+            continue
+        iid, title = e.get("id"), e.get("title")
+        if not (isinstance(iid, str) and 0 < len(iid) <= 64 and iid not in seen):
+            continue
+        if not (isinstance(title, str) and title.strip()):
+            continue
+        seen.add(iid)
+        desc = e.get("desc") if isinstance(e.get("desc"), str) else ""
+        created = e.get("created") if isinstance(e.get("created"), (int, float)) else 0
+        out.append({"id": iid, "title": title.strip()[:80], "desc": desc[:400],
+                    "tags": [t.strip()[:24] for t in (e.get("tags") or [])[:8]
+                             if isinstance(t, str) and t.strip()],
+                    "keys": [k for k in (e.get("keys") or [])[:MAX_IRON_MEMBERS]
+                             if isinstance(k, str) and 0 < len(k) <= 512],
+                    "created": created})
+    return out
+
+
 def load_prefs():
     try:
         raw = json.loads(PREFS_FILE.read_text())
-        return {"inactive": clean_inactive(raw.get("inactive"))}
+        return {"inactive": clean_inactive(raw.get("inactive")),
+                "irons": clean_irons(raw.get("irons"))}
     except Exception:
-        return {"inactive": []}
+        return {"inactive": [], "irons": []}
 
 
 def save_prefs(prefs):
@@ -492,7 +525,9 @@ class Relay:
     # switched off — the exact prompt storm this feature exists to stop.
     def _prefs_msg(self):
         with self.lock:
-            return {"type": "prefs", "inactive": list(self.prefs.get("inactive") or [])}
+            return {"type": "prefs",
+                    "inactive": list(self.prefs.get("inactive") or []),
+                    "irons": list(self.prefs.get("irons") or [])}
 
     def _send_prefs(self, conn):
         conn.send_json(self._prefs_msg())
@@ -664,18 +699,25 @@ class Relay:
             mobile.send_json({"type": "machines", "machines": self.roster()})
             return
         if t == "prefs":
-            # The user checked/unchecked a machine. Store the whole deny-list
-            # (last writer wins — it's one human on one account, not a CRDT) and
-            # echo it to EVERY authed mobile including the sender: the sender
-            # treats the echo as the ack, so a write that never reaches disk
-            # never silently looks applied.
-            inactive = clean_inactive(frame.get("inactive"))
+            # The user checked/unchecked a machine, or edited irons. Store the
+            # whole field (last writer wins — it's one human on one account, not
+            # a CRDT) and echo it to EVERY authed mobile including the sender:
+            # the sender treats the echo as the ack, so a write that never
+            # reaches disk never silently looks applied. Only fields PRESENT in
+            # the frame are overwritten — an irons-only write must not blow away
+            # the machines deny-list (the client sends them separately).
+            parts = []
             with self.lock:
-                self.prefs["inactive"] = inactive
+                if "inactive" in frame:
+                    self.prefs["inactive"] = clean_inactive(frame.get("inactive"))
+                    parts.append(f"{len(self.prefs['inactive'])} machine(s) switched off")
+                if "irons" in frame:
+                    self.prefs["irons"] = clean_irons(frame.get("irons"))
+                    parts.append(f"{len(self.prefs['irons'])} iron(s)")
                 snapshot = dict(self.prefs)
             save_prefs(snapshot)
             self.broadcast_prefs()
-            print(f"[relay] prefs: {len(inactive)} machine(s) switched off", flush=True)
+            print(f"[relay] prefs: {'; '.join(parts) or 'no-op write'}", flush=True)
             return
         if t == "pushSubscribe":
             # The phone enabled notifications: store its (opaque) Web Push
