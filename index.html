@@ -1126,10 +1126,10 @@
         <span class="menutitle" id="ironstitle">🔥 irons</span>
         <button id="ironAddBtn" title="new iron — a named group of projects to track as one effort">＋ new iron</button>
       </div>
+      <!-- title only — the description writes itself (haiku, via ironDescribe)
+           and tags are edited later on the iron's page, never at creation -->
       <div id="ironform" class="ironform" hidden>
-        <input id="ironFormTitle" placeholder="title — the effort, e.g. voice" autocomplete="off" />
-        <input id="ironFormDesc" placeholder="description (optional)" autocomplete="off" />
-        <input id="ironFormTags" placeholder="tags, comma-separated (optional)" autocomplete="off" />
+        <input id="ironFormTitle" placeholder="name the effort — e.g. voice" autocomplete="off" />
         <div class="frow">
           <button id="ironFormSave">＋ create</button>
           <button id="ironFormCancel">cancel</button>
@@ -1138,9 +1138,9 @@
       <div id="ironlist"></div>
     </section>
     <section class="col hidden" id="ironview">
+      <!-- no desc field: the description is AI-owned (refreshed by ironDescribe) -->
       <div id="ironedit" class="ironform" hidden>
         <input id="ironEditTitle" placeholder="title" autocomplete="off" />
-        <input id="ironEditDesc" placeholder="description" autocomplete="off" />
         <input id="ironEditTags" placeholder="tags, comma-separated" autocomplete="off" />
         <div class="frow">
           <button id="ironEditSave">save</button>
@@ -2728,6 +2728,12 @@ function handleMachineJson(machine, m) {
     confirmCreateLocal(machine, m.path);
     return;
   }
+  if (m.type === 'ironDesc') {
+    // likewise: the describe request goes to whichever live machine can run
+    // the LLM call, which need not be the machine we're viewing.
+    onIronDesc(m);
+    return;
+  }
   if (m.type === 'error' && /harness link closed|no local harness/i.test(m.error || '')) {
     // The worker's local harness connection died — the deploy/graceful-restart
     // signature: the worker↔relay socket stays up so nothing else flaps. Re-list
@@ -2959,6 +2965,8 @@ function handleJson(m) {
     // direct mode: the harness registry is the irons truth. In fleet the RELAY
     // is (prefs frame) — a machine's own broadcast must not overwrite it.
     if (!FLEET) applyIrons(m.irons);
+  } else if (m.type === 'ironDesc') {
+    onIronDesc(m);                        // haiku's take on an iron — store + repaint
   } else if (m.type === 'accounts') {
     accountsInfo = m;                     // subscription logins + headroom (direct mode)
     renderAccountsBody();                 // repaint the 🧠 overlay if it's open
@@ -7191,9 +7199,9 @@ function renderIronList() {
     sc.className = 'scount'; sc.textContent = `${st.sessions} sess`;
     row.appendChild(sc);
     card.appendChild(row);
-    if (iron.desc) {
+    if (iron.desc || st.members.length) {
       const d = document.createElement('div');
-      d.className = 'sdesc'; d.textContent = iron.desc;
+      d.className = 'sdesc'; d.textContent = iron.desc || 'describing…';
       card.appendChild(d);
     }
     if ((iron.tags || []).length) {
@@ -7213,6 +7221,7 @@ function renderIronList() {
     }
     list.appendChild(card);
   });
+  maybeRefreshIronDescs();      // looking at the list is what triggers (throttled) re-description
 }
 // Sessions burning in this iron — every session of every member project, tagged
 // the way allSessions() tags them so focusSession can cross machine/project.
@@ -7291,11 +7300,12 @@ function renderIronDetail() {
   };
   head.appendChild(del);
   body.appendChild(head);
-  if (iron.desc) {
+  if (iron.desc || ironMemberIds(iron).length) {
     const d = document.createElement('div');
-    d.className = 'ih-desc'; d.textContent = iron.desc;
+    d.className = 'ih-desc'; d.textContent = iron.desc || 'describing…';
     body.appendChild(d);
   }
+  requestIronDesc(iron);        // throttled; re-derives when membership changed or it went stale
   if ((iron.tags || []).length) {
     const tr = document.createElement('div'); tr.className = 'ih-tags';
     iron.tags.forEach(t => {
@@ -7360,18 +7370,18 @@ document.getElementById('ironAddBtn').onclick = () => {
 document.getElementById('ironFormCancel').onclick = () => { ironFormEl.hidden = true; };
 document.getElementById('ironFormSave').onclick = () => {
   const t = document.getElementById('ironFormTitle');
-  const d = document.getElementById('ironFormDesc');
-  const g = document.getElementById('ironFormTags');
   if (!t.value.trim()) { t.focus(); return; }
-  ironCreate(t.value, d.value, parseIronTags(g.value));
-  t.value = ''; d.value = ''; g.value = '';
+  ironCreate(t.value, '', []);       // title only — desc writes itself (haiku), tags come later
+  t.value = '';
   ironFormEl.hidden = true;
+};
+document.getElementById('ironFormTitle').onkeydown = (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); document.getElementById('ironFormSave').click(); }
 };
 const ironEditEl = document.getElementById('ironedit');
 function openIronEdit() {
   const iron = ironById(currentIronId); if (!iron) return;
   document.getElementById('ironEditTitle').value = iron.title || '';
-  document.getElementById('ironEditDesc').value = iron.desc || '';
   document.getElementById('ironEditTags').value = (iron.tags || []).join(', ');
   ironEditEl.hidden = false;
   if (!isTouch) document.getElementById('ironEditTitle').focus();
@@ -7380,8 +7390,8 @@ document.getElementById('ironEditCancel').onclick = () => { ironEditEl.hidden = 
 document.getElementById('ironEditSave').onclick = () => {
   const t = document.getElementById('ironEditTitle').value.trim();
   if (!t) return;
+  // desc is deliberately NOT editable — it's AI-owned (ironDescribe below)
   ironUpdate(currentIronId, { title: t,
-    desc: document.getElementById('ironEditDesc').value.trim(),
     tags: parseIronTags(document.getElementById('ironEditTags').value) });
   ironEditEl.hidden = true;
   renderIronDetail();                            // direct mode repaints on the broadcast; fleet already did
@@ -7424,6 +7434,59 @@ function ironPickCreate() {
 }
 document.getElementById('ironpicknewbtn').onclick = ironPickCreate;
 document.getElementById('ironpicknew').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); ironPickCreate(); } };
+// -- dynamic descriptions: haiku writes them, nobody types them ---------------
+// An iron is created with a TITLE ONLY. Its one-line desc is derived by a
+// model (the harness's stateless `ironDescribe` op → IRON_DESC_MODEL, haiku)
+// from the member projects + their sessions' titles, requested by whichever
+// browser is LOOKING at an iron surface, throttled per iron, and re-derived
+// when membership changes or the last take goes stale. The reply is stored
+// like any other edit (prefs push in fleet / ironUpdate in direct), so every
+// device sees the same sentence without ever asking twice.
+const ironDescMeta = {};              // iron id -> {key, at, inflight} — per-browser throttle
+const IRON_DESC_TTL = 3600e3;         // re-describe an untouched iron at most hourly
+function ironDescContext(iron) {
+  const ids = ironMemberIds(iron);
+  const rows = projectRows().filter(r => ids.includes(r.id));
+  if (!rows.length) return null;      // empty iron — nothing to describe
+  const sess = ironSessions(iron).slice(0, 24);
+  return 'iron title: ' + iron.title +
+         '\nmember projects: ' + rows.map(r => r.name).join(', ') +
+         '\nsessions:\n' + (sess.map(s =>
+           '- ' + (s.title || 'new session') + (s.desc ? ' — ' + s.desc : '')).join('\n') || '(none yet)');
+}
+// Fleet: any live harness can run the LLM call — prefer one hosting a member.
+function ironDescMachine(iron) {
+  for (const key of ironMemberIds(iron)) {
+    const g = projectGroup(key);
+    const me = g && g.machines.find(x => x.online && isMachineActive(x.machineId));
+    if (me) return me.machineId;
+  }
+  const lm = liveMachines()[0];
+  return lm ? lm.id : null;
+}
+function requestIronDesc(iron) {
+  const m = ironDescMeta[iron.id] || (ironDescMeta[iron.id] = { key: '', at: 0, inflight: 0 });
+  const key = ironMemberIds(iron).slice().sort().join('|');
+  const now = Date.now();
+  if (m.inflight && now - m.inflight < 30e3) return;            // one ask at a time
+  if (key === m.key && iron.desc && now - m.at < IRON_DESC_TTL) return;   // fresh + unchanged
+  const ctx = ironDescContext(iron);
+  if (!ctx) return;
+  const frame = { type: 'ironDescribe', id: iron.id, context: ctx };
+  if (FLEET) { const mid = ironDescMachine(iron); if (!mid) return; hsendTo(mid, frame); }
+  else hsend(frame);
+  m.inflight = now; m.key = key;
+}
+function maybeRefreshIronDescs() { ironList.forEach(requestIronDesc); }
+function onIronDesc(m) {
+  const meta = ironDescMeta[m.id];
+  if (meta) { meta.inflight = 0; meta.at = Date.now(); }
+  if (typeof m.desc !== 'string' || !m.desc) return;   // naming unconfigured / call failed → keep what we had
+  const iron = ironById(m.id);
+  if (!iron || iron.desc === m.desc) return;
+  if (FLEET) { iron.desc = m.desc; ironsPush(); renderIronLive(); }
+  else ironUpdate(m.id, { desc: m.desc });             // broadcast repaints
+}
 
 // -- view switcher: one of four depth levels at a time ------------------------
 // projects → sessions → transcript → tty. Mobile defaults to the transcript

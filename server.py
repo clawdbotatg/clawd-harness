@@ -239,6 +239,23 @@ TEST_SYS_PROMPT = ("A developer just parked this software-engineering session on
 # would falsify the work), so it gets its own model knob — default: whatever
 # names sessions, so an unconfigured harness changes nothing.
 TEST_MODEL = os.environ.get("TEST_HINT_MODEL", "") or ""
+# 🔥 iron descriptions: the user creates an iron with a TITLE ONLY — its
+# one-line description is derived by a model from the member projects + their
+# sessions' titles, and refreshed by the UI as membership/work changes (the
+# stateless `ironDescribe` op; the browser stores the result like any edit).
+IRON_SYS_PROMPT = ("You write the one-line description for an 'iron' — a named "
+                   "group of software projects a developer is juggling as one "
+                   "effort. Given its title, member projects and their sessions' "
+                   "titles, reply with ONLY compact JSON and nothing else: "
+                   '{"desc": "<one plain sentence, max 120 chars: what this '
+                   'effort is and what is moving in it right now>"}. '
+                   "Concrete and present-tense; no marketing tone, no emoji; "
+                   "don't restate the title.")
+# Per-user ask: this job runs on Haiku (a taste/summary job, not a code job).
+# The id matches the bankr gateway's roster; if the configured gateway doesn't
+# carry it, generate_iron_desc falls back to the naming model, so an
+# unconfigured or differently-stocked box still gets a description.
+IRON_DESC_MODEL = os.environ.get("IRON_DESC_MODEL", "") or "claude-haiku-4.5"
 # Pinning also COMPACTS. A pin means "I'm done driving this for now, come back
 # after testing" — and the thing that decides whether coming back is pleasant is
 # how much context window is left. Compacting at the moment of parking is free
@@ -6482,6 +6499,28 @@ def generate_test_hint(transcript_text):
     return hint.strip() if isinstance(hint, str) else ""
 
 
+def generate_iron_desc(context):
+    """One-line description of a 🔥 iron, from its members' names + session
+    titles. Tries IRON_DESC_MODEL (haiku), falls back to the naming model if
+    that id isn't on this box's gateway. None = unconfigured/failed (caller
+    keeps the old desc); "" = the model had nothing to say."""
+    parsed = _llm_json(IRON_SYS_PROMPT, context, model=IRON_DESC_MODEL)
+    if not parsed and IRON_DESC_MODEL != BANKR_MODEL:
+        parsed = _llm_json(IRON_SYS_PROMPT, context)
+    if not parsed:
+        return None
+    d = parsed.get("desc")
+    return d.strip()[:200] if isinstance(d, str) else ""
+
+
+def serve_iron_describe(client, frame):
+    """Threaded `ironDescribe` op: stateless — the browser supplies the context
+    (it owns iron storage in BOTH modes: relay prefs in fleet, iron ops here in
+    direct) and stores the reply itself. Replies to the sender only."""
+    desc = generate_iron_desc(str(frame.get("context") or "")[:6000])
+    client.send_json({"type": "ironDesc", "id": frame.get("id"), "desc": desc})
+
+
 # ── project emoji codes (1–3 emoji identity badge via the same gateway) ───────
 def _clean_emoji(raw):
     """Sanitize a model-emitted emoji code: strip anything that isn't emoji
@@ -7021,6 +7060,11 @@ class Handler(BaseHTTPRequestHandler):
             # Controller read queries — threaded so a transcript scan can't
             # stall this client's read loop; replied only to the requester.
             threading.Thread(target=MGR.serve_read_query, args=(client, frame),
+                             daemon=True).start()
+            return
+        if t == "ironDescribe":
+            # 🔥 iron description — an LLM call, threaded for the same reason.
+            threading.Thread(target=serve_iron_describe, args=(client, frame),
                              daemon=True).start()
             return
         if t == "subscribe":

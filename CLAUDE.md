@@ -607,8 +607,14 @@ user-facing overview; this file orients an agent working **on** the code.
   by hand — custom chips are welcome, it's just an array edit. Last mined
   2026-08.
 - **🔥 Irons** (2026-08-26): a level ABOVE projects — an iron is a **named
-  group of projects** ("irons in the fire": title, description, tags) for
-  tracking one effort that spans repos. The 🔥 header icon left of the 🗂️
+  group of projects** ("irons in the fire") for tracking one effort that spans
+  repos. **Created with a title only**: the one-line description is AI-derived
+  (the stateless `ironDescribe` WS op → `IRON_DESC_MODEL`, default
+  `claude-haiku-4.5` on the bankr gateway, falling back to `BANKR_MODEL`) from
+  member projects + session titles, requested by whichever browser is looking
+  at an iron surface (throttled hourly / on membership change) and stored like
+  any other edit, so every device sees the same sentence; tags are edited
+  later on the iron's page, never at creation. The 🔥 header icon left of the 🗂️
   projects icon opens `#/irons`; an iron's own page (`#/i/<id>`) shows one tab row of
   **every session from every member project across machines**, 📌 pinned ones
   at the end, plus member-project chips. Assignment is the 🔥 corner button on

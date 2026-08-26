@@ -94,12 +94,12 @@ await page.evaluate(()=>document.getElementById('ironsBtn').click());
 await page.waitForTimeout(300);
 check('🔥 opens its own page at #/irons', await page.evaluate(()=>currentView()==='irons' && location.hash==='#/irons'));
 
-// 2. create an iron → irons-only prefs write + echo applied
+// 2. create an iron (TITLE ONLY — desc is haiku's job, tags come later)
+check('create form is title-only (no desc/tags inputs)',
+      await page.evaluate(()=>document.querySelectorAll('#ironform input').length===1));
 await page.evaluate(()=>{ window.__sent.length=0;
   document.getElementById('ironAddBtn').click();
   document.getElementById('ironFormTitle').value='voice';
-  document.getElementById('ironFormDesc').value='all the voice work';
-  document.getElementById('ironFormTags').value='speech, hud';
   document.getElementById('ironFormSave').click();
 });
 await page.waitForTimeout(200);
@@ -168,6 +168,18 @@ check('📌 pinned member sits at the END, marked',
 check('the unrelated project’s session stays out', !detail.tabs.some(t=>/other/.test(t.lbl)));
 check('global tab strip is hidden on the iron page (it has its own row)',
       await page.evaluate(()=>document.getElementById('sessionbar').hidden));
+// the AI desc: a reply from ironDescribe is stored (prefs push) + rendered
+const descFlow = await page.evaluate(()=>{
+  window.__sent.length=0;
+  onIronDesc({ id: ironList[0].id, desc: 'haiku wrote this' });
+  const f=window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean)
+          .find(x=>x.type==='prefs');
+  return { desc: ironList[0].desc,
+           pushed: !!(f && f.irons && f.irons[0].desc==='haiku wrote this' && !('inactive' in f)),
+           shown: document.getElementById('ironbody').innerText.includes('haiku wrote this') };
+});
+check('haiku’s desc is stored (irons-only push) + rendered',
+      descFlow.desc==='haiku wrote this' && descFlow.pushed && descFlow.shown, JSON.stringify(descFlow));
 
 // 6. deep link straight to the iron
 await page.evaluate(id=>{ navTo('projects'); location.hash='#/i/'+id; }, ironId);
@@ -187,15 +199,28 @@ await dpage.evaluate(()=>window.__relayRx({type:'irons',irons:[
   {id:'i9',title:'direct iron',desc:'',tags:[],pids:['p1'],created:1}]}));
 await dpage.waitForTimeout(300);
 const direct = await dpage.evaluate(()=>{
-  currentIronId='i9'; navTo('iron');
+  const sent=()=>window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean);
+  window.__sent.length=0;
+  currentIronId='i9'; navTo('iron');                     // opening the page asks haiku for a desc
+  const req = sent().find(x=>x.type==='ironDescribe');
+  const placeholder = document.getElementById('ironbody').innerText.includes('describing…');
+  window.__relayRx({type:'ironDesc', id:'i9', desc:'made by haiku'});
+  const upd = sent().find(x=>x.type==='ironUpdate');
   const tabs=[...document.querySelectorAll('#irontabs .stab')].map(t=>t.querySelector('.lbl').textContent);
   window.__sent.length=0;
   ironAssign('p1','');                                   // registry-backed op, not a prefs frame
-  const sent=window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean);
-  return { tabs, op: sent[0] && sent[0].type, pid: sent[0] && sent[0].pid };
+  const op = sent()[0];
+  return { tabs, placeholder,
+           req: req ? { id:req.id, hasCtx: /direct job/.test(req.context||'') } : null,
+           upd: upd ? { id:upd.id, desc:upd.desc } : null,
+           op: op && op.type, pid: op && op.pid };
 });
 check('direct mode: harness `irons` frame renders the member session',
       direct.tabs.length===1 && /job/.test(direct.tabs[0]), JSON.stringify(direct.tabs));
+check('direct mode: opening the page requests a desc (session titles in context) + shows "describing…"',
+      !!direct.req && direct.req.id==='i9' && direct.req.hasCtx && direct.placeholder, JSON.stringify(direct.req));
+check('direct mode: haiku’s reply is stored via ironUpdate',
+      !!direct.upd && direct.upd.id==='i9' && direct.upd.desc==='made by haiku', JSON.stringify(direct.upd));
 check('direct mode: assignment is an ironAssign op (registry-backed)',
       direct.op==='ironAssign' && direct.pid==='p1', JSON.stringify(direct));
 await dpage.close();
