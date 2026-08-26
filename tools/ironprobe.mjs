@@ -95,6 +95,11 @@ await page.waitForTimeout(300);
 check('🔥 opens its own page at #/irons', await page.evaluate(()=>currentView()==='irons' && location.hash==='#/irons'));
 
 // 2. create an iron (TITLE ONLY — desc is haiku's job, tags come later)
+check('both forms are actually INVISIBLE until asked for (hidden beats display:flex)',
+      await page.evaluate(()=>{
+        const gone = el => getComputedStyle(el).display==='none';
+        return gone(document.getElementById('ironform')) && gone(document.getElementById('ironedit'));
+      }));
 check('create form is title-only (no desc/tags inputs)',
       await page.evaluate(()=>document.querySelectorAll('#ironform input').length===1));
 await page.evaluate(()=>{ window.__sent.length=0;

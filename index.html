@@ -635,6 +635,9 @@
      frame landing mid-type never eats the text (the projects-rung rule) */
   .ironform { display:flex; flex-direction:column; gap:6px; padding:10px 14px 0;
               width:100%; max-width:780px; align-self:center; }
+  /* author display:flex beats the UA's [hidden]{display:none} — restate it, or
+     both forms render permanently (the "what in the hell is this ui" bug) */
+  .ironform[hidden] { display:none; }
   .ironform input { background:var(--raised); color:var(--ink); border:1px solid var(--edge);
               border-radius:5px; padding:7px 9px; font-family:var(--mono); font-size:13px; }
   .ironform input:focus { outline:none; border-color:var(--accent-dim); }
