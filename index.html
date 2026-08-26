@@ -675,24 +675,28 @@
   .scard .sfire:hover { color:var(--accent); border-color:var(--accent-dim); background:var(--raised); }
   .scard .sfire.sfire2 { right:44px; }               /* a ⏏ already owns the corner */
   .scount.siron { color:var(--accent); cursor:pointer; }
-  /* the assign picker — a small centered modal, so a rung repaint can't close it */
-  #ironpickmodal { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:66;
+  /* the assign picker + the iron page's ＋ add-project picker — small centered
+     modals, so a rung repaint can't close them */
+  :is(#ironpickmodal, #ironaddmodal) { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:66;
                    display:flex; align-items:center; justify-content:center; padding:20px; }
-  #ironpickmodal[hidden] { display:none; }
-  #ironpickcard { background:var(--panel); border:1px solid var(--edge); border-radius:10px;
+  :is(#ironpickmodal, #ironaddmodal)[hidden] { display:none; }
+  :is(#ironpickcard, #ironaddcard) { background:var(--panel); border:1px solid var(--edge); border-radius:10px;
                   padding:16px; width:min(420px, 92vw); max-height:80vh; overflow-y:auto;
                   display:flex; flex-direction:column; gap:8px; font-family:var(--mono); }
-  #ironpickcard .ip-t { color:var(--ink); font-size:13px; }
-  #ironpickcard button { background:transparent; border:1px solid var(--edge); border-radius:5px;
+  :is(#ironpickcard, #ironaddcard) .ip-t { color:var(--ink); font-size:13px; }
+  :is(#ironpickcard, #ironaddcard) button { background:transparent; border:1px solid var(--edge); border-radius:5px;
                   color:var(--dim); font-size:12px; font-family:var(--mono); cursor:pointer;
                   padding:7px 10px; text-align:left; }
-  #ironpickcard button:hover { color:var(--accent); border-color:var(--accent-dim); background:var(--raised); }
-  #ironpickcard button.member { color:var(--accent); border-color:var(--accent-dim); }
+  :is(#ironpickcard, #ironaddcard) button:hover { color:var(--accent); border-color:var(--accent-dim); background:var(--raised); }
+  :is(#ironpickcard, #ironaddcard) button.member { color:var(--accent); border-color:var(--accent-dim); }
   #ironpickcard .ip-new { display:flex; gap:6px; }
-  #ironpickcard .ip-new input { flex:1; min-width:0; background:var(--raised); color:var(--ink);
+  :is(#ironpickcard .ip-new, #ironaddcard) input { flex:1; min-width:0; background:var(--raised); color:var(--ink);
                   border:1px solid var(--edge); border-radius:5px; padding:6px 9px;
                   font-family:var(--mono); font-size:12px; }
-  #ironpickcard .ip-new input:focus { outline:none; border-color:var(--accent-dim); }
+  :is(#ironpickcard .ip-new, #ironaddcard) input:focus { outline:none; border-color:var(--accent-dim); }
+  #ironaddcard input { flex:0 0 auto; }
+  .iprojchip.iadd { border-style:dashed; }
+  .iprojchip.iadd:hover { color:var(--accent); border-color:var(--accent-dim); }
   .pinnednote:hover { color:var(--accent); border-color:var(--accent-dim); }
   /* project cards reuse .scard; status colors + an add-project row */
   .scard.cloning, .scard.error { cursor:default; }
@@ -1032,6 +1036,14 @@
         <button id="ironpicknewbtn" title="create a new iron and put this project in it">＋</button>
       </div>
       <button id="ironpickclose">✕ cancel</button>
+    </div>
+  </div>
+  <div id="ironaddmodal" hidden>
+    <div id="ironaddcard">
+      <div class="ip-t" id="ironaddtitle"></div>
+      <input id="ironaddinput" placeholder="type a project name…" autocomplete="off" spellcheck="false" autocapitalize="off" />
+      <div id="ironaddlist" style="display:flex;flex-direction:column;gap:6px;"></div>
+      <button id="ironaddclose">✕ done</button>
     </div>
   </div>
   <div id="machinesmodal" hidden>
@@ -7336,7 +7348,7 @@ function renderIronDetail() {
     e.className = 'ironempty';
     e.textContent = ironMemberIds(iron).length
       ? 'no sessions yet — open a member project below and start one.'
-      : 'empty iron — add projects to it with the 🔥 button on their cards (projects page).';
+      : 'empty iron — tap ＋ add project below.';
     tabs.appendChild(e);
   }
   body.appendChild(tabs);
@@ -7362,6 +7374,14 @@ function renderIronDetail() {
     chip.appendChild(rm);
     prow.appendChild(chip);
   });
+  const addc = document.createElement('span');
+  addc.className = 'iprojchip iadd';
+  addc.title = 'add a project to this iron';
+  addc.onclick = openIronAdd;
+  const anm = document.createElement('span');
+  anm.className = 'nm'; anm.textContent = '＋ add project';
+  addc.appendChild(anm);
+  prow.appendChild(addc);
   body.appendChild(prow);
 }
 // -- create form (irons page) + edit form (detail page): static nodes, wired once
@@ -7437,6 +7457,77 @@ function ironPickCreate() {
 }
 document.getElementById('ironpicknewbtn').onclick = ironPickCreate;
 document.getElementById('ironpicknew').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); ironPickCreate(); } };
+// -- the ＋ add-project picker (opened from an iron page's projects row) -------
+// Autocompletes over every project not already in this iron; picking one
+// assigns it and the popup stays open so several go in a row. `ironAddPicked`
+// hides a pick before the broadcast lands (direct mode's ironList only moves
+// on the server's `irons` frame; fleet mutates locally and wouldn't need it).
+const ironAddModal = document.getElementById('ironaddmodal');
+const ironAddInput = document.getElementById('ironaddinput');
+const ironAddListEl = document.getElementById('ironaddlist');
+let ironAddSel = 0;
+let ironAddPicked = new Set();
+function ironAddMatches() {
+  const iron = ironById(currentIronId); if (!iron) return [];
+  const mine = new Set(ironMemberIds(iron));
+  const q = ironAddInput.value.trim().toLowerCase();
+  return projectRows()
+    .filter(p => !mine.has(p.id) && !ironAddPicked.has(p.id))
+    .filter(p => !q || (p.name || '').toLowerCase().includes(q))
+    .slice(0, 12);
+}
+function renderIronAdd() {
+  const rows = ironAddMatches();
+  if (ironAddSel >= rows.length) ironAddSel = Math.max(0, rows.length - 1);
+  ironAddListEl.innerHTML = '';
+  if (!rows.length) {
+    const d = document.createElement('div');
+    d.className = 'ironempty';
+    d.textContent = ironAddInput.value.trim() ? 'no matching project' : 'every project is already in.';
+    ironAddListEl.appendChild(d);
+    return;
+  }
+  rows.forEach((p, i) => {
+    const b = document.createElement('button');
+    if (i === ironAddSel) b.classList.add('member');   // ↑/↓ highlight
+    const other = ironForRow(p.id);
+    b.textContent = (shortEmoji(p.emoji) ? shortEmoji(p.emoji) + ' ' : '') + p.name
+      + (FLEET && p.machineName ? ' · ' + p.machineName.replace(/^clawd-/, '') : '')
+      + (other ? '   in 🔥 ' + other.title : '');
+    if (other) b.title = 'picking it moves it out of "' + other.title + '"';
+    b.onclick = () => ironAddPick(p);
+    b.onmousemove = () => { if (ironAddSel !== i) { ironAddSel = i; renderIronAdd(); } };
+    ironAddListEl.appendChild(b);
+  });
+}
+function ironAddPick(p) {
+  ironAssign(p.id, currentIronId);
+  ironAddPicked.add(p.id);
+  ironAddInput.value = ''; ironAddSel = 0;
+  renderIronAdd();
+  if (!isTouch) ironAddInput.focus();
+}
+function openIronAdd() {
+  const iron = ironById(currentIronId); if (!iron) return;
+  document.getElementById('ironaddtitle').textContent = 'add projects to "' + iron.title + '"';
+  ironAddPicked = new Set();
+  ironAddInput.value = ''; ironAddSel = 0;
+  ironAddModal.hidden = false;
+  renderIronAdd();
+  if (!isTouch) ironAddInput.focus();
+}
+function closeIronAdd() { ironAddModal.hidden = true; }
+document.getElementById('ironaddclose').onclick = closeIronAdd;
+ironAddModal.onclick = (e) => { if (e.target === ironAddModal) closeIronAdd(); };
+ironAddInput.addEventListener('input', () => { ironAddSel = 0; renderIronAdd(); });
+ironAddInput.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') { ironAddSel++; renderIronAdd(); }
+  else if (e.key === 'ArrowUp') { ironAddSel = Math.max(0, ironAddSel - 1); renderIronAdd(); }
+  else if (e.key === 'Enter') { const rows = ironAddMatches(); if (rows[ironAddSel]) ironAddPick(rows[ironAddSel]); }
+  else if (e.key === 'Escape') closeIronAdd();
+  else return;
+  e.preventDefault(); e.stopPropagation();
+});
 // -- dynamic descriptions: haiku writes them, nobody types them ---------------
 // An iron is created with a TITLE ONLY. Its one-line desc is derived by a
 // model (the harness's stateless `ironDescribe` op → IRON_DESC_MODEL, haiku)

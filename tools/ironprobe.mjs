@@ -186,6 +186,43 @@ const descFlow = await page.evaluate(()=>{
 check('haiku’s desc is stored (irons-only push) + rendered',
       descFlow.desc==='haiku wrote this' && descFlow.pushed && descFlow.shown, JSON.stringify(descFlow));
 
+// 5b. the ＋ add-project picker on the iron page (autocomplete over non-members)
+const addFlow = await page.evaluate(()=>{
+  const modal=document.getElementById('ironaddmodal');
+  const idle=getComputedStyle(modal).display==='none';       // invisible until asked
+  const chip=document.querySelector('#ironbody .iprojchip.iadd');
+  if(!chip) return { idle, chip:false };
+  chip.click();
+  const open=getComputedStyle(modal).display!=='none';
+  const inp=document.getElementById('ironaddinput');
+  const focused=document.activeElement===inp;
+  inp.value='oth'; inp.dispatchEvent(new Event('input',{bubbles:true}));
+  const rows=[...document.querySelectorAll('#ironaddlist button')].map(b=>b.textContent);
+  window.__sent.length=0;
+  inp.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+  const f=window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean)
+          .find(x=>x.type==='prefs');
+  const keys=(f && f.irons && f.irons[0] && f.irons[0].keys)||[];
+  const stillOpen=!modal.hidden;
+  const emptied=document.getElementById('ironaddlist').innerText;
+  document.getElementById('ironaddclose').click();
+  return { idle, chip:true, open, focused, rows, keys, leaks: !!(f && 'inactive' in f),
+           stillOpen, closed: modal.hidden, emptied };
+});
+check('＋ add-project picker: hidden until asked, the chip opens it focused',
+      !!addFlow && addFlow.idle && addFlow.chip && addFlow.open && addFlow.focused, JSON.stringify(addFlow));
+check('typing autocompletes to the one matching project',
+      addFlow.rows && addFlow.rows.length===1 && /other/.test(addFlow.rows[0]), JSON.stringify(addFlow.rows));
+check('Enter assigns it (irons-only prefs frame) and the popup STAYS open for the next add',
+      addFlow.keys.length===2 && addFlow.keys.some(k=>/\/other$/.test(k)) && !addFlow.leaks
+      && addFlow.stillOpen && addFlow.closed,
+      JSON.stringify({keys:addFlow.keys, leaks:addFlow.leaks, stillOpen:addFlow.stillOpen, closed:addFlow.closed}));
+check('the just-picked project leaves the list', /every project is already in/.test(addFlow.emptied), addFlow.emptied);
+await page.evaluate(()=>{ ironAssign(projectRows().find(p=>/other/.test(p.name)).id, ''); });  // undo for the checks below
+await page.evaluate(()=>{ document.querySelector('#ironbody .iprojchip.iadd').click(); });     // eyeball frame: the picker open
+await page.screenshot({path:join(HERE,'ironprobe-add.png')});
+await page.evaluate(()=>closeIronAdd());
+
 // 6. deep link straight to the iron
 await page.evaluate(id=>{ navTo('projects'); location.hash='#/i/'+id; }, ironId);
 await page.waitForTimeout(300);
