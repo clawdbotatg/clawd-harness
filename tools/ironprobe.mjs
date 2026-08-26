@@ -115,6 +115,9 @@ const wrote = await page.evaluate(()=>{
 });
 check('creating sends an IRONS-ONLY prefs frame', !!wrote && wrote.hasIrons && wrote.title==='voice' && !wrote.leaksInactive, JSON.stringify(wrote));
 const ironId = await page.evaluate(()=>ironList[0].id);
+// the relay's echo is a faithful copy of the write (it confirms + clears the
+// dirty flag); only THEN can a different write from elsewhere land
+await page.evaluate(()=>window.__relayRx({type:'prefs',inactive:[],irons:JSON.parse(JSON.stringify(ironList))}));
 await page.evaluate(o=>window.__relayRx(o),{type:'prefs',inactive:[],
   irons:[{id:ironId,title:'voice',desc:'all the voice work',tags:['speech','hud'],keys:[],created:1}]});
 await page.waitForTimeout(200);
@@ -186,7 +189,10 @@ const descFlow = await page.evaluate(()=>{
 check('haiku’s desc is stored (irons-only push) + rendered',
       descFlow.desc==='haiku wrote this' && descFlow.pushed && descFlow.shown, JSON.stringify(descFlow));
 
-// 5b. the ＋ add-project picker on the iron page (autocomplete over non-members)
+// 5b. the ＋ add-project picker on the iron page: a toggle checklist — the row
+// you tap turns ✓ in place (never vanishes/reshuffles), and the write survives
+// an unauthed socket (the 2026-08-26 production loss: mutate locally, frame
+// silently dropped, next prefs frame reverts).
 const addFlow = await page.evaluate(()=>{
   const modal=document.getElementById('ironaddmodal');
   const idle=getComputedStyle(modal).display==='none';       // invisible until asked
@@ -204,21 +210,42 @@ const addFlow = await page.evaluate(()=>{
           .find(x=>x.type==='prefs');
   const keys=(f && f.irons && f.irons[0] && f.irons[0].keys)||[];
   const stillOpen=!modal.hidden;
-  const emptied=document.getElementById('ironaddlist').innerText;
+  const ticked=[...document.querySelectorAll('#ironaddlist button')]
+               .filter(b=>b.classList.contains('inx')).map(b=>b.textContent);
+  // no hover handlers on the rows — a mousemove re-render eats the first iOS tap
+  const hoverFree=[...document.querySelectorAll('#ironaddlist button')].every(b=>!b.onmousemove);
   document.getElementById('ironaddclose').click();
   return { idle, chip:true, open, focused, rows, keys, leaks: !!(f && 'inactive' in f),
-           stillOpen, closed: modal.hidden, emptied };
+           stillOpen, closed: modal.hidden, ticked, hoverFree };
 });
 check('＋ add-project picker: hidden until asked, the chip opens it focused',
       !!addFlow && addFlow.idle && addFlow.chip && addFlow.open && addFlow.focused, JSON.stringify(addFlow));
-check('typing autocompletes to the one matching project',
+check('typing filters to the one matching project',
       addFlow.rows && addFlow.rows.length===1 && /other/.test(addFlow.rows[0]), JSON.stringify(addFlow.rows));
-check('Enter assigns it (irons-only prefs frame) and the popup STAYS open for the next add',
+check('Enter toggles it IN (irons-only prefs frame), popup stays open, row turns ✓ in place',
       addFlow.keys.length===2 && addFlow.keys.some(k=>/\/other$/.test(k)) && !addFlow.leaks
-      && addFlow.stillOpen && addFlow.closed,
-      JSON.stringify({keys:addFlow.keys, leaks:addFlow.leaks, stillOpen:addFlow.stillOpen, closed:addFlow.closed}));
-check('the just-picked project leaves the list', /every project is already in/.test(addFlow.emptied), addFlow.emptied);
-await page.evaluate(()=>{ ironAssign(projectRows().find(p=>/other/.test(p.name)).id, ''); });  // undo for the checks below
+      && addFlow.stillOpen && addFlow.closed
+      && addFlow.ticked.length===1 && /✓ .*other/.test(addFlow.ticked[0]) && addFlow.hoverFree,
+      JSON.stringify(addFlow));
+// the unauthed-socket hole: an edit made before auth completes must QUEUE and
+// survive the stale prefs frame the relay sends on connect — never vanish
+const unauthed = await page.evaluate(()=>{
+  ironAssign(projectRows().find(p=>/other/.test(p.name)).id, '');   // back out (authed write)
+  const before = ironList[0].keys.slice();
+  relayAuthed=false; relayOutbox.length=0; window.__sent.length=0;
+  ironAssign(projectRows().find(p=>/other/.test(p.name)).id, ironList[0].id);  // edit while unauthed
+  const queued = relayOutbox.filter(o=>o.type==='prefs').length;
+  window.__relayRx({type:'prefs',inactive:[],irons:JSON.parse(JSON.stringify(ironList.map(i=>({...i,keys:before}))))}); // stale echo
+  const kept = ironList[0].keys.length;
+  window.__sent.length=0; setRelayAuthed();
+  const flushed = window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean)
+                  .filter(x=>x.type==='prefs' && x.irons && x.irons[0].keys.length===2).length;
+  // undo for the checks below, back on the authed socket
+  ironAssign(projectRows().find(p=>/other/.test(p.name)).id, '');
+  return { queued, kept, flushed };
+});
+check('an edit while the socket is UNAUTHED queues, survives the stale echo, and flushes on auth',
+      unauthed.queued>=1 && unauthed.kept===2 && unauthed.flushed>=1, JSON.stringify(unauthed));
 await page.evaluate(()=>{ document.querySelector('#ironbody .iprojchip.iadd').click(); });     // eyeball frame: the picker open
 await page.screenshot({path:join(HERE,'ironprobe-add.png')});
 await page.evaluate(()=>closeIronAdd());

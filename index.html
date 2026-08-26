@@ -43,6 +43,9 @@
   html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
               overscroll-behavior:none;   /* kill the browser's back/forward swipe overscroll */
               font:13px/1.55 var(--mono); -webkit-font-smoothing:antialiased; }
+  /* touch-action:manipulation disables double-tap-to-zoom WITHOUT eating taps —
+     see the zoom-suppression note near `gesturestart` in the JS before touching */
+  html { touch-action: manipulation; }
   #app { display:flex; flex-direction:column; height:100%; }
   /* padding-top folds in the iOS status-bar / notch inset (env() is 0 in a normal
      browser tab, ~47–59px in the installed standalone PWA) so the header clears the
@@ -709,6 +712,21 @@
                   font-family:var(--mono); font-size:12px; }
   :is(#ironpickcard .ip-new, #ironaddcard) input:focus { outline:none; border-color:var(--accent-dim); }
   #ironaddcard input { flex:0 0 auto; }
+  /* the ＋ add-project popup is a TOGGLE CHECKLIST: tap a row to put the project
+     in / take it out — the ✓ appearing on the row you tapped IS the feedback.
+     Rows never reshuffle under a finger; `done` lives in the header so it's
+     always reachable without scrolling past the list. */
+  #ironaddcard .ia-hdr { display:flex; align-items:center; gap:8px; }
+  #ironaddcard .ia-hdr .ip-t { flex:1; min-width:0; }
+  #ironaddcard .ia-hdr button { flex:0 0 auto; color:var(--ink); }
+  #ironaddlist { display:flex; flex-direction:column; gap:6px; overflow-y:auto;
+                 -webkit-overflow-scrolling:touch; min-height:0; }
+  #ironaddcard button.inx { color:var(--accent); border-color:var(--accent-dim); }
+  #ironaddcard button.ksel { outline:1px solid var(--edge-hi); }
+  @media (pointer: coarse) {
+    #ironaddcard button { padding:12px; font-size:14px; }
+    #ironaddcard input { padding:11px; font-size:16px; }  /* 16px stops iOS zoom-on-focus */
+  }
   .iprojchip.iadd { border-style:dashed; }
   .iprojchip.iadd:hover { color:var(--accent); border-color:var(--accent-dim); }
   .pinnednote:hover { color:var(--accent); border-color:var(--accent-dim); }
@@ -1055,10 +1073,12 @@
   </div>
   <div id="ironaddmodal" hidden>
     <div id="ironaddcard">
-      <div class="ip-t" id="ironaddtitle"></div>
-      <input id="ironaddinput" placeholder="type a project name…" autocomplete="off" spellcheck="false" autocapitalize="off" />
-      <div id="ironaddlist" style="display:flex;flex-direction:column;gap:6px;"></div>
-      <button id="ironaddclose">✕ done</button>
+      <div class="ia-hdr">
+        <div class="ip-t" id="ironaddtitle"></div>
+        <button id="ironaddclose">done</button>
+      </div>
+      <input id="ironaddinput" placeholder="filter projects…" autocomplete="off" spellcheck="false" autocapitalize="off" />
+      <div id="ironaddlist"></div>
     </div>
   </div>
   <div id="machinesmodal" hidden>
@@ -1223,17 +1243,16 @@
 <script>
 // Kill all zoom on mobile. The viewport meta (user-scalable=no, min=max=scale)
 // handles Android/Chrome, but iOS Safari deliberately *ignores* user-scalable=no
-// for accessibility — so we also defeat its two zoom gestures in JS:
+// for accessibility — so we also defeat its two zoom gestures:
 //   1. pinch  → Safari fires non-standard `gesture*` events; preventDefault them.
-//   2. double-tap → suppress the second tap when it lands <300ms after the first.
+//   2. double-tap → `touch-action:manipulation` on <html> (in CSS). This used to
+//      be a JS touchend handler that preventDefault()ed any tap <300ms after the
+//      previous one — which ALSO cancels that tap's click, so every quick second
+//      tap in the app (tap a button, then tap the next) silently did NOTHING.
+//      That was the 2026-08-26 "adding a project to an iron doesn't work" bug,
+//      and it had been eating fast taps everywhere. Never bring it back.
 ['gesturestart', 'gesturechange', 'gestureend'].forEach(t =>
   document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
-let _lastTouchEnd = 0;
-document.addEventListener('touchend', (e) => {
-  const now = e.timeStamp;
-  if (now - _lastTouchEnd <= 300) e.preventDefault();   // collapse double-tap zoom
-  _lastTouchEnd = now;
-}, { passive: false });
 // Touch devices (phones/tablets): make the terminal a read-only mirror. Mobile
 // dictation/IME streams partial, self-revising text that xterm forwards as
 // overlapping keystrokes ("thithis issthis is a…"), so all input goes through
@@ -7112,7 +7131,19 @@ function ironById(id) { return ironList.find(i => i.id === id) || null; }
 function ironForRow(rowId) { return ironList.find(i => ironMemberIds(i).includes(rowId)) || null; }
 // One receive path for both modes (relay prefs echo / harness broadcast).
 function applyIrons(list) {
-  ironList = Array.isArray(list) ? list : [];
+  const incoming = Array.isArray(list) ? list : [];
+  if (FLEET && ironsDirty) {
+    // A local edit the relay hasn't echoed back yet. Applying a non-matching
+    // server copy here would silently EAT the edit (the 2026-08-26 "added a
+    // project, it vanished" bug: mutate locally, frame dropped by the auth
+    // gate, next prefs frame reverts). Matching echo = confirmation; a stale
+    // copy racing our in-flight write gets our list re-pushed instead — the
+    // relay sends prefs right after authOk, so that frame is the retry bell.
+    if (ironsFp(incoming) === ironsFp(ironList)) ironsDirty = false;
+    else if (Date.now() - ironsPushedAt < 15e3) { ironsPush(); return; }
+    else ironsDirty = false;             // too old to be a race — accept the server's truth
+  }
+  ironList = incoming;
   if (currentIronId && !ironById(currentIronId) && currentView() === 'iron') {
     currentIronId = null; setView('irons');    // deleted elsewhere while open here
     return;
@@ -7120,10 +7151,22 @@ function applyIrons(list) {
   renderIronsUI();
 }
 // Fleet: push the whole list; the relay persists it and echoes it to every
-// device (the echo is the ack). The frame carries ONLY `irons` — the relay
-// merges per-field, so this never clobbers the machines deny-list.
+// device (the echo is the ack — ironsDirty stays up until it lands). NEVER
+// silently drop: relaySend queues behind the auth gate, so an edit made while
+// the phone's socket is still re-authing after wake goes out when it opens.
+let ironsDirty = false, ironsPushedAt = 0;
+// Semantic fingerprint mirroring the relay's clean_irons (trim/clip), so a
+// sanitizer-normalized echo still reads as "our write, confirmed".
+function ironsFp(l) {
+  return JSON.stringify((l || []).map(i => [i.id, String(i.title || '').trim().slice(0, 80),
+    String(i.desc || '').slice(0, 400),
+    (i.tags || []).map(t => String(t).trim().slice(0, 24)).filter(Boolean),
+    (i.keys || i.pids || []).slice(), i.created || 0]));
+}
 function ironsPush() {
-  if (FLEET && ws && ws.readyState === 1 && relayAuthed) ws.send(JSON.stringify({ type: 'prefs', irons: ironList }));
+  if (!FLEET) return;
+  relaySend({ type: 'prefs', irons: JSON.parse(JSON.stringify(ironList)) });
+  ironsDirty = true; ironsPushedAt = Date.now();
 }
 function ironNewId() { return 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 function parseIronTags(csv) { return (csv || '').split(',').map(t => t.trim()).filter(Boolean).slice(0, 8); }
@@ -7176,7 +7219,10 @@ function renderIronLive() {
   if (v === 'irons') renderIronList();
   else if (v === 'iron') renderIronDetail();
 }
-function renderIronsUI() { renderProjectRung(); renderIronLive(); }
+function renderIronsUI() {
+  renderProjectRung(); renderIronLive();
+  if (!ironAddModal.hidden) renderIronAdd();   // echo/broadcast refreshes the checklist's ✓s
+}
 // Per-iron aggregate: member rows + session totals, computed from the same
 // normalized rows the projects rung renders.
 function ironStats(iron, rows) {
@@ -7473,59 +7519,58 @@ function ironPickCreate() {
 document.getElementById('ironpicknewbtn').onclick = ironPickCreate;
 document.getElementById('ironpicknew').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); ironPickCreate(); } };
 // -- the ＋ add-project picker (opened from an iron page's projects row) -------
-// Autocompletes over every project not already in this iron; picking one
-// assigns it and the popup stays open so several go in a row. `ironAddPicked`
-// hides a pick before the broadcast lands (direct mode's ironList only moves
-// on the server's `irons` frame; fleet mutates locally and wouldn't need it).
+// A TOGGLE CHECKLIST over every project on every machine: rows keep the rung's
+// order and never vanish or reshuffle on tap — tapping one puts it in the iron
+// (✓ appears on that row, the feedback) or takes it back out. Type to filter.
+// No hover handlers: a mousemove that re-renders the list eats the first tap
+// on iOS (Safari treats it as hover), which is one way "add" can look dead.
 const ironAddModal = document.getElementById('ironaddmodal');
 const ironAddInput = document.getElementById('ironaddinput');
 const ironAddListEl = document.getElementById('ironaddlist');
 let ironAddSel = 0;
-let ironAddPicked = new Set();
 function ironAddMatches() {
-  const iron = ironById(currentIronId); if (!iron) return [];
-  const mine = new Set(ironMemberIds(iron));
+  if (!ironById(currentIronId)) return [];
   const q = ironAddInput.value.trim().toLowerCase();
   return projectRows()
-    .filter(p => !mine.has(p.id) && !ironAddPicked.has(p.id))
     .filter(p => !q || (p.name || '').toLowerCase().includes(q))
-    .slice(0, 12);
+    .slice(0, 40);
 }
 function renderIronAdd() {
+  const iron = ironById(currentIronId); if (!iron) return;
+  const mine = new Set(ironMemberIds(iron));
   const rows = ironAddMatches();
   if (ironAddSel >= rows.length) ironAddSel = Math.max(0, rows.length - 1);
   ironAddListEl.innerHTML = '';
   if (!rows.length) {
     const d = document.createElement('div');
-    d.className = 'ironempty';
-    d.textContent = ironAddInput.value.trim() ? 'no matching project' : 'every project is already in.';
+    d.className = 'ironempty'; d.textContent = 'no matching project';
     ironAddListEl.appendChild(d);
     return;
   }
   rows.forEach((p, i) => {
     const b = document.createElement('button');
-    if (i === ironAddSel) b.classList.add('member');   // ↑/↓ highlight
-    const other = ironForRow(p.id);
-    b.textContent = (shortEmoji(p.emoji) ? shortEmoji(p.emoji) + ' ' : '') + p.name
+    const inx = mine.has(p.id);
+    if (inx) b.classList.add('inx');
+    if (i === ironAddSel && !isTouch) b.classList.add('ksel');   // ↑/↓ highlight, keyboard only
+    const other = !inx && ironForRow(p.id);
+    b.textContent = (inx ? '✓ ' : '') + (shortEmoji(p.emoji) ? shortEmoji(p.emoji) + ' ' : '') + p.name
       + (FLEET && p.machineName ? ' · ' + p.machineName.replace(/^clawd-/, '') : '')
       + (other ? '   in 🔥 ' + other.title : '');
-    if (other) b.title = 'picking it moves it out of "' + other.title + '"';
-    b.onclick = () => ironAddPick(p);
-    b.onmousemove = () => { if (ironAddSel !== i) { ironAddSel = i; renderIronAdd(); } };
+    if (inx) b.title = 'in this iron — tap to take it out';
+    else if (other) b.title = 'tapping moves it out of "' + other.title + '"';
+    b.onclick = () => ironAddToggle(p);
     ironAddListEl.appendChild(b);
   });
 }
-function ironAddPick(p) {
-  ironAssign(p.id, currentIronId);
-  ironAddPicked.add(p.id);
-  ironAddInput.value = ''; ironAddSel = 0;
-  renderIronAdd();
-  if (!isTouch) ironAddInput.focus();
+function ironAddToggle(p) {
+  const iron = ironById(currentIronId); if (!iron) return;
+  const inx = ironMemberIds(iron).includes(p.id);
+  ironAssign(p.id, inx ? '' : iron.id);
+  renderIronAdd();          // fleet mutates synchronously; direct repaints again on the broadcast
 }
 function openIronAdd() {
   const iron = ironById(currentIronId); if (!iron) return;
-  document.getElementById('ironaddtitle').textContent = 'add projects to "' + iron.title + '"';
-  ironAddPicked = new Set();
+  document.getElementById('ironaddtitle').textContent = 'projects in "' + iron.title + '"';
   ironAddInput.value = ''; ironAddSel = 0;
   ironAddModal.hidden = false;
   renderIronAdd();
@@ -7538,7 +7583,7 @@ ironAddInput.addEventListener('input', () => { ironAddSel = 0; renderIronAdd(); 
 ironAddInput.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown') { ironAddSel++; renderIronAdd(); }
   else if (e.key === 'ArrowUp') { ironAddSel = Math.max(0, ironAddSel - 1); renderIronAdd(); }
-  else if (e.key === 'Enter') { const rows = ironAddMatches(); if (rows[ironAddSel]) ironAddPick(rows[ironAddSel]); }
+  else if (e.key === 'Enter') { const rows = ironAddMatches(); if (rows[ironAddSel]) ironAddToggle(rows[ironAddSel]); }
   else if (e.key === 'Escape') closeIronAdd();
   else return;
   e.preventDefault(); e.stopPropagation();
@@ -7564,13 +7609,17 @@ function ironDescContext(iron) {
            '- ' + (s.title || 'new session') + (s.desc ? ' — ' + s.desc : '')).join('\n') || '(none yet)');
 }
 // Fleet: any live harness can run the LLM call — prefer one hosting a member.
+// ONLY over an ALREADY-OPEN e2e channel: hsendTo on a closed one starts a
+// handshake, and a handshake can mean a Face ID prompt — merely looking at an
+// iron page must never cost a passkey. No open channel → skip, retry later.
 function ironDescMachine(iron) {
+  const open = mid => { const c = e2eChans[mid]; return c && c.status === 'open'; };
   for (const key of ironMemberIds(iron)) {
     const g = projectGroup(key);
-    const me = g && g.machines.find(x => x.online && isMachineActive(x.machineId));
+    const me = g && g.machines.find(x => x.online && isMachineActive(x.machineId) && open(x.machineId));
     if (me) return me.machineId;
   }
-  const lm = liveMachines()[0];
+  const lm = liveMachines().find(m => open(m.id));
   return lm ? lm.id : null;
 }
 function requestIronDesc(iron) {
