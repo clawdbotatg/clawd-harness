@@ -4,7 +4,7 @@
 //   cd tools && node ironprobe.mjs
 //
 // What has to hold (fleet mode, the production surface):
-//   1. the 🔥 button sits to the LEFT of the "projects" title and opens #/irons
+//   1. the 🔥 header icon sits immediately LEFT of the 🗂️ projects icon and opens #/irons
 //   2. creating an iron sends an IRONS-ONLY prefs frame (never `inactive` —
 //      clobbering the machines deny-list from the irons page would be a
 //      passkey-storm regression), and the relay echo is applied
@@ -81,13 +81,15 @@ await page.evaluate(()=>{
 });
 await page.waitForTimeout(400);
 
-// 1. the 🔥 button, left of the title
+// 1. the 🔥 header icon, immediately LEFT of the 🗂️ projects icon
 const head = await page.evaluate(()=>{
-  const h=document.getElementById('projhead');
-  if(!h) return null;
-  return { first:h.children[0].id, label:h.querySelector('.menutitle').textContent };
+  const b=document.getElementById('ironsBtn');
+  if(!b) return null;
+  return { emoji:b.textContent.trim(), isHbtn:b.classList.contains('hbtn'),
+           nextIsProjects: b.nextElementSibling && b.nextElementSibling.id==='projectsBtn' };
 });
-check('🔥 sits left of the "projects" title', !!head && head.first==='ironsBtn' && /projects/.test(head.label), JSON.stringify(head));
+check('🔥 header icon sits left of the 🗂️ projects icon',
+      !!head && head.emoji==='🔥' && head.isHbtn && head.nextIsProjects, JSON.stringify(head));
 await page.evaluate(()=>document.getElementById('ironsBtn').click());
 await page.waitForTimeout(300);
 check('🔥 opens its own page at #/irons', await page.evaluate(()=>currentView()==='irons' && location.hash==='#/irons'));

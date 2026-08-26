@@ -193,7 +193,8 @@ user-facing overview; this file orients an agent working **on** the code.
   `RTCPeerConnection` are all stubbed — no key, no mic, no live controller.
   Server half: `python3 -m controller.test_voice`.
 - **`tools/ironprobe.mjs`** — guards the **🔥 irons layer** (2026-08-26): the
-  button sits left of the "projects" title and opens `#/irons`; creating an
+  header icon sits immediately left of the 🗂️ projects icon and opens
+  `#/irons`; creating an
   iron sends an **irons-only** relay `prefs` frame (a frame that also carried
   `inactive` would clobber the machines deny-list — the relay merges
   per-field, `fleet/test_relay_prefs.py` guards that half); a project card's
@@ -607,8 +608,8 @@ user-facing overview; this file orients an agent working **on** the code.
   2026-08.
 - **🔥 Irons** (2026-08-26): a level ABOVE projects — an iron is a **named
   group of projects** ("irons in the fire": title, description, tags) for
-  tracking one effort that spans repos. The 🔥 button left of the "projects"
-  title opens `#/irons`; an iron's own page (`#/i/<id>`) shows one tab row of
+  tracking one effort that spans repos. The 🔥 header icon left of the 🗂️
+  projects icon opens `#/irons`; an iron's own page (`#/i/<id>`) shows one tab row of
   **every session from every member project across machines**, 📌 pinned ones
   at the end, plus member-project chips. Assignment is the 🔥 corner button on
   each project card (modal picker; one iron per project; most projects stay

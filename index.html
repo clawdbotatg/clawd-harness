@@ -664,12 +664,6 @@
   .iprojchip .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .iprojchip .rm { color:var(--dim); cursor:pointer; padding:0 2px; }
   .iprojchip .rm:hover { color:var(--err); }
-  /* projects rung: 🔥 button to the LEFT of the "projects" title */
-  #projhead { display:flex; align-items:center; gap:8px; }
-  #projhead .menutitle { flex:1; }
-  #ironsBtn { background:transparent; border:1px solid var(--edge); border-radius:6px;
-              font-size:15px; line-height:1.2; cursor:pointer; padding:3px 9px; }
-  #ironsBtn:hover { border-color:var(--accent); background:var(--raised); }
   /* project card: 🔥 corner control (mirrors the pincard second-button layout)
      + the "in iron X" badge */
   .scard .sfire { position:absolute; top:8px; right:9px; background:transparent;
@@ -999,6 +993,7 @@
     <!-- one control strip, left→right: projects · sessions · machines · subscriptions
          · PM · pins · settings · reload. All the same square emoji chip (.hbtn);
          only 📌 carries a count. -->
+    <button id="ironsBtn" class="hbtn" title="Irons — named groups of projects, each with every session inside it"><span class="bico">🔥</span></button>
     <button id="projectsBtn" class="hbtn" title="All projects"><span class="bico">🗂️</span></button>
     <button id="menuBtn" class="hbtn" title="Sessions in this project"><span class="bico">💬</span></button>
     <button id="machinesBtn" class="hbtn" title="Fleet machines"><span class="bico">🖥️</span></button>
@@ -4776,19 +4771,9 @@ function focusProjectFilterOnArrival() {
 function ensureProjectChrome() {
   if (projCardsEl) return;
   projectsEl.textContent = '';
-  // 🔥 irons — a level above projects (named groups of them) — sits to the
-  // LEFT of the "projects" title and opens its own page.
-  const phead = document.createElement('div');
-  phead.id = 'projhead';
-  const ironsGo = document.createElement('button');
-  ironsGo.id = 'ironsBtn'; ironsGo.textContent = '🔥';
-  ironsGo.title = 'irons — named groups of projects, each with every session inside it';
-  ironsGo.onclick = () => navTo('irons');
-  phead.appendChild(ironsGo);
   projLabelEl = document.createElement('div');
   projLabelEl.className = 'menutitle';
-  phead.appendChild(projLabelEl);
-  projectsEl.appendChild(phead);
+  projectsEl.appendChild(projLabelEl);
 
   // add/search row: the box does double duty. As you type it FILTERS the list
   // below (substring match on name); Enter OPENS the project when the filter has
@@ -7457,6 +7442,7 @@ const pinBtn = document.getElementById('pinBtn');
 const pmfeed = document.getElementById('pmfeed');
 const menuBtn = document.getElementById('menuBtn');
 const projectsBtn = document.getElementById('projectsBtn');
+const ironsHdrBtn = document.getElementById('ironsBtn');   // 🔥 header icon, left of 🗂️
 const closeBtn = document.getElementById('closeBtn');
 const machineTag = document.getElementById('machineTag');
 const ttymetaEl = document.getElementById('ttymeta');
@@ -7540,6 +7526,7 @@ function setView(view) {
   menuBtn.classList.toggle('on', sessions);
   projectsBtn.classList.toggle('on', projects);
   pinsBtn.classList.toggle('on', pins);
+  ironsHdrBtn.classList.toggle('on', irons || iron);
   statusEl.classList.toggle('pmopen', pm);
   try { localStorage.setItem('cc_view', view); } catch {}
   refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
@@ -7567,6 +7554,7 @@ const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; setView(v
 menuBtn.onclick = () => navTo('sessions');
 projectsBtn.onclick = () => navTo('projects');
 pinsBtn.onclick = () => navTo('pins');           // 📌 the board of parked to-dos
+ironsHdrBtn.onclick = () => navTo('irons');      // 🔥 named groups of projects
 // In-session 📌: park the open session on the board and move straight on to the
 // NEXT session in the normal list (hopAfterPin) — pinning is a "done with this
 // one" gesture, not a request to go look at the board. If it's already pinned,
