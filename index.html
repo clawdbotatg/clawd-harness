@@ -1268,7 +1268,7 @@
            CURRENT state rather than just the legend -->
       <div id="ttystat" hidden role="img"><span class="dot"></span></div>
       <div id="sessiondesc" title="AI-generated name for this session"></div>
-      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."></div>
+      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button></div>
     </div>
     <div id="attachments"></div>
     <div id="keys" title="Send keys to the session (works even when the terminal is read-only) — for navigating TUI menus like /model">
@@ -1291,7 +1291,6 @@
       <textarea id="box" placeholder="message"></textarea>
       <input id="imgInput" type="file" accept="image/*,text/*,.md,.markdown,.txt,.csv,.json,.yaml,.yml,.toml,.log,.xml,.html" multiple hidden />
       <div id="actions">
-        <button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button>
         <button id="imgBtn" title="Attach an image or text file">🖼</button>
         <button id="send" title="Send message">📤</button>
       </div>
@@ -7086,13 +7085,16 @@ function showChipTip(btn, text) {
 function hideChipTip() { chipTip.style.display = 'none'; }
 {
   const chipsEl = document.getElementById('quickchips');
+  // the 🕘 sent-history button is static markup at the end of the strip —
+  // chips insert BEFORE it so it stays the rightmost item, just past "doc"
+  const sentEnd = document.getElementById('sentBtn');
   for (const q of QUICK_PROMPTS) {
     const b = document.createElement('button');
     b.textContent = q.e + ' ' + q.label;
     b.onclick = () => { hideChipTip(); sendQuick(q.text); };
     b.onmouseenter = () => showChipTip(b, q.text);
     b.onmouseleave = hideChipTip;
-    chipsEl.appendChild(b);
+    chipsEl.insertBefore(b, sentEnd);
   }
 }
 function sendQuick(text) {
