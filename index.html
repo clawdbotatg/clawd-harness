@@ -69,16 +69,16 @@
   header .spacer { flex:1; }
   #dot { width:8px; height:8px; background:var(--err); flex:0 0 auto; }   /* square status LED */
   #dot.up { background:var(--ok); }
-  /* 🔥 iron scope header: the iron's identity riding above its session tabs
-     while a scoped session is open — one tappable line, title then dim desc */
-  #ironhdr { display:flex; align-items:baseline; gap:8px; padding:4px 12px;
-             border-bottom:1px solid var(--edge); background:var(--panel);
-             cursor:pointer; overflow:hidden; }
-  #ironhdr[hidden] { display:none; }
-  #ironhdr .iht { flex:0 0 auto; font-size:13px; font-weight:600; color:var(--ink); white-space:nowrap; }
-  #ironhdr .ihd { flex:1 1 auto; min-width:0; font-size:11px; font-family:var(--mono); color:var(--dim);
-                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  #ironhdr:hover .iht { color:var(--accent); }
+  /* 🔥 iron scope: while a session is open INSIDE an iron, the iron page's own
+     body (#ironbody — title/desc, projects row, session tabs) rides at the TOP
+     of the terminal panel, so the tty view IS the iron page with a live
+     terminal + composer under its tabs. Cap its share so the terminal always
+     keeps most of the screen. */
+  #left > #ironbody { flex:0 1 auto; max-height:45%; padding:10px 14px; }
+  #left > .ironform { flex:0 0 auto; }
+  /* the session overlay (✕ / 📌 / account tag, absolute top-right, z-20) floats
+     over the head row here — reserve its footprint so ✎ 🗑 stay tappable */
+  @media (max-width:1180px) { #left > #ironbody .ih-row { padding-right:170px; } }
   /* second header row: session tabs for the current project, busy→idle→dead, left to right */
   #sessionbar { display:flex; align-items:center; gap:6px; padding:5px 12px;
                 border-bottom:1px solid var(--edge); background:var(--panel);
@@ -1054,11 +1054,6 @@
     <button id="settingsBtn" class="hbtn" title="Settings"><span class="bico">⚙️</span></button>
     <button id="reloadBtn" class="hbtn" title="Reload (recover a blank screen)"><span class="bico">🔄</span></button>
   </header>
-  <!-- 🔥 iron scope header: shown above the tab strip while a session is open
-       INSIDE an iron, so the tty view reads as the iron's page — title + desc
-       up top, the iron's session tabs under it, terminal + composer below.
-       Tapping it climbs back to the iron page. -->
-  <div id="ironhdr" hidden></div>
   <div id="sessionbar" hidden></div>
   <div id="needsbar" hidden></div>
   <div id="rebootbar" hidden>
@@ -3533,12 +3528,13 @@ function renderSessionBar(view) {
   const bar = document.getElementById('sessionbar');
   const wasHidden = bar.hidden;
   view = view || currentView();
-  renderIronHdr(view);                                          // 🔥 iron identity above the strip while scoped
   if (view === 'pm') { renderPmBar(bar, wasHidden); return; }   // PM threads ride the same strip
   const sorted = railSessions();                               // unified roster (or the scoped iron's), importance-ordered
-  // hidden on the projects rung and both 🔥 iron pages (the iron detail carries
-  // its own session row — two strips of tabs would fight for the same tap)
-  if (view === 'projects' || view === 'irons' || view === 'iron' || !sorted.length) {
+  // hidden on the projects rung, both 🔥 iron pages, AND a scoped iron session —
+  // everywhere the iron chrome carries its own #irontabs row (two strips of
+  // tabs would fight for the same tap)
+  if (view === 'projects' || view === 'irons' || view === 'iron' ||
+      (ironScope && (view === 'tty' || view === 'transcript')) || !sorted.length) {
     bar.hidden = true; bar.innerHTML = '';
     if (!wasHidden) refitTTY();
     return;
@@ -3599,35 +3595,24 @@ function renderSessionBar(view) {
   if (wasHidden) refitTTY();
 }
 
-// 🔥 the iron scope header — while a session is open INSIDE an iron the tty
-// view reads as the iron's own page: this line (title + AI desc) sits above
-// the strip of the iron's session tabs, and tapping it climbs back to the
-// iron page. Content-only repaints (no inputs live here, but churn is churn);
-// visibility flips refit the terminal since they change its height.
-function renderIronHdr(view) {
-  const el = document.getElementById('ironhdr');
-  const wasHidden = el.hidden;
-  const iron = (ironScope && (view === 'tty' || view === 'transcript')) ? ironById(ironScope) : null;
-  if (!iron) {
-    if (!wasHidden) { el.hidden = true; el.innerHTML = ''; delete el.dataset.fp; refitTTY(); }
-    return;
+// 🔥 the iron scope chrome — while a session is open INSIDE an iron, the iron
+// page's whole body (#ironbody: ← irons / title / ✎ 🗑, desc, tags, PROJECTS
+// row, session tabs) is reparented to the TOP of the terminal panel, so the
+// tty view IS the iron page with a live terminal + composer under its tabs.
+// The ✎ edit form (#ironedit) travels with it so editing works in place.
+// Climbing back to a normal rung (or the iron page itself) sends both home.
+function placeIronChrome(on) {
+  const body = document.getElementById('ironbody'), edit = document.getElementById('ironedit'),
+        home = document.getElementById('ironview');
+  if (on && body.parentElement !== leftPanel) {
+    leftPanel.insertBefore(body, leftPanel.firstChild);
+    leftPanel.insertBefore(edit, body);        // form above the body, same as on the iron page
+    refitTTY();
+  } else if (!on && body.parentElement !== home) {
+    home.insertBefore(edit, home.firstChild);  // restore the iron page's own order: edit, body
+    home.insertBefore(body, edit.nextSibling);
+    refitTTY();
   }
-  const fp = iron.title + '\x1f' + (iron.desc || '');
-  if (el.dataset.fp !== fp) {
-    el.dataset.fp = fp;
-    el.innerHTML = '';
-    const t = document.createElement('span');
-    t.className = 'iht'; t.textContent = '🔥 ' + iron.title;
-    el.appendChild(t);
-    const d = document.createElement('span');
-    d.className = 'ihd'; d.textContent = iron.desc || '';
-    el.appendChild(d);
-    el.title = 'back to the 🔥 ' + iron.title + ' iron';
-    el.onclick = () => { currentIronId = iron.id; navTo('iron'); };
-  }
-  requestIronDesc(iron);          // throttled — a deep link may land before any desc exists
-  el.hidden = false;
-  if (wasHidden) refitTTY();
 }
 
 // ---- 🔎 filter the tab strip ------------------------------------------------
@@ -7304,6 +7289,9 @@ function renderIronLive() {
   const v = currentView();
   if (v === 'irons') renderIronList();
   else if (v === 'iron') renderIronDetail();
+  // scoped session: the iron chrome above the terminal tracks frames too
+  // (tab dots/ages, membership, desc) — same repaint the iron page gets
+  else if (ironScope && (v === 'tty' || v === 'transcript')) renderIronDetail();
 }
 function renderIronsUI() {
   renderProjectRung(); renderIronLive();
@@ -7398,6 +7386,7 @@ function ironTabNode(s, parked) {
   const tab = document.createElement('button');
   const mOff = FLEET && s._machine && !isMachineOnline(s._machine);
   tab.className = 'stab' + (parked ? ' parked' : '') +
+                  (s.cid === currentCid ? ' active' : '') +   // the session open under the tabs
                   (sessionIsLocal(s) ? ' local' : '') + (mOff ? ' moff' : '');
   tab.title = (s.title || 'new session') + (parked ? ' — 📌 pinned (parked on the board)' : '') +
               (mOff ? ` — ${s._machine} is offline` : '');
@@ -7533,7 +7522,14 @@ function renderIronDetail() {
     tabs.appendChild(e);
   }
   body.appendChild(tabs);
+  // riding above a terminal (scoped session): a repaint can change our height
+  // (desc lands, tabs wrap), which changes the terminal's box — refit it then
+  if (body.parentElement === leftPanel && body.offsetHeight !== lastIronChromeH) {
+    lastIronChromeH = body.offsetHeight;
+    refitTTY();
+  }
 }
+let lastIronChromeH = 0;   // last painted height of the scoped iron chrome
 // -- create form (irons page) + edit form (detail page): static nodes, wired once
 const ironFormEl = document.getElementById('ironform');
 document.getElementById('ironAddBtn').onclick = () => {
@@ -7816,7 +7812,13 @@ function setView(view) {
   pinsPanel.classList.toggle('hidden', !pins);
   ironsPanel.classList.toggle('hidden', !irons);
   ironPanel.classList.toggle('hidden', !iron);
-  if (!iron) ironEditEl.hidden = true;           // leaving the detail closes its edit form
+  // 🔥 scoped session: the iron page's body rides above the terminal (see
+  // placeIronChrome) — keep the iron detail painted there, tabs highlighting
+  // the open session. Any other view sends the chrome back to the iron page.
+  const scopedTty = (tty || view === 'transcript') && !!ironScope;
+  placeIronChrome(scopedTty);
+  if (scopedTty) { currentIronId = ironScope; renderIronDetail(); }
+  if (!iron && !scopedTty) ironEditEl.hidden = true;   // leaving the iron surface closes its edit form
   document.getElementById('keys').style.display = (tty && isTouch) ? '' : 'none';  // key bar only for touch (the desktop terminal takes these keys natively)
   if (!tty && kbdMode) setKbdMode(false);   // ⌨ typing mode is per-visit: back to the safe read-only default off the tty view
   const inSession = (tty || view === 'transcript') && !!currentCid;

@@ -259,35 +259,45 @@ const scope = await page.evaluate(()=>{
   const tab=[...document.querySelectorAll('#irontabs .stab')].find(t=>/mic/.test(t.textContent));
   if(!tab) return null;
   tab.click();
-  const bar=document.getElementById('sessionbar');
-  const hdr=document.getElementById('ironhdr');
-  const tabs=[...bar.querySelectorAll('.stab')].map(t=>({
-    lbl:(t.querySelector('.lbl')||{}).textContent||'', parked:t.classList.contains('parked')}));
+  const body=document.getElementById('ironbody');
+  const tabs=[...document.querySelectorAll('#irontabs .stab')].map(t=>({
+    lbl:(t.querySelector('.lbl')||{}).textContent||'', parked:t.classList.contains('parked'),
+    active:t.classList.contains('active')}));
   return { view: currentView(), hash: location.hash, scope: ironScope,
-           barShown: !bar.hidden, tabs,
-           hdrShown: !hdr.hidden, hdrText: hdr.innerText };
+           chromeOnTty: body.parentElement===document.getElementById('left'),
+           barHidden: document.getElementById('sessionbar').hidden,
+           bodyText: body.innerText.slice(0,300), tabs,
+           composerShown: getComputedStyle(document.querySelector('footer .inputrow')).display!=='none' };
 });
-check('tapping an iron tab opens the tty INSIDE the iron (scoped url + 🔥 header)',
+check('tapping an iron tab opens the tty INSIDE the iron page (chrome above the terminal)',
       !!scope && scope.view==='tty' && scope.scope===ironId
       && scope.hash==='#/i/'+ironId+'/s/ca1/tty'
-      && scope.hdrShown && /🔥 voice/.test(scope.hdrText) && /haiku wrote this/.test(scope.hdrText),
+      && scope.chromeOnTty && scope.barHidden && scope.composerShown
+      && /🔥 voice/.test(scope.bodyText) && /haiku wrote this/.test(scope.bodyText)
+      && /projects/i.test(scope.bodyText),
       JSON.stringify(scope));
-check('the scoped strip is the WHOLE iron — live members first, 📌 pinned at the end, no outsiders',
-      !!scope && scope.barShown && scope.tabs.length===2
-      && /mic/.test(scope.tabs[0].lbl) && !scope.tabs[0].parked
-      && /^📌 .*hud/.test(scope.tabs[1].lbl) && scope.tabs[1].parked
+check('the iron tabs stay: whole roster (📌 pinned at the end, no outsiders), open one highlighted',
+      !!scope && scope.tabs.length===2
+      && /mic/.test(scope.tabs[0].lbl) && !scope.tabs[0].parked && scope.tabs[0].active
+      && /^📌 .*hud/.test(scope.tabs[1].lbl) && scope.tabs[1].parked && !scope.tabs[1].active
       && !scope.tabs.some(t=>/other/.test(t.lbl)),
       JSON.stringify(scope && scope.tabs));
-const hdrTap = await page.evaluate(()=>{
-  document.getElementById('ironhdr').click();      // the header line itself = back to the iron
-  const back = { view: currentView(), hash: location.hash,
-                 hdrHidden: document.getElementById('ironhdr').hidden };
-  const tab=[...document.querySelectorAll('#irontabs .stab')].find(t=>/mic/.test(t.textContent));
-  tab.click();                                     // re-enter for the checks below
-  return back;
+const inline = await page.evaluate(()=>{
+  const hud=[...document.querySelectorAll('#irontabs .stab')].find(t=>/hud/.test(t.textContent));
+  hud.click();                                     // switch sessions WITHOUT leaving the iron
+  const body=document.getElementById('ironbody');
+  const tabs=[...document.querySelectorAll('#irontabs .stab')].map(t=>({
+    lbl:(t.querySelector('.lbl')||{}).textContent||'', active:t.classList.contains('active')}));
+  const out={ view: currentView(), cid: currentCid, scope: ironScope,
+              chromeOnTty: body.parentElement===document.getElementById('left'), tabs };
+  const mic=[...document.querySelectorAll('#irontabs .stab')].find(t=>/mic/.test(t.textContent));
+  mic.click();                                     // back for the checks below
+  return out;
 });
-check('tapping the 🔥 header line climbs back to the iron page (and the line hides there)',
-      hdrTap.view==='iron' && hdrTap.hash==='#/i/'+ironId && hdrTap.hdrHidden, JSON.stringify(hdrTap));
+check('tapping another iron tab switches the terminal IN PLACE (view stays, highlight moves)',
+      inline.view==='tty' && inline.cid==='ch1' && inline.scope===ironId && inline.chromeOnTty
+      && inline.tabs.find(t=>/hud/.test(t.lbl)).active && !inline.tabs.find(t=>/mic/.test(t.lbl)).active,
+      JSON.stringify(inline));
 const climb = await page.evaluate(()=>{
   document.getElementById('ironsBtn').click();     // 🔥 while scoped = back to YOUR iron
   return { view: currentView(), hash: location.hash };
@@ -303,17 +313,18 @@ const climb2 = await page.evaluate(()=>{
 check('goShallower from a scoped session climbs to the iron page, scope intact',
       climb2.view==='iron' && climb2.scope===ironId, JSON.stringify(climb2));
 const exitScope = await page.evaluate(()=>{ navTo('sessions');
-  return { scope: ironScope, hdrHidden: document.getElementById('ironhdr').hidden }; });
-check('navigating to a normal rung exits the scope (header gone too)',
-      exitScope.scope===null && exitScope.hdrHidden, JSON.stringify(exitScope));
+  return { scope: ironScope,
+           chromeHome: document.getElementById('ironbody').parentElement===document.getElementById('ironview') }; });
+check('navigating to a normal rung exits the scope (chrome returns to the iron page)',
+      exitScope.scope===null && exitScope.chromeHome, JSON.stringify(exitScope));
 // deep link straight into a scoped session (reload survival)
 await page.evaluate(id=>{ location.hash='#/i/'+id+'/s/ca1/tty'; }, ironId);
 await page.waitForTimeout(300);
 const dl = await page.evaluate(()=>({ view: currentView(), scope: ironScope,
-  hdrShown: !document.getElementById('ironhdr').hidden,
-  tabs:[...document.querySelectorAll('#sessionbar .stab')].length }));
-check('deep link #/i/<id>/s/<cid>/tty restores the scoped session view (header + full rail)',
-      dl.view==='tty' && dl.scope===ironId && dl.hdrShown && dl.tabs===2, JSON.stringify(dl));
+  chromeOnTty: document.getElementById('ironbody').parentElement===document.getElementById('left'),
+  tabs:[...document.querySelectorAll('#irontabs .stab')].length }));
+check('deep link #/i/<id>/s/<cid>/tty restores the scoped session view (chrome + full tabs)',
+      dl.view==='tty' && dl.scope===ironId && dl.chromeOnTty && dl.tabs===2, JSON.stringify(dl));
 await page.screenshot({path:join(HERE,'ironprobe-scoped.png')});   // eyeball frame: 🔥 header + iron tabs over the tty
 
 // 6. deep link straight to the iron

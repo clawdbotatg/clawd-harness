@@ -617,12 +617,15 @@ user-facing overview; this file orients an agent working **on** the code.
   later on the iron's page, never at creation. The 🔥 header icon left of the 🗂️
   projects icon opens `#/irons`; an iron's own page (`#/i/<id>`) shows one tab row of
   **every session from every member project across machines**, 📌 pinned ones
-  at the end, plus member-project chips. **Tapping a session keeps you inside
-  the iron** (`#/i/<id>/s/<cid>/tty`): the `#ironhdr` line (🔥 title + desc,
-  tap = back to the iron page) rides above the tab strip, and the strip is the
-  iron's WHOLE roster — `railSessions()` includes 📌 pinned members there
-  (dashed, at the end), unlike the normal strip which parks them on the board;
-  swipe/cycle flips through them and the full tty + composer sit below. Assignment is the 🔥 corner button on
+  at the end, plus member-project chips. **Tapping a session keeps you ON the iron page**
+  (`#/i/<id>/s/<cid>/tty`): `placeIronChrome` reparents `#ironbody` (title/✎🗑,
+  desc, tags, PROJECTS row, session tabs) + `#ironedit` to the top of the
+  terminal panel, so the live tty + composer sit under the iron's own tabs —
+  tab taps switch the terminal in place (open one highlighted), the global
+  `#sessionbar` hides (the iron's `#irontabs` is the strip), and swipe/cycle
+  ride `railSessions()`, which scoped = the iron's WHOLE roster including 📌
+  pinned members (dashed, at the end), unlike the normal strip which parks
+  them on the board. Climbing to any normal rung sends the chrome home. Assignment is the 🔥 corner button on
   each project card (modal picker; one iron per project; most projects stay
   loose). Member refs are `projectRows().id` — the **projectKey** in fleet (a
   gh repo groups once across boxes), the **pid** in direct mode. Storage is
