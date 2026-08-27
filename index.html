@@ -3472,6 +3472,10 @@ function refreshBreadcrumb(view) {
       const pe = currentProjectEmoji();
       crumb = (pe ? pe + ' ' : '') + pn;
     }
+    if (ironScope && (view === 'tty' || view === 'transcript')) {
+      const it = ironById(ironScope);           // scoped session: 🔥 iron · project
+      if (it) crumb = '🔥 ' + it.title + (crumb ? ' · ' + crumb : '');
+    }
   }
   meta.textContent = crumb;
   // Show the AI session name above the message box, but only when a specific
@@ -3516,7 +3520,7 @@ function renderSessionBar(view) {
   const wasHidden = bar.hidden;
   view = view || currentView();
   if (view === 'pm') { renderPmBar(bar, wasHidden); return; }   // PM threads ride the same strip
-  const sorted = sortedSessions();                             // unified roster, importance-ordered (needs-you → working → idle → dead)
+  const sorted = railSessions();                               // unified roster (or the scoped iron's), importance-ordered
   // hidden on the projects rung and both 🔥 iron pages (the iron detail carries
   // its own session row — two strips of tabs would fight for the same tap)
   if (view === 'projects' || view === 'irons' || view === 'iron' || !sorted.length) {
@@ -5578,6 +5582,19 @@ function sortedSessions() {
   return allSessions().filter(s => !s.pinned).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
 }
 
+// The rail the strip/cycling/close-hop actually flip through. Normally the full
+// unified roster; while an IRON SCOPE is active (a session opened from an iron
+// page) it narrows to that iron's member sessions, so tabbing/swiping moves
+// between the iron's ttys and nothing else — the iron behaves like a project.
+function railSessions() {
+  if (!ironScope) return sortedSessions();
+  const iron = ironById(ironScope);
+  if (!iron) { ironScope = null; return sortedSessions(); }   // iron deleted under us
+  const ids = ironMemberIds(iron);
+  return sortedSessions().filter(s => FLEET ? (s._pkey && ids.includes(s._pkey))
+                                            : ids.includes(s.pid));
+}
+
 // The pin board's roster: every 📌 parked session across all projects (and, in
 // fleet, machines) — newest pin first, so what you just parked sits on top.
 function pinnedSessions() {
@@ -5592,6 +5609,16 @@ function pinnedSessions() {
 // (cycling shouldn't yank you between views).
 function focusSession(s) {
   pendingSendText = null;          // manual open cancels a queued new-session send
+  // Opening a session OUTSIDE the scoped iron drops the scope (back to the full
+  // rail). An iron we don't know yet (list still loading) keeps it — the deep
+  // link resolver sets scope before the irons frame may have landed.
+  if (ironScope) {
+    const iron = ironById(ironScope);
+    if (iron) {
+      const ids = ironMemberIds(iron);
+      if (!(FLEET ? (s._pkey && ids.includes(s._pkey)) : ids.includes(s.pid))) ironScope = null;
+    }
+  }
   if (FLEET) {
     if (s._machine && s._machine !== currentMachine) attachMachine(s._machine);
     if (s._pkey) currentProjectKey = s._pkey;
@@ -5716,7 +5743,7 @@ function closeSession(cid, ev) {
 // left/right (and the horizontal swipe) move between sessions, not abstraction
 // levels. focusSession() re-points the project/machine and keeps your view.
 function cycleSession(dir) {
-  const list = sortedSessions();
+  const list = railSessions();
   if (!list.length) return;
   const idx = list.findIndex(s => s.cid === currentCid);
   const next = idx < 0 ? (dir > 0 ? 0 : list.length - 1)
@@ -5729,7 +5756,7 @@ function cycleSession(dir) {
 // nothing's left to land on, fall back to the projects rung.
 function closeCurrentSession() {
   if (!currentCid) return;
-  const roster = sortedSessions();
+  const roster = railSessions();
   const idx = roster.findIndex(s => s.cid === currentCid);
   const rest = roster.filter(s => s.cid !== currentCid);
   closeSession(currentCid);
@@ -5744,7 +5771,7 @@ function closeCurrentSession() {
 // this cid; drop it by hand. Nothing left to hop to → the sessions list (which
 // carries the "📌 N pinned on the board" note, so the board is still one tap).
 function hopAfterPin(cid) {
-  const roster = sortedSessions();
+  const roster = railSessions();
   const idx = roster.findIndex(s => s.cid === cid);
   const rest = roster.filter(s => s.cid !== cid);
   if (!rest.length) { navTo('sessions'); return; }
@@ -7126,6 +7153,10 @@ else {
 // last-writer-wins whole-list, same contract as the active-machines set.
 let ironList = [];
 let currentIronId = null;
+// Iron SCOPE: set when a session is opened from an iron page — the session
+// plane (tab strip, swipe/cycle rail, climb-out target, URL) then belongs to
+// that iron until you navigate back to the normal rungs or open an outsider.
+let ironScope = null;
 function ironMemberIds(iron) { return (FLEET ? iron.keys : iron.pids) || []; }
 function ironById(id) { return ironList.find(i => i.id === id) || null; }
 function ironForRow(rowId) { return ironList.find(i => ironMemberIds(i).includes(rowId)) || null; }
@@ -7315,7 +7346,10 @@ function ironTabNode(s, parked) {
                   (sessionIsLocal(s) ? ' local' : '') + (mOff ? ' moff' : '');
   tab.title = (s.title || 'new session') + (parked ? ' — 📌 pinned (parked on the board)' : '') +
               (mOff ? ` — ${s._machine} is offline` : '');
-  tab.onclick = () => focusSession(s);
+  // opening from the iron page scopes the whole session plane to this iron:
+  // the strip shows the iron's sessions, swipe/cycle moves within them, and
+  // climbing out lands back HERE (see railSessions / stepLevel)
+  tab.onclick = () => { ironScope = currentIronId; focusSession(s); };
   const dot = document.createElement('span');
   dot.className = 'sdot' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '');
   tab.appendChild(dot);
@@ -7711,6 +7745,9 @@ function setView(view) {
   const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects',
         pm = view === 'pm', pins = view === 'pins',
         irons = view === 'irons', iron = view === 'iron';
+  // Iron scope survives only the session plane and the iron page itself —
+  // navigating to any normal rung (projects/sessions/pins/pm/irons) exits it.
+  if (!tty && view !== 'transcript' && !iron) ironScope = null;
   // Leaving the terminal view: stop claiming the PTY size (read BEFORE the
   // panel toggles below change what currentView() reports).
   if (!tty && currentCid && currentView() === 'tty') { releaseResize(); markSeen(currentCid); }
@@ -7775,7 +7812,12 @@ const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; setView(v
 menuBtn.onclick = () => navTo('sessions');
 projectsBtn.onclick = () => navTo('projects');
 pinsBtn.onclick = () => navTo('pins');           // 📌 the board of parked to-dos
-ironsHdrBtn.onclick = () => navTo('irons');      // 🔥 named groups of projects
+// 🔥 named groups of projects. From a session opened INSIDE an iron, the same
+// button is "back to my iron" — the scoped session's list rung is the iron page.
+ironsHdrBtn.onclick = () => {
+  if (ironScope && inSessionView()) { currentIronId = ironScope; navTo('iron'); return; }
+  navTo('irons');
+};
 // In-session 📌: park the open session on the board and move straight on to the
 // NEXT session in the normal list (hopAfterPin) — pinning is a "done with this
 // one" gesture, not a request to go look at the board. If it's already pinned,
@@ -7833,7 +7875,11 @@ function parseHash() {
   if (parts[0] === 'pm') { nav.view = 'pm'; return nav; }   // Fleet PM (its own top-level view)
   if (parts[0] === 'pins') { nav.view = 'pins'; return nav; }   // 📌 pin board (top-level, like pm)
   if (parts[0] === 'irons') { nav.view = 'irons'; return nav; }   // 🔥 the irons page
-  if (parts[0] === 'i' && parts[1]) { nav.view = 'iron'; nav.iron = decodeURIComponent(parts[1]); return nav; }   // one iron's page
+  if (parts[0] === 'i' && parts[1]) {            // one iron's page — or a session opened within it
+    nav.view = 'iron'; nav.iron = decodeURIComponent(parts[1]);
+    if (parts[2] === 's' && parts[3]) { nav.cid = decodeURIComponent(parts[3]); nav.view = 'tty'; }
+    return nav;
+  }
   // Optional machine prefix (#/m/<machine>/…) — disambiguates a project that
   // exists on several machines so a deep link lands on the RIGHT host, not the
   // project's default pick. Written by syncUrl in fleet mode + by notifications.
@@ -7855,6 +7901,13 @@ function syncUrl() {
   if (v === 'pins') { const h = '#/pins'; if (h !== location.hash) { lastWrittenHash = h; location.hash = h; } return; }
   if (v === 'irons') { const h = '#/irons'; if (h !== location.hash) { lastWrittenHash = h; location.hash = h; } return; }
   if (v === 'iron') { const h = '#/i/' + encodeURIComponent(currentIronId || ''); if (h !== location.hash) { lastWrittenHash = h; location.hash = h; } return; }
+  // a session opened from an iron page carries the iron in its URL, so a reload
+  // lands back inside the iron scope (strip + climb-out target intact)
+  if (ironScope && (v === 'tty' || v === 'transcript') && currentCid) {
+    const h = '#/i/' + encodeURIComponent(ironScope) + '/s/' + encodeURIComponent(currentCid) + (v === 'tty' ? '/tty' : '');
+    if (h !== location.hash) { lastWrittenHash = h; location.hash = h; }
+    return;
+  }
   let h = '#/';
   const pkey = FLEET ? currentProjectKey : currentPid;
   if (pkey && v !== 'projects') {
@@ -7892,6 +7945,20 @@ function resolvePendingNav() {
   if (nav.view === 'pins') { pendingNav = null; setView('pins'); return; }   // board fills as session frames land
   if (nav.view === 'irons') { pendingNav = null; setView('irons'); return; }   // list fills as irons land
   if (nav.view === 'iron') { pendingNav = null; currentIronId = nav.iron; setView('iron'); return; }   // detail shows loading until irons land
+  if (nav.iron && nav.cid) {
+    // a session inside an iron scope (#/i/<id>/s/<cid>): find the cid anywhere
+    // on the fleet (its machine isn't in the URL — focusSession re-points it)
+    const s = allSessions().find(x => x.cid === nav.cid);
+    if (!s) {
+      const loaded = FLEET ? (machineList.length && allMachinesSessions()) : gotSessions;
+      if (!loaded) return;                       // still loading — re-driven by every frame
+      pendingNav = null; currentIronId = nav.iron; setView('iron'); return;   // gone → its iron page
+    }
+    pendingNav = null;
+    currentIronId = nav.iron; ironScope = nav.iron;
+    focusSession(s);
+    return;
+  }
   if (FLEET) { resolvePendingNavFleet(nav); return; }
   if (isHomeRoute(nav)) { if (gotSessions) landHome(); return; }    // wait for the roster, then land on the warmest session
   // -- direct mode: key is the local pid --------------------------------------
@@ -8000,6 +8067,13 @@ function restoreViewAfterQuestion() {
 // (the machines rung is gone; the roster lives in the 🖥️ overlay).
 const LEVELS = ['projects', 'sessions', 'tty'];   // transcript view pulled
 function stepLevel(dir) {
+  // Climbing out of a session opened from an IRON page lands back on the iron —
+  // that page is this session's "list" rung while the scope is active.
+  if (dir < 0 && ironScope && inSessionView()) {
+    currentIronId = ironScope;                 // setView('iron') keeps the scope
+    viewBeforeQuestion = null; setView('iron');
+    return;
+  }
   const i = LEVELS.indexOf(currentView());
   if (i === -1) return;
   let next = LEVELS[Math.min(LEVELS.length - 1, Math.max(0, i + dir))];

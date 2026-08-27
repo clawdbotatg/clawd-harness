@@ -250,6 +250,50 @@ await page.evaluate(()=>{ document.querySelector('#ironbody .iprojchip.iadd').cl
 await page.screenshot({path:join(HERE,'ironprobe-add.png')});
 await page.evaluate(()=>closeIronAdd());
 
+// 5c. IRON SCOPE: opening a session from the iron page keeps you "inside" the
+// iron — the tab strip shows only its sessions, the URL carries the iron, and
+// climbing out lands back on the iron page (not the project's sessions rung).
+await page.evaluate(id=>openIron(id), ironId);
+await page.waitForTimeout(200);
+const scope = await page.evaluate(()=>{
+  const tab=[...document.querySelectorAll('#irontabs .stab')].find(t=>/mic/.test(t.textContent));
+  if(!tab) return null;
+  tab.click();
+  const bar=document.getElementById('sessionbar');
+  const tabs=[...bar.querySelectorAll('.stab')].map(t=>(t.querySelector('.lbl')||{}).textContent||'');
+  return { view: currentView(), hash: location.hash, scope: ironScope,
+           barShown: !bar.hidden, tabs,
+           crumb: document.getElementById('meta').textContent };
+});
+check('tapping an iron tab opens the tty INSIDE the iron (scoped url + 🔥 crumb)',
+      !!scope && scope.view==='tty' && scope.scope===ironId
+      && scope.hash==='#/i/'+ironId+'/s/ca1/tty' && /🔥 voice/.test(scope.crumb), JSON.stringify(scope));
+check('the tab strip is scoped to the iron’s sessions (member only — no outsiders)',
+      !!scope && scope.barShown && scope.tabs.length===1 && /mic/.test(scope.tabs[0]), JSON.stringify(scope && scope.tabs));
+const climb = await page.evaluate(()=>{
+  document.getElementById('ironsBtn').click();     // 🔥 while scoped = back to YOUR iron
+  return { view: currentView(), hash: location.hash };
+});
+check('the 🔥 header button returns to the scoped iron page (not the irons list)',
+      climb.view==='iron' && climb.hash==='#/i/'+ironId, JSON.stringify(climb));
+const climb2 = await page.evaluate(()=>{
+  const tab=[...document.querySelectorAll('#irontabs .stab')].find(t=>/mic/.test(t.textContent));
+  tab.click();                                     // re-enter the scoped session…
+  goShallower();                                   // …and climb (Ctrl+Shift+↑ path)
+  return { view: currentView(), scope: ironScope };
+});
+check('goShallower from a scoped session climbs to the iron page, scope intact',
+      climb2.view==='iron' && climb2.scope===ironId, JSON.stringify(climb2));
+const exitScope = await page.evaluate(()=>{ navTo('sessions'); return ironScope; });
+check('navigating to a normal rung exits the scope', exitScope===null, String(exitScope));
+// deep link straight into a scoped session (reload survival)
+await page.evaluate(id=>{ location.hash='#/i/'+id+'/s/ca1/tty'; }, ironId);
+await page.waitForTimeout(300);
+const dl = await page.evaluate(()=>({ view: currentView(), scope: ironScope,
+  tabs:[...document.querySelectorAll('#sessionbar .stab')].length }));
+check('deep link #/i/<id>/s/<cid>/tty restores the scoped session view',
+      dl.view==='tty' && dl.scope===ironId && dl.tabs===1, JSON.stringify(dl));
+
 // 6. deep link straight to the iron
 await page.evaluate(id=>{ navTo('projects'); location.hash='#/i/'+id; }, ironId);
 await page.waitForTimeout(300);
