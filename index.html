@@ -3615,7 +3615,19 @@ function renderSessionBar(view) {
 function renderIronRow(view) {
   const el = document.getElementById('ironrow');
   const wasHidden = el.hidden;
-  const iron = (ironScope && (view === 'tty' || view === 'transcript')) ? ironById(ironScope) : null;
+  let iron = null;
+  if (view === 'tty' || view === 'transcript') {
+    // ANY session whose project belongs to an iron gets the row — not just one
+    // entered through the iron page. Deriving here also SETS the scope, so the
+    // tab strip below narrows to the iron in the same paint (renderIronRow
+    // runs at the top of renderSessionBar, before railSessions is read).
+    if (!ironScope) {
+      const rowId = FLEET ? currentProjectKey : currentPid;
+      const found = rowId && ironForRow(rowId);
+      if (found) ironScope = found.id;
+    }
+    iron = ironScope ? ironById(ironScope) : null;
+  }
   if (!iron) {
     if (!wasHidden) { el.hidden = true; el.innerHTML = ''; delete el.dataset.fp; refitTTY(); }
     return;

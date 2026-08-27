@@ -315,6 +315,21 @@ const exitScope = await page.evaluate(()=>{ navTo('sessions');
   return { scope: ironScope, rowHidden: document.getElementById('ironrow').hidden }; });
 check('navigating to a normal rung exits the scope (iron row gone)',
       exitScope.scope===null && exitScope.rowHidden, JSON.stringify(exitScope));
+// entering a member session the NORMAL way (sessions rung / global strip, not
+// via the iron page) must ALSO raise the row + scope the strip — the row is
+// "this session lives in an iron", not "you came in through the iron page"
+const normalEntry = await page.evaluate(()=>{
+  focusSession(allSessions().find(s=>s.cid==='ca1'));   // what a strip/rung tap does
+  return { view: currentView(), scope: ironScope,
+           rowShown: !document.getElementById('ironrow').hidden,
+           rowText: document.getElementById('ironrow').innerText,
+           tabs:[...document.querySelectorAll('#sessionbar .stab')].length };
+});
+check('opening a member session from the NORMAL path raises the row + scopes the strip',
+      normalEntry.view==='tty' && normalEntry.scope===ironId && normalEntry.rowShown
+      && /🔥 voice/.test(normalEntry.rowText) && normalEntry.tabs===2,
+      JSON.stringify(normalEntry));
+await page.evaluate(()=>navTo('sessions'));            // back out for the deep-link check
 // deep link straight into a scoped session (reload survival)
 await page.evaluate(id=>{ location.hash='#/i/'+id+'/s/ca1/tty'; }, ironId);
 await page.waitForTimeout(300);
