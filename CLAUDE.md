@@ -157,6 +157,22 @@ user-facing overview; this file orients an agent working **on** the code.
   asserts both words, splash suppression on dead sessions, tap-parks-per-cid,
   re-arm on fresh entry, and the exit-frame path — against a fake session with
   `inSessionView` stubbed, so it subscribes to nothing and claims no PTY size.
+- **`tools/sentlogprobe.mjs`** — guards the **🕘 sent history** (2026-08-26),
+  the companion to gotcha #2's bracketed paste: delivery of a long send is
+  INTACT (verified even mid-turn and mid-Bash-tool — the checklist that
+  "vanished" on 08-26 was in fact fully received and acted on), but claude's
+  TUI echoes only the TAIL of a long paste, and a send delivered while a turn
+  runs rides in as steering with NO user-message echo (it may not even appear
+  in the transcript) — to a person who just dictated a wall of text that reads
+  as "it cut off my message and I can't get it back". Every prior recovery net
+  (draft, outbox, pending) clears ON delivery by design, so the harness now
+  archives every composer send in a localStorage ring (`cc_sent`, 30 entries)
+  behind the 🕘 button beside the composer — view, copy, or ↩ restore. The
+  probe asserts deliverSend records the full text (quick chips excluded), the
+  modal shows head AND tail, ↩ restores verbatim, and the ring caps. Runs on
+  the sessions rung with `hsend` stubbed — nothing touches a real session.
+  (Server-side twin: `.clawd-harness.prompts.jsonl` logs every browser send in
+  full — that's where a lost text is recovered from on any OTHER device.)
 - **`tools/tabfilterprobe.mjs`** — guards the **🔎 tab-strip filter** (2026-08-09):
   that it sits at the far right, stays pinned there when the strip scrolls (it's
   `position:sticky`, so tabs pass *under* it), that typing narrows the strip and
@@ -767,7 +783,15 @@ user-facing overview; this file orients an agent working **on** the code.
    TUI (raw 295/1317 vs bracketed 1317/1317; the kernel PTY layer throttles
    fine and was exonerated). Control sends (`/compact `) stay raw on purpose —
    the slash-command menu only reacts to typing. Per-engine flag; codex is
-   opted out until verified the same way.
+   opted out until verified the same way. **Re-verified 2026-08-26 against
+   idle, mid-turn (streaming) and mid-tool (Bash running) TUIs, single-line
+   and multi-line: delivery is intact in all of them.** What still LOOKS like
+   truncation: the TUI echoes only the tail of a long paste, and a mid-turn
+   send rides as steering with no echo at all — a display problem, answered by
+   the 🕘 sent history (`tools/sentlogprobe.mjs` above). Before re-opening a
+   "my text got cut off" report as a delivery bug, diff
+   `.clawd-harness.prompts.jsonl` (what the harness got) against what claude
+   *did* — on 08-26 the "lost" message had been received in full and acted on.
 3. **`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`** in the child env — Claude Code
    can render its TUI in the terminal's *alternate screen* (a server-side
    rollout: it flips on per-account with no CLI update or harness change).

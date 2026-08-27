@@ -743,6 +743,30 @@
   .iprojchip.iadd { border-style:dashed; }
   .iprojchip.iadd:hover { color:var(--accent); border-color:var(--accent-dim); }
   .pinnednote:hover { color:var(--accent); border-color:var(--accent-dim); }
+  /* 🕘 sent history — same centered-modal deal as the iron pickers */
+  #sentlog { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:66;
+             display:flex; align-items:center; justify-content:center; padding:20px; }
+  #sentlog[hidden] { display:none; }
+  #sentlogcard { background:var(--panel); border:1px solid var(--edge); border-radius:10px;
+                 padding:14px; width:min(560px, 94vw); max-height:82vh; overflow:hidden;
+                 display:flex; flex-direction:column; gap:8px; font-family:var(--mono); }
+  #sentlogcard .sl-hdr { display:flex; align-items:center; gap:8px; }
+  #sentlogcard .sl-hdr .ip-t { flex:1; color:var(--ink); font-size:13px; }
+  #sentlogcard .sl-hdr button { background:transparent; border:1px solid var(--edge); border-radius:5px;
+                 color:var(--dim); font-family:var(--mono); font-size:12px; cursor:pointer; padding:6px 10px; }
+  #sentloglist { overflow-y:auto; -webkit-overflow-scrolling:touch; min-height:0;
+                 display:flex; flex-direction:column; gap:10px; }
+  .sl-item { border:1px solid var(--edge); border-radius:8px; padding:8px; display:flex;
+             flex-direction:column; gap:6px; }
+  .sl-meta { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:11px; flex-wrap:wrap; }
+  .sl-meta .sl-sess { color:var(--accent); }
+  .sl-meta button { margin-left:auto; background:transparent; border:1px solid var(--edge); border-radius:5px;
+                    color:var(--dim); font-family:var(--mono); font-size:11px; cursor:pointer; padding:4px 8px; }
+  .sl-meta button + button { margin-left:0; }
+  .sl-meta button:hover { color:var(--accent); border-color:var(--accent-dim); background:var(--raised); }
+  .sl-text { color:var(--ink); font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere;
+             max-height:180px; overflow-y:auto; user-select:text; -webkit-user-select:text; }
+  @media (pointer: coarse) { .sl-meta button { padding:9px 12px; font-size:13px; } }
   /* project cards reuse .scard; status colors + an add-project row */
   .scard.cloning, .scard.error { cursor:default; }
   .scard.cloning { opacity:.75; }
@@ -1111,6 +1135,21 @@
       </div>
     </div>
   </div>
+  <!-- 🕘 sent history: the full text of every composer send, kept client-side.
+       Exists because a long paste DELIVERS in full (bracketed paste, 8f1aeaf)
+       but claude's TUI echoes only its tail — and a send delivered mid-turn
+       rides in as steering with no user-message echo at all. That reads as
+       "my text got cut off and I can't get it back". The terminal can lie
+       about what went in; this doesn't. -->
+  <div id="sentlog" hidden>
+    <div id="sentlogcard">
+      <div class="sl-hdr">
+        <div class="ip-t">🕘 sent history</div>
+        <button id="sentlogclose">✕</button>
+      </div>
+      <div id="sentloglist"></div>
+    </div>
+  </div>
   <div id="machinesmodal" hidden>
     <div id="machshead">
       <span class="bico">🖥️</span>
@@ -1253,6 +1292,7 @@
       <textarea id="box" placeholder="message"></textarea>
       <input id="imgInput" type="file" accept="image/*,text/*,.md,.markdown,.txt,.csv,.json,.yaml,.yml,.toml,.log,.xml,.html" multiple hidden />
       <div id="actions">
+        <button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button>
         <button id="imgBtn" title="Attach an image or text file">🖼</button>
         <button id="send" title="Send message">📤</button>
       </div>
@@ -1872,6 +1912,7 @@ function flushOutbound() {
 function deliverSend(cid, full, recover, via) {
   via = via || 'typed';
   stashOutbox(cid, recover);
+  if (via !== 'quick') recordSent(cid, full);   // chips are canned one-liners — nothing to recover
   if (!hsend({ type: 'send', text: full, via })) { outbound.push({ cid, full, via }); scheduleReconnect(0); return; }
   // hsend "succeeded" — but a socket killed during sleep still reads OPEN and
   // eats the bytes without an error. If the server has been silent a while,
@@ -6744,6 +6785,7 @@ function flushPendingSend() {
   if (!currentCid) { clearTimeout(flushRetryTimer); flushRetryTimer = setTimeout(flushPendingSend, 2000); return; }
   hsend({ type: 'send', text: pendingSendText });
   stashOutbox(currentCid, pendingSendText);  // now bound to a real session — hold until confirmed
+  recordSent(currentCid, pendingSendText);   // and into the 🕘 archive like any other send
   stashPending(null);                        // it's the outbox's job to recover it now
   pendingSendText = null;
 }
@@ -6824,6 +6866,85 @@ function armHistoryConfirm(cid, text) {
 const PENDING_KEY = 'cc_pendingsend';
 function stashPending(text) { try { text ? sessionStorage.setItem(PENDING_KEY, text) : sessionStorage.removeItem(PENDING_KEY); } catch {} }
 function takePending() { try { const t = sessionStorage.getItem(PENDING_KEY) || ''; sessionStorage.removeItem(PENDING_KEY); return t; } catch { return ''; } }
+
+// ── 🕘 sent history ──────────────────────────────────────────────────────────
+// Delivery of a long send is INTACT (bracketed paste, 8f1aeaf — verified even
+// mid-turn and mid-tool), but the PROOF dies with the echo: claude's TUI
+// paints only the TAIL of a long paste, and a send delivered while a turn is
+// running rides in as steering with no "> your message" echo at all. To the
+// person who just dictated a wall of text, that reads as "it cut off my
+// message and I can't get it back" — and every recovery net above (draft,
+// outbox, pending) clears ON delivery by design, so a delivered-but-invisible
+// send was recoverable nowhere. This is the nowhere: every composer send is
+// kept in a localStorage ring, viewable / copyable / restorable via the 🕘
+// button beside the composer. localStorage on purpose (not sessionStorage):
+// this is an archive, not a redelivery net — nothing ever auto-resends from
+// it, so cross-tab bleed is harmless and surviving the tab is the point.
+const SENT_KEY = 'cc_sent', SENT_MAX = 30, SENT_BYTES = 256 * 1024;
+function sentRing() { try { return JSON.parse(localStorage.getItem(SENT_KEY)) || []; } catch { return []; } }
+function recordSent(cid, text) {
+  if (!text) return;
+  try {
+    let ring = sentRing();
+    ring.unshift({ t: Date.now(), cid: cid || '', text });
+    ring = ring.slice(0, SENT_MAX);
+    let s = JSON.stringify(ring);
+    while (ring.length > 1 && s.length > SENT_BYTES) { ring.pop(); s = JSON.stringify(ring); }
+    localStorage.setItem(SENT_KEY, s);
+  } catch {}
+}
+function sentSessName(cid) {
+  const s = (sessionList || []).find(x => x.cid === cid);
+  return s ? (s.title || cid.slice(0, 8)) : (cid ? cid.slice(0, 8) : '');
+}
+function sentAgo(t) {
+  const m = Math.max(0, Math.round((Date.now() - t) / 60000));
+  if (m < 1) return 'just now';
+  if (m < 60) return m + 'm ago';
+  const h = Math.round(m / 60);
+  return h < 48 ? h + 'h ago' : Math.round(h / 24) + 'd ago';
+}
+const sentlogEl = document.getElementById('sentlog');
+function showSentLog() {
+  const list = document.getElementById('sentloglist');
+  list.innerHTML = '';
+  const ring = sentRing();
+  if (!ring.length) {
+    const d = document.createElement('div');
+    d.className = 'sl-meta';
+    d.textContent = 'nothing sent from this browser yet — sends land here from now on';
+    list.appendChild(d);
+  }
+  for (const e of ring) {
+    const it = document.createElement('div'); it.className = 'sl-item';
+    const meta = document.createElement('div'); meta.className = 'sl-meta';
+    const when = document.createElement('span');
+    when.textContent = sentAgo(e.t) + ' · ' + e.text.length + ' chars';
+    const sess = document.createElement('span'); sess.className = 'sl-sess';
+    sess.textContent = sentSessName(e.cid);
+    const copy = document.createElement('button'); copy.textContent = '📋 copy';
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(e.text); copy.textContent = '✓ copied'; }
+      catch { copy.textContent = '✗ select the text instead'; }
+      setTimeout(() => { copy.textContent = '📋 copy'; }, 1500);
+    };
+    const back = document.createElement('button'); back.textContent = '↩ composer';
+    back.onclick = () => {
+      box.value = e.text; autosizeBox(); saveDraft();
+      sentlogEl.hidden = true;
+      if (!isTouch) box.focus();
+    };
+    meta.append(when, sess, copy, back);
+    const body = document.createElement('div'); body.className = 'sl-text';
+    body.textContent = e.text;
+    it.append(meta, body);
+    list.appendChild(it);
+  }
+  sentlogEl.hidden = false;
+}
+document.getElementById('sentBtn').onclick = showSentLog;
+document.getElementById('sentlogclose').onclick = () => { sentlogEl.hidden = true; };
+sentlogEl.addEventListener('pointerdown', (e) => { if (e.target === sentlogEl) sentlogEl.hidden = true; });
 
 let activeDraftId = null;   // which context's draft is currently sitting in the box
 // Persist the box into the context it belongs to (called as you type, and before any swap).
