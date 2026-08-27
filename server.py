@@ -4845,6 +4845,16 @@ class SessionManager:
                 # place; if the pool is truly dead the send watchdog + bounce
                 # rescue still act on real evidence (the plan's emergency rule).
                 decision, best, reason = "stay", None, "live background work — a respawn would kill it"
+            if decision == "move" and not (s.transcript_path or s._find_transcript()):
+                # A handoff is a --resume respawn, and a session that has never
+                # completed a turn has no transcript to resume — the CLI dies
+                # with "No conversation found with session ID" and the send
+                # lands in a corpse (2026-08-27: every fresh session's first
+                # composer send, because spawn-time _route_key and prompt-time
+                # _pool_key rank pools differently by design). Deliver in
+                # place; the move it wanted is re-decided at the next prompt,
+                # when a transcript exists.
+                decision, best, reason = "stay", None, "no transcript yet — nothing to resume on the target"
             prompt_id = uuid.uuid4().hex[:8]
             applied = bool(SUB_ROUTE_ON_PROMPT and decision == "move" and best)
             self._log_route(s, decision, best, reason, via=via,
@@ -5531,8 +5541,16 @@ class SessionManager:
         move the viewers over. The old claude gets SIGTERM once we're sure."""
         if s.busy or not s.alive or s.ceremony:  # re-check after the network call
             return
-        s.last_handoff = time.time()
         src = s.transcript_path or s._find_transcript()
+        if not src:
+            # Nothing to --resume: a zero-turn session has no transcript, and
+            # respawning it resuming=True kills it ("No conversation found
+            # with session ID"). Every caller assumes a resume, so decline —
+            # a session with no context loses nothing by staying put.
+            print(f"[handoff {s.cid[:8]}] no transcript yet — nothing to "
+                  "resume; staying put", flush=True)
+            return
+        s.last_handoff = time.time()
         base_src = Path(s.config_dir or os.path.expanduser("~/.claude"))
         base_dst = Path(target.config_dir or os.path.expanduser("~/.claude"))
         if src and base_src != base_dst:

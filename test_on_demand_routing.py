@@ -55,6 +55,11 @@ class FakeSession:
         self.sent = []                        # what send_message delivered HERE
         self.ready = ready                    # wait_ready's answer
         self.resumed = False                  # set by FakeMgr._handoff
+        self.last_handoff = 0.0
+        self.transcript_path = "/fake/transcript.jsonl"  # zero-turn tests blank this
+
+    def _find_transcript(self):
+        return None                           # transcript_path is the whole truth here
 
     def send_message(self, text, control=False):
         self.sent.append(text)
@@ -246,6 +251,27 @@ m.sessions["c0"].bg = "shell"
 m.send_prompt("c0", "hello")
 check("7. live background work vetoes the optional handoff",
       m.moves == [] and m.sessions["c0"].sent == ["hello"], f"moves={m.moves}")
+
+# 2026-08-27: a handoff is a --resume respawn, and a session that has never
+# completed a turn has no transcript — the CLI dies with "No conversation
+# found with session ID" and the prompt lands in a corpse. Every fresh
+# session's FIRST composer send hit this (spawn-time _route_key and
+# prompt-time _pool_key rank pools differently by design, so a move was
+# near-guaranteed).
+m = drained_pair()
+m.sessions["c0"].transcript_path = ""        # zero-turn: nothing on disk yet
+ok = m.send_prompt("c0", "hello")
+check("8. a zero-turn session (no transcript) never moves — nothing to resume",
+      ok and m.moves == [] and m.sessions["c0"].sent == ["hello"],
+      f"moves={m.moves}")
+
+# …and the hard guard inside the REAL _handoff, for every other handoff path
+m = drained_pair()
+s0 = m.sessions["c0"]
+s0.transcript_path = ""
+server.SessionManager._handoff(m, s0, m.accounts["fresh"], why="test")
+check("8b. real _handoff declines a transcript-less session outright",
+      m.sessions["c0"] is s0 and s0.alive and s0.last_handoff == 0.0)
 
 # ── carve-outs and the flag ─────────────────────────────────────────────
 print("\ncarve-outs (the addenda's fences) and the rollout flag")
