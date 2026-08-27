@@ -15,8 +15,11 @@
 //   5. the create form (a live <input>) survives the repaint a frame triggers:
 //      focus + un-mirrored text intact (the projects-rung rule)
 //   6. deep link #/i/<id> lands on the iron page
-// And in DIRECT mode: the harness `irons` frame renders, and assignment goes
-// out as an ironAssign op (registry-backed), not a prefs frame.
+//   7. the list is a PRIORITY order: 🔎 filter box (arrival-focused, Enter on a
+//      lone match dives in, survives repaints) + ⠿ drag-to-reorder that
+//      persists (new irons land on top; no date sort)
+// And in DIRECT mode: the harness `irons` frame renders, assignment goes
+// out as an ironAssign op (registry-backed), and reorder as ironOrder.
 //
 // Same fake-relay stub as fleetprobe/settingsprobe — window.WebSocket is
 // replaced before the page loads, machine frames are injected straight into
@@ -354,6 +357,61 @@ check('deep link #/i/<id> dives into the iron’s warmest session',
       await page.evaluate(id=>currentView()==='tty' && ironScope===id && currentCid==='ca1'
         && /voice/.test(document.getElementById('ironrow').innerText), ironId));
 await page.screenshot({path:join(HERE,'ironprobe.png')});
+
+// 7. 🔎 filter (the projects-rung deal) + ⠿ drag-to-reorder priority
+await page.evaluate(()=>{
+  ironCreate('metal','',[]);                       // second iron, via the real path
+  // faithful echo so the dirty flag clears and later frames land
+  window.__relayRx({type:'prefs',inactive:[],irons:JSON.parse(JSON.stringify(ironList))});
+});
+check('a NEW iron lands at the TOP of the priority order',
+      await page.evaluate(()=>ironList[0].title==='metal'));
+const filt = await page.evaluate(()=>{
+  navTo('projects'); navTo('irons');               // fresh arrival
+  const inp=document.getElementById('ironFilterInp');
+  const focused=document.activeElement===inp;
+  inp.value='voi'; inp.dispatchEvent(new Event('input',{bubbles:true}));
+  const vis=()=>[...document.querySelectorAll('#ironlist .ironcard')]
+              .filter(c=>c.style.display!=='none').map(c=>ironById(c.dataset.id).title);
+  const narrowed=vis();
+  renderIronList();                                // literally what a frame does
+  const after={ focused: document.activeElement===inp, text: inp.value, vis: vis() };
+  return { focused, narrowed, after };
+});
+check('landing on irons focuses the filter box', filt.focused, JSON.stringify(filt));
+check('typing narrows the list', filt.narrowed.length===1 && filt.narrowed[0]==='voice', JSON.stringify(filt.narrowed));
+check('the filter survives a repaint (focus + text + narrowing)',
+      filt.after.focused && filt.after.text==='voi' && filt.after.vis.length===1, JSON.stringify(filt.after));
+const enter = await page.evaluate(()=>{
+  document.getElementById('ironFilterInp')
+    .dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+  return { view: currentView(), scope: ironScope, cid: currentCid,
+           cleared: document.getElementById('ironFilterInp').value==='' };
+});
+check('Enter on a lone match dives straight into that iron, filter cleared',
+      enter.view==='tty' && enter.scope===ironId && enter.cid==='ca1' && enter.cleared, JSON.stringify(enter));
+const drag = await page.evaluate(()=>{
+  navTo('irons');
+  const list=document.getElementById('ironlist');
+  const cards=[...list.querySelectorAll('.ironcard')];
+  const grab=cards[0].querySelector('.irondrag');
+  if(!grab) return null;
+  const bot=cards[cards.length-1].getBoundingClientRect();
+  grab.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:7}));
+  const stayed=currentView()==='irons';            // grabbing must NOT open the iron
+  grab.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,pointerId:7,clientY:bot.bottom+5}));
+  window.__sent.length=0;
+  grab.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:7}));
+  const f=window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean)
+          .find(x=>x.type==='prefs');
+  return { stayed,
+           dom:[...list.querySelectorAll('.ironcard')].map(c=>ironById(c.dataset.id).title),
+           mem: ironList.map(i=>i.title),
+           pushed: !!(f && f.irons && f.irons[0].title==='voice'), leaks: !!(f && 'inactive' in f) };
+});
+check('⠿ drag moves the card to the bottom and PERSISTS the order (irons-only push)',
+      !!drag && drag.stayed && drag.dom[0]==='voice' && drag.dom[1]==='metal'
+      && drag.mem[0]==='voice' && drag.pushed && !drag.leaks, JSON.stringify(drag));
 await page.close();
 
 // ---- direct mode ------------------------------------------------------------
@@ -363,7 +421,8 @@ await dpage.evaluate(()=>window.__relayRx({type:'projects',projects:[
 await dpage.evaluate(()=>window.__relayRx({type:'sessions',sessions:[
   {cid:'c1',pid:'p1',title:'direct job',tab:'job',alive:true,busy:false,pinned:0,promptedAt:1,lastActive:1}],current:null}));
 await dpage.evaluate(()=>window.__relayRx({type:'irons',irons:[
-  {id:'i9',title:'direct iron',desc:'',tags:[],pids:['p1'],created:1}]}));
+  {id:'i9',title:'direct iron',desc:'',tags:[],pids:['p1'],created:1},
+  {id:'i8',title:'second iron',desc:'',tags:[],pids:[],created:2}]}));
 await dpage.waitForTimeout(300);
 const direct = await dpage.evaluate(()=>{
   const sent=()=>window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean);
@@ -392,6 +451,15 @@ check('direct mode: haiku’s reply is stored via ironUpdate',
       !!direct.upd && direct.upd.id==='i9' && direct.upd.desc==='made by haiku', JSON.stringify(direct.upd));
 check('direct mode: assignment is an ironAssign op (registry-backed)',
       direct.op==='ironAssign' && direct.pid==='p1', JSON.stringify(direct));
+const dorder = await dpage.evaluate(()=>{
+  window.__sent.length=0;
+  ironReorder(['i8','i9']);                              // drag's drop path
+  const op=window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean)
+           .find(x=>x.type==='ironOrder');
+  return { ids: op && op.ids, mem: ironList.map(i=>i.id) };
+});
+check('direct mode: reorder goes out as an ironOrder op, applied optimistically',
+      !!dorder.ids && dorder.ids.join()==='i8,i9' && dorder.mem.join()==='i8,i9', JSON.stringify(dorder));
 await dpage.close();
 
 check('no page errors', errors.length===0, errors.join(' | '));

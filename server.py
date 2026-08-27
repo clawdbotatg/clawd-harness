@@ -4029,7 +4029,12 @@ class SessionManager:
                 "tags": [str(t)[:24] for t in (e.get("tags") or [])
                          if str(t).strip()][:8],
                 "pids": [p for p in (e.get("pids") or []) if p in self.projects],
-                "created": e.get("created", 0.0)}
+                "created": e.get("created", 0.0),
+                # priority order (drag-to-reorder in the UI; smaller = higher).
+                # Legacy irons default to created so an untouched list keeps
+                # its old created-ascending order.
+                "rank": e["rank"] if isinstance(e.get("rank"), (int, float))
+                        else e.get("created", 0.0)}
 
         for e in reg.get("accounts", []):
             if not e.get("name"):
@@ -5899,9 +5904,11 @@ class SessionManager:
     # relay-side (they must span machines), so a fleet harness never sees them.
 
     def irons_meta(self):
+        # Priority order: rank ascending (drag-to-reorder writes it via
+        # iron_order; the UI renders frames in the order they arrive).
         with self.lock:
             irons = sorted((dict(i) for i in self.irons.values()),
-                           key=lambda i: i.get("created", 0.0))
+                           key=lambda i: (i.get("rank", 0.0), i.get("created", 0.0)))
         return {"type": "irons", "irons": irons}
 
     def broadcast_irons(self):
@@ -5917,6 +5924,9 @@ class SessionManager:
                          if isinstance(t, str) and t.strip()][:8],
                 "pids": [], "created": time.time()}
         with self.lock:
+            # New iron starts at the TOP of the priority order (smallest rank).
+            ranks = [i.get("rank", 0.0) for i in self.irons.values()]
+            iron["rank"] = (min(ranks) - 1.0) if ranks else 0.0
             self.irons[iron["id"]] = iron
         self.save_registry()
         self.broadcast_irons()
@@ -5937,6 +5947,22 @@ class SessionManager:
         self.save_registry()
         self.broadcast_irons()
         return True
+
+    def iron_order(self, ids):
+        """Persist a drag-reorder: the given id list (top first) becomes the
+        priority order (rank 0..n). Unknown ids are skipped; irons the list
+        missed keep their old rank rather than being dropped or sunk."""
+        changed = False
+        with self.lock:
+            for n, iid in enumerate(i for i in (ids or []) if isinstance(i, str)):
+                iron = self.irons.get(iid)
+                if iron is not None and iron.get("rank") != float(n):
+                    iron["rank"] = float(n)
+                    changed = True
+        if changed:
+            self.save_registry()
+            self.broadcast_irons()
+        return changed
 
     def iron_delete(self, iid):
         with self.lock:
@@ -7127,6 +7153,8 @@ class Handler(BaseHTTPRequestHandler):
                             desc=frame.get("desc"), tags=frame.get("tags"))
         elif t == "ironDelete":
             MGR.iron_delete(frame.get("id"))
+        elif t == "ironOrder":
+            MGR.iron_order(frame.get("ids") or [])
         elif t == "ironAssign":
             MGR.iron_assign(frame.get("pid"), frame.get("iron") or "")
         elif t == "restart":

@@ -205,8 +205,13 @@ user-facing overview; this file orients an agent working **on** the code.
   tab taps switching the terminal in place; ✎ edits in an overlay without
   leaving the tty; an empty iron opens the add-project picker over the list;
   the static create form survives a repaint with focus + un-mirrored text;
+  the list is a PRIORITY order (new iron on top, ⠿ drag persists as an
+  irons-only push, grabbing the handle never opens the iron) with a 🔎 filter
+  (arrival-focused, narrows by title, survives repaints, Enter on a lone
+  match dives in and clears);
   and in direct mode the harness `irons` frame drives the same dive +
-  assignment goes out as `ironAssign` (registry-backed — `python3
+  assignment goes out as `ironAssign` + reorder as `ironOrder`
+  (registry-backed — `python3
   test_irons.py` guards that half). Both modes run against the stubbed
   WebSocket; no session touched.
 - **`tools/spawnprobe.mjs`** — guards the **spawn watch** (2026-08-20): a `new`
@@ -619,7 +624,17 @@ user-facing overview; this file orients an agent working **on** the code.
   at an iron surface (throttled hourly / on membership change) and stored like
   any other edit, so every device sees the same sentence; tags are edited
   later via the ✎ overlay, never at creation. The 🔥 header icon left of the 🗂️
-  projects icon opens `#/irons` (the list). **An iron has NO page of its own**
+  projects icon opens `#/irons` (the list). **The list is a PRIORITY order,
+  not a date sort** (2026-08-26): a new iron lands at the TOP, cards carry a ⠿
+  drag handle (pointer events — works on touch; the handle is the only grab
+  surface so tap-to-open and scroll survive) and the dragged order persists —
+  fleet: the array order of the `prefs` frame's `irons` field (`clean_irons`
+  keeps order); direct: a `rank` field written by the `ironOrder` op, `irons`
+  frames arrive rank-sorted. The head also carries a filter box, the
+  projects-rung deal exactly: a static node (a frame's repaint can't eat
+  mid-type text or steal focus), arrival focuses it (desktop), typing narrows
+  by title, Esc clears, and Enter with ONE match left dives into that iron —
+  the "get me into that effort" keyboard path. **An iron has NO page of its own**
   (the intermediate detail page was removed 2026-08-26): tapping an iron —
   from the list, a project card's 🔥 badge, or a `#/i/<id>` deep link — dives
   STRAIGHT into its warmest session (`openIron`), and the whole iron identity

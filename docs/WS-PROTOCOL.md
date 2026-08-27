@@ -71,6 +71,7 @@ viewer** (each with its own `client.cid`).
 | `ironUpdate` | `id`, `title?`, `desc?`, `tags?` | Edit an iron's metadata in place (absent fields unchanged; blank title ignored). Broadcasts `irons`. |
 | `ironDelete` | `id` | Delete an iron. Its projects and their sessions are untouched — the grouping is pure metadata. Broadcasts `irons`. |
 | `ironAssign` | `pid`, `iron` | Put project `pid` into iron `iron` (**one iron per project** — assignment removes it from any other), or take it out of every iron with `iron:""`. Unknown pid/iron refused silently. A project dropped by the disk reconcile or `removeProject` is forgotten by every iron automatically. Broadcasts `irons`. |
+| `ironOrder` | `ids` | Persist a drag-reorder of the irons list: `ids` (top first) becomes the priority order — each named iron's `rank` is set to its index. Unknown ids skipped; irons the list missed keep their old rank. The `irons` broadcast always arrives rank-sorted (a new iron is created at the top — smallest rank); an identical order is a quiet no-op. **Direct mode only** — fleet order is simply the array order of the relay `prefs` frame's `irons` field. |
 | `ironDescribe` | `id`, `context` | **Stateless LLM call, both modes** (unlike the `iron*` ops above): derive an iron's one-line description from `context` (the browser-built summary of the iron's title, member projects and session titles, ≤6000 chars). Threaded; replies to the sender only with `{type:"ironDesc", id, desc}` — `desc` is `null` when naming is unconfigured / the call failed (the client keeps what it had). Runs on `IRON_DESC_MODEL` (default `claude-haiku-4.5`), falling back to `BANKR_MODEL` if that id isn't on the gateway. The *browser* stores the result (relay `prefs` push in fleet, `ironUpdate` here) and throttles re-asks (hourly, or on membership change, only while an iron surface is on screen) — the harness holds no iron state for this in fleet mode. |
 | `input` | `data`, `cid?` | Raw keystrokes → PTY. `data` is a UTF-8 string (incl. escape seqs for TUI menus). Falls back to `client.cid` if `cid` omitted. |
 | `send` | `text`, `cid?`, `via?` | High-level: type `text`, wait for the paste to settle, then submit `\r`. Use this to "send a message/prompt". Optional `via` tags the send's origin (`"quick"` = a quick-prompt chip tap) for the server's prompt log; omitted = typed. |
@@ -119,7 +120,7 @@ resolve; degrades, doesn't break.
 { "type":"projects", "projects":[<projectMeta>...], "boot":"<BOOT_ID>" }
 { "type":"sessions", "sessions":[<sessionMeta>...], "current":"<cid|null>" }
 { "type":"accounts", "accounts":[<accountMeta>...], "active":"<name>", "auto":bool }
-{ "type":"irons", "irons":[{ "id","title","desc","tags":[..], "pids":[..], "created" }...] }
+{ "type":"irons", "irons":[{ "id","title","desc","tags":[..], "pids":[..], "created", "rank" }...] }  // rank-sorted: list order = priority (see ironOrder)
 // + a restart-state frame if a restart is already pending
 ```
 `boot` is a per-process id; the browser auto-reloads when it changes after a

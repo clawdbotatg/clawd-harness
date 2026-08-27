@@ -677,6 +677,12 @@
   .ironform .frow button { flex:0 0 auto; }
   @media (pointer:coarse) { .ironform input, #ironpickcard input { font-size:16px; } }  /* <16px zooms the page on iOS focus */
   .ironcard { cursor:pointer; }
+  /* ⠿ drag handle: the ONLY draggable surface (the card itself must keep
+     tap-to-open + touch-scroll). touch-action:none or the browser claims the
+     pan and the drag never starts on a phone. */
+  .irondrag { cursor:grab; touch-action:none; user-select:none; -webkit-user-select:none;
+              color:var(--dim); font-size:14px; padding:2px 8px; margin:-2px -4px -2px 0; }
+  .ironcard.dragging { opacity:.55; border-color:var(--accent-dim); }
   .ironcard .itags { display:flex; flex-wrap:wrap; gap:5px; margin-top:5px; }
   .itag { border:1px solid var(--edge); border-radius:10px; color:var(--dim);
           font-size:10px; font-family:var(--mono); padding:1px 8px; }
@@ -1199,6 +1205,11 @@
       <div id="ironshead">
         <span class="menutitle" id="ironstitle">🔥 irons</span>
         <button id="ironAddBtn" title="new iron — a named group of projects to track as one effort">＋ new iron</button>
+      </div>
+      <!-- filter box, the projects-rung deal: static node (a frame can't eat
+           mid-type text), arrival focuses it, Enter opens a lone match -->
+      <div class="ironform" id="ironfilterrow">
+        <input id="ironFilterInp" placeholder="filter irons · Enter opens when one is left" autocomplete="off" />
       </div>
       <!-- title only — the description writes itself (haiku, via ironDescribe)
            and tags are edited later on the iron's page, never at creation -->
@@ -7257,7 +7268,7 @@ else {
 // last-writer-wins whole-list, same contract as the active-machines set.
 let ironList = [];
 let currentIronId = null;
-// Iron SCOPE: set when a session is opened from an iron page — the session
+// Iron SCOPE: set when a session is opened through irons (openIron) — the session
 // plane (tab strip, swipe/cycle rail, climb-out target, URL) then belongs to
 // that iron until you navigate back to the normal rungs or open an outsider.
 let ironScope = null;
@@ -7307,7 +7318,8 @@ function ironCreate(title, desc, tags) {
   if (FLEET) {
     const iron = { id: ironNewId(), title, desc: (desc || '').trim(), tags: tags || [],
                    keys: [], created: Date.now() / 1000 };
-    ironList.push(iron); ironsPush(); renderIronsUI();
+    ironList.unshift(iron);      // new iron = top of the priority order
+    ironsPush(); renderIronsUI();
     return iron;
   }
   hsend({ type: 'ironCreate', title, desc: desc || '', tags: tags || [] });
@@ -7351,6 +7363,7 @@ function ironCreateAndAssign(title, rowId) {
 // picker over the irons list instead (that's the only thing left to do).
 function openIron(id) {
   viewBeforeQuestion = null; deferredView = null;   // manual nav, same as navTo
+  setIronFilter('');            // clear on the way in, so coming back shows all (projects-rung rule)
   currentIronId = id;
   const iron = ironById(id);
   if (iron) {
@@ -7386,24 +7399,29 @@ function ironStats(iron, rows) {
            waiting: members.reduce((n, r) => n + (r.waitingCount || 0), 0) };
 }
 function renderIronList() {
+  if (ironDragCard) return;                     // a frame mid-drag would yank the card being held
   const list = document.getElementById('ironlist');
   document.getElementById('ironstitle').textContent = '🔥 irons · ' + ironList.length;
-  list.innerHTML = '';                          // the create form is outside this wipe
+  list.innerHTML = '';                          // the create/filter chrome is outside this wipe
   if (!ironList.length) {
     const e = document.createElement('div');
     e.className = 'ironempty';
     e.textContent = 'no irons yet. an iron is a named group of projects — one effort you’re ' +
                     'juggling ("irons in the fire"). hit ＋ new iron, then put projects in it ' +
-                    'with the 🔥 button on their cards. its page shows every session from every ' +
-                    'project inside it.';
+                    'with the 🔥 button on their cards. tapping an iron dives straight into ' +
+                    'its sessions.';
     list.appendChild(e);
     return;
   }
   const rows = projectRows();
-  ironList.slice().sort((a, b) => (a.created || 0) - (b.created || 0)).forEach(iron => {
+  // List order IS priority order — the user drags cards into it (⠿ handle) and
+  // it persists (fleet: array order in the relay prefs; direct: rank in the
+  // registry, irons frames arrive pre-sorted). No date sort here, ever.
+  ironList.forEach(iron => {
     const st = ironStats(iron, rows);
     const card = document.createElement('div');
     card.className = 'scard ironcard';
+    card.dataset.id = iron.id;
     card.onclick = () => openIron(iron.id);
     const row = document.createElement('div'); row.className = 'row';
     const title = document.createElement('span');
@@ -7425,6 +7443,11 @@ function renderIronList() {
     const sc = document.createElement('span');
     sc.className = 'scount'; sc.textContent = `${st.sessions} sess`;
     row.appendChild(sc);
+    const grab = document.createElement('span');
+    grab.className = 'irondrag'; grab.textContent = '⠿';
+    grab.title = 'drag to reorder — the list is your priority order';
+    grab.onpointerdown = (e) => startIronDrag(e, card);
+    row.appendChild(grab);
     card.appendChild(row);
     if (iron.desc || st.members.length) {
       const d = document.createElement('div');
@@ -7448,7 +7471,86 @@ function renderIronList() {
     }
     list.appendChild(card);
   });
+  applyIronFilter();            // honor live filter text after a repaint
   maybeRefreshIronDescs();      // looking at the list is what triggers (throttled) re-description
+}
+// -- 🔎 filter (the projects-rung deal: type to narrow, Enter opens a lone
+// match, the box is a static node so repaints can't eat it or steal focus) ----
+let ironFilter = '';
+const ironFilterInp = document.getElementById('ironFilterInp');
+function ironFilterHit(iron, q) { return !q || (iron.title || '').toLowerCase().includes(q); }
+function filteredIrons() {
+  const q = ironFilter.trim().toLowerCase();
+  return ironList.filter(i => ironFilterHit(i, q));
+}
+function applyIronFilter() {
+  const q = ironFilter.trim().toLowerCase();
+  document.querySelectorAll('#ironlist .ironcard').forEach(card => {
+    const iron = ironById(card.dataset.id);
+    card.style.display = (iron && ironFilterHit(iron, q)) ? '' : 'none';
+  });
+}
+function setIronFilter(v) {
+  ironFilter = v;
+  if (ironFilterInp.value !== v) ironFilterInp.value = v;
+}
+function focusIronFilter() {
+  if (isTouch) return;                          // autofocus on touch pops the soft keyboard
+  ironFilterInp.focus();
+  const n = ironFilterInp.value.length;
+  try { ironFilterInp.setSelectionRange(n, n); } catch {}
+}
+ironFilterInp.addEventListener('input', () => { ironFilter = ironFilterInp.value; applyIronFilter(); });
+ironFilterInp.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { setIronFilter(''); applyIronFilter(); return; }
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const m = filteredIrons();
+  if (m.length === 1) openIron(m[0].id);        // narrowed to one → dive in (openIron clears the filter)
+});
+// -- ⠿ drag-to-reorder: pointer events (mouse AND touch — HTML5 DnD is dead on
+// iOS). The handle is the only grab surface; the card follows the pointer's Y
+// among its visible siblings, and release persists the new order. ------------
+let ironDragCard = null;
+function startIronDrag(e, card) {
+  e.preventDefault(); e.stopPropagation();      // don't open the iron, don't scroll
+  ironDragCard = card;
+  card.classList.add('dragging');
+  const grab = e.currentTarget;
+  try { grab.setPointerCapture(e.pointerId); } catch {}
+  const list = document.getElementById('ironlist');
+  const move = (ev) => {
+    const cards = [...list.querySelectorAll('.ironcard')].filter(c => c !== card && c.style.display !== 'none');
+    let before = null;
+    for (const c of cards) {
+      const r = c.getBoundingClientRect();
+      if (ev.clientY < r.top + r.height / 2) { before = c; break; }
+    }
+    if (before ? card.nextSibling !== before || card === before : list.lastElementChild !== card) {
+      list.insertBefore(card, before);          // null → drop at the end
+    }
+  };
+  const drop = () => {
+    grab.removeEventListener('pointermove', move);
+    grab.removeEventListener('pointerup', drop);
+    grab.removeEventListener('pointercancel', drop);
+    card.classList.remove('dragging');
+    ironDragCard = null;
+    ironReorder([...list.querySelectorAll('.ironcard')].map(c => c.dataset.id));
+  };
+  grab.addEventListener('pointermove', move);
+  grab.addEventListener('pointerup', drop);
+  grab.addEventListener('pointercancel', drop);
+}
+// Persist a new priority order (top first). Optimistic locally in both modes;
+// direct mode's `ironOrder` op re-ranks server-side and the broadcast confirms.
+function ironReorder(ids) {
+  const byId = new Map(ironList.map(i => [i.id, i]));
+  const next = ids.map(id => byId.get(id)).filter(Boolean);
+  ironList.forEach(i => { if (!ids.includes(i.id)) next.push(i); });  // never drop a straggler
+  ironList = next;
+  if (FLEET) ironsPush(); else hsend({ type: 'ironOrder', ids });
+  renderIronsUI();
 }
 // Sessions burning in this iron — every session of every member project, tagged
 // the way allSessions() tags them so focusSession can cross machine/project.
@@ -7780,7 +7882,9 @@ function setView(view) {
   else if (view === 'transcript') feed.scrollTop = feed.scrollHeight;
   else if (pm) { renderPmFeed(); pmfeed.scrollTop = pmfeed.scrollHeight; }
   else if (pins) renderPinBoard();
-  else if (irons) renderIronList();
+  // landing on irons: paint, then the filter box takes focus — ARRIVAL only,
+  // same rule as the projects rung (a repaint never focuses).
+  else if (irons) { renderIronList(); focusIronFilter(); }
   if (typeof renderNeedsBar === 'function') renderNeedsBar();   // depth changed → re-filter the bar
 }
 // the toggle button hops between the two deep views; projects/sessions have their own entries.

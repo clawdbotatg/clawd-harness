@@ -46,6 +46,7 @@ class FakeMgr:
     iron_update = server.SessionManager.iron_update
     iron_delete = server.SessionManager.iron_delete
     iron_assign = server.SessionManager.iron_assign
+    iron_order = server.SessionManager.iron_order
     _iron_forget_pid = server.SessionManager._iron_forget_pid
 
     def __init__(self):
@@ -99,6 +100,27 @@ def test_assign():
           m.irons[b["id"]]["pids"] == [] and m.irons[a["id"]]["pids"] == ["p2"])
 
 
+def test_order():
+    m = FakeMgr()
+    a = m.iron_create("alpha")
+    b = m.iron_create("beta")
+    c = m.iron_create("gamma")
+    order = lambda: [i["title"] for i in m.irons_meta()["irons"]]
+    check("a NEW iron ranks at the TOP (create = highest priority)",
+          order() == ["gamma", "beta", "alpha"], str(order()))
+    saved = m.saved
+    check("iron_order re-ranks to the given list (top first)",
+          m.iron_order([a["id"], c["id"], b["id"]]) is True
+          and order() == ["alpha", "gamma", "beta"] and m.saved == saved + 1, str(order()))
+    check("same order again is a quiet no-op (no save/broadcast churn)",
+          m.iron_order([a["id"], c["id"], b["id"]]) is False and m.saved == saved + 1)
+    check("unknown ids are skipped, junk types ignored, missed irons keep their rank",
+          m.iron_order(["ghost", 7, None, b["id"], a["id"]]) is True
+          and order() == ["beta", "gamma", "alpha"], str(order()))
+    m.irons[c["id"]].pop("rank")            # a rank-less dict (pre-rank registry row)
+    check("a missing rank never crashes the sort", isinstance(order(), list))
+
+
 def test_forget():
     m = FakeMgr()
     a = m.iron_create("alpha")
@@ -132,6 +154,8 @@ def test_registry_roundtrip():
         mgr = mod.SessionManager()
         mgr.load()
         check("iron survives a reboot", "i1" in mgr.irons and mgr.irons["i1"]["title"] == "fire")
+        check("a pre-rank registry row hydrates rank from created (old order kept)",
+              mgr.irons["i1"]["rank"] == 7.0)
         check("hydration clips + types the fields",
               len(mgr.irons["i1"]["desc"]) == 400 and mgr.irons["i1"]["tags"] == ["ok", "3"])
         check("a pid whose project died offline is dropped from the iron",
@@ -139,8 +163,9 @@ def test_registry_roundtrip():
               str(mgr.irons["i1"]["pids"]))
         check("junk iron entries never hydrate", set(mgr.irons) == {"i1"})
         saved = json.loads(mod.REGISTRY_FILE.read_text())
-        check("save_registry writes the irons back",
-              saved.get("irons") and saved["irons"][0]["id"] == "i1")
+        check("save_registry writes the irons back (rank included)",
+              saved.get("irons") and saved["irons"][0]["id"] == "i1"
+              and saved["irons"][0].get("rank") == 7.0)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -150,6 +175,8 @@ def main():
     test_crud()
     print("[irons] assignment")
     test_assign()
+    print("[irons] priority order")
+    test_order()
     print("[irons] cleanup")
     test_forget()
     print("[irons] registry round-trip (sandboxed server.py)")
