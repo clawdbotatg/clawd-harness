@@ -1909,6 +1909,19 @@ class Engine:
     def slim_event(self, s, line):  return None
     def send_settle(self, big): return SEND_SETTLE if big else SEND_SETTLE_MIN
     def bg_probe(self, s):      return ""
+    # Wrap message text in bracketed-paste markers (ESC[200~ … ESC[201~) so
+    # the TUI ingests it as ONE paste instead of a raw keystroke burst. This
+    # is measured, not stylistic (2026-08-26): claude's TUI DROPS THE HEAD of
+    # a large unbracketed burst — a 1317-char single-line send delivered only
+    # the last 295 chars, cut mid-word, while the same bytes bracketed arrived
+    # intact (the kernel PTY layer was exonerated separately: a blocking write
+    # into a busy raw-mode reader throttles and loses nothing). It ate the
+    # front of every long dictated prompt. Real terminals (xterm.js included)
+    # bracket every paste, so this is also just fidelity: claude enables mode
+    # 2004 in its first paint. Per-engine because sending the markers to a TUI
+    # that never enabled 2004 would deliver them as literal text; codex stays
+    # opted out until someone verifies its TUI the same way.
+    bracketed_paste = False
     # The keystroke that answers this CLI's resume gate (see _RESUME_GATE_RE) —
     # a bare CR, because option 1 ("Resume from summary") is the one already
     # highlighted and the modal's own footer reads "Enter to confirm". b"" opts
@@ -1932,6 +1945,7 @@ class Engine:
 class ClaudeEngine(Engine):
     name, bin, routes_accounts = "claude", CLAUDE_BIN, True
     resume_gate_key = b"\r"                  # verified: CR → "❯ /compact" → Compacting…
+    bracketed_paste = True                   # verified: A/B on 2.1.247 (see Engine)
 
     def argv(self, s):
         argv = [self.bin,
@@ -3098,7 +3112,12 @@ class ClaudeSession:
         self._gate_deadline = 0.0
         self._gate_resolved_evt.set()
         try:
-            os.write(self.master_fd, data)
+            # Loop: os.write may return short (signal wakeup) even on a
+            # blocking fd, and a silently dropped tail is a truncated prompt.
+            view = memoryview(data)
+            while view:
+                n = os.write(self.master_fd, view)
+                view = view[n:]
         except OSError:
             pass
 
@@ -3128,7 +3147,14 @@ class ClaudeSession:
         if not control:
             self.prompted_at = time.time()   # belt-and-braces: a bounced prompt fires no hook
         pre_hooks = self.hook_count
-        self.write(text.encode("utf-8"))
+        data = text.encode("utf-8")
+        # Messages ride as a bracketed paste (see Engine.bracketed_paste — an
+        # unbracketed burst loses its HEAD in claude's TUI). Control sends stay
+        # raw keystrokes on purpose: /compact's trailing-space dance drives the
+        # slash-command autocomplete menu, which only reacts to typing.
+        if not control and self.eng.bracketed_paste:
+            data = b"\x1b[200~" + data + b"\x1b[201~"
+        self.write(data)
         # Short one-liners only need to clear the 0.6s burst cliff; big or
         # multi-line pastes take longer to finalize, so keep the full settle.
         big = len(text) > 280 or text.count("\n") >= 1

@@ -756,9 +756,18 @@ user-facing overview; this file orients an agent working **on** the code.
 1. **`SCRUB_ENV`** — scrub `CLAUDECODE` / `CLAUDE_CODE_*` / `ANTHROPIC_API_KEY`
    etc. from the child env, or a nested `claude` runs in embedded mode (no
    transcript written) and bills metered API instead of the subscription.
-2. **`SEND_SETTLE`** — pause between typing text and the `\r`, or claude's TUI
-   treats `text`+`\r` as a paste and the `\r` doesn't submit. Short messages use
-   `SEND_SETTLE_MIN` (~0.7s); big/multi-line use `SEND_SETTLE` (~1.5s).
+2. **`SEND_SETTLE` + bracketed paste** — pause between typing text and the
+   `\r`, or claude's TUI treats `text`+`\r` as a paste and the `\r` doesn't
+   submit. Short messages use `SEND_SETTLE_MIN` (~0.7s); big/multi-line use
+   `SEND_SETTLE` (~1.5s). And the text itself must ride as a **bracketed
+   paste** (`ESC[200~ … ESC[201~`, `Engine.bracketed_paste`, 2026-08-26):
+   claude's TUI **drops the head of a large unbracketed keystroke burst** — a
+   1317-char dictated prompt arrived as its last 295 chars, cut mid-word, and
+   read like the harness had "summarized" the message. Measured A/B on a real
+   TUI (raw 295/1317 vs bracketed 1317/1317; the kernel PTY layer throttles
+   fine and was exonerated). Control sends (`/compact `) stay raw on purpose —
+   the slash-command menu only reacts to typing. Per-engine flag; codex is
+   opted out until verified the same way.
 3. **`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`** in the child env — Claude Code
    can render its TUI in the terminal's *alternate screen* (a server-side
    rollout: it flips on per-account with no CLI update or harness change).
