@@ -260,16 +260,34 @@ const scope = await page.evaluate(()=>{
   if(!tab) return null;
   tab.click();
   const bar=document.getElementById('sessionbar');
-  const tabs=[...bar.querySelectorAll('.stab')].map(t=>(t.querySelector('.lbl')||{}).textContent||'');
+  const hdr=document.getElementById('ironhdr');
+  const tabs=[...bar.querySelectorAll('.stab')].map(t=>({
+    lbl:(t.querySelector('.lbl')||{}).textContent||'', parked:t.classList.contains('parked')}));
   return { view: currentView(), hash: location.hash, scope: ironScope,
            barShown: !bar.hidden, tabs,
-           crumb: document.getElementById('meta').textContent };
+           hdrShown: !hdr.hidden, hdrText: hdr.innerText };
 });
-check('tapping an iron tab opens the tty INSIDE the iron (scoped url + 🔥 crumb)',
+check('tapping an iron tab opens the tty INSIDE the iron (scoped url + 🔥 header)',
       !!scope && scope.view==='tty' && scope.scope===ironId
-      && scope.hash==='#/i/'+ironId+'/s/ca1/tty' && /🔥 voice/.test(scope.crumb), JSON.stringify(scope));
-check('the tab strip is scoped to the iron’s sessions (member only — no outsiders)',
-      !!scope && scope.barShown && scope.tabs.length===1 && /mic/.test(scope.tabs[0]), JSON.stringify(scope && scope.tabs));
+      && scope.hash==='#/i/'+ironId+'/s/ca1/tty'
+      && scope.hdrShown && /🔥 voice/.test(scope.hdrText) && /haiku wrote this/.test(scope.hdrText),
+      JSON.stringify(scope));
+check('the scoped strip is the WHOLE iron — live members first, 📌 pinned at the end, no outsiders',
+      !!scope && scope.barShown && scope.tabs.length===2
+      && /mic/.test(scope.tabs[0].lbl) && !scope.tabs[0].parked
+      && /^📌 .*hud/.test(scope.tabs[1].lbl) && scope.tabs[1].parked
+      && !scope.tabs.some(t=>/other/.test(t.lbl)),
+      JSON.stringify(scope && scope.tabs));
+const hdrTap = await page.evaluate(()=>{
+  document.getElementById('ironhdr').click();      // the header line itself = back to the iron
+  const back = { view: currentView(), hash: location.hash,
+                 hdrHidden: document.getElementById('ironhdr').hidden };
+  const tab=[...document.querySelectorAll('#irontabs .stab')].find(t=>/mic/.test(t.textContent));
+  tab.click();                                     // re-enter for the checks below
+  return back;
+});
+check('tapping the 🔥 header line climbs back to the iron page (and the line hides there)',
+      hdrTap.view==='iron' && hdrTap.hash==='#/i/'+ironId && hdrTap.hdrHidden, JSON.stringify(hdrTap));
 const climb = await page.evaluate(()=>{
   document.getElementById('ironsBtn').click();     // 🔥 while scoped = back to YOUR iron
   return { view: currentView(), hash: location.hash };
@@ -284,15 +302,19 @@ const climb2 = await page.evaluate(()=>{
 });
 check('goShallower from a scoped session climbs to the iron page, scope intact',
       climb2.view==='iron' && climb2.scope===ironId, JSON.stringify(climb2));
-const exitScope = await page.evaluate(()=>{ navTo('sessions'); return ironScope; });
-check('navigating to a normal rung exits the scope', exitScope===null, String(exitScope));
+const exitScope = await page.evaluate(()=>{ navTo('sessions');
+  return { scope: ironScope, hdrHidden: document.getElementById('ironhdr').hidden }; });
+check('navigating to a normal rung exits the scope (header gone too)',
+      exitScope.scope===null && exitScope.hdrHidden, JSON.stringify(exitScope));
 // deep link straight into a scoped session (reload survival)
 await page.evaluate(id=>{ location.hash='#/i/'+id+'/s/ca1/tty'; }, ironId);
 await page.waitForTimeout(300);
 const dl = await page.evaluate(()=>({ view: currentView(), scope: ironScope,
+  hdrShown: !document.getElementById('ironhdr').hidden,
   tabs:[...document.querySelectorAll('#sessionbar .stab')].length }));
-check('deep link #/i/<id>/s/<cid>/tty restores the scoped session view',
-      dl.view==='tty' && dl.scope===ironId && dl.tabs===1, JSON.stringify(dl));
+check('deep link #/i/<id>/s/<cid>/tty restores the scoped session view (header + full rail)',
+      dl.view==='tty' && dl.scope===ironId && dl.hdrShown && dl.tabs===2, JSON.stringify(dl));
+await page.screenshot({path:join(HERE,'ironprobe-scoped.png')});   // eyeball frame: 🔥 header + iron tabs over the tty
 
 // 6. deep link straight to the iron
 await page.evaluate(id=>{ navTo('projects'); location.hash='#/i/'+id; }, ironId);

@@ -69,6 +69,16 @@
   header .spacer { flex:1; }
   #dot { width:8px; height:8px; background:var(--err); flex:0 0 auto; }   /* square status LED */
   #dot.up { background:var(--ok); }
+  /* 🔥 iron scope header: the iron's identity riding above its session tabs
+     while a scoped session is open — one tappable line, title then dim desc */
+  #ironhdr { display:flex; align-items:baseline; gap:8px; padding:4px 12px;
+             border-bottom:1px solid var(--edge); background:var(--panel);
+             cursor:pointer; overflow:hidden; }
+  #ironhdr[hidden] { display:none; }
+  #ironhdr .iht { flex:0 0 auto; font-size:13px; font-weight:600; color:var(--ink); white-space:nowrap; }
+  #ironhdr .ihd { flex:1 1 auto; min-width:0; font-size:11px; font-family:var(--mono); color:var(--dim);
+                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #ironhdr:hover .iht { color:var(--accent); }
   /* second header row: session tabs for the current project, busy→idle→dead, left to right */
   #sessionbar { display:flex; align-items:center; gap:6px; padding:5px 12px;
                 border-bottom:1px solid var(--edge); background:var(--panel);
@@ -675,7 +685,8 @@
   .ih-sec { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.16em;
             font-family:var(--mono); margin-top:8px; }
   #irontabs { display:flex; flex-wrap:wrap; gap:6px; }
-  #irontabs .stab.parked { border-style:dashed; }     /* 📌 pinned members sit at the end */
+  /* 📌 pinned members sit at the end — on the iron page AND the scoped strip */
+  :is(#sessionbar, #irontabs) .stab.parked { border-style:dashed; }
   .iprojrow { display:flex; flex-wrap:wrap; gap:6px; }
   .iprojchip { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--edge);
                background:transparent; color:var(--dim); font-size:12px; font-family:var(--mono);
@@ -1043,6 +1054,11 @@
     <button id="settingsBtn" class="hbtn" title="Settings"><span class="bico">⚙️</span></button>
     <button id="reloadBtn" class="hbtn" title="Reload (recover a blank screen)"><span class="bico">🔄</span></button>
   </header>
+  <!-- 🔥 iron scope header: shown above the tab strip while a session is open
+       INSIDE an iron, so the tty view reads as the iron's page — title + desc
+       up top, the iron's session tabs under it, terminal + composer below.
+       Tapping it climbs back to the iron page. -->
+  <div id="ironhdr" hidden></div>
   <div id="sessionbar" hidden></div>
   <div id="needsbar" hidden></div>
   <div id="rebootbar" hidden>
@@ -3472,10 +3488,8 @@ function refreshBreadcrumb(view) {
       const pe = currentProjectEmoji();
       crumb = (pe ? pe + ' ' : '') + pn;
     }
-    if (ironScope && (view === 'tty' || view === 'transcript')) {
-      const it = ironById(ironScope);           // scoped session: 🔥 iron · project
-      if (it) crumb = '🔥 ' + it.title + (crumb ? ' · ' + crumb : '');
-    }
+    // (iron scope: the #ironhdr line above the strip carries the 🔥 identity —
+    // the crumb stays the project so the phone header doesn't say it twice)
   }
   meta.textContent = crumb;
   // Show the AI session name above the message box, but only when a specific
@@ -3519,6 +3533,7 @@ function renderSessionBar(view) {
   const bar = document.getElementById('sessionbar');
   const wasHidden = bar.hidden;
   view = view || currentView();
+  renderIronHdr(view);                                          // 🔥 iron identity above the strip while scoped
   if (view === 'pm') { renderPmBar(bar, wasHidden); return; }   // PM threads ride the same strip
   const sorted = railSessions();                               // unified roster (or the scoped iron's), importance-ordered
   // hidden on the projects rung and both 🔥 iron pages (the iron detail carries
@@ -3539,8 +3554,10 @@ function renderSessionBar(view) {
     const tab = document.createElement('button');
     const mOff = FLEET && s._machine && !isMachineOnline(s._machine);   // cached tab — host not on the roster right now
     tab.className = 'stab' + (s.cid === currentCid ? ' active' : '') +
+                    (s.pinned ? ' parked' : '') +               // 📌 members ride the scoped iron rail
                     (sessionIsLocal(s) ? ' local' : '') + (mOff ? ' moff' : '');
     tab.title = (s.title || 'new session') +
+                (s.pinned ? ' — 📌 pinned (parked on the board)' : '') +
                 (mOff ? ` — ${s._machine} is offline (cached tab; opens when it returns)` : '');
     tab.onclick = () => { clearTabFilter(); focusSession(s); };   // may cross project/machine; cancels any queued new-session send; picking a tab is the filter's endpoint, so it clears
     const dot = document.createElement('span');
@@ -3556,7 +3573,7 @@ function renderSessionBar(view) {
     }
     const lbl = document.createElement('span');
     // the AI's 1-2 word tab handle when it exists; full title until then
-    lbl.className = 'lbl'; lbl.textContent = s.tab || s.title || 'new session';
+    lbl.className = 'lbl'; lbl.textContent = (s.pinned ? '📌 ' : '') + (s.tab || s.title || 'new session');
     tab.appendChild(lbl);
     const eb = engineBadge(s);           // only renders for non-claude engines
     if (eb) tab.appendChild(eb);
@@ -3579,6 +3596,37 @@ function renderSessionBar(view) {
   });
   paintTabFilter(q, shown, sorted.length);
   bar.hidden = false;
+  if (wasHidden) refitTTY();
+}
+
+// 🔥 the iron scope header — while a session is open INSIDE an iron the tty
+// view reads as the iron's own page: this line (title + AI desc) sits above
+// the strip of the iron's session tabs, and tapping it climbs back to the
+// iron page. Content-only repaints (no inputs live here, but churn is churn);
+// visibility flips refit the terminal since they change its height.
+function renderIronHdr(view) {
+  const el = document.getElementById('ironhdr');
+  const wasHidden = el.hidden;
+  const iron = (ironScope && (view === 'tty' || view === 'transcript')) ? ironById(ironScope) : null;
+  if (!iron) {
+    if (!wasHidden) { el.hidden = true; el.innerHTML = ''; delete el.dataset.fp; refitTTY(); }
+    return;
+  }
+  const fp = iron.title + '\x1f' + (iron.desc || '');
+  if (el.dataset.fp !== fp) {
+    el.dataset.fp = fp;
+    el.innerHTML = '';
+    const t = document.createElement('span');
+    t.className = 'iht'; t.textContent = '🔥 ' + iron.title;
+    el.appendChild(t);
+    const d = document.createElement('span');
+    d.className = 'ihd'; d.textContent = iron.desc || '';
+    el.appendChild(d);
+    el.title = 'back to the 🔥 ' + iron.title + ' iron';
+    el.onclick = () => { currentIronId = iron.id; navTo('iron'); };
+  }
+  requestIronDesc(iron);          // throttled — a deep link may land before any desc exists
+  el.hidden = false;
   if (wasHidden) refitTTY();
 }
 
@@ -5590,9 +5638,16 @@ function railSessions() {
   if (!ironScope) return sortedSessions();
   const iron = ironById(ironScope);
   if (!iron) { ironScope = null; return sortedSessions(); }   // iron deleted under us
-  const ids = ironMemberIds(iron);
-  return sortedSessions().filter(s => FLEET ? (s._pkey && ids.includes(s._pkey))
-                                            : ids.includes(s.pid));
+  // The scoped rail mirrors the iron page's row exactly — INCLUDING 📌 pinned
+  // members (unlike the normal strip, which parks them on the board): the iron
+  // is "everything burning in this effort", and hiding the pinned ones left a
+  // strip of one tab. Live first in strip order, parked at the end.
+  const all = ironSessions(iron);
+  const rank = s => !s.alive ? 4 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : s.bg ? 2 : 3;
+  const warmth = s => s.promptedAt || s.lastActive || 0;
+  const live = all.filter(s => !s.pinned).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
+  const parked = all.filter(s => s.pinned).sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
+  return live.concat(parked);
 }
 
 // The pin board's roster: every 📌 parked session across all projects (and, in
