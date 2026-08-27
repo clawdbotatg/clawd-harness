@@ -220,11 +220,12 @@ user-facing overview; this file orients an agent working **on** the code.
   member session across machines, 📌 pinned at the END, outsiders excluded),
   tab taps switching the terminal in place; ✎ edits in an overlay without
   leaving the tty; an empty iron opens the add-project picker over the list;
-  the static create form survives a repaint with focus + un-mirrored text;
+  the ONE static box (filter + create-name — no separate create form exists)
+  survives a repaint with focus + un-mirrored text, arrival focuses it,
+  typing narrows by title, Enter on a lone match dives in and clears, and
+  ＋ create names an iron from the same text;
   the list is a PRIORITY order (new iron on top, ⠿ drag persists as an
-  irons-only push, grabbing the handle never opens the iron) with a 🔎 filter
-  (arrival-focused, narrows by title, survives repaints, Enter on a lone
-  match dives in and clears);
+  irons-only push, grabbing the handle never opens the iron);
   and in direct mode the harness `irons` frame drives the same dive +
   assignment goes out as `ironAssign` + reorder as `ironOrder`
   (registry-backed — `python3
@@ -646,11 +647,14 @@ user-facing overview; this file orients an agent working **on** the code.
   surface so tap-to-open and scroll survive) and the dragged order persists —
   fleet: the array order of the `prefs` frame's `irons` field (`clean_irons`
   keeps order); direct: a `rank` field written by the `ironOrder` op, `irons`
-  frames arrive rank-sorted. The head also carries a filter box, the
-  projects-rung deal exactly: a static node (a frame's repaint can't eat
+  frames arrive rank-sorted. Under the head sits **ONE box** (`#ironfilterrow`),
+  the projects-rung deal exactly: a static node (a frame's repaint can't eat
   mid-type text or steal focus), arrival focuses it (desktop), typing narrows
-  by title, Esc clears, and Enter with ONE match left dives into that iron —
-  the "get me into that effort" keyboard path. **An iron has NO page of its own**
+  by title, Esc clears, Enter with ONE match left dives into that iron — the
+  "get me into that effort" keyboard path — and the SAME text is the name for
+  the ＋ create button beside it (Enter never creates; only the button does).
+  **There is no separate create form** — a second create UI shipped briefly on
+  2026-08-26 and was explicitly killed; don't bring it back. **An iron has NO page of its own**
   (the intermediate detail page was removed 2026-08-26): tapping an iron —
   from the list, a project card's 🔥 badge, or a `#/i/<id>` deep link — dives
   STRAIGHT into its warmest session (`openIron`), and the whole iron identity

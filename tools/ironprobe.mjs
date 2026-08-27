@@ -12,8 +12,9 @@
 //      cross-machine projectKey and badges the card
 //   4. the iron page shows title/desc/tags + EVERY session from EVERY member
 //      project across machines — 📌 pinned members at the END, marked
-//   5. the create form (a live <input>) survives the repaint a frame triggers:
-//      focus + un-mirrored text intact (the projects-rung rule)
+//   5. the ONE box (filter + create-name, a live <input> — there is NO separate
+//      create form) survives the repaint a frame triggers: focus + un-mirrored
+//      text intact (the projects-rung rule); ＋ create names the iron from it
 //   6. deep link #/i/<id> lands on the iron page
 //   7. the list is a PRIORITY order: 🔎 filter box (arrival-focused, Enter on a
 //      lone match dives in, survives repaints) + ⠿ drag-to-reorder that
@@ -97,20 +98,21 @@ await page.evaluate(()=>document.getElementById('ironsBtn').click());
 await page.waitForTimeout(300);
 check('🔥 opens its own page at #/irons', await page.evaluate(()=>currentView()==='irons' && location.hash==='#/irons'));
 
-// 2. create an iron (TITLE ONLY — desc is haiku's job, tags come later)
-check('both forms are actually INVISIBLE until asked for (hidden beats display:flex)',
-      await page.evaluate(()=>{
-        const gone = el => getComputedStyle(el).display==='none';
-        return gone(document.getElementById('ironform')) && gone(document.getElementById('ironedit'));
-      }));
-check('create form is title-only (no desc/tags inputs)',
-      await page.evaluate(()=>document.querySelectorAll('#ironform input').length===1));
+// 2. create an iron: the ONE box is both filter and create-name — type a name,
+// hit ＋ create. (TITLE ONLY — desc is haiku's job, tags come later via ✎.)
+check('no second create UI — one box + ＋ create, edit overlay hidden until asked',
+      await page.evaluate(()=>!document.getElementById('ironform') && !document.getElementById('ironAddBtn')
+        && document.querySelectorAll('#ironfilterrow input').length===1
+        && !!document.getElementById('ironCreateBtn')
+        && getComputedStyle(document.getElementById('ironedit')).display==='none'));
 await page.evaluate(()=>{ window.__sent.length=0;
-  document.getElementById('ironAddBtn').click();
-  document.getElementById('ironFormTitle').value='voice';
-  document.getElementById('ironFormSave').click();
+  const inp=document.getElementById('ironFilterInp');
+  inp.value='voice'; inp.dispatchEvent(new Event('input',{bubbles:true}));
+  document.getElementById('ironCreateBtn').click();
 });
 await page.waitForTimeout(200);
+check('＋ create clears the box (back to filtering everything)',
+      await page.evaluate(()=>document.getElementById('ironFilterInp').value===''));
 const wrote = await page.evaluate(()=>{
   const f=window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean)
           .find(x=>x.type==='prefs');
@@ -127,16 +129,16 @@ await page.waitForTimeout(200);
 check('the relay echo lands (list shows the iron)',
       await page.evaluate(()=>/voice/.test(document.getElementById('ironlist').innerText)));
 
-// 5. repaint survival: un-mirrored text + focus in the create form
+// 5. repaint survival: un-mirrored text + focus in the one box
 const form = await page.evaluate(()=>{
-  document.getElementById('ironAddBtn').click();          // reopen the form
-  const t=document.getElementById('ironFormTitle');
-  t.focus(); t.value='half-typ';
+  const t=document.getElementById('ironFilterInp');
+  t.focus(); t.value='half-typ';                          // typed but not yet mirrored (no input event)
   renderIronList();                                       // literally what a frame does
-  return { focused: document.activeElement===t, text: t.value };
+  const out={ focused: document.activeElement===t, text: t.value };
+  t.value=''; t.dispatchEvent(new Event('input',{bubbles:true}));
+  return out;
 });
-check('create form survives a repaint (focus + un-mirrored text)', form.focused && form.text==='half-typ', JSON.stringify(form));
-await page.evaluate(()=>{ document.getElementById('ironFormCancel').click(); });
+check('the box survives a repaint (focus + un-mirrored text)', form.focused && form.text==='half-typ', JSON.stringify(form));
 
 // 2b. an EMPTY iron has no session to land on — tapping it opens the
 // ＋ add-project picker over the irons list instead of any intermediate page

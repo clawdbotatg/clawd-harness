@@ -675,6 +675,10 @@
   .ironform input:focus { outline:none; border-color:var(--accent-dim); }
   .ironform .frow { display:flex; gap:6px; }
   .ironform .frow button { flex:0 0 auto; }
+  /* the one filter+create row: input stretches, button hangs off its right */
+  #ironfilterrow { flex-direction:row; align-items:center; }
+  #ironfilterrow input { flex:1; min-width:0; }
+  #ironfilterrow button { flex:0 0 auto; padding:7px 10px; }
   @media (pointer:coarse) { .ironform input, #ironpickcard input { font-size:16px; } }  /* <16px zooms the page on iOS focus */
   .ironcard { cursor:pointer; }
   /* ⠿ drag handle: the ONLY draggable surface (the card itself must keep
@@ -1243,21 +1247,16 @@
            (never rebuilt) so a frame landing mid-type can't eat the text. -->
       <div id="ironshead">
         <span class="menutitle" id="ironstitle">🔥 irons</span>
-        <button id="ironAddBtn" title="new iron — a named group of projects to track as one effort">＋ new iron</button>
       </div>
-      <!-- filter box, the projects-rung deal: static node (a frame can't eat
-           mid-type text), arrival focuses it, Enter opens a lone match -->
+      <!-- ONE box, the projects-rung deal exactly: static node (a frame can't
+           eat mid-type text or steal focus), arrival focuses it, typing FILTERS
+           the list, Enter dives into a lone match — and the same text is the
+           NAME for ＋ create (Enter never creates; only the button does).
+           There is no separate create form. Title only — the description
+           writes itself (haiku, via ironDescribe), tags come later via ✎. -->
       <div class="ironform" id="ironfilterrow">
-        <input id="ironFilterInp" placeholder="filter irons · Enter opens when one is left" autocomplete="off" />
-      </div>
-      <!-- title only — the description writes itself (haiku, via ironDescribe)
-           and tags are edited later on the iron's page, never at creation -->
-      <div id="ironform" class="ironform" hidden>
-        <input id="ironFormTitle" placeholder="name the effort — e.g. voice" autocomplete="off" />
-        <div class="frow">
-          <button id="ironFormSave">＋ create</button>
-          <button id="ironFormCancel">cancel</button>
-        </div>
+        <input id="ironFilterInp" placeholder="filter irons · or type a name and hit ＋ create" autocomplete="off" />
+        <button id="ironCreateBtn" title="create an iron named what you typed — a named group of projects to track as one effort">＋ create</button>
       </div>
       <div id="ironlist"></div>
     </section>
@@ -7528,9 +7527,9 @@ function renderIronList() {
     const e = document.createElement('div');
     e.className = 'ironempty';
     e.textContent = 'no irons yet. an iron is a named group of projects — one effort you’re ' +
-                    'juggling ("irons in the fire"). hit ＋ new iron, then put projects in it ' +
-                    'with the 🔥 button on their cards. tapping an iron dives straight into ' +
-                    'its sessions.';
+                    'juggling ("irons in the fire"). type a name above and hit ＋ create, then ' +
+                    'put projects in it with the 🔥 button on their cards. tapping an iron ' +
+                    'dives straight into its sessions.';
     list.appendChild(e);
     return;
   }
@@ -7680,22 +7679,15 @@ function ironSessions(iron) {
   return allSessions().filter(s => FLEET ? (s._pkey && ids.includes(s._pkey))
                                          : ids.includes(s.pid));
 }
-// -- create form (irons page) + ✎ edit overlay: static nodes, wired once
-const ironFormEl = document.getElementById('ironform');
-document.getElementById('ironAddBtn').onclick = () => {
-  ironFormEl.hidden = !ironFormEl.hidden;
-  if (!ironFormEl.hidden && !isTouch) document.getElementById('ironFormTitle').focus();
-};
-document.getElementById('ironFormCancel').onclick = () => { ironFormEl.hidden = true; };
-document.getElementById('ironFormSave').onclick = () => {
-  const t = document.getElementById('ironFormTitle');
-  if (!t.value.trim()) { t.focus(); return; }
-  ironCreate(t.value, '', []);       // title only — desc writes itself (haiku), tags come later
-  t.value = '';
-  ironFormEl.hidden = true;
-};
-document.getElementById('ironFormTitle').onkeydown = (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); document.getElementById('ironFormSave').click(); }
+// -- ＋ create (irons page) + ✎ edit overlay: static nodes, wired once.
+// Create reads the ONE filter box — the text you typed to look for an iron is
+// the name of the one you make when it doesn't exist. Enter never creates
+// (that's the dive-into-a-lone-match key); only the button does.
+document.getElementById('ironCreateBtn').onclick = () => {
+  const t = ironFilterInp.value.trim();
+  if (!t) { focusIronFilter(); return; }
+  ironCreate(t, '', []);             // title only — desc writes itself (haiku), tags come later via ✎
+  setIronFilter(''); applyIronFilter();
 };
 const ironEditEl = document.getElementById('ironedit');
 function openIronEdit() {
