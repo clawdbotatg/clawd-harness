@@ -618,7 +618,7 @@ user-facing overview; this file orients an agent working **on** the code.
   member projects + session titles, requested by whichever browser is looking
   at an iron surface (throttled hourly / on membership change) and stored like
   any other edit, so every device sees the same sentence; tags are edited
-  later on the iron's page, never at creation. The 🔥 header icon left of the 🗂️
+  later via the ✎ overlay, never at creation. The 🔥 header icon left of the 🗂️
   projects icon opens `#/irons` (the list). **An iron has NO page of its own**
   (the intermediate detail page was removed 2026-08-26): tapping an iron —
   from the list, a project card's 🔥 badge, or a `#/i/<id>` deep link — dives
