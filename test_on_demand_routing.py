@@ -61,6 +61,9 @@ class FakeSession:
     def _find_transcript(self):
         return None                           # transcript_path is the whole truth here
 
+    def _has_conversation(self):
+        return bool(self.transcript_path)     # real content check tested separately (8c)
+
     def send_message(self, text, control=False):
         self.sent.append(text)
 
@@ -272,6 +275,30 @@ s0.transcript_path = ""
 server.SessionManager._handoff(m, s0, m.accounts["fresh"], why="test")
 check("8b. real _handoff declines a transcript-less session outright",
       m.sessions["c0"] is s0 and s0.alive and s0.last_handoff == 0.0)
+
+# 8c: the REAL predicate, on real files. The transcript FILE exists from the
+# first hook (SessionStart writes mode/snapshot lines immediately), so
+# file-exists is NOT the test — v1 of this guard used it and a fresh
+# session's first send was still moved and killed (2026-08-27, second time).
+import os, tempfile, types
+with tempfile.TemporaryDirectory() as td:
+    fresh = os.path.join(td, "fresh.jsonl")     # hook lines only, zero turns
+    with open(fresh, "w") as f:
+        f.write('{"type":"mode","mode":"normal","sessionId":"x"}\n'
+                '{"type":"file-history-snapshot","messageId":"m"}\n')
+    talked = os.path.join(td, "talked.jsonl")   # has a real conversation
+    with open(talked, "w") as f:
+        f.write('{"type":"mode","mode":"normal","sessionId":"x"}\n'
+                '{"type":"user","message":{"role":"user","content":"hi"}}\n')
+    fake = types.SimpleNamespace(transcript_path=fresh,
+                                 _find_transcript=lambda: None)
+    a = server.ClaudeSession._has_conversation(fake)
+    fake.transcript_path = talked
+    b = server.ClaudeSession._has_conversation(fake)
+    fake.transcript_path = os.path.join(td, "gone.jsonl")
+    c = server.ClaudeSession._has_conversation(fake)
+    check("8c. _has_conversation: hook-only file False, real convo True, missing False",
+          a is False and b is True and c is False, f"a={a} b={b} c={c}")
 
 # ── carve-outs and the flag ─────────────────────────────────────────────
 print("\ncarve-outs (the addenda's fences) and the rollout flag")

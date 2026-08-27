@@ -3372,6 +3372,26 @@ class ClaudeSession:
                 return hits[0]
         return None
 
+    def _has_conversation(self):
+        """True iff this session's transcript holds at least one real
+        conversation line — the thing --resume actually needs. The FILE
+        exists from the first hook (SessionStart writes mode/snapshot lines
+        immediately), so mere existence is not the test: resuming a
+        zero-turn session still dies with "No conversation found with
+        session ID" (2026-08-27 — the file-exists guard shipped that
+        morning let a fresh session's first send through and killed it)."""
+        path = self.transcript_path or self._find_transcript()
+        if not path:
+            return False
+        try:
+            with open(path) as f:
+                for line in f:
+                    if '"type":"user"' in line or '"type":"assistant"' in line:
+                        return True
+        except OSError:
+            pass
+        return False
+
     def _follow_session(self, obj):
         """Track the live transcript file + session id from a hook payload. A
         compaction (or resume) rotates claude's session file mid-run; following
@@ -3445,8 +3465,19 @@ class ClaudeSession:
         The OUTPUT shape is the harness's own (role/text/tools/…) and is
         engine-independent — every consumer above this line (transcript view,
         naming seed, digests, search, history seed) stays engine-blind. Only
-        the INPUT format differs, so the parse is the Engine's."""
-        return self.eng.slim_event(self, line)
+        the INPUT format differs, so the parse is the Engine's.
+
+        Never raises: one malformed transcript line must not take down a
+        subscriber's replay or the tailer (2026-08-27: a queued_command
+        whose prompt was a content-block LIST — an image queued mid-turn —
+        raised in _strip_noise, and every subscribe to that session killed
+        its whole WS: the harness read as bricked)."""
+        try:
+            return self.eng.slim_event(self, line)
+        except Exception as e:
+            print(f"[transcript {self.cid[:8]}] slim_event failed on a line: "
+                  f"{e!r}", flush=True)
+            return None
 
     def _slim_event_claude(self, line: str):
         """claude's transcript JSONL → slim events. Shapes mirror
@@ -3514,7 +3545,12 @@ class ClaudeSession:
             # user event here or the client's "⏳ queued" box never lands.
             att = obj.get("attachment") or {}
             if att.get("type") == "queued_command":
-                clean = _strip_noise(att.get("prompt") or "").strip()
+                p = att.get("prompt")
+                if not isinstance(p, str):
+                    # a send queued with an image attached writes prompt as a
+                    # content-block list, not a string
+                    p = _collect_text(p) if isinstance(p, list) else ""
+                clean = _strip_noise(p).strip()
                 if clean:
                     return {"role": "user", "text": clean}
             return None
@@ -4845,16 +4881,18 @@ class SessionManager:
                 # place; if the pool is truly dead the send watchdog + bounce
                 # rescue still act on real evidence (the plan's emergency rule).
                 decision, best, reason = "stay", None, "live background work — a respawn would kill it"
-            if decision == "move" and not (s.transcript_path or s._find_transcript()):
-                # A handoff is a --resume respawn, and a session that has never
-                # completed a turn has no transcript to resume — the CLI dies
-                # with "No conversation found with session ID" and the send
-                # lands in a corpse (2026-08-27: every fresh session's first
-                # composer send, because spawn-time _route_key and prompt-time
-                # _pool_key rank pools differently by design). Deliver in
-                # place; the move it wanted is re-decided at the next prompt,
-                # when a transcript exists.
-                decision, best, reason = "stay", None, "no transcript yet — nothing to resume on the target"
+            if decision == "move" and not s._has_conversation():
+                # A handoff is a --resume respawn, and a session with no
+                # conversation in its transcript has nothing to resume — the
+                # CLI dies with "No conversation found with session ID" and
+                # the send lands in a corpse (2026-08-27: every fresh
+                # session's first composer send, because spawn-time
+                # _route_key and prompt-time _pool_key rank pools differently
+                # by design). NOTE the predicate is transcript CONTENT, not
+                # file existence — the file exists from the first hook, which
+                # is how v1 of this guard still let the move through. Deliver
+                # in place; the move is re-decided at the next prompt.
+                decision, best, reason = "stay", None, "no conversation yet — nothing to resume on the target"
             prompt_id = uuid.uuid4().hex[:8]
             applied = bool(SUB_ROUTE_ON_PROMPT and decision == "move" and best)
             self._log_route(s, decision, best, reason, via=via,
@@ -5542,13 +5580,16 @@ class SessionManager:
         if s.busy or not s.alive or s.ceremony:  # re-check after the network call
             return
         src = s.transcript_path or s._find_transcript()
-        if not src:
-            # Nothing to --resume: a zero-turn session has no transcript, and
-            # respawning it resuming=True kills it ("No conversation found
-            # with session ID"). Every caller assumes a resume, so decline —
-            # a session with no context loses nothing by staying put.
-            print(f"[handoff {s.cid[:8]}] no transcript yet — nothing to "
-                  "resume; staying put", flush=True)
+        if not src or not s._has_conversation():
+            # Nothing to --resume: a zero-turn session has no conversation in
+            # its transcript (the FILE exists from the first hook — content is
+            # the test), and respawning it resuming=True kills it ("No
+            # conversation found with session ID"). Every caller assumes a
+            # resume, so decline — a session with no context loses nothing by
+            # staying put. This also stops the rebalance sweep from re-killing
+            # a session that died zero-turn and was respawned.
+            print(f"[handoff {s.cid[:8]}] no resumable conversation yet — "
+                  "staying put", flush=True)
             return
         s.last_handoff = time.time()
         base_src = Path(s.config_dir or os.path.expanduser("~/.claude"))
@@ -6691,6 +6732,8 @@ def generate_project_emoji(context_text, taken=()):
 
 def _strip_noise(text):
     """Drop harness boilerplate that shouldn't show as a user message."""
+    if not isinstance(text, str):
+        return ""                                # content-block lists etc. — never raise
     text = re.sub(r"<local-command-caveat>[\s\S]*?</local-command-caveat>", "", text)
     text = re.sub(r"<system-reminder>[\s\S]*?</system-reminder>", "", text)
     text = re.sub(r"</?command-(message|name|args)>", "", text)
