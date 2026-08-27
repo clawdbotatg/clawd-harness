@@ -617,15 +617,16 @@ user-facing overview; this file orients an agent working **on** the code.
   later on the iron's page, never at creation. The 🔥 header icon left of the 🗂️
   projects icon opens `#/irons`; an iron's own page (`#/i/<id>`) shows one tab row of
   **every session from every member project across machines**, 📌 pinned ones
-  at the end, plus member-project chips. **Tapping a session keeps you ON the iron page**
-  (`#/i/<id>/s/<cid>/tty`): `placeIronChrome` reparents `#ironbody` (title/✎🗑,
-  desc, tags, PROJECTS row, session tabs) + `#ironedit` to the top of the
-  terminal panel, so the live tty + composer sit under the iron's own tabs —
-  tab taps switch the terminal in place (open one highlighted), the global
-  `#sessionbar` hides (the iron's `#irontabs` is the strip), and swipe/cycle
-  ride `railSessions()`, which scoped = the iron's WHOLE roster including 📌
-  pinned members (dashed, at the end), unlike the normal strip which parks
-  them on the board. Climbing to any normal rung sends the chrome home. Assignment is the 🔥 corner button on
+  at the end, plus member-project chips. **Tapping a session keeps you inside the iron**
+  (`#/i/<id>/s/<cid>/tty`): the whole iron identity compresses into ONE row
+  (`#ironrow`, painted by `renderIronRow`) between the top bar and the session
+  tab strip — ← irons · 🔥 title (tap = the iron's full page) · AI desc ·
+  member project chips + ＋ · ✎ 🗑 — and the strip + swipe/cycle ride
+  `railSessions()`, which scoped = the iron's WHOLE roster including 📌 pinned
+  members (dashed, at the end), unlike the normal strip which parks them on
+  the board. Tab taps switch the terminal in place (open one highlighted);
+  the row rebuilds only on a content-fingerprint change (so the 🗑 two-tap
+  arm survives session frames) and hides on any normal rung. Assignment is the 🔥 corner button on
   each project card (modal picker; one iron per project; most projects stay
   loose). Member refs are `projectRows().id` — the **projectKey** in fleet (a
   gh repo groups once across boxes), the **pid** in direct mode. Storage is

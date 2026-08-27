@@ -69,16 +69,23 @@
   header .spacer { flex:1; }
   #dot { width:8px; height:8px; background:var(--err); flex:0 0 auto; }   /* square status LED */
   #dot.up { background:var(--ok); }
-  /* 🔥 iron scope: while a session is open INSIDE an iron, the iron page's own
-     body (#ironbody — title/desc, projects row, session tabs) rides at the TOP
-     of the terminal panel, so the tty view IS the iron page with a live
-     terminal + composer under its tabs. Cap its share so the terminal always
-     keeps most of the screen. */
-  #left > #ironbody { flex:0 1 auto; max-height:45%; padding:10px 14px; }
-  #left > .ironform { flex:0 0 auto; }
-  /* the session overlay (✕ / 📌 / account tag, absolute top-right, z-20) floats
-     over the head row here — reserve its footprint so ✎ 🗑 stay tappable */
-  @media (max-width:1180px) { #left > #ironbody .ih-row { padding-right:170px; } }
+  /* 🔥 iron scope row: the iron compressed to one line while one of its
+     sessions is open — sits between the top bar and the session tab strip.
+     Desc takes the slack and ellipsizes; everything else keeps its size. */
+  #ironrow { display:flex; align-items:center; gap:8px; padding:4px 12px;
+             border-bottom:1px solid var(--edge); background:var(--panel);
+             overflow:hidden; white-space:nowrap; }
+  #ironrow[hidden] { display:none; }
+  #ironrow .ir-title { flex:0 0 auto; font-size:13px; font-weight:600; color:var(--ink); cursor:pointer; }
+  #ironrow .ir-title:hover { color:var(--accent); }
+  #ironrow .ir-desc { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis;
+                      color:var(--dim); font-size:11px; font-family:var(--mono); }
+  #ironrow .iprojchip { flex:0 0 auto; padding:2px 7px; font-size:11px; max-width:150px; }
+  #ironrow button { flex:0 0 auto; background:transparent; border:1px solid var(--edge);
+                    color:var(--dim); font:inherit; font-size:11px; font-family:var(--mono);
+                    padding:2px 7px; cursor:pointer; }
+  #ironrow button:hover { color:var(--ink); border-color:var(--edge-hi); }
+  #ironrow button.danger:hover, #ironrow button.armed { color:var(--err); border-color:var(--err); }
   /* second header row: session tabs for the current project, busy→idle→dead, left to right */
   #sessionbar { display:flex; align-items:center; gap:6px; padding:5px 12px;
                 border-bottom:1px solid var(--edge); background:var(--panel);
@@ -1054,6 +1061,10 @@
     <button id="settingsBtn" class="hbtn" title="Settings"><span class="bico">⚙️</span></button>
     <button id="reloadBtn" class="hbtn" title="Reload (recover a blank screen)"><span class="bico">🔄</span></button>
   </header>
+  <!-- 🔥 iron scope row: while a session is open INSIDE an iron, the whole iron
+       identity compresses to this ONE row between the top bar and the session
+       tab strip — ← irons · 🔥 title · desc · member project chips · ✎ 🗑. -->
+  <div id="ironrow" hidden></div>
   <div id="sessionbar" hidden></div>
   <div id="needsbar" hidden></div>
   <div id="rebootbar" hidden>
@@ -3528,13 +3539,12 @@ function renderSessionBar(view) {
   const bar = document.getElementById('sessionbar');
   const wasHidden = bar.hidden;
   view = view || currentView();
+  renderIronRow(view);                                          // 🔥 one-row iron identity above the strip while scoped
   if (view === 'pm') { renderPmBar(bar, wasHidden); return; }   // PM threads ride the same strip
   const sorted = railSessions();                               // unified roster (or the scoped iron's), importance-ordered
-  // hidden on the projects rung, both 🔥 iron pages, AND a scoped iron session —
-  // everywhere the iron chrome carries its own #irontabs row (two strips of
-  // tabs would fight for the same tap)
-  if (view === 'projects' || view === 'irons' || view === 'iron' ||
-      (ironScope && (view === 'tty' || view === 'transcript')) || !sorted.length) {
+  // hidden on the projects rung and both 🔥 iron pages (the iron detail carries
+  // its own session row — two strips of tabs would fight for the same tap)
+  if (view === 'projects' || view === 'irons' || view === 'iron' || !sorted.length) {
     bar.hidden = true; bar.innerHTML = '';
     if (!wasHidden) refitTTY();
     return;
@@ -3595,24 +3605,87 @@ function renderSessionBar(view) {
   if (wasHidden) refitTTY();
 }
 
-// 🔥 the iron scope chrome — while a session is open INSIDE an iron, the iron
-// page's whole body (#ironbody: ← irons / title / ✎ 🗑, desc, tags, PROJECTS
-// row, session tabs) is reparented to the TOP of the terminal panel, so the
-// tty view IS the iron page with a live terminal + composer under its tabs.
-// The ✎ edit form (#ironedit) travels with it so editing works in place.
-// Climbing back to a normal rung (or the iron page itself) sends both home.
-function placeIronChrome(on) {
-  const body = document.getElementById('ironbody'), edit = document.getElementById('ironedit'),
-        home = document.getElementById('ironview');
-  if (on && body.parentElement !== leftPanel) {
-    leftPanel.insertBefore(body, leftPanel.firstChild);
-    leftPanel.insertBefore(edit, body);        // form above the body, same as on the iron page
-    refitTTY();
-  } else if (!on && body.parentElement !== home) {
-    home.insertBefore(edit, home.firstChild);  // restore the iron page's own order: edit, body
-    home.insertBefore(body, edit.nextSibling);
-    refitTTY();
+// 🔥 the iron scope row — while a session is open INSIDE an iron, the whole
+// iron identity compresses into ONE row between the top bar and the session
+// tab strip (which shows the iron's roster via railSessions): ← irons, the
+// 🔥 title (tap = the iron's full page), the AI desc taking the slack, the
+// member project chips + ＋ add, then ✎ 🗑. Rebuilt only when the content
+// fingerprint moves, so the 🗑 two-tap arm survives ordinary session frames;
+// visibility flips refit the terminal (the row changes its height).
+function renderIronRow(view) {
+  const el = document.getElementById('ironrow');
+  const wasHidden = el.hidden;
+  const iron = (ironScope && (view === 'tty' || view === 'transcript')) ? ironById(ironScope) : null;
+  if (!iron) {
+    if (!wasHidden) { el.hidden = true; el.innerHTML = ''; delete el.dataset.fp; refitTTY(); }
+    return;
   }
+  const st = ironStats(iron);
+  const fp = [iron.id, iron.title, iron.desc || '',
+              st.members.map(r => r.id + ':' + r.name + ':' + (r.sessionCount || 0)).join(',')].join('\x1f');
+  if (el.dataset.fp !== fp) {
+    el.dataset.fp = fp;
+    el.innerHTML = '';
+    const back = document.createElement('button');
+    back.textContent = '← irons';
+    back.title = 'all irons';
+    back.onclick = () => { currentIronId = null; navTo('irons'); };
+    el.appendChild(back);
+    const t = document.createElement('span');
+    t.className = 'ir-title'; t.textContent = '🔥 ' + iron.title;
+    t.title = 'open the ' + iron.title + ' iron page';
+    t.onclick = () => { currentIronId = iron.id; navTo('iron'); };
+    el.appendChild(t);
+    const d = document.createElement('span');
+    d.className = 'ir-desc'; d.textContent = iron.desc || '';
+    d.title = iron.desc || '';
+    el.appendChild(d);
+    st.members.forEach(r => {                    // member project chips, same look as the iron page's
+      const chip = document.createElement('span');
+      chip.className = 'iprojchip';
+      chip.title = 'open ' + r.name;
+      chip.onclick = () => selectProject(r.id);
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = (shortEmoji(r.emoji) ? shortEmoji(r.emoji) + ' ' : '') + r.name + ' · ' + (r.sessionCount || 0);
+      chip.appendChild(nm);
+      const rm = document.createElement('span');
+      rm.className = 'rm'; rm.textContent = '✕';
+      rm.title = 'take ' + r.name + ' out of this iron (project untouched)';
+      rm.onclick = (e) => { e.stopPropagation(); ironAssign(r.id, ''); };
+      chip.appendChild(rm);
+      el.appendChild(chip);
+    });
+    const addc = document.createElement('span');
+    addc.className = 'iprojchip iadd';
+    addc.title = 'add a project to this iron';
+    addc.onclick = openIronAdd;
+    const anm = document.createElement('span');
+    anm.className = 'nm'; anm.textContent = '＋';
+    addc.appendChild(anm);
+    el.appendChild(addc);
+    const ed = document.createElement('button');
+    ed.textContent = '✎';
+    ed.title = 'edit title / tags (opens the iron page)';   // the edit form lives on the iron page
+    ed.onclick = () => { currentIronId = iron.id; navTo('iron'); openIronEdit(); };
+    el.appendChild(ed);
+    const del = document.createElement('button');
+    del.className = 'danger'; del.textContent = '🗑';
+    del.title = 'delete this iron (projects and sessions are untouched)';
+    del.onclick = () => {                        // two-tap, same as the iron page
+      if (!del.classList.contains('armed')) {
+        del.classList.add('armed'); del.textContent = '🗑 sure?';
+        setTimeout(() => { del.classList.remove('armed'); del.textContent = '🗑'; }, 3000);
+        return;
+      }
+      const id = iron.id; currentIronId = null;
+      ironDelete(id); navTo('irons');
+    };
+    el.appendChild(del);
+  }
+  requestIronDesc(iron);          // throttled — a deep link may land before any desc exists
+  el.hidden = false;
+  if (wasHidden) refitTTY();
 }
 
 // ---- 🔎 filter the tab strip ------------------------------------------------
@@ -7289,9 +7362,9 @@ function renderIronLive() {
   const v = currentView();
   if (v === 'irons') renderIronList();
   else if (v === 'iron') renderIronDetail();
-  // scoped session: the iron chrome above the terminal tracks frames too
-  // (tab dots/ages, membership, desc) — same repaint the iron page gets
-  else if (ironScope && (v === 'tty' || v === 'transcript')) renderIronDetail();
+  // scoped session: the one-row iron chrome above the strip tracks frames too
+  // (title/desc, member chips + counts) — same repaint the iron page gets
+  else if (ironScope && (v === 'tty' || v === 'transcript')) renderIronRow(v);
 }
 function renderIronsUI() {
   renderProjectRung(); renderIronLive();
@@ -7522,14 +7595,7 @@ function renderIronDetail() {
     tabs.appendChild(e);
   }
   body.appendChild(tabs);
-  // riding above a terminal (scoped session): a repaint can change our height
-  // (desc lands, tabs wrap), which changes the terminal's box — refit it then
-  if (body.parentElement === leftPanel && body.offsetHeight !== lastIronChromeH) {
-    lastIronChromeH = body.offsetHeight;
-    refitTTY();
-  }
 }
-let lastIronChromeH = 0;   // last painted height of the scoped iron chrome
 // -- create form (irons page) + edit form (detail page): static nodes, wired once
 const ironFormEl = document.getElementById('ironform');
 document.getElementById('ironAddBtn').onclick = () => {
@@ -7812,13 +7878,11 @@ function setView(view) {
   pinsPanel.classList.toggle('hidden', !pins);
   ironsPanel.classList.toggle('hidden', !irons);
   ironPanel.classList.toggle('hidden', !iron);
-  // 🔥 scoped session: the iron page's body rides above the terminal (see
-  // placeIronChrome) — keep the iron detail painted there, tabs highlighting
-  // the open session. Any other view sends the chrome back to the iron page.
-  const scopedTty = (tty || view === 'transcript') && !!ironScope;
-  placeIronChrome(scopedTty);
-  if (scopedTty) { currentIronId = ironScope; renderIronDetail(); }
-  if (!iron && !scopedTty) ironEditEl.hidden = true;   // leaving the iron surface closes its edit form
+  // 🔥 scoped session: keep currentIronId pointed at the scope so the one-row
+  // iron chrome (renderIronRow, via renderSessionBar below) and its ✎/title
+  // hops always target the right iron.
+  if ((tty || view === 'transcript') && ironScope) currentIronId = ironScope;
+  if (!iron) ironEditEl.hidden = true;           // leaving the detail closes its edit form
   document.getElementById('keys').style.display = (tty && isTouch) ? '' : 'none';  // key bar only for touch (the desktop terminal takes these keys natively)
   if (!tty && kbdMode) setKbdMode(false);   // ⌨ typing mode is per-visit: back to the safe read-only default off the tty view
   const inSession = (tty || view === 'transcript') && !!currentCid;
