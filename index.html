@@ -7480,29 +7480,7 @@ function renderIronDetail() {
     });
     body.appendChild(tr);
   }
-  // every session from every member project — live ones first (strip order),
-  // 📌 pinned members at the end with the marker
-  const sesSec = document.createElement('div');
-  sesSec.className = 'ih-sec'; sesSec.textContent = 'sessions';
-  body.appendChild(sesSec);
-  const tabs = document.createElement('div'); tabs.id = 'irontabs';
-  const all = ironSessions(iron);
-  const rank = s => !s.alive ? 4 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : s.bg ? 2 : 3;
-  const warmth = s => s.promptedAt || s.lastActive || 0;
-  const live = all.filter(s => !s.pinned).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
-  const parked = all.filter(s => s.pinned).sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
-  live.forEach(s => tabs.appendChild(ironTabNode(s, false)));
-  parked.forEach(s => tabs.appendChild(ironTabNode(s, true)));
-  if (!all.length) {
-    const e = document.createElement('div');
-    e.className = 'ironempty';
-    e.textContent = ironMemberIds(iron).length
-      ? 'no sessions yet — open a member project below and start one.'
-      : 'empty iron — tap ＋ add project below.';
-    tabs.appendChild(e);
-  }
-  body.appendChild(tabs);
-  // member projects — tap opens the project's sessions rung, ✕ removes it
+  // member projects FIRST — tap opens the project's sessions rung, ✕ removes it
   const prSec = document.createElement('div');
   prSec.className = 'ih-sec'; prSec.textContent = 'projects';
   body.appendChild(prSec);
@@ -7533,6 +7511,28 @@ function renderIronDetail() {
   addc.appendChild(anm);
   prow.appendChild(addc);
   body.appendChild(prow);
+  // then every session from every member project — live ones first (strip
+  // order), 📌 pinned members at the end with the marker
+  const sesSec = document.createElement('div');
+  sesSec.className = 'ih-sec'; sesSec.textContent = 'sessions';
+  body.appendChild(sesSec);
+  const tabs = document.createElement('div'); tabs.id = 'irontabs';
+  const all = ironSessions(iron);
+  const rank = s => !s.alive ? 4 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : s.bg ? 2 : 3;
+  const warmth = s => s.promptedAt || s.lastActive || 0;
+  const live = all.filter(s => !s.pinned).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
+  const parked = all.filter(s => s.pinned).sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
+  live.forEach(s => tabs.appendChild(ironTabNode(s, false)));
+  parked.forEach(s => tabs.appendChild(ironTabNode(s, true)));
+  if (!all.length) {
+    const e = document.createElement('div');
+    e.className = 'ironempty';
+    e.textContent = ironMemberIds(iron).length
+      ? 'no sessions yet — open a member project above and start one.'
+      : 'empty iron — tap ＋ add project above.';
+    tabs.appendChild(e);
+  }
+  body.appendChild(tabs);
 }
 // -- create form (irons page) + edit form (detail page): static nodes, wired once
 const ironFormEl = document.getElementById('ironform');
