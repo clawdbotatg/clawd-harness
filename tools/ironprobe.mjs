@@ -399,14 +399,24 @@ const drag = await page.evaluate(()=>{
   const grab=cards[0].querySelector('.irondrag');
   if(!grab) return null;
   const bot=cards[cards.length-1].getBoundingClientRect();
+  const domBefore=[...list.querySelectorAll('.ironcard')].map(c=>c.dataset.id).join();
   grab.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:7}));
   const stayed=currentView()==='irons';            // grabbing must NOT open the iron
   grab.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,pointerId:7,clientY:bot.bottom+5}));
+  // mid-drag: real pick-up-and-carry — the card is LIFTED and riding the
+  // pointer (fixed + transform), a spacer holds its slot, the sibling glides
+  // via transform, and the DOM order hasn't budged (no snap-reorder mid-drag)
+  const mid={ lifted: getComputedStyle(cards[0]).position==='fixed' && /translate/.test(cards[0].style.transform),
+              spacer: !!list.querySelector('.ironph'),
+              sibGlides: /translateY/.test(cards[1].style.transform) && cards[1].classList.contains('shifting'),
+              domStill: [...list.querySelectorAll('.ironcard')].map(c=>c.dataset.id).join()===domBefore };
   window.__sent.length=0;
   grab.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:7}));
+  const landed={ spacerGone: !list.querySelector('.ironph'),
+                 clean: !cards[0].style.transform && cards[0].style.position==='' };
   const f=window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean)
           .find(x=>x.type==='prefs');
-  return { stayed,
+  return { stayed, mid, landed,
            dom:[...list.querySelectorAll('.ironcard')].map(c=>ironById(c.dataset.id).title),
            mem: ironList.map(i=>i.title),
            pushed: !!(f && f.irons && f.irons[0].title==='voice'), leaks: !!(f && 'inactive' in f) };
@@ -414,6 +424,11 @@ const drag = await page.evaluate(()=>{
 check('⠿ drag moves the card to the bottom and PERSISTS the order (irons-only push)',
       !!drag && drag.stayed && drag.dom[0]==='voice' && drag.dom[1]==='metal'
       && drag.mem[0]==='voice' && drag.pushed && !drag.leaks, JSON.stringify(drag));
+check('mid-drag it CARRIES: card lifted on the pointer, spacer in its slot, sibling glides by transform, DOM order untouched',
+      !!drag && drag.mid.lifted && drag.mid.spacer && drag.mid.sibGlides && drag.mid.domStill,
+      JSON.stringify(drag && drag.mid));
+check('drop lands clean: spacer gone, every drag style stripped',
+      !!drag && drag.landed.spacerGone && drag.landed.clean, JSON.stringify(drag && drag.landed));
 await page.close();
 
 // ---- direct mode ------------------------------------------------------------

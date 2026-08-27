@@ -686,7 +686,13 @@
      pan and the drag never starts on a phone. */
   .irondrag { cursor:grab; touch-action:none; user-select:none; -webkit-user-select:none;
               color:var(--dim); font-size:14px; padding:2px 8px; margin:-2px -4px -2px 0; }
-  .ironcard.dragging { opacity:.55; border-color:var(--accent-dim); }
+  .irondrag:active { cursor:grabbing; }
+  /* pick-up-and-carry: the lifted card floats with a shadow, its slot stays
+     open as a dashed spacer, and the others glide (transform-only) */
+  .ironcard.dragging { opacity:.93; border-color:var(--accent-dim); cursor:grabbing;
+              box-shadow:0 10px 28px rgba(0,0,0,.55); }
+  .ironcard.shifting { transition:transform .16s ease; }
+  .ironph { border:1px dashed var(--edge); opacity:.7; flex:0 0 auto; box-sizing:border-box; }
   .ironcard .itags { display:flex; flex-wrap:wrap; gap:5px; margin-top:5px; }
   .itag { border:1px solid var(--edge); border-radius:10px; color:var(--dim);
           font-size:10px; font-family:var(--mono); padding:1px 8px; }
@@ -7544,7 +7550,8 @@ function renderIronList() {
     const card = document.createElement('div');
     card.className = 'scard ironcard';
     card.dataset.id = iron.id;
-    card.onclick = () => openIron(iron.id);
+    // the click a drag's pointerup mints must not dive into the iron
+    card.onclick = () => { if (Date.now() - ironDragEndAt > 350) openIron(iron.id); };
     const row = document.createElement('div'); row.className = 'row';
     const title = document.createElement('span');
     title.className = 'stitle'; title.textContent = '🔥 ' + iron.title;
@@ -7631,32 +7638,86 @@ ironFilterInp.addEventListener('keydown', (e) => {
   if (m.length === 1) openIron(m[0].id);        // narrowed to one → dive in (openIron clears the filter)
 });
 // -- ⠿ drag-to-reorder: pointer events (mouse AND touch — HTML5 DnD is dead on
-// iOS). The handle is the only grab surface; the card follows the pointer's Y
-// among its visible siblings, and release persists the new order. ------------
+// iOS). Real pick-up-and-carry: the grabbed card leaves the flow (position:
+// fixed) and rides the cursor via transform, a dashed spacer holds its slot,
+// and the other cards GLIDE out of the way (transform transitions only — the
+// DOM never reorders mid-drag, so nothing reflows or snaps). Slot math runs
+// against rects cached at grab time in list-content coordinates: feeding the
+// pointer back against rects that are themselves animating is exactly what
+// makes drags jitter. Near the list's edges an rAF loop auto-scrolls (the
+// cached math survives scrolling because it's content-space). Drop reorders
+// the DOM once and persists.
 let ironDragCard = null;
+let ironDragEndAt = 0;             // the pointerup mints a click on the card — swallow it
 function startIronDrag(e, card) {
   e.preventDefault(); e.stopPropagation();      // don't open the iron, don't scroll
+  if (ironDragCard) return;
   ironDragCard = card;
-  card.classList.add('dragging');
   const grab = e.currentTarget;
   try { grab.setPointerCapture(e.pointerId); } catch {}
   const list = document.getElementById('ironlist');
-  const move = (ev) => {
-    const cards = [...list.querySelectorAll('.ironcard')].filter(c => c !== card && c.style.display !== 'none');
-    let before = null;
-    for (const c of cards) {
-      const r = c.getBoundingClientRect();
-      if (ev.clientY < r.top + r.height / 2) { before = c; break; }
-    }
-    if (before ? card.nextSibling !== before || card === before : list.lastElementChild !== card) {
-      list.insertBefore(card, before);          // null → drop at the end
-    }
+  const sibs = [...list.querySelectorAll('.ironcard')].filter(c => c !== card && c.style.display !== 'none');
+  const r0 = card.getBoundingClientRect();
+  const lr = list.getBoundingClientRect();
+  const scroll0 = list.scrollTop;
+  const gap = parseFloat(getComputedStyle(list).rowGap) || 0;
+  const H = r0.height + gap;                    // how far a sibling steps to fill the hole
+  const origSlot = sibs.filter(c => (c.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING)).length;
+  // sibling midpoints in the COMPACTED layout (as if the card were already
+  // lifted out) — content-space, cached once, stable all drag
+  const mids = sibs.map((c, i) => {
+    const r = c.getBoundingClientRect();
+    return r.top + r.height / 2 + scroll0 - (i >= origSlot ? H : 0);
+  });
+  // spacer keeps the slot (and everyone's cached geometry) exactly where it was
+  const ph = document.createElement('div');
+  ph.className = 'ironph';
+  ph.style.height = r0.height + 'px';
+  list.insertBefore(ph, card);
+  // lift: fixed at its own rect, then pure-transform to follow the pointer
+  card.classList.add('dragging');
+  card.style.position = 'fixed';
+  card.style.left = r0.left + 'px'; card.style.top = r0.top + 'px';
+  card.style.width = r0.width + 'px';
+  card.style.zIndex = '40';
+  sibs.forEach(c => c.classList.add('shifting'));
+  const downX = e.clientX, downY = e.clientY, offY = e.clientY - r0.top;
+  let t = origSlot, lastY = e.clientY, raf = 0;
+  const apply = () => sibs.forEach((c, i) => {
+    const dy = (i >= t && i < origSlot) ? H : (i >= origSlot && i < t) ? -H : 0;
+    c.style.transform = dy ? `translateY(${dy}px)` : '';
+  });
+  const retarget = (clientY) => {
+    // slot from the DRAGGED CARD's center (not the raw pointer — grab point
+    // shouldn't change where it lands), in content space
+    const yc = clientY - offY + r0.height / 2 + list.scrollTop;
+    let n = 0; for (const m of mids) if (m < yc) n++;
+    if (n !== t) { t = n; apply(); }
   };
+  const move = (ev) => {
+    lastY = ev.clientY;
+    card.style.transform = `translate(${ev.clientX - downX}px, ${ev.clientY - downY}px)`;
+    retarget(ev.clientY);
+  };
+  const tick = () => {                          // hold near an edge → the list scrolls under you
+    if (!ironDragCard) return;
+    const v = lastY < lr.top + 48 ? -9 : lastY > lr.bottom - 48 ? 9 : 0;
+    if (v) { list.scrollTop += v; retarget(lastY); }
+    raf = requestAnimationFrame(tick);
+  };
+  raf = requestAnimationFrame(tick);
   const drop = () => {
     grab.removeEventListener('pointermove', move);
     grab.removeEventListener('pointerup', drop);
     grab.removeEventListener('pointercancel', drop);
+    cancelAnimationFrame(raf);
+    // land: make the DOM match the picture, then strip every drag prop
+    list.insertBefore(card, t < sibs.length ? sibs[t] : null);
+    ph.remove();
+    sibs.forEach(c => { c.classList.remove('shifting'); c.style.transform = ''; });
     card.classList.remove('dragging');
+    for (const p of ['position', 'left', 'top', 'width', 'zIndex', 'transform']) card.style[p] = '';
+    ironDragEndAt = Date.now();
     ironDragCard = null;
     ironReorder([...list.querySelectorAll('.ironcard')].map(c => c.dataset.id));
   };
