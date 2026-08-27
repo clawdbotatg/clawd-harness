@@ -48,21 +48,8 @@ controller/.mcp-config.json
 .clawd-controller.prompt.txt
 .clawd-controller.threads.json
 .clawd-controller.model.txt
-tools/brain.png
+tools/*.png
 
 # probe screenshots — regenerated on every run, pure churn in diffs
-tools/uiprobe.png
-tools/acctprobe.png
-tools/navprobe.png
-tools/pmprobe.png
-tools/fleetprobe.png
-tools/statprobe-mobile.png
-tools/statprobe-desktop.png
 
 # ⚙️ settings page probe shots
-tools/settings.png
-tools/settingsprobe.png
-tools/rungprobe.png
-tools/tabfilterprobe.png
-tools/tabfilterprobe-phone.png
-tools/pinfilterprobe.png
