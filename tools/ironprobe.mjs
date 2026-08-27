@@ -135,6 +135,18 @@ const form = await page.evaluate(()=>{
 check('create form survives a repaint (focus + un-mirrored text)', form.focused && form.text==='half-typ', JSON.stringify(form));
 await page.evaluate(()=>{ document.getElementById('ironFormCancel').click(); });
 
+// 2b. an EMPTY iron has no session to land on — tapping it opens the
+// ＋ add-project picker over the irons list instead of any intermediate page
+const empty = await page.evaluate(()=>{
+  openIron(ironList[0].id);
+  const modal=document.getElementById('ironaddmodal');
+  const out={ view: currentView(), picker: getComputedStyle(modal).display!=='none' };
+  closeIronAdd();
+  return out;
+});
+check('tapping an EMPTY iron stays on the list + opens the add-project picker',
+      empty.view==='irons' && empty.picker, JSON.stringify(empty));
+
 // 3. assign from a project card via the picker
 await page.evaluate(()=>navTo('projects'));
 await page.waitForTimeout(300);
@@ -156,27 +168,37 @@ check('the card now wears the iron badge',
         const card=[...document.querySelectorAll('#projcards .scard')].find(c=>/gpt-voice/.test(c.innerText));
         return !!card && /🔥 voice/.test(card.innerText); }));
 
-// 4. the iron page: header + cross-machine tabs, pinned at the end
+// 4. opening an iron = STRAIGHT into its session plane: one-row chrome between
+// the top bar and the strip, warmest session's tty under it — no detail page
 await page.evaluate(id=>openIron(id), ironId);
 await page.waitForTimeout(300);
 const detail = await page.evaluate(()=>{
-  const body=document.getElementById('ironbody');
-  const tabs=[...document.querySelectorAll('#irontabs .stab')];
-  return { hash:location.hash, text:body.innerText.slice(0,400),
-           tabs:tabs.map(t=>({lbl:t.querySelector('.lbl').textContent, parked:t.classList.contains('parked')})) };
+  const row=document.getElementById('ironrow');
+  const tabs=[...document.querySelectorAll('#sessionbar .stab')];
+  return { view: currentView(), scope: ironScope, cid: currentCid, hash:location.hash,
+           rowShown: !row.hidden, rowText: row.innerText,
+           barShown: !document.getElementById('sessionbar').hidden,
+           composerShown: getComputedStyle(document.querySelector('footer .inputrow')).display!=='none',
+           tabs:tabs.map(t=>({lbl:t.querySelector('.lbl').textContent, parked:t.classList.contains('parked'),
+                              active:t.classList.contains('active')})) };
 });
-check('deep hash #/i/<id> is written', detail.hash==='#/i/'+ironId, detail.hash);
-check('title + desc + tags render', /voice/.test(detail.text) && /all the voice work/.test(detail.text) && /speech/.test(detail.text));
-check('sessions from BOTH machines of the member project show',
-      detail.tabs.length===2 && detail.tabs.some(t=>/mic/.test(t.lbl)) && detail.tabs.some(t=>/hud/.test(t.lbl)),
+check('tapping an iron dives STRAIGHT into its warmest session (no intermediate page)',
+      detail.view==='tty' && detail.scope===ironId && detail.cid==='ca1'
+      && detail.hash==='#/i/'+ironId+'/s/ca1/tty' && detail.composerShown, JSON.stringify(detail));
+check('the one-row chrome shows title + desc + member chip + ✎ 🗑',
+      detail.rowShown && /🔥 voice/.test(detail.rowText) && /all the voice work/.test(detail.rowText)
+      && /gpt-voice/.test(detail.rowText) && /✎/.test(detail.rowText) && /🗑/.test(detail.rowText),
+      JSON.stringify(detail.rowText));
+check('sessions from BOTH machines of the member project ride the strip',
+      detail.barShown && detail.tabs.length===2
+      && detail.tabs.some(t=>/mic/.test(t.lbl)) && detail.tabs.some(t=>/hud/.test(t.lbl))
+      && detail.tabs[0].active,
       JSON.stringify(detail.tabs));
 check('📌 pinned member sits at the END, marked',
       detail.tabs.length===2 && detail.tabs[1].parked && /^📌 /.test(detail.tabs[1].lbl) && !detail.tabs[0].parked,
       JSON.stringify(detail.tabs));
 check('the unrelated project’s session stays out', !detail.tabs.some(t=>/other/.test(t.lbl)));
-check('global tab strip is hidden on the iron page (it has its own row)',
-      await page.evaluate(()=>document.getElementById('sessionbar').hidden));
-// the AI desc: a reply from ironDescribe is stored (prefs push) + rendered
+// the AI desc: a reply from ironDescribe is stored (prefs push) + rendered in the row
 const descFlow = await page.evaluate(()=>{
   window.__sent.length=0;
   onIronDesc({ id: ironList[0].id, desc: 'haiku wrote this' });
@@ -184,10 +206,22 @@ const descFlow = await page.evaluate(()=>{
           .find(x=>x.type==='prefs');
   return { desc: ironList[0].desc,
            pushed: !!(f && f.irons && f.irons[0].desc==='haiku wrote this' && !('inactive' in f)),
-           shown: document.getElementById('ironbody').innerText.includes('haiku wrote this') };
+           shown: document.getElementById('ironrow').innerText.includes('haiku wrote this') };
 });
-check('haiku’s desc is stored (irons-only push) + rendered',
+check('haiku’s desc is stored (irons-only push) + rendered in the row',
       descFlow.desc==='haiku wrote this' && descFlow.pushed && descFlow.shown, JSON.stringify(descFlow));
+// ✎ edits the iron in place (overlay — no page to go to)
+const edit = await page.evaluate(()=>{
+  [...document.querySelectorAll('#ironrow button')].find(b=>b.textContent==='✎').click();
+  const el=document.getElementById('ironedit');
+  const out={ open: !el.hidden, title: document.getElementById('ironEditTitle').value,
+              view: currentView() };
+  document.getElementById('ironEditCancel').click();
+  out.closed = el.hidden;
+  return out;
+});
+check('✎ opens the edit overlay IN PLACE (view stays tty), prefilled, cancel closes',
+      edit.open && edit.title==='voice' && edit.view==='tty' && edit.closed, JSON.stringify(edit));
 
 // 5b. the ＋ add-project picker on the iron page: a toggle checklist — the row
 // you tap turns ✓ in place (never vanishes/reshuffles), and the write survives
@@ -196,7 +230,7 @@ check('haiku’s desc is stored (irons-only push) + rendered',
 const addFlow = await page.evaluate(()=>{
   const modal=document.getElementById('ironaddmodal');
   const idle=getComputedStyle(modal).display==='none';       // invisible until asked
-  const chip=document.querySelector('#ironbody .iprojchip.iadd');
+  const chip=document.querySelector('#ironrow .iprojchip.iadd');
   if(!chip) return { idle, chip:false };
   chip.click();
   const open=getComputedStyle(modal).display!=='none';
@@ -246,7 +280,7 @@ const unauthed = await page.evaluate(()=>{
 });
 check('an edit while the socket is UNAUTHED queues, survives the stale echo, and flushes on auth',
       unauthed.queued>=1 && unauthed.kept===2 && unauthed.flushed>=1, JSON.stringify(unauthed));
-await page.evaluate(()=>{ document.querySelector('#ironbody .iprojchip.iadd').click(); });     // eyeball frame: the picker open
+await page.evaluate(()=>{ document.querySelector('#ironrow .iprojchip.iadd').click(); });     // eyeball frame: the picker open
 await page.screenshot({path:join(HERE,'ironprobe-add.png')});
 await page.evaluate(()=>closeIronAdd());
 
@@ -255,33 +289,6 @@ await page.evaluate(()=>closeIronAdd());
 // climbing out lands back on the iron page (not the project's sessions rung).
 await page.evaluate(id=>openIron(id), ironId);
 await page.waitForTimeout(200);
-const scope = await page.evaluate(()=>{
-  const tab=[...document.querySelectorAll('#irontabs .stab')].find(t=>/mic/.test(t.textContent));
-  if(!tab) return null;
-  tab.click();
-  const row=document.getElementById('ironrow');
-  const tabs=[...document.querySelectorAll('#sessionbar .stab')].map(t=>({
-    lbl:(t.querySelector('.lbl')||{}).textContent||'', parked:t.classList.contains('parked'),
-    active:t.classList.contains('active')}));
-  return { view: currentView(), hash: location.hash, scope: ironScope,
-           rowShown: !row.hidden, rowText: row.innerText,
-           chromeHome: document.getElementById('ironbody').parentElement===document.getElementById('ironview'),
-           barShown: !document.getElementById('sessionbar').hidden, tabs,
-           composerShown: getComputedStyle(document.querySelector('footer .inputrow')).display!=='none' };
-});
-check('tapping an iron tab opens the tty with the ONE-ROW iron chrome above the strip',
-      !!scope && scope.view==='tty' && scope.scope===ironId
-      && scope.hash==='#/i/'+ironId+'/s/ca1/tty'
-      && scope.rowShown && scope.chromeHome && scope.composerShown
-      && /🔥 voice/.test(scope.rowText) && /haiku wrote this/.test(scope.rowText)
-      && /gpt-voice/.test(scope.rowText) && /✎/.test(scope.rowText) && /🗑/.test(scope.rowText),
-      JSON.stringify(scope));
-check('the session bar shows the iron roster (📌 pinned at the end, no outsiders), open one highlighted',
-      !!scope && scope.barShown && scope.tabs.length===2
-      && /mic/.test(scope.tabs[0].lbl) && !scope.tabs[0].parked && scope.tabs[0].active
-      && /^📌 .*hud/.test(scope.tabs[1].lbl) && scope.tabs[1].parked && !scope.tabs[1].active
-      && !scope.tabs.some(t=>/other/.test(t.lbl)),
-      JSON.stringify(scope && scope.tabs));
 const inline = await page.evaluate(()=>{
   const hud=[...document.querySelectorAll('#sessionbar .stab')].find(t=>/hud/.test(t.textContent));
   hud.click();                                     // switch sessions WITHOUT leaving the iron
@@ -298,36 +305,36 @@ check('tapping another tab switches the terminal IN PLACE (view stays, row stays
       && inline.tabs.find(t=>/hud/.test(t.lbl)).active && !inline.tabs.find(t=>/mic/.test(t.lbl)).active,
       JSON.stringify(inline));
 const climb = await page.evaluate(()=>{
-  document.getElementById('ironsBtn').click();     // 🔥 while scoped = back to YOUR iron
+  document.getElementById('ironsBtn').click();     // 🔥 from a scoped session = the irons list
   return { view: currentView(), hash: location.hash };
 });
-check('the 🔥 header button returns to the scoped iron page (not the irons list)',
-      climb.view==='iron' && climb.hash==='#/i/'+ironId, JSON.stringify(climb));
-const climb2 = await page.evaluate(()=>{
-  const tab=[...document.querySelectorAll('#irontabs .stab')].find(t=>/mic/.test(t.textContent));
-  tab.click();                                     // re-enter the scoped session…
-  goShallower();                                   // …and climb (Ctrl+Shift+↑ path)
-  return { view: currentView(), scope: ironScope };
-});
-check('goShallower from a scoped session climbs to the iron page, scope intact',
-      climb2.view==='iron' && climb2.scope===ironId, JSON.stringify(climb2));
+check('the 🔥 header button from a scoped session goes to the irons list',
+      climb.view==='irons' && climb.hash==='#/irons', JSON.stringify(climb));
+const climb2 = await page.evaluate(id=>{
+  openIron(id);                                    // re-enter the scoped session…
+  goShallower();                                   // …and climb (Ctrl+Shift+↑ / swipe path)
+  return { view: currentView() };
+}, ironId);
+check('goShallower from a scoped session climbs to the irons list',
+      climb2.view==='irons', JSON.stringify(climb2));
+await page.evaluate(id=>openIron(id), ironId);     // back in for the exit-scope check
 const exitScope = await page.evaluate(()=>{ navTo('sessions');
   return { scope: ironScope, rowHidden: document.getElementById('ironrow').hidden }; });
 check('navigating to a normal rung exits the scope (iron row gone)',
       exitScope.scope===null && exitScope.rowHidden, JSON.stringify(exitScope));
-// entering a member session the NORMAL way (sessions rung / global strip, not
-// via the iron page) must ALSO raise the row + scope the strip — the row is
-// "this session lives in an iron", not "you came in through the iron page"
+// entering a member session the NORMAL way (sessions rung / global strip) must
+// NOT pull you into the iron — no row, no narrowed strip, no scope. Irons are
+// entered ONLY through the 🔥 list or a #/i/ link. (The first cut auto-scoped
+// here and yanked the full strip away mid-work — never again.)
 const normalEntry = await page.evaluate(()=>{
   focusSession(allSessions().find(s=>s.cid==='ca1'));   // what a strip/rung tap does
   return { view: currentView(), scope: ironScope,
-           rowShown: !document.getElementById('ironrow').hidden,
-           rowText: document.getElementById('ironrow').innerText,
-           tabs:[...document.querySelectorAll('#sessionbar .stab')].length };
+           rowHidden: document.getElementById('ironrow').hidden,
+           tabs:[...document.querySelectorAll('#sessionbar .stab')].map(t=>t.querySelector('.lbl').textContent) };
 });
-check('opening a member session from the NORMAL path raises the row + scopes the strip',
-      normalEntry.view==='tty' && normalEntry.scope===ironId && normalEntry.rowShown
-      && /🔥 voice/.test(normalEntry.rowText) && normalEntry.tabs===2,
+check('opening a member session from the NORMAL path stays NORMAL (no row, full strip, no scope)',
+      normalEntry.view==='tty' && normalEntry.scope===null && normalEntry.rowHidden
+      && normalEntry.tabs.some(l=>/other/.test(l)),   // the outsider is still there = strip not scoped
       JSON.stringify(normalEntry));
 await page.evaluate(()=>navTo('sessions'));            // back out for the deep-link check
 // deep link straight into a scoped session (reload survival)
@@ -340,11 +347,12 @@ check('deep link #/i/<id>/s/<cid>/tty restores the scoped session view (row + fu
       dl.view==='tty' && dl.scope===ironId && dl.rowShown && dl.tabs===2, JSON.stringify(dl));
 await page.screenshot({path:join(HERE,'ironprobe-scoped.png')});   // eyeball frame: 🔥 header + iron tabs over the tty
 
-// 6. deep link straight to the iron
+// 6. deep link straight to the iron → its warmest session, scoped
 await page.evaluate(id=>{ navTo('projects'); location.hash='#/i/'+id; }, ironId);
 await page.waitForTimeout(300);
-check('deep link #/i/<id> lands on the iron page',
-      await page.evaluate(()=>currentView()==='iron' && /voice/.test(document.getElementById('ironbody').innerText)));
+check('deep link #/i/<id> dives into the iron’s warmest session',
+      await page.evaluate(id=>currentView()==='tty' && ironScope===id && currentCid==='ca1'
+        && /voice/.test(document.getElementById('ironrow').innerText), ironId));
 await page.screenshot({path:join(HERE,'ironprobe.png')});
 await page.close();
 
@@ -360,23 +368,25 @@ await dpage.waitForTimeout(300);
 const direct = await dpage.evaluate(()=>{
   const sent=()=>window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean);
   window.__sent.length=0;
-  currentIronId='i9'; navTo('iron');                     // opening the page asks haiku for a desc
+  openIron('i9');                                        // dives into the member session + asks haiku for a desc
+  const view = currentView(), scope = ironScope;
   const req = sent().find(x=>x.type==='ironDescribe');
-  const placeholder = document.getElementById('ironbody').innerText.includes('describing…');
+  const placeholder = document.getElementById('ironrow').innerText.includes('describing…');
   window.__relayRx({type:'ironDesc', id:'i9', desc:'made by haiku'});
   const upd = sent().find(x=>x.type==='ironUpdate');
-  const tabs=[...document.querySelectorAll('#irontabs .stab')].map(t=>t.querySelector('.lbl').textContent);
+  const tabs=[...document.querySelectorAll('#sessionbar .stab')].map(t=>t.querySelector('.lbl').textContent);
   window.__sent.length=0;
   ironAssign('p1','');                                   // registry-backed op, not a prefs frame
   const op = sent()[0];
-  return { tabs, placeholder,
+  return { view, scope, tabs, placeholder,
            req: req ? { id:req.id, hasCtx: /direct job/.test(req.context||'') } : null,
            upd: upd ? { id:upd.id, desc:upd.desc } : null,
            op: op && op.type, pid: op && op.pid };
 });
-check('direct mode: harness `irons` frame renders the member session',
-      direct.tabs.length===1 && /job/.test(direct.tabs[0]), JSON.stringify(direct.tabs));
-check('direct mode: opening the page requests a desc (session titles in context) + shows "describing…"',
+check('direct mode: opening the iron dives into the member session (scoped strip)',
+      direct.view==='tty' && direct.scope==='i9'
+      && direct.tabs.length===1 && /job/.test(direct.tabs[0]), JSON.stringify(direct));
+check('direct mode: the row requests a desc (session titles in context) + shows "describing…"',
       !!direct.req && direct.req.id==='i9' && direct.req.hasCtx && direct.placeholder, JSON.stringify(direct.req));
 check('direct mode: haiku’s reply is stored via ironUpdate',
       !!direct.upd && direct.upd.id==='i9' && direct.upd.desc==='made by haiku', JSON.stringify(direct.upd));

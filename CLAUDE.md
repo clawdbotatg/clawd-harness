@@ -199,12 +199,16 @@ user-facing overview; this file orients an agent working **on** the code.
   `inactive` would clobber the machines deny-list — the relay merges
   per-field, `fleet/test_relay_prefs.py` guards that half); a project card's
   🔥 opens the modal picker and assignment stores the cross-machine
-  projectKey; the iron page (`#/i/<id>`) shows every session from every
-  member project across machines with 📌 pinned members at the END; the
-  static create form survives a repaint with focus + un-mirrored text; and in
-  direct mode the harness `irons` frame renders + assignment goes out as
-  `ironAssign` (registry-backed — `python3 test_irons.py` guards that half).
-  Both modes run against the stubbed WebSocket; no session touched.
+  projectKey; tapping an iron dives STRAIGHT into its warmest session (no
+  detail page) with the one-row `#ironrow` chrome + the scoped strip (every
+  member session across machines, 📌 pinned at the END, outsiders excluded),
+  tab taps switching the terminal in place; ✎ edits in an overlay without
+  leaving the tty; an empty iron opens the add-project picker over the list;
+  the static create form survives a repaint with focus + un-mirrored text;
+  and in direct mode the harness `irons` frame drives the same dive +
+  assignment goes out as `ironAssign` (registry-backed — `python3
+  test_irons.py` guards that half). Both modes run against the stubbed
+  WebSocket; no session touched.
 - **`tools/spawnprobe.mjs`** — guards the **spawn watch** (2026-08-20): a `new`
   that never comes back must not be a black void, and the prompt typed into it
   must never be lost. `newSession()` drops into the tty view *before* the
@@ -615,18 +619,24 @@ user-facing overview; this file orients an agent working **on** the code.
   at an iron surface (throttled hourly / on membership change) and stored like
   any other edit, so every device sees the same sentence; tags are edited
   later on the iron's page, never at creation. The 🔥 header icon left of the 🗂️
-  projects icon opens `#/irons`; an iron's own page (`#/i/<id>`) shows one tab row of
-  **every session from every member project across machines**, 📌 pinned ones
-  at the end, plus member-project chips. **Tapping a session keeps you inside the iron**
-  (`#/i/<id>/s/<cid>/tty`): the whole iron identity compresses into ONE row
-  (`#ironrow`, painted by `renderIronRow`) between the top bar and the session
-  tab strip — ← irons · 🔥 title (tap = the iron's full page) · AI desc ·
-  member project chips + ＋ · ✎ 🗑 — and the strip + swipe/cycle ride
-  `railSessions()`, which scoped = the iron's WHOLE roster including 📌 pinned
-  members (dashed, at the end), unlike the normal strip which parks them on
-  the board. Tab taps switch the terminal in place (open one highlighted);
-  the row rebuilds only on a content-fingerprint change (so the 🗑 two-tap
-  arm survives session frames) and hides on any normal rung. Assignment is the 🔥 corner button on
+  projects icon opens `#/irons` (the list). **An iron has NO page of its own**
+  (the intermediate detail page was removed 2026-08-26): tapping an iron —
+  from the list, a project card's 🔥 badge, or a `#/i/<id>` deep link — dives
+  STRAIGHT into its warmest session (`openIron`), and the whole iron identity
+  lives in ONE row (`#ironrow`, painted by `renderIronRow`) between the top
+  bar and the session tab strip: ← irons · 🔥 title · AI desc · member
+  project chips + ＋ add (the `#ironaddmodal` checklist) · ✎ (edit overlay
+  `#ironedit`) · 🗑 (two-tap delete). The strip + swipe/cycle ride
+  `railSessions()`, scoped = the iron's WHOLE roster across machines
+  including 📌 pinned members (dashed, at the end); tab taps switch the
+  terminal in place (open one highlighted). **The scope is entered ONLY through
+  irons** (the list / a `#/i/` link) — normal session navigation NEVER
+  auto-enters an iron just because the project is a member (an auto-scope cut
+  yanked the full strip away mid-work, 2026-08-26 — never again). The row
+  rebuilds only on a content-fingerprint change (so the 🗑 arm survives
+  session frames) and hides on any normal rung. An EMPTY iron opens the
+  add-project picker over the list. Climbing out (🔥 button / swipe /
+  Ctrl+Shift+↑) lands on the irons list. Assignment is the 🔥 corner button on
   each project card (modal picker; one iron per project; most projects stay
   loose). Member refs are `projectRows().id` — the **projectKey** in fleet (a
   gh repo groups once across boxes), the **pid** in direct mode. Storage is
