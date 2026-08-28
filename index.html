@@ -1279,13 +1279,13 @@
       <!-- state of this session as one colored square; the words are the tooltip,
            written by updateTtyStat() (title + aria-label) so it always names the
            CURRENT state rather than just the legend -->
-      <div id="ttystat" hidden role="img"><span class="dot"></span></div>
       <!-- 🤖 autopilot: tick it and the harness supervises this session itself —
            on every turn end an LLM reads the goal + transcript and either types
            the next nudge or parks with a reason in the #pilotrow above the
            composer. Bounded (PILOT_MAX_ROUNDS); any send from you refills it. -->
       <input type="checkbox" id="pilotchk" hidden
              title="🤖 autopilot — let the harness keep this session working on its goal, narrating progress in a status row. Bounded; your own messages steer it." />
+      <div id="ttystat" hidden role="img"><span class="dot"></span></div>
       <div id="sessiondesc" title="AI-generated name for this session"></div>
       <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button></div>
     </div>
