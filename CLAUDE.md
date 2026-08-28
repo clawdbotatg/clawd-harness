@@ -689,11 +689,11 @@ user-facing overview; this file orients an agent working **on** the code.
   works even on touch where the terminal is read-only), message box
   (type/dictate/paste images). The app opens on the projects rung; a session
   opens as the live terminal on every device (the transcript view was pulled —
-  `DEEP_VIEW`). Terminal is **read-only on touch by default** (mobile dictation
+  `DEEP_VIEW`). Terminal is **read-only on touch, always** (mobile dictation
   streams self-revising text that xterm forwards as garbled keystrokes) — the
-  key bar's **⌨ toggle** opts into direct typing (soft keyboard → PTY) for TUI
-  prompts/shells; it resets to read-only on leaving the tty view, and dictation
-  should still go through the composer. **Shared-PTY
+  key bar drives TUI menus, and typed/dictated text goes through the composer.
+  (The ⌨ direct-typing toggle was removed 2026-08-28 so the key bar fits one
+  phone row; `tools/probe-kbd.mjs` went with it.) **Shared-PTY
   sizing:** one PTY can't render two geometries, so resize frames are size
   *claims* and the server follows a single owner — deliberate acts (opening the
   tty view, resizing the window, typing/sending) claim it; reconnect/refit

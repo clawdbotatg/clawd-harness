@@ -346,10 +346,6 @@
      Touch is read-only here (disableStdin) so we lose nothing but in-TTY link taps;
      the transcript view keeps real markdown links. */
   @media (pointer: coarse) { .xterm-screen { pointer-events:none !important; } }
-  /* ⌨ typing mode (key bar toggle): stdin is re-enabled, so taps must reach the
-     terminal again to keep the soft keyboard anchored there. Touch-scroll of the
-     TTY pauses while it's on (the click-through above is what made it work). */
-  @media (pointer: coarse) { body.kbdmode .xterm-screen { pointer-events:auto !important; } }
   #feed, #pmfeed { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
           padding:12px; display:flex; flex-direction:column; gap:9px;
           width:100%; max-width:880px; align-self:center; }
@@ -498,7 +494,7 @@
      to min-height instantly, with no JS call to forget (the old autosizeBox() patch
      had to be re-run after every programmatic value change and kept regressing).
      Browsers without it fall back to the JS autosize below. */
-  #box { flex:1; resize:none; field-sizing:content; min-height:38px; max-height:160px;
+  #box { flex:1; resize:none; field-sizing:content; min-height:50px; max-height:160px;
          background:var(--raised); color:var(--ink);
          border:1px solid var(--edge); padding:9px 11px; font:inherit; }
   /* 13px on mobile (small, per request). iOS Safari would normally auto-zoom on focus for a field
@@ -506,7 +502,7 @@
      here no longer triggers the zoom. Scoped to coarse pointers so the desktop input keeps its
      inherited size. */
   @media (pointer: coarse) { #box { font-size:13px; } }
-  @media (pointer: fine) { #box { min-height:58px; } }   /* desktop: a little taller resting height */
+  @media (pointer: fine) { #box { min-height:76px; } }   /* desktop: a little taller resting height */
   #box:focus { outline:none; border-color:var(--accent); }
   #box::placeholder { color:var(--dim); }
   /* voice column: speaker (TTS) over mic (STT), stacked to the left of the box */
@@ -1278,7 +1274,6 @@
     </div>
     <div id="attachments"></div>
     <div id="keys" title="Send keys to the session (works even when the terminal is read-only) — for navigating TUI menus like /model">
-      <button data-k="kbd" id="kbdBtn" title="Type directly in the terminal (soft keyboard). While on, terminal touch-scroll pauses — toggle off to scroll. Dictate into the message box below, not here.">⌨</button>
       <button data-k="esc">esc</button>
       <button data-k="up">↑</button>
       <button data-k="down">↓</button>
@@ -7135,8 +7130,8 @@ box.addEventListener('keydown', (e) => {
   if (isTouch) return;
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 });
-// Raw passthrough when the user types directly in the terminal (desktop always;
-// touch only while the ⌨ key-bar toggle has re-enabled stdin).
+// Raw passthrough when the user types directly in the terminal (desktop only —
+// touch boots with stdin disabled and drives TUIs through the key bar instead).
 term.onData(d => sendKeys(d));
 // Shift+Enter should insert a newline, not submit. xterm sends a bare \r for
 // Enter regardless of modifiers, so intercept it and send \n (0x0A / Ctrl+J) —
@@ -7214,28 +7209,10 @@ const KEY_SEQ = {
 function sendKeys(data) {
   hsend({ type: 'input', data });
 }
-// ⌨ typing mode — opt-in direct terminal input on touch. The terminal boots
-// read-only there (disableStdin) because mobile DICTATION streams self-revising
-// text that xterm forwards as garbled keystrokes; but deliberate soft-keyboard
-// typing (a TUI prompt, a 2FA code, a shell) is fine — so it's a toggle, off by
-// default, reset when you leave the tty view. While on, taps land on the
-// terminal (see the body.kbdmode CSS) so the keyboard stays anchored to it.
-let kbdMode = false;
-const kbdBtn = document.getElementById('kbdBtn');
-function setKbdMode(on) {
-  kbdMode = !!on;
-  term.options.disableStdin = isTouch && !kbdMode;
-  term.options.cursorBlink = !isTouch || kbdMode;
-  document.body.classList.toggle('kbdmode', kbdMode);
-  kbdBtn.classList.toggle('on', kbdMode);
-  if (kbdMode) { term.focus(); sendResize(true); }  // typing here is a deliberate act → claim the PTY size
-  else term.blur();                                  // drop the soft keyboard
-}
 document.getElementById('keys').addEventListener('click', (e) => {
   if (swipeTap) { swipeTap = false; return; }   // this "click" is the tail of a horizontal nav swipe, not a real tap
   const k = e.target.closest('button')?.dataset.k;
-  if (k === 'kbd') { setKbdMode(!kbdMode); return; }
-  if (k && KEY_SEQ[k] != null) { sendKeys(KEY_SEQ[k]); kbdMode ? term.focus() : box.focus(); }
+  if (k && KEY_SEQ[k] != null) { sendKeys(KEY_SEQ[k]); box.focus(); }
 });
 
 // -- voice: read replies aloud (TTS) + dictate into the box (STT) -------------
@@ -8022,7 +7999,6 @@ function setView(view) {
   if ((tty || view === 'transcript') && ironScope) currentIronId = ironScope;
   ironEditEl.hidden = true;                      // any nav closes the ✎ edit overlay
   document.getElementById('keys').style.display = (tty && isTouch) ? '' : 'none';  // key bar only for touch (the desktop terminal takes these keys natively)
-  if (!tty && kbdMode) setKbdMode(false);   // ⌨ typing mode is per-visit: back to the safe read-only default off the tty view
   const inSession = (tty || view === 'transcript') && !!currentCid;
   closeBtn.classList.toggle('show', inSession);  // big close-✕ only when a session is open
   updatePinBtn();       // 📌 toggle rides beside it, state mirrors the open session
