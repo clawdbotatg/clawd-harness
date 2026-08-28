@@ -181,6 +181,17 @@ user-facing overview; this file orients an agent working **on** the code.
   the optimistic tick survives a stale frame arriving before the server's
   echo. Fake session + stubbed `hsend`/`currentView` — subscribes to nothing,
   sends nothing. Server half: `python3 test_autopilot.py`.
+- **`tools/spotprobe.mjs`** — guards the **two-mode spotlight launcher**
+  (2026-08-28): **Ctrl+Shift+Space** = projects mode (Enter opens the project
+  and spawns a fresh session — unchanged), **Ctrl+Space** = irons mode over
+  the same overlay (type an iron's title, Enter → `openIron`, i.e. dive
+  STRAIGHT into the iron's warmest live session across machines — no spawn;
+  the "get me back into that effort" chord). Asserts each chord opens its
+  mode, the chords SWITCH an already-open overlay rather than closing it,
+  typing narrows irons by title (priority order kept, never re-sorted), Enter
+  hands the survivor's id to `openIron` and closes, Esc closes. `openIron` is
+  stubbed in-page and the fake irons have no members, so nothing subscribes to
+  or messages a real session.
 - **`tools/tabfilterprobe.mjs`** — guards the **🔎 tab-strip filter** (2026-08-09):
   that it sits at the far right, stays pinned there when the strip scrolls (it's
   `position:sticky`, so tabs pass *under* it), that typing narrows the strip and

@@ -1054,7 +1054,8 @@
   #rebootovl .rb-title { font-size:18px; font-weight:600; letter-spacing:.2px; }
   #rebootovl .rb-row { display:flex; align-items:center; gap:10px; }
   #rebootovl .rb-sub { color:var(--dim); font-size:12px; }
-  /* spotlight launcher (Ctrl+Shift+Space): type a project, Enter → new session */
+  /* spotlight launcher — Ctrl+Shift+Space: type a project, Enter → new session;
+     Ctrl+Space: type an iron, Enter → dive into its warmest session */
   #spotlight { position:fixed; inset:0; z-index:65; background:rgba(0,0,0,.6);
                display:flex; align-items:flex-start; justify-content:center; padding:16vh 16px 0;
                backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }
@@ -8424,19 +8425,30 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowRight') navFwd(); else navBack();
 });
 
-// -- spotlight (Ctrl+Shift+Space) ---------------------------------------------
-// A launcher over the same rows the projects rung filters: type a substring of a
-// project name, pick with ↑/↓ (or click), and Enter opens that project AND spawns
-// a fresh session in it — the whole projects → filter → open → ＋ dance in one
-// keystroke. Skips rows you couldn't click on the rung (cloning / error / every
-// host offline).
+// -- spotlight (Ctrl+Shift+Space projects · Ctrl+Space irons) ------------------
+// A launcher with two modes over the same overlay. Projects mode
+// (Ctrl+Shift+Space): type a substring of a project name, pick with ↑/↓ (or
+// click), and Enter opens that project AND spawns a fresh session in it — the
+// whole projects → filter → open → ＋ dance in one keystroke. Skips rows you
+// couldn't click on the rung (cloning / error / every host offline).
+// Irons mode (Ctrl+Space): the same dance over the 🔥 irons — Enter runs
+// openIron(), which dives STRAIGHT into the iron's warmest live session with
+// the scoped strip (every member session across machines). No spawn — this is
+// the "get me back into that effort" chord, not the "start something" one.
 const spotEl = document.getElementById('spotlight');
 const spotInput = document.getElementById('spotinput');
 const spotListEl = document.getElementById('spotlist');
 const SPOT_MAX = 12;
 let spotSel = 0;
+let spotMode = 'proj';          // 'proj' | 'iron'
 function spotMatches() {
   const q = spotInput.value.trim().toLowerCase();
+  if (spotMode === 'iron') {
+    // ironList order IS the user's priority order — keep it, don't re-sort.
+    return ironList
+      .filter(it => !q || String(it.title || '').toLowerCase().includes(q))
+      .slice(0, SPOT_MAX);
+  }
   return projectRows()
     .filter(p => p.status !== 'cloning' && p.status !== 'error' && p.online !== false)
     .filter(p => !q || (p.name || '').toLowerCase().includes(q))
@@ -8448,19 +8460,30 @@ function renderSpotlight() {
   spotListEl.innerHTML = '';
   if (!rows.length) {
     const d = document.createElement('div');
-    d.className = 'spotempty'; d.textContent = 'no matching project';
+    d.className = 'spotempty';
+    d.textContent = spotMode === 'iron'
+      ? (ironList.length ? 'no matching iron' : 'no irons yet — 🔥 in the header to create one')
+      : 'no matching project';
     spotListEl.appendChild(d);
     return;
   }
   rows.forEach((p, i) => {
     const r = document.createElement('div');
     r.className = 'spotrow' + (i === spotSel ? ' sel' : '');
-    const nm = document.createElement('span'); nm.className = 'sname'; nm.textContent = p.name;
+    const nm = document.createElement('span'); nm.className = 'sname';
     const mt = document.createElement('span'); mt.className = 'smeta2';
-    mt.textContent = [p.kind === 'local' ? '🔒 local' : p.kind === 'external' ? '🔀 external' : '',
-                      p.pinned ? 'this app'
-                               : (FLEET && p.machineName ? p.machineName.replace(/^clawd-/, '') : ''),
-                      `${p.sessionCount || 0} sess`].filter(Boolean).join(' · ');
+    if (spotMode === 'iron') {
+      nm.textContent = '🔥 ' + (p.title || '');
+      const st = ironStats(p);
+      mt.textContent = [`${st.members.length} proj`, `${st.sessions} sess`,
+                        st.busy ? `${st.busy} busy` : ''].filter(Boolean).join(' · ');
+    } else {
+      nm.textContent = p.name;
+      mt.textContent = [p.kind === 'local' ? '🔒 local' : p.kind === 'external' ? '🔀 external' : '',
+                        p.pinned ? 'this app'
+                                 : (FLEET && p.machineName ? p.machineName.replace(/^clawd-/, '') : ''),
+                        `${p.sessionCount || 0} sess`].filter(Boolean).join(' · ');
+    }
     r.appendChild(nm); r.appendChild(mt);
     r.onclick = () => spotLaunch(p);
     r.onmousemove = () => { if (spotSel !== i) { spotSel = i; renderSpotlight(); } };
@@ -8468,7 +8491,11 @@ function renderSpotlight() {
     if (i === spotSel) r.scrollIntoView({ block: 'nearest' });
   });
 }
-function openSpotlight() {
+function openSpotlight(mode) {
+  spotMode = mode || 'proj';
+  spotInput.placeholder = spotMode === 'iron'
+    ? 'jump to iron · Enter → its sessions'
+    : 'jump to project · Enter → new session';
   spotInput.value = ''; spotSel = 0;
   spotEl.hidden = false;
   renderSpotlight();
@@ -8477,6 +8504,7 @@ function openSpotlight() {
 function closeSpotlight() { spotEl.hidden = true; spotInput.blur(); }
 function spotLaunch(p) {
   closeSpotlight();
+  if (spotMode === 'iron') { openIron(p.id); return; }   // warmest member session (or add-picker if empty)
   selectProject(p.id);   // fleet: resolves + attaches the host machine; direct: sets currentPid
   newSession();          // spawn — the server's focus reply drops us into the fresh terminal
 }
@@ -8508,9 +8536,23 @@ window.addEventListener('keydown', (e) => {
   else if (e.code === 'KeyP') gotoProjects();
   else if (e.code === 'KeyW') closeCurrentSession();
   else if (e.code === 'KeyN') newSession();   // spawn a session + focus the box to start typing
-  else if (e.code === 'Space') { if (spotEl.hidden) openSpotlight(); else closeSpotlight(); }
+  else if (e.code === 'Space') {
+    if (spotEl.hidden || spotMode !== 'proj') openSpotlight('proj'); else closeSpotlight();
+  }
   else handled = false;
   if (handled) { e.preventDefault(); e.stopPropagation(); }
+}, true);
+
+// Ctrl+Space (no shift) — the same spotlight in irons mode: type an iron's
+// title, Enter dives into its warmest live session. Separate listener because
+// the block above hard-requires shiftKey; same capture + stopPropagation deal
+// so the chord never reaches xterm (Ctrl+Space would otherwise send NUL to the
+// PTY — nothing in claude's TUI wants it).
+window.addEventListener('keydown', (e) => {
+  if (!e.ctrlKey || e.shiftKey || e.metaKey || e.altKey) return;
+  if (e.code !== 'Space') return;
+  e.preventDefault(); e.stopPropagation();
+  if (spotEl.hidden || spotMode !== 'iron') openSpotlight('iron'); else closeSpotlight();
 }, true);
 
 // Horizontal swipe flips through the session rail (in a session) or changes depth
