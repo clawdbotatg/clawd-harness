@@ -62,6 +62,7 @@ viewer** (each with its own `client.cid`).
 | `accountsRefresh` | — | Poll every account's usage now (instead of waiting out the TTL). Broadcasts `accounts` on change. |
 | `close` | `cid` | Kill that session (SIGTERM) and detach viewers. Files on disk untouched. |
 | `pin` | `cid`, `on?` | 📌 park a session on the pin board (`on:true`, the default) or restore it to the tabs (`on:false`). Pure metadata — the claude process is untouched and can still be prompted via `send`; the UI keeps pinned sessions off the tab strip/sessions rung and shows them on the board instead. Persisted (survives restarts); broadcasts `sessions`. **Pinning has two side effects on the session itself:** it derives `testHint` (below), then types the engine's `/compact` into the TUI — parking is when compaction is free, so the return trip gets a full context window. The compact waits for the session to go genuinely idle (never mid-turn, never while a TUI prompt is up) for up to `PIN_COMPACT_WAIT` (900s), and is skipped for ceremony/never-prompted sessions or with `PIN_COMPACT=0`. It is sent as a *control* send: no `prompted_at` bump, no bounce watchdog, no `promptCount` change. |
+| `autopilot` | `cid`, `on?` | 🤖 engage (`on:true`, the default) or disengage autopilot on a session — the checkbox beside the state square. While engaged, every `Stop` runs an LLM supervisor over the session's goal + transcript tail: it either types the next goal-directed prompt into the session itself (`via:"pilot"`, through the same routing preflight as a human send) or parks with a reason; `pilotStatus` (below) narrates each round. Engaging derives the goal and — if the session is idle — acts immediately. Bounded: at most `PILOT_MAX_ROUNDS` (20) pilot sends per human prompt (any non-pilot send refills the budget); ceremony sessions refuse to engage; a supervisor "prompt" starting with `/` is dropped, never typed. Durable (registry + respawn clone); broadcasts `sessions`. `AUTO_PILOT=0` opts the box out; model: `PILOT_MODEL` (default `claude-haiku-4.5` on the naming gateway). |
 | `createProject` | `name` | Create a new public GitHub repo under `GH_OWNER` and adopt it (async; status broadcasts via `projects`). |
 | `addProject` | `repoUrl` | Clone a repo and adopt it (async). Input normalized: full URL as-is; `owner/repo` and bare `repo` resolved against github.com. |
 | `addLocalProject` | `path`, `create?` | Register a folder anywhere on the machine's disk (absolute or `~` path) as a **private local project** (`kind:"local"`): sessions run inside it like any project, but the harness never runs gh/git-remote operations on it and never stores/broadcasts a repo URL. Synchronous — the project appears `ready` immediately. A path that **doesn't exist** is answered with `localProjectMissing` (the resolved absolute path) instead of an error, so the UI can confirm with the human; the retry with `create:true` then `mkdir -p`'s the folder and registers it. Rejected (with an `error` frame to the sender) for: paths that exist but aren't directories, `/` or `~` itself, paths under `projects/` (auto-managed) or the harness's own dir (the pinned self-project) — all guards run before any mkdir, so `create` can't be aimed at them. Re-adding the same resolved path is a no-op. |
@@ -209,7 +210,8 @@ no-op that would leave the previous session's stream flowing (that's how
   "tool":<str|null>, "status":"blocked|working|background|idle", "bg":"shell|agent|", "digest":str,
   "blocked_on":str, "lastAnswer":str, "sessionId", "promptCount":int,
   "lastActive":float, "created":float, "alive":bool, "account":str,
-  "pinned":float, "testHint":str, "engine":"claude|codex" }
+  "pinned":float, "testHint":str, "engine":"claude|codex",
+  "autopilot":bool, "pilotStatus":str, "pilotRounds":int }
   // pinned = epoch when the session was 📌 parked on the pin board (see the `pin`
   // op); 0.0 = not pinned. Pinned sessions stay fully alive/promptable.
   // engine = which agent CLI drives it. Absent on pre-2026-08 rows/clients —
@@ -249,6 +251,12 @@ no-op that would leave the previous session's stream flowing (that's how
   unconfigured. **Durable** (persisted in the registry) — a restart must not
   blank the board's instructions. Model: `TEST_HINT_MODEL`, defaulting to
   `BANKR_MODEL`.
+- `autopilot` / `pilotStatus` / `pilotRounds` = the 🤖 autopilot (see the
+  `autopilot` op): whether the harness's LLM supervisor is driving this
+  session, its live narration line ("▶ tests green, wiring the UI next ·
+  round 3/20" / "🙋 needs a db choice" / "✅ shipped and verified" / "⏸ paused
+  at the cap"), and how many pilot sends the current human budget has used.
+  All durable — an engaged pilot survives restarts and account handoffs.
 - `blocked_on` = the open question if the turn ended by asking the human
   something in plain text (LLM-inferred) — a *soft* block the `waiting` flag
   (TUI prompts only) misses. `""` when not blocked. These three feed the AI

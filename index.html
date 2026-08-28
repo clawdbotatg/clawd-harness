@@ -473,6 +473,17 @@
   #keys button.on { background:var(--accent); color:#000; border-color:var(--accent); }
   #attachments { display:flex; flex-wrap:wrap; gap:6px; }
   #attachments:empty { display:none; }
+  /* 🤖 autopilot: the checkbox (head of the session-name row, beside the state
+     square) and the narration row (styled like a pending message, violet =
+     the machine's own voice, matching the agent state color) */
+  #pilotchk { flex:0 0 auto; width:15px; height:15px; margin:0; cursor:pointer;
+              accent-color:var(--local); }
+  #pilotchk[hidden] { display:none; }
+  #pilotrow { display:flex; gap:8px; align-items:flex-start; background:var(--raised);
+              border:1px solid var(--local); color:var(--ink); padding:7px 10px;
+              font-size:13px; white-space:pre-wrap; word-break:break-word; }
+  #pilotrow[hidden] { display:none; }
+  #pilotrow .tag { flex:0 0 auto; padding-top:1px; }
   /* queued messages: acked locally (amber), removed once they land in the transcript */
   #pending { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
   #pending:empty { display:none; }
@@ -1269,9 +1280,18 @@
            written by updateTtyStat() (title + aria-label) so it always names the
            CURRENT state rather than just the legend -->
       <div id="ttystat" hidden role="img"><span class="dot"></span></div>
+      <!-- 🤖 autopilot: tick it and the harness supervises this session itself —
+           on every turn end an LLM reads the goal + transcript and either types
+           the next nudge or parks with a reason in the #pilotrow above the
+           composer. Bounded (PILOT_MAX_ROUNDS); any send from you refills it. -->
+      <input type="checkbox" id="pilotchk" hidden
+             title="🤖 autopilot — let the harness keep this session working on its goal, narrating progress in a status row. Bounded; your own messages steer it." />
       <div id="sessiondesc" title="AI-generated name for this session"></div>
       <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button></div>
     </div>
+    <!-- 🤖 the autopilot's narration row — same slot style as the upload chips:
+         where the work stands / what the supervisor is doing, live per round -->
+    <div id="pilotrow" hidden><span class="tag">🤖</span><span id="pilottext"></span></div>
     <div id="attachments"></div>
     <div id="keys" title="Send keys to the session (works even when the terminal is read-only) — for navigating TUI menus like /model">
       <button data-k="esc">esc</button>
@@ -5449,6 +5469,7 @@ function updateTtyStat() {
   // state square there.
   const v = currentView();
   const s = currentCid && allSessions().find(x => x.cid === currentCid);
+  renderPilotUI();                 // 🤖 checkbox + row track the same signal
   if (!s || (v !== 'tty' && v !== 'transcript')) { ttystatEl.hidden = true; return; }
   const st = sessionState(s);
   ttystatEl.className = st.key;
@@ -5456,6 +5477,34 @@ function updateTtyStat() {
   ttystatEl.setAttribute('aria-label', 'session state: ' + st.word);
   ttystatEl.hidden = false;
 }
+// -- 🤖 autopilot: the checkbox beside the state square + the narration row --
+// Rendered from the same signal as the state square (updateTtyStat calls it, so
+// every sessions frame / view change repaints). The checkbox is a STATIC node
+// (never rebuilt — a repaint mid-tap must not eat the click); after a tap we
+// hold our optimistic state briefly so the next stale frame can't revert the
+// box before the server's echo lands.
+const pilotChk = document.getElementById('pilotchk');
+const pilotRow = document.getElementById('pilotrow');
+const pilotText = document.getElementById('pilottext');
+let pilotPendingAt = 0, pilotCidShown = null;
+function renderPilotUI() {
+  const v = currentView();
+  const s = currentCid && allSessions().find(x => x.cid === currentCid);
+  const show = !!s && (v === 'tty' || v === 'transcript');
+  pilotChk.hidden = !show;
+  if (!show) { pilotRow.hidden = true; return; }
+  if (s.cid !== pilotCidShown) { pilotCidShown = s.cid; pilotPendingAt = 0; }
+  if (Date.now() - pilotPendingAt > 4000) pilotChk.checked = !!s.autopilot;
+  const on = pilotChk.checked;
+  pilotRow.hidden = !on;
+  if (on) pilotText.textContent = (s.autopilot && s.pilotStatus) || 'engaging…';
+}
+pilotChk.addEventListener('change', () => {
+  if (!currentCid) { pilotChk.checked = false; return; }
+  pilotPendingAt = Date.now();
+  hsend({ type: 'autopilot', cid: currentCid, on: pilotChk.checked });
+  renderPilotUI();
+});
 // -- "have I just been here?" — the splash's cooldown ------------------------
 // Bouncing between two sessions shouldn't re-run the show every hop: the splash
 // earns its ~2s only when you've been AWAY long enough to have lost the thread.

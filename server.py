@@ -294,6 +294,45 @@ def wants_auto_tldr(text):
         return False
     paras = [p for p in re.split(r"\n\s*\n", t) if p.strip()]
     return len(paras) >= 2 or len(t) >= AUTO_TLDR_LONG
+
+
+# ── 🤖 Autopilot (per-session, the checkbox beside the state square) ─────────
+# The Aug-2026 usage analysis said the bottleneck isn't claude, it's ATTENTION:
+# sessions sat idle 4-8× longer than they worked, and ~12% of all human sends
+# were pure "keep going". Autopilot is the checkbox answer: tick it on a
+# session and the harness supervises the loop itself — on every Stop a cheap
+# LLM reads the goal + transcript tail and either types the next nudge or
+# parks with a reason, narrating where the work stands in the 🤖 row above the
+# composer. Bounded by PILOT_MAX_ROUNDS so an unattended loop can't burn a
+# plan; any human send refills the budget (steering is expected, not an off
+# switch). Ceremony sessions never engage; auto-tldr yields to it (the pilot
+# row IS the absent reader's summary). AUTO_PILOT=0 opts the box out.
+AUTO_PILOT       = os.environ.get("AUTO_PILOT", "1") != "0"
+PILOT_MODEL      = os.environ.get("PILOT_MODEL", "") or "claude-haiku-4.5"
+PILOT_MAX_ROUNDS = int(os.environ.get("PILOT_MAX_ROUNDS", "20"))  # sends per human budget-refill
+PILOT_DELAY      = float(os.environ.get("PILOT_DELAY", "4"))      # grace after Stop before acting
+PILOT_CTX        = int(os.environ.get("PILOT_CTX", "7000"))       # transcript chars the supervisor reads
+
+PILOT_SYS_PROMPT = (
+    "You supervise a software-engineering agent session running on autopilot. "
+    "You are given the session GOAL and a transcript excerpt (head … tail). "
+    "Decide what happens next and reply with ONLY compact JSON, nothing else: "
+    '{"action": "continue" | "needs_human" | "done", '
+    '"prompt": "<if continue: the next instruction to type into the session, '
+    "<=60 words, concrete and goal-directed — push it to verify, test, fix, "
+    'and finish>", '
+    '"status": "<max 18 words for the dashboard: where the work stands and '
+    'what is happening next>"}. '
+    "Choose needs_human ONLY for things the agent truly cannot do itself: a "
+    "credential, a product decision, a physical/manual check, or an explicit "
+    "question that needs the human's judgment. Choose done when the goal is "
+    "met AND verified. Otherwise keep the agent moving — prefer continue.")
+PILOT_GOAL_SYS_PROMPT = (
+    "You supervise a software-engineering agent session. From the transcript "
+    "excerpt, state the CURRENT working goal the human wants this session to "
+    "achieve. Reply with ONLY compact JSON, nothing else: "
+    '{"goal": "<max 40 words: the concrete outcome being pursued, including '
+    'its definition of done if one was stated>"}.')
 # Project *emoji codes*: every project gets a short 1–3 emoji badge (AI-picked
 # from its README / files / commits) shown on its card, the sessions rung, and
 # every session tab — so a glance at the tab strip tells you which project each
@@ -2420,7 +2459,8 @@ class ClaudeSession:
                  created=0.0, last_active=0.0, prompted_at=0.0,
                  account="default", config_dir="", ceremony=False,
                  pinned=0.0, test_hint="", model="", ctx_tokens=0,
-                 engine="claude"):
+                 engine="claude", autopilot=0.0, pilot_goal="",
+                 pilot_status="", pilot_rounds=0):
         self.manager = manager
         # Which agent CLI drives this session ("claude" | "codex"). Chosen at
         # spawn and durable: a --resume must reach for the same binary, and an
@@ -2462,6 +2502,18 @@ class ClaudeSession:
         # again. Durable — a restart shouldn't blank the board's instructions.
         self.test_hint = test_hint
         self._hint_at_prompt = 0                  # prompt_count the hint was derived at
+        # 🤖 autopilot (the checkbox beside the state square): timestamp when
+        # engaged, 0.0 = off. While on, every Stop runs _pilot_step — a cheap
+        # LLM supervisor that keeps the session moving toward pilot_goal and
+        # narrates pilot_status (the 🤖 row above the composer). All durable:
+        # a restart/handoff must neither disengage the pilot nor blank its row
+        # (ctor params, so clone_for_respawn carries them automatically).
+        self.autopilot = autopilot
+        self.pilot_goal = pilot_goal              # what this session is FOR (LLM, re-derived on human steer)
+        self.pilot_status = pilot_status          # the 🤖 row: where we are / what happens next
+        self.pilot_rounds = pilot_rounds          # sends since the last human prompt (capped: PILOT_MAX_ROUNDS)
+        self._pilot_goal_stale = True             # re-derive goal before the next step
+        self._pilot_lock = threading.Lock()       # one supervisor step at a time
 
         self.title = title
         self.desc = desc
@@ -2540,6 +2592,9 @@ class ClaudeSession:
                 "account": self.account, "config_dir": self.config_dir,
                 "ceremony": self.ceremony, "pinned": self.pinned,
                 "test_hint": self.test_hint,
+                "autopilot": self.autopilot, "pilot_goal": self.pilot_goal,
+                "pilot_status": self.pilot_status,
+                "pilot_rounds": self.pilot_rounds,
                 "model": self.model, "ctx_tokens": self.ctx_tokens}
 
     def clone_for_respawn(self, **overrides):
@@ -2625,6 +2680,9 @@ class ClaudeSession:
                 "account": self.account,
                 "pinned": self.pinned,
                 "testHint": self.test_hint or "",   # 📌 board: the human's verification step
+                "autopilot": bool(self.autopilot),  # 🤖 checkbox state
+                "pilotStatus": self.pilot_status or "",  # the 🤖 row above the composer
+                "pilotRounds": self.pilot_rounds,
                 "model": self.model,
                 "ctxTokens": self.ctx_tokens}
 
@@ -2864,8 +2922,15 @@ class ClaudeSession:
             # fire on some later (possibly controller-driven) turn.
             armed, self.auto_tldr_armed = self.auto_tldr_armed, False
             if (AUTO_TLDR and armed and not self.ceremony and not self.pinned
-                    and not self.clients and wants_auto_tldr(data["last"])):
+                    and not self.autopilot and not self.clients
+                    and wants_auto_tldr(data["last"])):
                 threading.Thread(target=self._auto_tldr, daemon=True).start()
+            # 🤖 autopilot: the turn just ended — let the supervisor read the
+            # outcome and decide (continue / needs a human / done). Fires on
+            # EVERY Stop while engaged, including turns its own prompt caused:
+            # that IS the loop; the round cap ends it.
+            if AUTO_PILOT and self.autopilot and not self.ceremony:
+                threading.Thread(target=self._pilot_step, daemon=True).start()
         elif ev == "Notification":
             # Fires both for "needs your permission / input" (mid-turn, busy) and
             # for a 60s-idle nudge (turn already Stopped, not busy). Only the
@@ -3211,6 +3276,108 @@ class ClaudeSession:
         # and must not bounce off an exhausted pool (plan's Auto-TLDR section).
         # One turn either way — a move re-delivers THIS text once, never twice.
         self.manager.send_prompt(self.cid, AUTO_TLDR_TEXT, via="auto")
+
+    # -- 🤖 autopilot ----------------------------------------------------------
+    def _pilot_set_status(self, status, persist=True):
+        """Write the 🤖 row and fan it out. Persisted by default — a restart
+        must not blank the row (it's the 'where were we' the human returns to)."""
+        self.pilot_status = (status or "")[:180]
+        if persist:
+            self.manager.save_registry()
+        self.manager.broadcast_sessions()
+
+    def pilot_note_human_send(self, via, control):
+        """A human (or the PM) prompted this session: refill the round budget
+        and mark the goal stale — steering usually means the goal moved.
+        Called from send_prompt for every non-pilot, non-control send."""
+        if self.autopilot and not control and via not in ("pilot", "auto"):
+            self.pilot_rounds = 0
+            self._pilot_goal_stale = True
+
+    def _pilot_engage(self):
+        """The checkbox was just ticked: derive the goal now and, if the
+        session is sitting idle, act immediately — 'handle this session' must
+        not wait for a Stop that already happened."""
+        self._pilot_refresh_goal()
+        if self.autopilot and self.alive and not self.busy and not self.waiting:
+            self._pilot_step(engaging=True)
+
+    def _pilot_refresh_goal(self):
+        text = self._transcript_text_for_naming(cap=PILOT_CTX)
+        if not text:
+            # nothing to read yet (fresh session) — the first prompt IS the goal
+            self.pilot_goal = (self.first_prompt or "")[:300]
+            self._pilot_goal_stale = False
+            return
+        parsed = _llm_json(PILOT_GOAL_SYS_PROMPT, text, max_tokens=160,
+                           model=PILOT_MODEL) \
+            or _llm_json(PILOT_GOAL_SYS_PROMPT, text, max_tokens=160)
+        goal = (parsed or {}).get("goal") or ""
+        self.pilot_goal = (goal.strip() or self.first_prompt or "")[:300]
+        self._pilot_goal_stale = False
+        if self.pilot_goal:
+            print(f"[pilot {self.cid[:8]}] goal: {self.pilot_goal!r}", flush=True)
+
+    def _pilot_step(self, engaging=False):
+        """One supervisor round: read the goal + transcript tail, then either
+        type the next nudge or park with a reason in the 🤖 row. Runs on every
+        Stop while engaged (and once at engage-time if idle). Same shape as
+        _auto_tldr: a grace sleep, then re-check everything that can change at
+        the Stop boundary — a new prompt (hook_count moved), the session going
+        busy, the checkbox going off — those win and the step is dropped."""
+        if not self._pilot_lock.acquire(blocking=False):
+            return                                  # a step is already in flight
+        try:
+            pre_hooks = self.hook_count
+            time.sleep(PILOT_DELAY)
+            if not (AUTO_PILOT and self.autopilot and self.alive) \
+                    or self.busy or self.waiting \
+                    or self.hook_count != pre_hooks:
+                return
+            if self.pilot_rounds >= PILOT_MAX_ROUNDS:
+                self._pilot_set_status(
+                    f"⏸ paused at the {PILOT_MAX_ROUNDS}-round cap — any "
+                    "message from you refills it")
+                return
+            if self._pilot_goal_stale or not self.pilot_goal:
+                self._pilot_refresh_goal()
+            text = self._transcript_text_for_naming(cap=PILOT_CTX)
+            if not text:
+                self._pilot_set_status("🤖 waiting for the first turn…",
+                                       persist=False)
+                return
+            goal = self.pilot_goal or "(unknown — infer from the transcript)"
+            ask = f"GOAL:\n{goal}\n\nTRANSCRIPT (head … tail):\n{text}"
+            parsed = _llm_json(PILOT_SYS_PROMPT, ask, max_tokens=300,
+                               model=PILOT_MODEL) \
+                or _llm_json(PILOT_SYS_PROMPT, ask, max_tokens=300)
+            if not parsed:
+                self._pilot_set_status("⚠️ supervisor call failed (naming "
+                                       "gateway unconfigured?) — will retry "
+                                       "next turn", persist=False)
+                return
+            action = (parsed.get("action") or "").strip()
+            status = (parsed.get("status") or "").strip()
+            prompt = (parsed.get("prompt") or "").strip()[:800]
+            if action == "continue" and prompt and not prompt.startswith("/"):
+                # (a leading "/" would be a slash command, not a prompt — the
+                # supervisor has no business driving TUI menus; drop to parked)
+                self.pilot_rounds += 1
+                self._pilot_set_status(
+                    f"▶ {status or 'continuing'} · round "
+                    f"{self.pilot_rounds}/{PILOT_MAX_ROUNDS}")
+                print(f"[pilot {self.cid[:8]}] round {self.pilot_rounds}: "
+                      f"{prompt!r}", flush=True)
+                log_prompt(self, prompt, "pilot")
+                # A real model prompt through the same preflight as a human
+                # send — routing, bounce watchdog and limit rescues all apply.
+                self.manager.send_prompt(self.cid, prompt, via="pilot")
+            elif action == "done":
+                self._pilot_set_status(f"✅ {status or 'goal reached'}")
+            else:                                   # needs_human, or malformed
+                self._pilot_set_status(f"🙋 {status or 'needs you'}")
+        finally:
+            self._pilot_lock.release()
 
     # -- read channel: raw PTY bytes -> subscribed clients ---------------------
     def _pump_pty(self):
@@ -4166,6 +4333,10 @@ class SessionManager:
                     prompted_at=e.get("prompted_at", 0.0),
                     pinned=e.get("pinned", 0.0),
                     test_hint=e.get("test_hint", ""),
+                    autopilot=e.get("autopilot", 0.0),
+                    pilot_goal=e.get("pilot_goal", ""),
+                    pilot_status=e.get("pilot_status", ""),
+                    pilot_rounds=e.get("pilot_rounds", 0),
                     model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0))
                 self.sessions[s.cid] = s
                 s.start()
@@ -4238,6 +4409,10 @@ class SessionManager:
                 ceremony=e.get("ceremony", False),
                 pinned=e.get("pinned", 0.0),
                 test_hint=e.get("test_hint", ""),
+                autopilot=e.get("autopilot", 0.0),
+                pilot_goal=e.get("pilot_goal", ""),
+                pilot_status=e.get("pilot_status", ""),
+                pilot_rounds=e.get("pilot_rounds", 0),
                 model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0))
             self.sessions[s.cid] = s
             s.start()
@@ -4865,6 +5040,7 @@ class SessionManager:
         s = self.sessions.get(cid)
         if not s:
             return False
+        s.pilot_note_human_send(via, control)    # 🤖 a human send refills the round budget
         if control or s.ceremony or not s.eng.routes_accounts \
                 or not SUB_AUTOSWITCH:
             s.send_message(text, control=control)
@@ -6309,6 +6485,30 @@ class SessionManager:
         self.save_registry()
         self.broadcast_sessions()
 
+    def autopilot(self, cid, on):
+        """🤖 engage/disengage autopilot on a session (the checkbox beside the
+        state square). Engaging derives the goal and — if the session is idle —
+        acts immediately (async; the tick itself must stay instant). Ceremony
+        sessions never engage: they sit on broken accounts on purpose and an
+        LLM 'keep going' into a login screen helps nobody."""
+        s = self.get(cid)
+        if not s or (on and s.ceremony):
+            return
+        if on and not s.autopilot:
+            s.autopilot = time.time()
+            s.pilot_rounds = 0
+            s._pilot_goal_stale = True
+            s.pilot_status = "🤖 reading the session…"
+            print(f"[pilot {cid[:8]}] engaged", flush=True)
+            threading.Thread(target=s._pilot_engage, daemon=True).start()
+        elif not on and s.autopilot:
+            s.autopilot = 0.0
+            s.pilot_status = ""
+            s.pilot_goal = ""     # a re-tick re-reads: the goal may have moved
+            print(f"[pilot {cid[:8]}] disengaged", flush=True)
+        self.save_registry()
+        self.broadcast_sessions()
+
     def close(self, cid, _broadcast=True):
         with self.lock:
             s = self.sessions.pop(cid, None)
@@ -7208,6 +7408,8 @@ class Handler(BaseHTTPRequestHandler):
             MGR.close(frame.get("cid"))
         elif t == "pin":
             MGR.pin(frame.get("cid"), bool(frame.get("on", True)))
+        elif t == "autopilot":
+            MGR.autopilot(frame.get("cid"), bool(frame.get("on", True)))
         elif t == "createProject":
             MGR.create_project(frame.get("name", ""))
         elif t == "addProject":

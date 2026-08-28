@@ -173,6 +173,14 @@ user-facing overview; this file orients an agent working **on** the code.
   the sessions rung with `hsend` stubbed — nothing touches a real session.
   (Server-side twin: `.clawd-harness.prompts.jsonl` logs every browser send in
   full — that's where a lost text is recovered from on any OTHER device.)
+- **`tools/pilotprobe.mjs`** — guards the **🤖 autopilot** client half
+  (2026-08-28): the checkbox beside the state square exists only in a session
+  view and is a STATIC node (a sessions-frame repaint can never rebuild it
+  mid-tap), tick/untick each send exactly one `{type:"autopilot"}` frame, the
+  `#pilotrow` appears instantly ("engaging…") then mirrors `pilotStatus`, and
+  the optimistic tick survives a stale frame arriving before the server's
+  echo. Fake session + stubbed `hsend`/`currentView` — subscribes to nothing,
+  sends nothing. Server half: `python3 test_autopilot.py`.
 - **`tools/tabfilterprobe.mjs`** — guards the **🔎 tab-strip filter** (2026-08-09):
   that it sits at the far right, stays pinned there when the strip scrolls (it's
   `position:sticky`, so tabs pass *under* it), that typing narrows the strip and
@@ -621,6 +629,26 @@ user-facing overview; this file orients an agent working **on** the code.
   `AUTO_TLDR_TEXT/MIN/LONG/DELAY`. Test: `python3 test_auto_tldr.py`. Known
   limit: an idle-but-subscribed desktop tab left on the session suppresses it
   (subscription is the "someone's looking" signal; phones drop theirs on lock).
+- **🤖 Autopilot** (2026-08-28): the checkbox beside the state square in a
+  session view — born from the Aug usage analysis (sessions idle 4–8× longer
+  than they work; ~12% of human sends are pure "keep going"). Tick it and the
+  harness supervises the session itself: on every Stop, `_pilot_step` runs a
+  cheap LLM (`PILOT_MODEL`, haiku on the naming gateway) over the derived goal
+  (`PILOT_GOAL_SYS_PROMPT`, re-derived when the human steers) + transcript
+  head/tail and either types the next goal-directed prompt (`via:"pilot"`,
+  through the full `send_prompt` preflight — routing/rescues apply) or parks
+  with a reason. The `#pilotrow` above the composer (upload-chips slot,
+  violet) narrates every round: "▶ … · round 3/20" / "🙋 needs you" / "✅
+  done" / "⏸ paused at the cap". Bounds that matter: `PILOT_MAX_ROUNDS` (20)
+  pilot sends per human budget — any non-pilot send refills it and marks the
+  goal stale; a supervisor "prompt" starting with `/` is dropped (never drive
+  the TUI menu); ceremony sessions refuse; auto-tldr yields while engaged
+  (the row IS the absent reader's summary). All four fields are ctor params →
+  registry rows, so `clone_for_respawn` and restarts carry an engaged pilot
+  (the pins-reverted lesson). The checkbox + row are STATIC nodes (repaint
+  must never eat a mid-tap click); an optimistic tick holds ~4s against stale
+  frames until the server echoes. `AUTO_PILOT=0` opts a box out. Tests:
+  `python3 test_autopilot.py`, `cd tools && node pilotprobe.mjs`.
 - **Quick-prompt chips:** the one-tap buttons on the session-name line above the
   composer (`QUICK_PROMPTS` array in index.html) — the things the user actually
   says most ("tldr", "okay what is next?", "yes, go", …), ordered most→least
