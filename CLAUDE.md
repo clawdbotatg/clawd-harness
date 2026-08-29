@@ -708,8 +708,16 @@ user-facing overview; this file orients an agent working **on** the code.
   auto-enters an iron just because the project is a member (an auto-scope cut
   yanked the full strip away mid-work, 2026-08-26 — never again). The row
   rebuilds only on a content-fingerprint change (so the 🗑 arm survives
-  session frames) and hides on any normal rung. An EMPTY iron opens the
-  add-project picker over the list. Climbing out (🔥 button / swipe /
+  session frames) and hides on any normal rung. Only a MEMBER-LESS iron opens
+  the add-project picker over the list; an iron whose member sessions just
+  aren't visible yet **waits instead of mislabeling itself empty** (2026-08-29:
+  cards render from `projects` frames but the dive needs each machine's
+  `sessions` frame, and a click in that gap — channel still securing after
+  wake/boot — opened the picker over an iron visibly full of projects). The
+  dive-wait (`armIronDive`/`maybeIronDive`, retried from both sessions-frame
+  handlers, cancelled by any manual nav, `IRON_DIVE_WAIT_MS` cap) dives the
+  moment a frame lands, and on timeout says "no open sessions … yet" — never
+  the picker, never a surprise spawn. Climbing out (🔥 button / swipe /
   Ctrl+Shift+↑) lands on the irons list. Assignment is the 🔥 corner button on
   each project card (modal picker; one iron per project; most projects stay
   loose). Member refs are `projectRows().id` — the **projectKey** in fleet (a

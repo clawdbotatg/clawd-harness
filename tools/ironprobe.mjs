@@ -360,6 +360,34 @@ check('deep link #/i/<id> dives into the iron’s warmest session',
         && /voice/.test(document.getElementById('ironrow').innerText), ironId));
 await page.screenshot({path:join(HERE,'ironprobe.png')});
 
+// 6b. the dive-wait (2026-08-29): the iron card renders from `projects` frames
+// but the dive needs `sessions` frames — clicking in that gap (channel still
+// securing after wake / cold boot) must NOT open the add-project picker over an
+// iron visibly full of projects. It holds the click open and dives the moment
+// the frame lands; only a truly member-less iron falls through to the picker.
+const gap = await page.evaluate(()=>{
+  navTo('irons');
+  const saved = {};                                // sessions frames "not arrived yet"
+  for (const mid of Object.keys(perMachine)) {
+    saved[mid] = { sl: perMachine[mid].sessionList, got: perMachine[mid].gotSessions };
+    perMachine[mid].sessionList = []; perMachine[mid].gotSessions = false;
+  }
+  document.querySelector('#ironlist .ironcard').click();
+  const mid_ = { view: currentView(), add: !document.getElementById('ironaddmodal').hidden,
+                 waiting: /finding/.test(meta.textContent) };
+  // the frame lands (the same call the WS handler makes) → the click completes
+  for (const mid of Object.keys(saved)) {
+    perMachine[mid].sessionList = saved[mid].sl; perMachine[mid].gotSessions = saved[mid].got;
+  }
+  maybeIronDive();
+  return { mid_, after: { view: currentView(), cid: currentCid, scope: ironScope } };
+});
+check('clicking an iron before sessions frames land WAITS (no add-picker) …',
+      gap.mid_.view==='irons' && !gap.mid_.add && gap.mid_.waiting, JSON.stringify(gap.mid_));
+check('… and dives the moment the sessions frame arrives',
+      gap.after.view==='tty' && gap.after.cid==='ca1', JSON.stringify(gap.after));
+await page.evaluate(()=>navTo('irons'));
+
 // 7. 🔎 filter (the projects-rung deal) + ⠿ drag-to-reorder priority
 await page.evaluate(()=>{
   ironCreate('metal','',[]);                       // second iron, via the real path

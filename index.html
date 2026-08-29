@@ -2842,6 +2842,7 @@ function handleMachineJson(machine, m) {
     renderNeedsBar();                    // any machine's blocked sessions → the needs-you bar
     renderPinsUI();                      // any machine's pins → the 📌 count/board
     renderIronLive();                    // 🔥 an open iron page tracks any machine's sessions
+    maybeIronDive();                     // an iron click waiting on this machine's sessions dives now
     checkViewedGone();                   // viewed session dead/vanished → dead veil, not a black tty
     return;
   }
@@ -3092,6 +3093,7 @@ function handleJson(m) {
     refreshSessionTag();                  // account may have just landed for the open session
     renderPinsUI();                       // 📌 count/board tracks pin state live
     renderIronLive();                     // 🔥 an open iron page tracks its sessions live
+    maybeIronDive();                      // an iron click waiting on the roster dives now
     resolvePendingNav();                  // …or a session
     checkViewedGone();                    // viewed session dead/vanished → dead veil, not a black tty
   } else if (m.type === 'irons') {
@@ -5788,10 +5790,14 @@ function railSessions() {
   if (!ironScope) return sortedSessions();
   const iron = ironById(ironScope);
   if (!iron) { ironScope = null; return sortedSessions(); }   // iron deleted under us
-  // The scoped rail mirrors the iron page's row exactly — INCLUDING 📌 pinned
-  // members (unlike the normal strip, which parks them on the board): the iron
-  // is "everything burning in this effort", and hiding the pinned ones left a
-  // strip of one tab. Live first in strip order, parked at the end.
+  return ironRail(iron);
+}
+// The iron's scoped rail — INCLUDING 📌 pinned members (unlike the normal
+// strip, which parks them on the board): the iron is "everything burning in
+// this effort", and hiding the pinned ones left a strip of one tab. Live first
+// in strip order, parked at the end. Shared by railSessions (scope active) and
+// openIron (deciding whether there is anything to dive into yet).
+function ironRail(iron) {
   const all = ironSessions(iron);
   const rank = s => !s.alive ? 4 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : s.bg ? 2 : 3;
   const warmth = s => s.promptedAt || s.lastActive || 0;
@@ -5814,6 +5820,7 @@ function pinnedSessions() {
 // (cycling shouldn't yank you between views).
 function focusSession(s) {
   pendingSendText = null;          // manual open cancels a queued new-session send
+  cancelIronDive();                // opening a session by hand outruns a waiting iron click
   // Opening a session OUTSIDE the scoped iron drops the scope (back to the full
   // rail). An iron we don't know yet (list still loading) keeps it — the deep
   // link resolver sets scope before the irons frame may have landed.
@@ -7518,17 +7525,60 @@ function ironCreateAndAssign(title, rowId) {
 // picker over the irons list instead (that's the only thing left to do).
 function openIron(id) {
   viewBeforeQuestion = null; deferredView = null;   // manual nav, same as navTo
+  cancelIronDive();
   setIronFilter('');            // clear on the way in, so coming back shows all (projects-rung rule)
   currentIronId = id;
   const iron = ironById(id);
   if (iron) {
-    ironScope = id;
-    const rail = railSessions();
-    if (rail.length) { focusSession(rail[0]); return; }
-    ironScope = null;
+    const rail = ironRail(iron);
+    if (rail.length) { ironScope = id; focusSession(rail[0]); return; }
+    // Member projects but no sessions in sight: that is NOT "empty iron" — the
+    // iron card renders from `projects` frames while the dive needs each
+    // machine's `sessions` frame, and in that gap (channel still securing
+    // after wake / cold boot) the first cut opened the add-project picker over
+    // an iron visibly full of projects (2026-08-29). Wait for the frames and
+    // dive the moment one lands; only a truly member-LESS iron falls through
+    // to the picker, where adding a project genuinely is the only next step.
+    if (ironMemberIds(iron).length) { armIronDive(id); return; }
   }
   if (currentView() !== 'irons') setView('irons');
   if (iron) openIronAdd();
+}
+// -- the iron dive-wait: sessions frames haven't landed yet, so hold the click
+// open instead of mislabeling the iron empty. Retried from both sessions-frame
+// handlers; any manual navigation cancels it so a late frame never yanks you.
+const IRON_DIVE_WAIT_MS = 15000;
+let ironDiveWatch = null;          // { id, timer }
+function cancelIronDive() {
+  if (!ironDiveWatch) return;
+  clearTimeout(ironDiveWatch.timer);
+  ironDiveWatch = null;
+}
+function armIronDive(id) {
+  cancelIronDive();
+  const iron = ironById(id);
+  if (currentView() !== 'irons') setView('irons');
+  meta.textContent = 'opening 🔥 ' + (iron ? iron.title : '') + ' — finding its sessions…';
+  ironDiveWatch = { id, timer: setTimeout(() => {
+    ironDiveWatch = null;
+    // Every reachable machine reported (or never will): the honest truth is
+    // "no sessions here yet". Say it and stay — never the add-picker (it has
+    // projects) and never a surprise spawn (＋ inside a member project starts one).
+    const it = ironById(id);
+    meta.textContent = 'no open sessions in 🔥 ' + (it ? it.title : 'that iron') + ' yet';
+  }, IRON_DIVE_WAIT_MS) };
+  maybeIronDive();                 // the frames may already be here (direct mode races are short)
+}
+function maybeIronDive() {
+  if (!ironDiveWatch) return;
+  const iron = ironById(ironDiveWatch.id);
+  if (!iron) { cancelIronDive(); return; }              // deleted while we waited
+  const rail = ironRail(iron);
+  if (!rail.length) return;                             // still waiting — the timer has the floor
+  const id = ironDiveWatch.id;
+  cancelIronDive();
+  currentIronId = id; ironScope = id;
+  focusSession(rail[0]);
 }
 // Repaint whatever iron surface is visible + the project cards' 🔥 badges.
 function renderIronLive() {
@@ -8091,7 +8141,7 @@ function setView(view) {
 }
 // the toggle button hops between the two deep views; projects/sessions have their own entries.
 // Each is a manual nav, so it cancels any pending question auto-return (navTo wraps that).
-const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; setView(v); };
+const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; cancelIronDive(); setView(v); };
 // 💬 always lands on the sessions rung — with no project selected it lists EVERY
 // session (see renderSessions). It used to bounce to the projects rung in that
 // case, which read as "the sessions button doesn't show me my sessions."
@@ -8504,7 +8554,7 @@ function openSpotlight(mode) {
 function closeSpotlight() { spotEl.hidden = true; spotInput.blur(); }
 function spotLaunch(p) {
   closeSpotlight();
-  if (spotMode === 'iron') { openIron(p.id); return; }   // warmest member session (or add-picker if empty)
+  if (spotMode === 'iron') { openIron(p.id); return; }   // warmest member session (waits for frames if needed)
   selectProject(p.id);   // fleet: resolves + attaches the host machine; direct: sets currentPid
   newSession();          // spawn — the server's focus reply drops us into the fresh terminal
 }
