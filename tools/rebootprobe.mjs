@@ -1,10 +1,13 @@
 import { chromium } from 'playwright-core';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = dirname(HERE);
 const cache = join(process.env.HOME, 'Library/Caches/ms-playwright');
 const d = readdirSync(cache).filter(x => x.startsWith('chromium_headless_shell-')).sort().reverse()[0];
 const exec = ['mac-arm64','mac-x64'].map(a => join(cache, d, `chrome-headless-shell-${a}`, 'chrome-headless-shell')).find(existsSync);
-const token = readFileSync('/Users/clawd/clawd-harness/.clawd-harness.token','utf8').trim();
+const token = readFileSync(join(ROOT, '.clawd-harness.token'),'utf8').trim();
 const b = await chromium.launch({ executablePath: exec });
 const p = await b.newPage({ viewport: { width: 1000, height: 700 } });
 await p.goto(`http://127.0.0.1:8787/?t=${token}`, { waitUntil: 'networkidle', timeout: 15000 });
@@ -29,7 +32,7 @@ const out = await p.evaluate(() => {
            hiddenWhenIdle: document.getElementById('rebootNow').hidden };
 });
 console.log(JSON.stringify(out, null, 1));
-await p.screenshot({ path: '/Users/clawd/clawd-harness/tools/rebootprobe.png' });
+await p.screenshot({ path: join(HERE, 'rebootprobe.png') });
 await b.close();
 const f = [];
 if (!out.barShown) f.push('banner not shown');
