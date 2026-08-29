@@ -36,7 +36,17 @@ user-facing overview; this file orients an agent working **on** the code.
 
 ## Run / test
 
-> ### Definition of done: `python3 tools/shipcheck.py`
+> ### Definition of done: `tools/checkall.sh` green, then `python3 tools/shipcheck.py`
+>
+> **`tools/checkall.sh` runs EVERY guard — all `test_*.py` (root + fleet) and
+> every probe in `tools/`, discovered not listed.** It exists because guards
+> were rotting silently: on 2026-08-29 an audit found tapprobe red since the
+> 08-26 iron-detail-page removal, tabswitchprobe dead on a hardcoded cid, and
+> test_on_demand_routing broken by the 08-28 autopilot change — three guards
+> off, nobody knew, and the exact bug class one of them guarded (tap-swallow)
+> shipped again in that window. A feature change that breaks a NEIGHBOR's
+> guard is invisible to per-feature testing; only the full gate sees it. Run
+> it before any push that touches `index.html`, `server.py`, or `fleet/`.
 > **A change is not done when the file is saved, and not done when you have
 > screenshotted it working. It is done when `shipcheck` exits 0.** Run it before
 > you tell the user a UI change is live — it verifies tree-clean + HEAD-pushed +

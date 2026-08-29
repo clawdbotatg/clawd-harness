@@ -56,10 +56,9 @@ await page.evaluate(()=>{
 await page.waitForTimeout(400);
 check('isTouch is on under iPhone emulation', await page.evaluate(()=>isTouch));
 
-// tap the ＋ add project chip
-await page.tap('#ironbody .iprojchip.iadd');
-await page.waitForTimeout(120);   // deliberately inside the old 300ms swallow window
-check('tap opens the popup', await page.evaluate(()=>getComputedStyle(document.getElementById('ironaddmodal')).display!=='none'));
+// The iron detail page (#ironbody) was removed 2026-08-26: opening a
+// member-less iron now lands the add-project picker directly over the list.
+check('empty iron auto-opens the popup', await page.evaluate(()=>getComputedStyle(document.getElementById('ironaddmodal')).display!=='none'));
 
 // TAP THE THIRD ROW (index 2 ≠ ironAddSel 0) — the production gesture
 await page.evaluate(()=>{ window.__sent.length=0; });

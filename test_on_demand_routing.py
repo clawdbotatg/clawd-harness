@@ -58,6 +58,9 @@ class FakeSession:
         self.last_handoff = 0.0
         self.transcript_path = "/fake/transcript.jsonl"  # zero-turn tests blank this
 
+    def pilot_note_human_send(self, via, control):
+        pass                                  # 🤖 autopilot bookkeeping — not under test here
+
     def _find_transcript(self):
         return None                           # transcript_path is the whole truth here
 

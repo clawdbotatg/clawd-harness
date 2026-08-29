@@ -3472,7 +3472,7 @@ function allProjectEmojiCodes() {
 let _emShortSig = null, _emShortMap = new Map();
 function emojiShortMap() {
   const codes = [...new Set(allProjectEmojiCodes().filter(Boolean))].sort();
-  const sig = codes.join(' ');
+  const sig = codes.join('\x00');
   if (sig !== _emShortSig) { _emShortSig = sig; _emShortMap = emojiPrefixMap(codes); }
   return _emShortMap;   // recomputed only when the set of codes actually changes
 }
