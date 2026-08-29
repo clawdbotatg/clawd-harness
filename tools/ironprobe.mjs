@@ -512,17 +512,32 @@ const quietSetup = await page.evaluate(()=>{
 });
 const quietId = quietSetup.id;
 check('a sessionless iron lands on ITS PAGE at #/i/<id> — member row + ＋, add tail, no picker',
-      quietSetup.view==='iron' && quietSetup.hash==='#/i/'+quietId && quietSetup.waiting
+      quietSetup.view==='iron' && quietSetup.hash==='#/i/'+quietId
       && quietSetup.rows.length===1 && /dormant/.test(quietSetup.rows[0]) && /no sessions/.test(quietSetup.rows[0])
       && quietSetup.plus && quietSetup.addTail && !quietSetup.picker,
       JSON.stringify(quietSetup));
-await page.waitForTimeout(500);                   // the dive-wait expires
-const settled = await page.evaluate(()=>({ view: currentView(),
-  status: document.getElementById('ironvstatus').textContent,
-  shown: !document.getElementById('ironvstatus').hidden }));
-check('the wait expires ON the page with the honest "no open sessions yet — ＋"',
-      settled.view==='iron' && settled.shown && /no open sessions/.test(settled.status), JSON.stringify(settled));
+// every machine has already reported: "no sessions" is KNOWN — the page must
+// land CLEAN, no "finding its sessions…" banner contradicting the rows
+// (2026-08-29 second cut: the banner sat over a row already saying "no sessions")
+check('…and lands CLEAN: no "finding…" banner when the rosters are already in',
+      !quietSetup.waiting, JSON.stringify(quietSetup));
 await page.screenshot({path:join(HERE,'ironprobe-page.png')});   // eyeball frame: the sessionless iron page
+// the frame GAP on a sessionless iron: the banner may show while an answer is
+// pending, but must clear the MOMENT the last roster lands with "no" — not
+// age out on the 15s timer
+const gapEmpty = await page.evaluate(id=>{
+  navTo('irons');
+  const saved={};
+  for (const mid of Object.keys(perMachine)) { saved[mid]=perMachine[mid].gotSessions; perMachine[mid].gotSessions=false; }
+  openIron(id);
+  const mid_={ view: currentView(), waiting: !document.getElementById('ironvstatus').hidden };
+  for (const mid of Object.keys(saved)) perMachine[mid].gotSessions=saved[mid];
+  maybeIronDive();                                // what the last sessions-frame handler does
+  return { mid_, after: { view: currentView(), waiting: !document.getElementById('ironvstatus').hidden } };
+}, quietId);
+check('mid-gap the page says "finding…"; the banner clears the moment the last roster lands',
+      gapEmpty.mid_.view==='iron' && gapEmpty.mid_.waiting
+      && gapEmpty.after.view==='iron' && !gapEmpty.after.waiting, JSON.stringify(gapEmpty));
 const spawn = await page.evaluate(()=>{
   window.__hs=[]; const realHsend=hsend; hsend=(f)=>{ window.__hs.push(f); return true; };
   document.querySelector('#ironvlist .ivproj[data-id] .ivplus').click();
@@ -601,15 +616,13 @@ check('direct mode: reorder goes out as an ironOrder op, applied optimistically'
 // sessions, so opening it lands on the page; ＋ sends a plain `new` for that
 // project and drops into the tty still inside the iron
 const dpageFlow = await dpage.evaluate(()=>{
-  IRON_DIVE_WAIT_MS = 150;
   openIron('i8');
   return { view: currentView(), waiting: !document.getElementById('ironvstatus').hidden,
            rows: [...document.querySelectorAll('#ironvlist .ivproj[data-id]')].map(c=>c.innerText.replace(/\s+/g,' ')) };
 });
-check('direct mode: a sessionless iron lands on its page with the member row + ＋',
-      dpageFlow.view==='iron' && dpageFlow.waiting
+check('direct mode: a sessionless iron lands CLEAN on its page (member row + ＋, no banner)',
+      dpageFlow.view==='iron' && !dpageFlow.waiting
       && dpageFlow.rows.length===1 && /beta/.test(dpageFlow.rows[0]), JSON.stringify(dpageFlow));
-await dpage.waitForTimeout(400);                  // the dive-wait expires — the page stays
 const dspawn = await dpage.evaluate(()=>{
   window.__sent.length=0;
   document.querySelector('#ironvlist .ivproj[data-id="p2"] .ivplus').click();

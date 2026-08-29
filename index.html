@@ -7613,7 +7613,18 @@ function openIron(id) {
   }
   setView('iron');              // the iron page — renders on arrival
   if (iron && !ironMemberIds(iron).length) { openIronAdd(); return; }
-  armIronDive(id);              // an unknown iron (list still loading) waits too — applyIrons re-drives
+  // Arm the "finding its sessions…" wait ONLY while an answer is genuinely
+  // pending — sessions frames still streaming in, or the irons list itself
+  // not landed yet (deep link; applyIrons re-drives). With every machine
+  // already reported, "no sessions" is KNOWN: land clean, no banner — the
+  // rows' own "no sessions" + ＋ say everything (the first cut showed
+  // "finding…" over a row already saying "no sessions" for 15s, 2026-08-29).
+  if (!iron || !ironRosterLoaded()) armIronDive(id);
+}
+// Has every reachable machine reported its session roster? (Same condition
+// the deep-link resolver waits on.)
+function ironRosterLoaded() {
+  return FLEET ? !!(machineList.length && allMachinesSessions()) : gotSessions;
 }
 // -- the iron dive-wait: sessions frames haven't landed yet, so hold the click
 // open (on the iron page) instead of mislabeling the iron empty. Retried from
@@ -7638,11 +7649,10 @@ function armIronDive(id) {
   ironDiveSay('opening 🔥 ' + (iron ? iron.title : '') + ' — finding its sessions…');
   ironDiveWatch = { id, timer: setTimeout(() => {
     ironDiveWatch = null;
-    // Every reachable machine reported (or never will): the honest truth is
-    // "no sessions here yet". Say it on the page — whose ＋ buttons are the
-    // way to change it — and stay. Never a surprise spawn.
-    const it = ironById(id);
-    ironDiveSay('no open sessions in 🔥 ' + (it ? it.title : 'that iron') + ' yet — ＋ starts one in a member project');
+    // The frames never came (a machine asleep/unreachable). Drop the banner
+    // quietly — the page's rows already show everything we do know, and a
+    // stale "finding…" over a row saying "no sessions" reads as a contradiction.
+    ironDiveSay('');
     renderIronDetail();
   }, IRON_DIVE_WAIT_MS) };
   maybeIronDive();                 // the frames may already be here (direct mode races are short)
@@ -7652,7 +7662,13 @@ function maybeIronDive() {
   const iron = ironById(ironDiveWatch.id);
   if (!iron) return;             // irons list not landed yet (or deleted) — the timer has the floor
   const rail = ironRail(iron);
-  if (!rail.length) return;                             // still waiting — the timer has the floor
+  if (!rail.length) {
+    // Every machine has now reported and none holds a session: the answer
+    // arrived, it's just "no" — clear the "finding…" banner right away
+    // instead of letting the timer age it out.
+    if (ironRosterLoaded()) cancelIronDive();
+    return;
+  }
   const id = ironDiveWatch.id;
   cancelIronDive();
   currentIronId = id; ironScope = id;
