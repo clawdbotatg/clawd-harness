@@ -600,8 +600,8 @@
     header .bico { font-size:13px; }
   }
   /* projects (top rung) + sessions (next rung): both are scrollable card lists */
-  #menu, #projects, #machines, #pinsview, #ironsview { flex:1; background:var(--bg); }
-  #sessions, #projectlist, #machinelist, #pinboard, #ironlist { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
+  #menu, #projects, #machines, #pinsview, #ironsview, #ironview { flex:1; background:var(--bg); }
+  #sessions, #projectlist, #machinelist, #pinboard, #ironlist, #ironvlist { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
               padding:14px; display:flex; flex-direction:column; gap:9px;
               width:100%; max-width:780px; align-self:center; }
   /* Project cards live in their own container so a repaint can reconcile them
@@ -659,17 +659,22 @@
   /* sessions rung: quiet reminder that some of this project's sessions are parked */
   .pinnednote { border:1px dashed var(--edge); padding:8px 14px; background:transparent;
                 color:var(--dim); cursor:pointer; font-family:var(--mono); font-size:12px; text-align:left; }
-  /* 🔥 irons: named groups of projects — one page listing them; an iron itself
-     has no page (tapping one dives into its session plane, chrome = #ironrow). */
-  #ironshead { display:flex; align-items:center; gap:8px; padding:14px 14px 0;
+  /* 🔥 irons: named groups of projects — one page listing them. An iron WITH
+     live sessions has no page of its own (tapping it dives into its session
+     plane, chrome = #ironrow); a SESSIONLESS iron lands on #ironview instead:
+     member projects, each with a ＋ that spawns a session inside the iron. */
+  :is(#ironshead, #ironvhead) { display:flex; align-items:center; gap:8px; padding:14px 14px 0;
                width:100%; max-width:780px; align-self:center; }
-  #ironshead .menutitle { flex:1; padding:0; min-width:0; }
-  #ironshead button, .ironform button {
+  :is(#ironshead, #ironvhead) .menutitle { flex:1; padding:0; min-width:0; }
+  :is(#ironshead, #ironvhead) button, .ironform button {
                background:transparent; border:1px solid var(--edge); border-radius:5px;
                color:var(--dim); font-size:12px; font-family:var(--mono); cursor:pointer;
                padding:4px 10px; white-space:nowrap; }
-  #ironshead button:hover, .ironform button:hover {
+  :is(#ironshead, #ironvhead) button:hover, .ironform button:hover {
                color:var(--accent); border-color:var(--accent-dim); background:var(--raised); }
+  #ironvhead button.danger:hover, #ironvhead button.armed { color:var(--err); border-color:var(--err); }
+  #ironvdesc { color:var(--dim); font-size:12px; line-height:1.5; padding:6px 14px 0;
+               width:100%; max-width:780px; align-self:center; box-sizing:border-box; }
   /* create / edit form — STATIC nodes outside the repainted containers, so a
      frame landing mid-type never eats the text (the projects-rung rule) */
   .ironform { display:flex; flex-direction:column; gap:6px; padding:10px 14px 0;
@@ -683,10 +688,27 @@
   .ironform .frow { display:flex; gap:6px; }
   .ironform .frow button { flex:0 0 auto; }
   /* the one filter+create row: input stretches, button hangs off its right */
-  #irondivebar { margin:0 12px 8px; padding:10px 12px; border-radius:8px;
+  /* dive-wait status on the iron page: "finding its sessions…" while frames
+     stream in, the honest "none yet" after the wait expires */
+  #ironvstatus { margin:8px 14px 0; padding:10px 12px; border-radius:8px;
                  background:var(--accent-bg); color:var(--accent);
-                 font-family:var(--mono); font-size:13px; }
-  #irondivebar[hidden] { display:none; }
+                 font-family:var(--mono); font-size:13px;
+                 width:calc(100% - 28px); max-width:752px; align-self:center; box-sizing:border-box; }
+  #ironvstatus[hidden] { display:none; }
+  /* the iron page's project rows: a .scard wearing a ＋ spawn on the right,
+     member sessions (if any drifted in after the wait) as tap rows under it */
+  .ivproj { cursor:pointer; }
+  .ivproj .ivplus { flex:0 0 auto; background:transparent; border:1px solid var(--edge);
+                    border-radius:6px; color:var(--accent); font-size:15px; line-height:1;
+                    padding:6px 12px; cursor:pointer; }
+  .ivproj .ivplus:hover { border-color:var(--accent-dim); background:var(--raised); }
+  .ivsess { display:flex; align-items:center; gap:6px; margin-top:5px; padding:7px 9px;
+            border:1px solid var(--edge); border-radius:6px; font-size:12px;
+            font-family:var(--mono); color:var(--dim); cursor:pointer; }
+  .ivsess:hover { color:var(--ink); border-color:var(--edge-hi); }
+  .ivaddproj { border-style:dashed; color:var(--dim); font-family:var(--mono); font-size:12px; }
+  .ivaddproj:hover { color:var(--accent); }
+  @media (pointer:coarse) { .ivproj .ivplus { padding:9px 16px; } }
   #ironfilterrow { flex-direction:row; align-items:center; }
   #ironfilterrow input { flex:1; min-width:0; }
   #ironfilterrow button { flex:0 0 auto; padding:7px 10px; }
@@ -1144,8 +1166,8 @@
       <div id="ironaddlist"></div>
     </div>
   </div>
-  <!-- ✎ iron edit: an overlay (opened from the one-row iron chrome — there is
-       no iron detail page any more). No desc field: the description is
+  <!-- ✎ iron edit: an overlay (opened from the one-row iron chrome, or from
+       the sessionless iron page's head). No desc field: the description is
        AI-owned (refreshed by ironDescribe). -->
   <div id="ironedit" hidden>
     <div id="ironeditcard" class="ironform">
@@ -1276,11 +1298,23 @@
         <input id="ironFilterInp" placeholder="filter irons · or type a name and hit ＋ create" autocomplete="off" />
         <button id="ironCreateBtn" title="create an iron named what you typed — a named group of projects to track as one effort">＋ create</button>
       </div>
-      <!-- dive-wait banner: a clicked iron whose sessions haven't streamed in
-           yet holds the click open here, LOUDLY (a meta-line whisper read as
-           "nothing happened"). Static node; armIronDive/cancelIronDive own it. -->
-      <div id="irondivebar" hidden></div>
       <div id="ironlist"></div>
+    </section>
+    <section class="col hidden" id="ironview">
+      <!-- 🔥 one iron's page — the landing for an iron with no live session to
+           dive into: member projects, each wearing a ＋ that starts a session
+           in that project INSIDE the iron. While sessions frames are still
+           streaming in, this page is the waiting room (#ironvstatus says so)
+           and the dive-wait fires the moment a member session lands. -->
+      <div id="ironvhead">
+        <button id="ironvback" title="all irons">← irons</button>
+        <span class="menutitle" id="ironvtitle"></span>
+        <button id="ironvedit" title="edit title / tags">✎</button>
+        <button id="ironvdel" class="danger" title="delete this iron (projects and sessions are untouched)">🗑</button>
+      </div>
+      <div id="ironvdesc"></div>
+      <div id="ironvstatus" hidden></div>
+      <div id="ironvlist"></div>
     </section>
   </main>
   <footer>
@@ -3555,6 +3589,15 @@ function refreshBreadcrumb(view) {
     renderSessionBar(view);
     return;
   }
+  // 🔥 one iron's page (sessionless irons): the iron's name is the crumb
+  if (view === 'iron') {
+    const iron = ironById(currentIronId);
+    meta.textContent = '🔥 ' + (iron ? iron.title : 'iron');
+    document.getElementById('sessiondesc').textContent = '';
+    document.getElementById('descrow').classList.remove('insession');
+    renderSessionBar(view);
+    return;
+  }
   // projects rung: blank. Deeper: the project name (the machine is abstracted away —
   // it surfaces only via the sessions-rung select when a project spans machines).
   let crumb = '';
@@ -3612,8 +3655,9 @@ function renderSessionBar(view) {
   renderIronRow(view);                                          // 🔥 one-row iron identity above the strip while scoped
   if (view === 'pm') { renderPmBar(bar, wasHidden); return; }   // PM threads ride the same strip
   const sorted = railSessions();                               // unified roster (or the scoped iron's), importance-ordered
-  // hidden on the projects rung and the 🔥 irons list
-  if (view === 'projects' || view === 'irons' || !sorted.length) {
+  // hidden on the projects rung and both 🔥 iron surfaces (the global strip on
+  // a sessionless iron's page would contradict the page saying "no sessions")
+  if (view === 'projects' || view === 'irons' || view === 'iron' || !sorted.length) {
     bar.hidden = true; bar.innerHTML = '';
     if (!wasHidden) refitTTY();
     return;
@@ -7475,8 +7519,12 @@ function applyIrons(list) {
     else ironsDirty = false;             // too old to be a race — accept the server's truth
   }
   ironList = incoming;
-  if (currentIronId && !ironById(currentIronId)) currentIronId = null;   // deleted elsewhere
+  if (currentIronId && !ironById(currentIronId)) {
+    currentIronId = null;                                                // deleted elsewhere
+    if (currentView() === 'iron') setView('irons');                      // its page has nothing left to show
+  }
   renderIronsUI();
+  maybeIronDive();   // a dive parked on an iron the list hadn't named yet (deep link) resolves now
 }
 // Fleet: push the whole list; the relay persists it and echoes it to every
 // device (the echo is the ack — ironsDirty stays up until it lands). NEVER
@@ -7541,11 +7589,18 @@ function ironCreateAndAssign(title, rowId) {
   if (FLEET) { const it = ironCreate(title, '', []); if (it) ironAssign(rowId, it.id); }
   else hsend({ type: 'ironCreate', title, desc: '', tags: [], pid: rowId });
 }
-// Opening an iron goes STRAIGHT into its session plane — there is no
-// intermediate iron detail page: the one-row chrome + the scoped tab strip +
-// the live tty ARE the iron. Lands on the warmest live session (📌 parked at
-// the end of the rail); an iron with no sessions yet opens the ＋ add-project
-// picker over the irons list instead (that's the only thing left to do).
+// Opening an iron with live sessions goes STRAIGHT into its session plane —
+// the one-row chrome + the scoped tab strip + the live tty ARE the iron.
+// Lands on the warmest live session (📌 parked at the end of the rail). Only
+// an iron with NOTHING to dive into lands on the iron page (#ironview):
+// member projects, each with a ＋ that spawns a session inside the iron. The
+// page doubles as the dive's waiting room — the iron card renders from
+// `projects` frames while the dive needs each machine's `sessions` frame, and
+// in that gap (channel still securing after wake / cold boot) we must neither
+// mislabel the iron empty nor sit on the list looking dead (2026-08-29): the
+// dive-wait stays armed and fires the moment a member session streams in. A
+// member-LESS iron additionally opens the ＋ add-project picker over the page,
+// where adding a project genuinely is the only next step.
 function openIron(id) {
   viewBeforeQuestion = null; deferredView = null;   // manual nav, same as navTo
   cancelIronDive();
@@ -7555,24 +7610,18 @@ function openIron(id) {
   if (iron) {
     const rail = ironRail(iron);
     if (rail.length) { ironScope = id; focusSession(rail[0]); return; }
-    // Member projects but no sessions in sight: that is NOT "empty iron" — the
-    // iron card renders from `projects` frames while the dive needs each
-    // machine's `sessions` frame, and in that gap (channel still securing
-    // after wake / cold boot) the first cut opened the add-project picker over
-    // an iron visibly full of projects (2026-08-29). Wait for the frames and
-    // dive the moment one lands; only a truly member-LESS iron falls through
-    // to the picker, where adding a project genuinely is the only next step.
-    if (ironMemberIds(iron).length) { armIronDive(id); return; }
   }
-  if (currentView() !== 'irons') setView('irons');
-  if (iron) openIronAdd();
+  setView('iron');              // the iron page — renders on arrival
+  if (iron && !ironMemberIds(iron).length) { openIronAdd(); return; }
+  armIronDive(id);              // an unknown iron (list still loading) waits too — applyIrons re-drives
 }
 // -- the iron dive-wait: sessions frames haven't landed yet, so hold the click
-// open instead of mislabeling the iron empty. Retried from both sessions-frame
-// handlers; any manual navigation cancels it so a late frame never yanks you.
-const IRON_DIVE_WAIT_MS = 15000;
+// open (on the iron page) instead of mislabeling the iron empty. Retried from
+// both sessions-frame handlers + applyIrons; any manual navigation cancels it
+// so a late frame never yanks you.
+let IRON_DIVE_WAIT_MS = 15000;     // let: probes shrink it
 let ironDiveWatch = null;          // { id, timer }
-const ironDiveBar = document.getElementById('irondivebar');
+const ironDiveBar = document.getElementById('ironvstatus');
 function cancelIronDive() {
   if (ironDiveBar) ironDiveBar.hidden = true;
   if (!ironDiveWatch) return;
@@ -7580,28 +7629,28 @@ function cancelIronDive() {
   ironDiveWatch = null;
 }
 function ironDiveSay(text) {
-  if (ironDiveBar) { ironDiveBar.textContent = text; ironDiveBar.hidden = false; }
-  meta.textContent = text;
+  if (ironDiveBar) { ironDiveBar.textContent = text; ironDiveBar.hidden = !text; }
+  if (text) meta.textContent = text;
 }
 function armIronDive(id) {
   cancelIronDive();
   const iron = ironById(id);
-  if (currentView() !== 'irons') setView('irons');
   ironDiveSay('opening 🔥 ' + (iron ? iron.title : '') + ' — finding its sessions…');
   ironDiveWatch = { id, timer: setTimeout(() => {
     ironDiveWatch = null;
     // Every reachable machine reported (or never will): the honest truth is
-    // "no sessions here yet". Say it and stay — never the add-picker (it has
-    // projects) and never a surprise spawn (＋ inside a member project starts one).
+    // "no sessions here yet". Say it on the page — whose ＋ buttons are the
+    // way to change it — and stay. Never a surprise spawn.
     const it = ironById(id);
-    ironDiveSay('no open sessions in 🔥 ' + (it ? it.title : 'that iron') + ' yet — open a member project and ＋ one');
+    ironDiveSay('no open sessions in 🔥 ' + (it ? it.title : 'that iron') + ' yet — ＋ starts one in a member project');
+    renderIronDetail();
   }, IRON_DIVE_WAIT_MS) };
   maybeIronDive();                 // the frames may already be here (direct mode races are short)
 }
 function maybeIronDive() {
   if (!ironDiveWatch) return;
   const iron = ironById(ironDiveWatch.id);
-  if (!iron) { cancelIronDive(); return; }              // deleted while we waited
+  if (!iron) return;             // irons list not landed yet (or deleted) — the timer has the floor
   const rail = ironRail(iron);
   if (!rail.length) return;                             // still waiting — the timer has the floor
   const id = ironDiveWatch.id;
@@ -7613,6 +7662,7 @@ function maybeIronDive() {
 function renderIronLive() {
   const v = currentView();
   if (v === 'irons') renderIronList();
+  else if (v === 'iron') renderIronDetail();     // the sessionless iron's page tracks frames too
   // scoped session: the one-row iron chrome above the strip tracks frames
   // (title/desc, member chips + counts) — the row IS the iron's live surface
   else if (ironScope && (v === 'tty' || v === 'transcript')) renderIronRow(v);
@@ -7742,6 +7792,129 @@ document.getElementById('ironlist').addEventListener('click', (e) => {
   // the click a drag's pointerup mints must not dive into the iron
   if (Date.now() - ironDragEndAt > 350) openIron(card.dataset.id);
 });
+// -- 🔥 the iron page (#ironview): the landing for an iron with nothing to
+// dive into — member projects, each wearing a ＋ that starts a session in that
+// project INSIDE the iron (scope kept, so the fresh tty opens under the iron
+// row and the scoped strip). Repaint, don't rebuild: this repaints on every
+// projects/sessions frame while visible, so cards are keyed by row id, left
+// untouched unless their own content changed, and the click is DELEGATED to
+// #ironvlist (wired once below).
+function renderIronDetail() {
+  const iron = ironById(currentIronId);
+  document.getElementById('ironvtitle').textContent = '🔥 ' + (iron ? iron.title : '…');
+  document.getElementById('ironvdesc').textContent =
+    iron ? (iron.desc || (ironMemberIds(iron).length ? 'describing…' : 'no projects in this iron yet')) : 'loading…';
+  const list = document.getElementById('ironvlist');
+  if (!iron) { list.innerHTML = ''; delete list.dataset.ids; return; }
+  const st = ironStats(iron);
+  const byRow = new Map();                       // member sessions grouped under their project row
+  for (const s of ironSessions(iron)) {
+    const k = FLEET ? ironKeyCanon(s._pkey) : s.pid;
+    if (!byRow.has(k)) byRow.set(k, []);
+    byRow.get(k).push(s);
+  }
+  const wantIds = st.members.map(r => r.id).join('\n');
+  if (list.dataset.ids !== wantIds) {
+    list.dataset.ids = wantIds;
+    list.innerHTML = '';
+    for (const r of st.members) {
+      const card = document.createElement('div');
+      card.className = 'scard ivproj';
+      card.dataset.id = r.id;
+      list.appendChild(card);
+    }
+    const add = document.createElement('div');   // dashed tail row → the ＋ add-project picker
+    add.className = 'scard ivproj ivaddproj';
+    add.textContent = '＋  add a project to this iron';
+    list.appendChild(add);
+  }
+  for (const r of st.members) {
+    const card = list.querySelector(':scope > .ivproj[data-id="' + CSS.escape(r.id) + '"]');
+    if (!card) continue;
+    const ss = byRow.get(FLEET ? ironKeyCanon(r.id) : r.id) || [];
+    const fp = JSON.stringify([r.emoji || '', r.name, r.busyCount || 0, r.waitingCount || 0,
+      ss.map(s => [s.cid, s.title || s.tab || '', !!s.busy, !!s.pinned])]);
+    if (card._ivfp === fp) continue;             // unchanged card: not one DOM touch
+    card._ivfp = fp;
+    fillIronProjRow(card, r, ss);
+  }
+  requestIronDesc(iron);          // throttled — landing here may precede any desc
+}
+function fillIronProjRow(card, r, ss) {
+  card.innerHTML = '';
+  const row = document.createElement('div'); row.className = 'row';
+  const t = document.createElement('span');
+  t.className = 'stitle';
+  t.textContent = (shortEmoji(r.emoji) ? shortEmoji(r.emoji) + ' ' : '') + r.name;
+  row.appendChild(t);
+  if (r.waitingCount > 0) {
+    const w = document.createElement('span');
+    w.className = 'scount swait'; w.textContent = `⏳ ${r.waitingCount} needs you`;
+    row.appendChild(w);
+  }
+  if (r.busyCount > 0) {
+    const b = document.createElement('span');
+    b.className = 'scount swork'; b.textContent = `▶ ${r.busyCount} working`;
+    row.appendChild(b);
+  }
+  const sc = document.createElement('span');
+  sc.className = 'scount'; sc.textContent = ss.length ? `${ss.length} sess` : 'no sessions';
+  row.appendChild(sc);
+  const plus = document.createElement('button');
+  plus.className = 'ivplus'; plus.textContent = '＋';
+  plus.title = 'start a new session in ' + r.name + ' — it opens inside this iron';
+  row.appendChild(plus);
+  card.appendChild(row);
+  // member sessions (normally none — a live one would have been dived into;
+  // they appear when one spawns elsewhere after the wait expired)
+  for (const s of ss) {
+    const sr = document.createElement('div');
+    sr.className = 'ivsess'; sr.dataset.cid = s.cid;
+    sr.textContent = (s.pinned ? '📌 ' : '') + (s.title || s.tab || s.cid);
+    sr.title = 'open this session inside the iron';
+    card.appendChild(sr);
+  }
+}
+// ＋ on an iron-page project row: spawn a session there WITHOUT leaving the
+// iron — scope is set first, so newSession's drop into the tty keeps it and
+// the focus reply opens the fresh session under the iron's chrome.
+function ironSpawnIn(rowId) {
+  if (!ironById(currentIronId)) return;
+  cancelIronDive();
+  ironScope = currentIronId;
+  newSessionMachine = null;        // never inherit another project's ＋ machine pick
+  if (FLEET) currentProjectKey = rowId;
+  else currentPid = rowId;
+  newSession();
+}
+// The ONE click listener for the iron page's rows — delegated, same rule as
+// #ironlist: a frame's repaint can never eat a tap.
+document.getElementById('ironvlist').addEventListener('click', (e) => {
+  const card = e.target.closest('.ivproj');
+  if (!card) return;
+  if (card.classList.contains('ivaddproj')) { openIronAdd(); return; }
+  if (e.target.closest('.ivplus')) { ironSpawnIn(card.dataset.id); return; }
+  const sr = e.target.closest('.ivsess');
+  if (sr) {
+    const s = allSessions().find(x => x.cid === sr.dataset.cid);
+    if (s) { ironScope = currentIronId; focusSession(s); }
+    return;
+  }
+  selectProject(card.dataset.id);  // the project's normal sessions rung (leaves the iron)
+});
+document.getElementById('ironvback').onclick = () => { currentIronId = null; navTo('irons'); };
+document.getElementById('ironvedit').onclick = () => openIronEdit();   // overlay, right here
+document.getElementById('ironvdel').onclick = (e) => {                 // two-tap, same as the iron row's
+  const del = e.currentTarget;
+  if (!del.classList.contains('armed')) {
+    del.classList.add('armed'); del.textContent = '🗑 sure?';
+    setTimeout(() => { del.classList.remove('armed'); del.textContent = '🗑'; }, 3000);
+    return;
+  }
+  del.classList.remove('armed'); del.textContent = '🗑';
+  const id = currentIronId; currentIronId = null;
+  ironDelete(id); navTo('irons');
+};
 // -- 🔎 filter (the projects-rung deal: type to narrow, Enter opens a lone
 // match, the box is a static node so repaints can't eat it or steal focus) ----
 let ironFilter = '';
@@ -8086,6 +8259,7 @@ const rightPanel = document.getElementById('right');
 const pmPanel = document.getElementById('pm');
 const pinsPanel = document.getElementById('pinsview');
 const ironsPanel = document.getElementById('ironsview');
+const ironPagePanel = document.getElementById('ironview');   // ONE iron's page (sessionless irons)
 const pinsBtn = document.getElementById('pinsBtn');
 const pinBtn = document.getElementById('pinBtn');
 const pmfeed = document.getElementById('pmfeed');
@@ -8135,10 +8309,9 @@ function refreshSessionTag() {
   ttymetaEl.classList.toggle('show', v === 'tty' && !!(model || pct));
 }
 function setView(view) {
-  if (view === 'iron') view = 'irons';   // the detail page is gone — legacy nav lands on the list
   const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects',
         pm = view === 'pm', pins = view === 'pins',
-        irons = view === 'irons';
+        irons = view === 'irons', iron = view === 'iron';   // iron = ONE iron's page (sessionless irons only — see openIron)
   // Iron scope lives only on the session plane — navigating to any rung
   // (projects/sessions/pins/pm/irons) exits it.
   if (!tty && view !== 'transcript') ironScope = null;
@@ -8154,6 +8327,7 @@ function setView(view) {
   pmPanel.classList.toggle('hidden', !pm);
   pinsPanel.classList.toggle('hidden', !pins);
   ironsPanel.classList.toggle('hidden', !irons);
+  ironPagePanel.classList.toggle('hidden', !iron);
   // 🔥 scoped session: keep currentIronId pointed at the scope so the one-row
   // iron chrome (renderIronRow, via renderSessionBar below) and its ✎ always
   // target the right iron.
@@ -8169,7 +8343,7 @@ function setView(view) {
   // stays, but a message there starts a new session rather than going to a
   // session you're not viewing — say so in the placeholder. The PM view keeps
   // the composer (it talks to the current PM thread).
-  composer.style.display = (projects || pins || irons) ? 'none' : '';
+  composer.style.display = (projects || pins || irons || iron) ? 'none' : '';
   // On the sessions rung a message starts a NEW session — which needs a project.
   // With none selected (the all-sessions listing) say so rather than promise it.
   const noProj = FLEET ? !currentProjectKey : !currentPid;
@@ -8180,7 +8354,7 @@ function setView(view) {
   menuBtn.classList.toggle('on', sessions);
   projectsBtn.classList.toggle('on', projects);
   pinsBtn.classList.toggle('on', pins);
-  ironsHdrBtn.classList.toggle('on', irons || ((tty || view === 'transcript') && !!ironScope));
+  ironsHdrBtn.classList.toggle('on', irons || iron || ((tty || view === 'transcript') && !!ironScope));
   statusEl.classList.toggle('pmopen', pm);
   try { localStorage.setItem('cc_view', view); } catch {}
   refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
@@ -8198,6 +8372,7 @@ function setView(view) {
   // landing on irons: paint, then the filter box takes focus — ARRIVAL only,
   // same rule as the projects rung (a repaint never focuses).
   else if (irons) { renderIronList(); focusIronFilter(); }
+  else if (iron) renderIronDetail();
   if (typeof renderNeedsBar === 'function') renderNeedsBar();   // depth changed → re-filter the bar
 }
 // the toggle button hops between the two deep views; projects/sessions have their own entries.
@@ -8209,8 +8384,8 @@ const navTo = (v) => { viewBeforeQuestion = null; deferredView = null; cancelIro
 menuBtn.onclick = () => navTo('sessions');
 projectsBtn.onclick = () => navTo('projects');
 pinsBtn.onclick = () => navTo('pins');           // 📌 the board of parked to-dos
-// 🔥 named groups of projects — the list. (An iron itself has no page: tapping
-// one dives straight into its session plane, see openIron.)
+// 🔥 named groups of projects — the list. (Tapping an iron dives straight into
+// its session plane; only a sessionless one lands on its page — see openIron.)
 ironsHdrBtn.onclick = () => navTo('irons');
 // In-session 📌: park the open session on the board and move straight on to the
 // NEXT session in the normal list (hopAfterPin) — pinning is a "done with this
@@ -8237,6 +8412,7 @@ document.getElementById('brand').onclick = () => {
 };
 if (!FLEET) machinesBtn.style.display = 'none';   // no machines rung when talking to a harness directly
 pendingNav = parseHash();        // restore project / session / depth from the URL…
+if (pendingNav.iron) currentIronId = pendingNav.iron;   // a #/i/ link's page can name itself while loading
 setView(pendingNav.view);        // …optimistically; resolvePendingNav refines once data lands
 // Safety net: if the rosters never fully arrive, don't hang on a blank projects
 // rung — force the home landing (best-effort) after a few seconds.
@@ -8251,6 +8427,7 @@ function currentView() {
   if (!pmPanel.classList.contains('hidden')) return 'pm';
   if (!pinsPanel.classList.contains('hidden')) return 'pins';
   if (!ironsPanel.classList.contains('hidden')) return 'irons';
+  if (!ironPagePanel.classList.contains('hidden')) return 'iron';
   if (!projectsPanel.classList.contains('hidden')) return 'projects';
   if (!menuPanel.classList.contains('hidden')) return 'sessions';
   if (!leftPanel.classList.contains('hidden')) return 'tty';
@@ -8293,6 +8470,9 @@ function syncUrl() {
   if (v === 'pm') { const h = '#/pm'; if (h !== location.hash) { lastWrittenHash = h; location.hash = h; } return; }
   if (v === 'pins') { const h = '#/pins'; if (h !== location.hash) { lastWrittenHash = h; location.hash = h; } return; }
   if (v === 'irons') { const h = '#/irons'; if (h !== location.hash) { lastWrittenHash = h; location.hash = h; } return; }
+  // one iron's page — deep-linkable, reload lands back on it (openIron re-decides: dive if sessions arrived)
+  if (v === 'iron') { const h = currentIronId ? '#/i/' + encodeURIComponent(currentIronId) : '#/irons';
+    if (h !== location.hash) { lastWrittenHash = h; location.hash = h; } return; }
   // a session opened from an iron page carries the iron in its URL, so a reload
   // lands back inside the iron scope (strip + climb-out target intact)
   if (ironScope && (v === 'tty' || v === 'transcript') && currentCid) {
@@ -8336,7 +8516,7 @@ function resolvePendingNav() {
   if (nav.view === 'pm') { pendingNav = null; openPM(); return; }   // PM is harness-data-independent
   if (nav.view === 'pins') { pendingNav = null; setView('pins'); return; }   // board fills as session frames land
   if (nav.view === 'irons') { pendingNav = null; setView('irons'); return; }   // list fills as irons land
-  if (nav.view === 'iron') {                     // #/i/<id> — straight into the iron's session plane
+  if (nav.view === 'iron') {                     // #/i/<id> — the warmest session, or the sessionless iron's page
     const loaded = FLEET ? (machineList.length && allMachinesSessions()) : gotSessions;
     if (!loaded) return;                         // still loading — re-driven by every frame
     pendingNav = null; openIron(nav.iron); return;
@@ -8463,9 +8643,10 @@ function restoreViewAfterQuestion() {
 // (the machines rung is gone; the roster lives in the 🖥️ overlay).
 const LEVELS = ['projects', 'sessions', 'tty'];   // transcript view pulled
 function stepLevel(dir) {
-  // Climbing out of an iron-scoped session lands on the irons LIST — the iron
-  // itself has no page (its row + tabs + tty were the thing you're leaving).
-  if (dir < 0 && ironScope && inSessionView()) {
+  // Climbing out of an iron-scoped session lands on the irons LIST — a live
+  // iron has no page (its row + tabs + tty were the thing you're leaving), and
+  // so does climbing out of a sessionless iron's page.
+  if (dir < 0 && ((ironScope && inSessionView()) || currentView() === 'iron')) {
     viewBeforeQuestion = null; setView('irons');
     return;
   }

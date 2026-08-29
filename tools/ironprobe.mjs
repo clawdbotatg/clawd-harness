@@ -10,8 +10,12 @@
 //      passkey-storm regression), and the relay echo is applied
 //   3. a project card's 🔥 corner button opens the picker; assigning stores the
 //      cross-machine projectKey and badges the card
-//   4. the iron page shows title/desc/tags + EVERY session from EVERY member
-//      project across machines — 📌 pinned members at the END, marked
+//   4. an iron with live sessions dives STRAIGHT into its session plane —
+//      EVERY session from EVERY member project across machines rides the
+//      scoped strip, 📌 pinned members at the END, marked; an iron with NO
+//      sessions lands on the iron page (#ironview) instead: member project
+//      rows, each with a ＋ that spawns a session in that project INSIDE the
+//      iron (2026-08-29)
 //   5. the ONE box (filter + create-name, a live <input> — there is NO separate
 //      create form) survives the repaint a frame triggers: focus + un-mirrored
 //      text intact (the projects-rung rule); ＋ create names the iron from it
@@ -140,8 +144,9 @@ const form = await page.evaluate(()=>{
 });
 check('the box survives a repaint (focus + un-mirrored text)', form.focused && form.text==='half-typ', JSON.stringify(form));
 
-// 2b. an EMPTY iron has no session to land on — tapping it opens the
-// ＋ add-project picker over the irons list instead of any intermediate page
+// 2b. a member-LESS iron has nothing to dive into and no rows to show —
+// tapping it lands on the iron page with the ＋ add-project picker open over
+// it (adding a project is the only next step)
 const empty = await page.evaluate(()=>{
   openIron(ironList[0].id);
   const modal=document.getElementById('ironaddmodal');
@@ -149,8 +154,8 @@ const empty = await page.evaluate(()=>{
   closeIronAdd();
   return out;
 });
-check('tapping an EMPTY iron stays on the list + opens the add-project picker',
-      empty.view==='irons' && empty.picker, JSON.stringify(empty));
+check('tapping a member-LESS iron lands on its page + opens the add-project picker',
+      empty.view==='iron' && empty.picker, JSON.stringify(empty));
 
 // 3. assign from a project card via the picker
 await page.evaluate(()=>navTo('projects'));
@@ -363,8 +368,9 @@ await page.screenshot({path:join(HERE,'ironprobe.png')});
 // 6b. the dive-wait (2026-08-29): the iron card renders from `projects` frames
 // but the dive needs `sessions` frames — clicking in that gap (channel still
 // securing after wake / cold boot) must NOT open the add-project picker over an
-// iron visibly full of projects. It holds the click open and dives the moment
-// the frame lands; only a truly member-less iron falls through to the picker.
+// iron visibly full of projects. The iron PAGE is the waiting room: it holds
+// the click open there and dives the moment the frame lands; only a truly
+// member-less iron falls through to the picker.
 const gap = await page.evaluate(()=>{
   navTo('irons');
   const saved = {};                                // sessions frames "not arrived yet"
@@ -374,7 +380,8 @@ const gap = await page.evaluate(()=>{
   }
   document.querySelector('#ironlist .ironcard').click();
   const mid_ = { view: currentView(), add: !document.getElementById('ironaddmodal').hidden,
-                 waiting: /finding/.test(meta.textContent) };
+                 waiting: /finding/.test(meta.textContent)
+                          && !document.getElementById('ironvstatus').hidden };
   // the frame lands (the same call the WS handler makes) → the click completes
   for (const mid of Object.keys(saved)) {
     perMachine[mid].sessionList = saved[mid].sl; perMachine[mid].gotSessions = saved[mid].got;
@@ -382,8 +389,8 @@ const gap = await page.evaluate(()=>{
   maybeIronDive();
   return { mid_, after: { view: currentView(), cid: currentCid, scope: ironScope } };
 });
-check('clicking an iron before sessions frames land WAITS (no add-picker) …',
-      gap.mid_.view==='irons' && !gap.mid_.add && gap.mid_.waiting, JSON.stringify(gap.mid_));
+check('clicking an iron before sessions frames land WAITS on its page (no add-picker) …',
+      gap.mid_.view==='iron' && !gap.mid_.add && gap.mid_.waiting, JSON.stringify(gap.mid_));
 check('… and dives the moment the sessions frame arrives',
       gap.after.view==='tty' && gap.after.cid==='ca1', JSON.stringify(gap.after));
 await page.evaluate(()=>navTo('irons'));
@@ -480,17 +487,79 @@ check('mid-drag it CARRIES: card lifted on the pointer, spacer in its slot, sibl
       JSON.stringify(drag && drag.mid));
 check('drop lands clean: spacer gone, every drag style stripped',
       !!drag && drag.landed.spacerGone && drag.landed.clean, JSON.stringify(drag && drag.landed));
+
+// 8. the iron page (2026-08-29 "it doesn't know what to do"): an iron whose
+// member projects have NO sessions lands on #ironview — project rows each
+// wearing a ＋ that spawns a session in that project INSIDE the iron — instead
+// of the old dead-end message on the list.
+const quietSetup = await page.evaluate(()=>{
+  IRON_DIVE_WAIT_MS = 150;                        // probe-speed dive-wait
+  handleMachineJson('clawd-atg',{type:'projects',projects:[
+    {pid:'pa1',name:'gpt-voice',repoUrl:'https://github.com/clawdbotatg/gpt-voice',kind:'gh',status:'ready',sessionCount:1,busyCount:1,waitingCount:0,created:1,pinned:false,lastTouched:100,emoji:'🎙'},
+    {pid:'pa2',name:'other',repoUrl:'https://github.com/clawdbotatg/other',kind:'gh',status:'ready',sessionCount:1,busyCount:0,waitingCount:0,created:1,pinned:false,lastTouched:50,emoji:''},
+    {pid:'pa3',name:'dormant',repoUrl:'https://github.com/clawdbotatg/dormant',kind:'gh',status:'ready',sessionCount:0,busyCount:0,waitingCount:0,created:1,pinned:false,lastTouched:5,emoji:''}]});
+  const quiet = ironCreate('quiet','',[]);
+  window.__relayRx({type:'prefs',inactive:[],irons:JSON.parse(JSON.stringify(ironList))});
+  ironAssign(projectRows().find(p=>/dormant/.test(p.name)).id, quiet.id);
+  window.__relayRx({type:'prefs',inactive:[],irons:JSON.parse(JSON.stringify(ironList))});
+  openIron(quiet.id);
+  return { id: quiet.id, view: currentView(), hash: location.hash,
+           waiting: !document.getElementById('ironvstatus').hidden,
+           rows: [...document.querySelectorAll('#ironvlist .ivproj[data-id]')].map(c=>c.innerText.replace(/\s+/g,' ')),
+           plus: !!document.querySelector('#ironvlist .ivproj[data-id] .ivplus'),
+           addTail: !!document.querySelector('#ironvlist .ivaddproj'),
+           picker: !document.getElementById('ironaddmodal').hidden };
+});
+const quietId = quietSetup.id;
+check('a sessionless iron lands on ITS PAGE at #/i/<id> — member row + ＋, add tail, no picker',
+      quietSetup.view==='iron' && quietSetup.hash==='#/i/'+quietId && quietSetup.waiting
+      && quietSetup.rows.length===1 && /dormant/.test(quietSetup.rows[0]) && /no sessions/.test(quietSetup.rows[0])
+      && quietSetup.plus && quietSetup.addTail && !quietSetup.picker,
+      JSON.stringify(quietSetup));
+await page.waitForTimeout(500);                   // the dive-wait expires
+const settled = await page.evaluate(()=>({ view: currentView(),
+  status: document.getElementById('ironvstatus').textContent,
+  shown: !document.getElementById('ironvstatus').hidden }));
+check('the wait expires ON the page with the honest "no open sessions yet — ＋"',
+      settled.view==='iron' && settled.shown && /no open sessions/.test(settled.status), JSON.stringify(settled));
+await page.screenshot({path:join(HERE,'ironprobe-page.png')});   // eyeball frame: the sessionless iron page
+const spawn = await page.evaluate(()=>{
+  window.__hs=[]; const realHsend=hsend; hsend=(f)=>{ window.__hs.push(f); return true; };
+  document.querySelector('#ironvlist .ivproj[data-id] .ivplus').click();
+  const out={ frames: window.__hs.slice(), view: currentView(), scope: ironScope, pending: pendingNewFocus };
+  hsend=realHsend;
+  // the machine answers: roster with the fresh session, then the focus reply
+  handleMachineJson('clawd-atg',{type:'sessions',sessions:[
+    {cid:'ca1',pid:'pa1',title:'wire the mic',tab:'mic',alive:true,busy:true,pinned:0,promptedAt:Date.now()/1000-60,lastActive:Date.now()/1000},
+    {cid:'ca2',pid:'pa2',title:'unrelated job',tab:'other',alive:true,busy:false,pinned:0,promptedAt:Date.now()/1000-120,lastActive:Date.now()/1000},
+    {cid:'cq1',pid:'pa3',title:'fresh spawn',tab:'fresh',alive:true,busy:false,pinned:0,promptedAt:Date.now()/1000,lastActive:Date.now()/1000}]});
+  handleMachineJson('clawd-atg',{type:'focus',cid:'cq1'});
+  out.after={ view: currentView(), cid: currentCid, scope: ironScope,
+              rowShown: !document.getElementById('ironrow').hidden,
+              rowText: document.getElementById('ironrow').innerText,
+              tabs: [...document.querySelectorAll('#sessionbar .stab')].map(t=>(t.querySelector('.lbl')||{}).textContent||'') };
+  return out;
+});
+check('＋ on the project row asks for a session THERE (`new` with its pid), scope kept',
+      spawn.frames.some(f=>f.type==='new'&&f.pid==='pa3') && spawn.view==='tty'
+      && spawn.scope===quietId && spawn.pending===true, JSON.stringify({frames:spawn.frames,view:spawn.view,scope:spawn.scope}));
+check('the focus lands the fresh session INSIDE the iron (row chrome + scoped strip)',
+      spawn.after.view==='tty' && spawn.after.cid==='cq1' && spawn.after.scope===quietId
+      && spawn.after.rowShown && /🔥 quiet/.test(spawn.after.rowText)
+      && spawn.after.tabs.length===1 && /fresh/.test(spawn.after.tabs[0]),
+      JSON.stringify(spawn.after));
 await page.close();
 
 // ---- direct mode ------------------------------------------------------------
 const dpage = await newPage(raw, 'https://direct.probe/?t=x');
 await dpage.evaluate(()=>window.__relayRx({type:'projects',projects:[
-  {pid:'p1',name:'alpha',repoUrl:'https://github.com/x/alpha',kind:'gh',status:'ready',sessionCount:1,busyCount:0,waitingCount:0,created:1,pinned:false,lastTouched:10,emoji:''}],boot:'b1'}));
+  {pid:'p1',name:'alpha',repoUrl:'https://github.com/x/alpha',kind:'gh',status:'ready',sessionCount:1,busyCount:0,waitingCount:0,created:1,pinned:false,lastTouched:10,emoji:''},
+  {pid:'p2',name:'beta',repoUrl:'https://github.com/x/beta',kind:'gh',status:'ready',sessionCount:0,busyCount:0,waitingCount:0,created:1,pinned:false,lastTouched:5,emoji:''}],boot:'b1'}));
 await dpage.evaluate(()=>window.__relayRx({type:'sessions',sessions:[
   {cid:'c1',pid:'p1',title:'direct job',tab:'job',alive:true,busy:false,pinned:0,promptedAt:1,lastActive:1}],current:null}));
 await dpage.evaluate(()=>window.__relayRx({type:'irons',irons:[
   {id:'i9',title:'direct iron',desc:'',tags:[],pids:['p1'],created:1},
-  {id:'i8',title:'second iron',desc:'',tags:[],pids:[],created:2}]}));
+  {id:'i8',title:'second iron',desc:'',tags:[],pids:['p2'],created:2}]}));
 await dpage.waitForTimeout(300);
 const direct = await dpage.evaluate(()=>{
   const sent=()=>window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean);
@@ -528,6 +597,28 @@ const dorder = await dpage.evaluate(()=>{
 });
 check('direct mode: reorder goes out as an ironOrder op, applied optimistically',
       !!dorder.ids && dorder.ids.join()==='i8,i9' && dorder.mem.join()==='i8,i9', JSON.stringify(dorder));
+// the iron page + ＋ spawn, direct mode: i8's one member (beta) has no
+// sessions, so opening it lands on the page; ＋ sends a plain `new` for that
+// project and drops into the tty still inside the iron
+const dpageFlow = await dpage.evaluate(()=>{
+  IRON_DIVE_WAIT_MS = 150;
+  openIron('i8');
+  return { view: currentView(), waiting: !document.getElementById('ironvstatus').hidden,
+           rows: [...document.querySelectorAll('#ironvlist .ivproj[data-id]')].map(c=>c.innerText.replace(/\s+/g,' ')) };
+});
+check('direct mode: a sessionless iron lands on its page with the member row + ＋',
+      dpageFlow.view==='iron' && dpageFlow.waiting
+      && dpageFlow.rows.length===1 && /beta/.test(dpageFlow.rows[0]), JSON.stringify(dpageFlow));
+await dpage.waitForTimeout(400);                  // the dive-wait expires — the page stays
+const dspawn = await dpage.evaluate(()=>{
+  window.__sent.length=0;
+  document.querySelector('#ironvlist .ivproj[data-id="p2"] .ivplus').click();
+  const fr=window.__sent.map(x=>{try{return JSON.parse(x);}catch{return null;}}).filter(Boolean);
+  return { newFrame: fr.find(f=>f.type==='new'), view: currentView(), scope: ironScope, pid: currentPid };
+});
+check('direct mode: ＋ sends `new` for that project and opens the tty inside the iron',
+      !!dspawn.newFrame && dspawn.newFrame.pid==='p2' && dspawn.view==='tty'
+      && dspawn.scope==='i8' && dspawn.pid==='p2', JSON.stringify(dspawn));
 await dpage.close();
 
 check('no page errors', errors.length===0, errors.join(' | '));

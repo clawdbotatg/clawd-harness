@@ -108,10 +108,12 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
    (a session replaying it would trip the PTY scan — the echo trap;
    `test_resume_gate.py` enforces).
 7. **Iron scope is entered only through irons** (list / `#/i/` link) — normal
-   session navigation never auto-enters an iron. An iron has no detail page;
-   opening one dives into its warmest session, waiting for session frames
-   rather than mislabeling the iron empty. One create/filter box; no second
-   create form.
+   session navigation never auto-enters an iron. Opening an iron dives into
+   its warmest session, waiting for session frames rather than mislabeling the
+   iron empty; only a **sessionless** iron lands on the iron page (`#ironview`
+   — member project rows, each with a ＋ that spawns a session *inside* the
+   iron; the page doubles as the dive-wait's waiting room). One create/filter
+   box; no second create form.
 8. **Terminal is read-only on touch, always** — dictation through the
    composer, TUI menus through the key bar.
 9. **Never commit** runtime/secret files (`.clawd-harness.*`, uploads,
