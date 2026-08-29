@@ -683,6 +683,10 @@
   .ironform .frow { display:flex; gap:6px; }
   .ironform .frow button { flex:0 0 auto; }
   /* the one filter+create row: input stretches, button hangs off its right */
+  #irondivebar { margin:0 12px 8px; padding:10px 12px; border-radius:8px;
+                 background:var(--accent-bg); color:var(--accent);
+                 font-family:var(--mono); font-size:13px; }
+  #irondivebar[hidden] { display:none; }
   #ironfilterrow { flex-direction:row; align-items:center; }
   #ironfilterrow input { flex:1; min-width:0; }
   #ironfilterrow button { flex:0 0 auto; padding:7px 10px; }
@@ -1272,6 +1276,10 @@
         <input id="ironFilterInp" placeholder="filter irons · or type a name and hit ＋ create" autocomplete="off" />
         <button id="ironCreateBtn" title="create an iron named what you typed — a named group of projects to track as one effort">＋ create</button>
       </div>
+      <!-- dive-wait banner: a clicked iron whose sessions haven't streamed in
+           yet holds the click open here, LOUDLY (a meta-line whisper read as
+           "nothing happened"). Static node; armIronDive/cancelIronDive own it. -->
+      <div id="irondivebar" hidden></div>
       <div id="ironlist"></div>
     </section>
   </main>
@@ -5827,8 +5835,7 @@ function focusSession(s) {
   if (ironScope) {
     const iron = ironById(ironScope);
     if (iron) {
-      const ids = ironMemberIds(iron);
-      if (!(FLEET ? (s._pkey && ids.includes(s._pkey)) : ids.includes(s.pid))) ironScope = null;
+      if (!(FLEET ? (s._pkey && ironHasKey(iron, s._pkey)) : ironHasKey(iron, s.pid))) ironScope = null;
     }
   }
   if (FLEET) {
@@ -7436,7 +7443,23 @@ let currentIronId = null;
 let ironScope = null;
 function ironMemberIds(iron) { return (FLEET ? iron.keys : iron.pids) || []; }
 function ironById(id) { return ironList.find(i => i.id === id) || null; }
-function ironForRow(rowId) { return ironList.find(i => ironMemberIds(i).includes(rowId)) || null; }
+// Canonical form of a fleet member key: follow the name→URL fold (a machine
+// that can't report a repo URL keys the same project `name:<x>` while another
+// keys it by URL — projectGroup resolves both to the merged group's key), so
+// membership matches whichever form was stored at assign time or computed for
+// a session now. Direct-mode pids pass through untouched.
+function ironKeyCanon(k) {
+  if (!FLEET || !k) return k;
+  const g = projectGroup(k);
+  return (g && g.key) || k;
+}
+function ironHasKey(iron, rowId) {
+  const ids = ironMemberIds(iron);
+  if (!FLEET) return ids.includes(rowId);
+  const k = ironKeyCanon(rowId);
+  return ids.some(id => ironKeyCanon(id) === k);
+}
+function ironForRow(rowId) { return ironList.find(i => ironHasKey(i, rowId)) || null; }
 // One receive path for both modes (relay prefs echo / harness broadcast).
 function applyIrons(list) {
   const incoming = Array.isArray(list) ? list : [];
@@ -7549,23 +7572,29 @@ function openIron(id) {
 // handlers; any manual navigation cancels it so a late frame never yanks you.
 const IRON_DIVE_WAIT_MS = 15000;
 let ironDiveWatch = null;          // { id, timer }
+const ironDiveBar = document.getElementById('irondivebar');
 function cancelIronDive() {
+  if (ironDiveBar) ironDiveBar.hidden = true;
   if (!ironDiveWatch) return;
   clearTimeout(ironDiveWatch.timer);
   ironDiveWatch = null;
+}
+function ironDiveSay(text) {
+  if (ironDiveBar) { ironDiveBar.textContent = text; ironDiveBar.hidden = false; }
+  meta.textContent = text;
 }
 function armIronDive(id) {
   cancelIronDive();
   const iron = ironById(id);
   if (currentView() !== 'irons') setView('irons');
-  meta.textContent = 'opening 🔥 ' + (iron ? iron.title : '') + ' — finding its sessions…';
+  ironDiveSay('opening 🔥 ' + (iron ? iron.title : '') + ' — finding its sessions…');
   ironDiveWatch = { id, timer: setTimeout(() => {
     ironDiveWatch = null;
     // Every reachable machine reported (or never will): the honest truth is
     // "no sessions here yet". Say it and stay — never the add-picker (it has
     // projects) and never a surprise spawn (＋ inside a member project starts one).
     const it = ironById(id);
-    meta.textContent = 'no open sessions in 🔥 ' + (it ? it.title : 'that iron') + ' yet';
+    ironDiveSay('no open sessions in 🔥 ' + (it ? it.title : 'that iron') + ' yet — open a member project and ＋ one');
   }, IRON_DIVE_WAIT_MS) };
   maybeIronDive();                 // the frames may already be here (direct mode races are short)
 }
@@ -7596,8 +7625,7 @@ function renderIronsUI() {
 // normalized rows the projects rung renders.
 function ironStats(iron, rows) {
   rows = rows || projectRows();
-  const ids = ironMemberIds(iron);
-  const members = rows.filter(r => ids.includes(r.id));
+  const members = rows.filter(r => ironHasKey(iron, r.id));
   return { members,
            sessions: members.reduce((n, r) => n + (r.sessionCount || 0), 0),
            busy: members.reduce((n, r) => n + (r.busyCount || 0), 0),
@@ -7607,8 +7635,8 @@ function renderIronList() {
   if (ironDragCard) return;                     // a frame mid-drag would yank the card being held
   const list = document.getElementById('ironlist');
   document.getElementById('ironstitle').textContent = '🔥 irons · ' + ironList.length;
-  list.innerHTML = '';                          // the create/filter chrome is outside this wipe
   if (!ironList.length) {
+    list.innerHTML = '';
     const e = document.createElement('div');
     e.className = 'ironempty';
     e.textContent = 'no irons yet. an iron is a named group of projects — one effort you’re ' +
@@ -7618,68 +7646,102 @@ function renderIronList() {
     list.appendChild(e);
     return;
   }
+  // Repaint, don't rebuild (2026-08-29 — the "clicking an iron does NOTHING"
+  // bug). This list repaints on EVERY projects/sessions frame from EVERY
+  // machine while it's visible — several times a second on a busy fleet — and
+  // the old innerHTML='' rebuild destroyed the very card a finger was resting
+  // on, so the tap's click fired on a removed node (or, iOS, not at all).
+  // Cards are keyed by iron id and left completely untouched unless their own
+  // rendered content changed; membership/order changes (create / delete / ⠿
+  // drag — all user-driven, no tap in flight) rebuild the card shells. The
+  // click is DELEGATED to #ironlist (wired once below), never per-card.
   const rows = projectRows();
+  const wantIds = ironList.map(i => i.id).join('\n');
+  const haveIds = [...list.querySelectorAll(':scope > .ironcard')].map(c => c.dataset.id).join('\n');
+  if (wantIds !== haveIds) {
+    list.innerHTML = '';
+    for (const iron of ironList) {
+      const card = document.createElement('div');
+      card.className = 'scard ironcard';
+      card.dataset.id = iron.id;
+      list.appendChild(card);
+    }
+  }
   // List order IS priority order — the user drags cards into it (⠿ handle) and
   // it persists (fleet: array order in the relay prefs; direct: rank in the
   // registry, irons frames arrive pre-sorted). No date sort here, ever.
   ironList.forEach(iron => {
     const st = ironStats(iron, rows);
-    const card = document.createElement('div');
-    card.className = 'scard ironcard';
-    card.dataset.id = iron.id;
-    // the click a drag's pointerup mints must not dive into the iron
-    card.onclick = () => { if (Date.now() - ironDragEndAt > 350) openIron(iron.id); };
-    const row = document.createElement('div'); row.className = 'row';
-    const title = document.createElement('span');
-    title.className = 'stitle'; title.textContent = '🔥 ' + iron.title;
-    row.appendChild(title);
-    const pc = document.createElement('span');
-    pc.className = 'scount'; pc.textContent = `${st.members.length} proj`;
-    row.appendChild(pc);
-    if (st.waiting > 0) {
-      const w = document.createElement('span');
-      w.className = 'scount swait'; w.textContent = `⏳ ${st.waiting} needs you`;
-      row.appendChild(w);
-    }
-    if (st.busy > 0) {
-      const b = document.createElement('span');
-      b.className = 'scount swork'; b.textContent = `▶ ${st.busy} working`;
-      row.appendChild(b);
-    }
-    const sc = document.createElement('span');
-    sc.className = 'scount'; sc.textContent = `${st.sessions} sess`;
-    row.appendChild(sc);
-    const grab = document.createElement('span');
-    grab.className = 'irondrag'; grab.textContent = '⠿';
-    grab.title = 'drag to reorder — the list is your priority order';
-    grab.onpointerdown = (e) => startIronDrag(e, card);
-    row.appendChild(grab);
-    card.appendChild(row);
-    if (iron.desc || st.members.length) {
-      const d = document.createElement('div');
-      d.className = 'sdesc'; d.textContent = iron.desc || 'describing…';
-      card.appendChild(d);
-    }
-    if ((iron.tags || []).length) {
-      const tr = document.createElement('div'); tr.className = 'itags';
-      iron.tags.forEach(t => {
-        const tg = document.createElement('span');
-        tg.className = 'itag'; tg.textContent = t;
-        tr.appendChild(tg);
-      });
-      card.appendChild(tr);
-    }
-    if (st.members.length) {
-      const mrow = document.createElement('div');
-      mrow.className = 'smeta';
-      mrow.textContent = st.members.map(r => (shortEmoji(r.emoji) ? shortEmoji(r.emoji) + ' ' : '') + r.name).join(' · ');
-      card.appendChild(mrow);
-    }
-    list.appendChild(card);
+    const card = list.querySelector(':scope > .ironcard[data-id="' + CSS.escape(iron.id) + '"]');
+    if (!card) return;
+    const fp = JSON.stringify([iron.title, iron.desc || '', iron.tags || [],
+      st.members.map(r => [r.emoji || '', r.name]), st.sessions, st.busy, st.waiting]);
+    if (card._ifp === fp) return;               // unchanged card: not one DOM touch
+    card._ifp = fp;
+    fillIronCard(card, iron, st);
   });
   applyIronFilter();            // honor live filter text after a repaint
   maybeRefreshIronDescs();      // looking at the list is what triggers (throttled) re-description
 }
+function fillIronCard(card, iron, st) {
+  card.innerHTML = '';
+  const row = document.createElement('div'); row.className = 'row';
+  const title = document.createElement('span');
+  title.className = 'stitle'; title.textContent = '🔥 ' + iron.title;
+  row.appendChild(title);
+  const pc = document.createElement('span');
+  pc.className = 'scount'; pc.textContent = `${st.members.length} proj`;
+  row.appendChild(pc);
+  if (st.waiting > 0) {
+    const w = document.createElement('span');
+    w.className = 'scount swait'; w.textContent = `⏳ ${st.waiting} needs you`;
+    row.appendChild(w);
+  }
+  if (st.busy > 0) {
+    const b = document.createElement('span');
+    b.className = 'scount swork'; b.textContent = `▶ ${st.busy} working`;
+    row.appendChild(b);
+  }
+  const sc = document.createElement('span');
+  sc.className = 'scount'; sc.textContent = `${st.sessions} sess`;
+  row.appendChild(sc);
+  const grab = document.createElement('span');
+  grab.className = 'irondrag'; grab.textContent = '⠿';
+  grab.title = 'drag to reorder — the list is your priority order';
+  grab.onpointerdown = (e) => startIronDrag(e, card);
+  row.appendChild(grab);
+  card.appendChild(row);
+  if (iron.desc || st.members.length) {
+    const d = document.createElement('div');
+    d.className = 'sdesc'; d.textContent = iron.desc || 'describing…';
+    card.appendChild(d);
+  }
+  if ((iron.tags || []).length) {
+    const tr = document.createElement('div'); tr.className = 'itags';
+    iron.tags.forEach(t => {
+      const tg = document.createElement('span');
+      tg.className = 'itag'; tg.textContent = t;
+      tr.appendChild(tg);
+    });
+    card.appendChild(tr);
+  }
+  if (st.members.length) {
+    const mrow = document.createElement('div');
+    mrow.className = 'smeta';
+    mrow.textContent = st.members.map(r => (shortEmoji(r.emoji) ? shortEmoji(r.emoji) + ' ' : '') + r.name).join(' · ');
+    card.appendChild(mrow);
+  }
+}
+// The ONE click listener for the whole irons list — delegated so a frame's
+// repaint can never eat a tap (the handler owns the container, which is
+// static; whichever card node is under the finger at release resolves here).
+document.getElementById('ironlist').addEventListener('click', (e) => {
+  if (e.target.closest('.irondrag')) return;    // grabbing the handle never opens the iron
+  const card = e.target.closest('.ironcard');
+  if (!card) return;
+  // the click a drag's pointerup mints must not dive into the iron
+  if (Date.now() - ironDragEndAt > 350) openIron(card.dataset.id);
+});
 // -- 🔎 filter (the projects-rung deal: type to narrow, Enter opens a lone
 // match, the box is a static node so repaints can't eat it or steal focus) ----
 let ironFilter = '';
@@ -7815,9 +7877,8 @@ function ironReorder(ids) {
 // Sessions burning in this iron — every session of every member project, tagged
 // the way allSessions() tags them so focusSession can cross machine/project.
 function ironSessions(iron) {
-  const ids = ironMemberIds(iron);
-  return allSessions().filter(s => FLEET ? (s._pkey && ids.includes(s._pkey))
-                                         : ids.includes(s.pid));
+  return allSessions().filter(s => FLEET ? (s._pkey && ironHasKey(iron, s._pkey))
+                                         : ironHasKey(iron, s.pid));
 }
 // -- ＋ create (irons page) + ✎ edit overlay: static nodes, wired once.
 // Create reads the ONE filter box — the text you typed to look for an iron is

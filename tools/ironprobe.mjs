@@ -388,6 +388,29 @@ check('… and dives the moment the sessions frame arrives',
       gap.after.view==='tty' && gap.after.cid==='ca1', JSON.stringify(gap.after));
 await page.evaluate(()=>navTo('irons'));
 
+// 6c. taps survive the repaint storm (2026-08-29 "clicking an iron does
+// NOTHING"): the list repaints on every frame from every machine, and the old
+// innerHTML='' rebuild destroyed the card under the finger between pointerdown
+// and click. Now (a) an unchanged card is left as the SAME DOM node across a
+// repaint, and (b) the click is delegated to #ironlist, so even a click whose
+// target card was rebuilt mid-tap still opens the iron.
+const tap = await page.evaluate(()=>{
+  navTo('irons');
+  const list=document.getElementById('ironlist');
+  const before=list.querySelector('.ironcard');
+  renderIronList(); renderIronList();            // two frame repaints
+  const sameNode = list.querySelector('.ironcard')===before;
+  // a rebuilt card (innards swapped) must still open via the delegated listener
+  const card=list.querySelector('.ironcard');
+  card._ifp=null; renderIronList();              // force a re-fill of this card
+  card.querySelector('.stitle').dispatchEvent(new MouseEvent('click',{bubbles:true}));
+  return { sameNode, view: currentView(), cid: currentCid };
+});
+check('repaints keep the card as the SAME node (taps can\'t die on a removed one)', tap.sameNode);
+check('the delegated click opens the iron even after a mid-tap re-fill',
+      tap.view==='tty' && tap.cid==='ca1', JSON.stringify(tap));
+await page.evaluate(()=>navTo('irons'));
+
 // 7. 🔎 filter (the projects-rung deal) + ⠿ drag-to-reorder priority
 await page.evaluate(()=>{
   ironCreate('metal','',[]);                       // second iron, via the real path

@@ -693,7 +693,18 @@ user-facing overview; this file orients an agent working **on** the code.
   "get me into that effort" keyboard path — and the SAME text is the name for
   the ＋ create button beside it (Enter never creates; only the button does).
   **There is no separate create form** — a second create UI shipped briefly on
-  2026-08-26 and was explicitly killed; don't bring it back. **An iron has NO page of its own**
+  2026-08-26 and was explicitly killed; don't bring it back. **The list obeys
+  "repaint, don't rebuild"** (2026-08-29 — the "clicking an iron does NOTHING"
+  bug): it repaints on every projects/sessions frame from every machine, and
+  the old `innerHTML=''` rebuild destroyed the card under a finger between
+  pointerdown and click, so taps died on removed nodes. Cards are reconciled
+  by iron id with a per-card content fingerprint (`_ifp` — an unchanged card
+  is not touched at all; only a membership/order change rebuilds shells), and
+  the open-click is **delegated to `#ironlist`**, never bound per-card.
+  Membership matching goes through `ironHasKey`/`ironKeyCanon`, which follows
+  the fleet's name→URL project-key fold — a session on a machine that reports
+  the repo without a URL (`name:<x>` key) still counts as inside an iron whose
+  stored key is the URL form. **An iron has NO page of its own**
   (the intermediate detail page was removed 2026-08-26): tapping an iron —
   from the list, a project card's 🔥 badge, or a `#/i/<id>` deep link — dives
   STRAIGHT into its warmest session (`openIron`), and the whole iron identity
