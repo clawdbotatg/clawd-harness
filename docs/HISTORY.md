@@ -722,8 +722,11 @@ user-facing overview; this file orients an agent working **on** the code.
   Membership matching goes through `ironHasKey`/`ironKeyCanon`, which follows
   the fleet's name→URL project-key fold — a session on a machine that reports
   the repo without a URL (`name:<x>` key) still counts as inside an iron whose
-  stored key is the URL form. **An iron has NO page of its own**
-  (the intermediate detail page was removed 2026-08-26): tapping an iron —
+  stored key is the URL form. **An iron with live sessions has no
+  intermediate page** (that always-on detail page was removed 2026-08-26;
+  2026-08-30 re-introduced a page for **sessionless** irons only — `#ironview`,
+  member project rows each with a ＋ spawn, doubling as the dive-wait's waiting
+  room): tapping an iron —
   from the list, a project card's 🔥 badge, or a `#/i/<id>` deep link — dives
   STRAIGHT into its warmest session (`openIron`), and the whole iron identity
   lives in ONE row (`#ironrow`, painted by `renderIronRow`) between the top

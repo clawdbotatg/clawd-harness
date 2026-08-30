@@ -68,7 +68,7 @@ viewer** (each with its own `client.cid`).
 | `addLocalProject` | `path`, `create?` | Register a folder anywhere on the machine's disk (absolute or `~` path) as a **private local project** (`kind:"local"`): sessions run inside it like any project, but the harness never runs gh/git-remote operations on it and never stores/broadcasts a repo URL. Synchronous — the project appears `ready` immediately. A path that **doesn't exist** is answered with `localProjectMissing` (the resolved absolute path) instead of an error, so the UI can confirm with the human; the retry with `create:true` then `mkdir -p`'s the folder and registers it. Rejected (with an `error` frame to the sender) for: paths that exist but aren't directories, `/` or `~` itself, paths under `projects/` (auto-managed) or the harness's own dir (the pinned self-project) — all guards run before any mkdir, so `create` can't be aimed at them. Re-adding the same resolved path is a no-op. |
 | `addExternalProject` | `repoUrl` | Adopt SOMEONE ELSE'S GitHub repo as an **external project** (`kind:"external"`). Async: the provisioning thread runs `gh repo view --json viewerPermission,defaultBranchRef,…` and decides — no push access → `gh repo fork <url> --clone` (origin = our fork under `GH_OWNER`, `upstream` = the source); push access → plain clone + an `upstream` remote pointing at the same repo, so every external project has the same remote shape. Records `upstream` + `defaultBranch`. Every session spawned in it is born with a standing rule (never commit/push the default branch; branch from `upstream/<default>`; push the branch to origin; `gh pr create --repo <upstream>`; report the PR link), and the server fast-forwards the default branch from upstream before each spawn so sessions never start stale. Lives under `projects/`, so removal is the delete-the-folder contract. Non-GitHub input is rejected with an `error` frame to the sender; re-adding a URL already cloned as a plain `gh` project converts it in place. |
 | `removeProject` | `pid` | Detach a `kind:"local"` project: drop its registry entry and close its sessions. **Never touches the folder on disk.** Silently ignored for gh projects (they keep the delete-the-folder contract below) and the pinned self-project. |
-| `ironCreate` | `title`, `desc?`, `tags?`, `pid?` | 🔥 create an **iron** — a named group of projects tracked as one effort (the UI has no iron page: tapping an iron dives straight into its sessions, with a one-row chrome over the scoped tab strip). Title trimmed/clipped (80 chars; blank refused), `desc` ≤400, `tags` ≤8×24 — though the UI sends a **title only**: the desc is AI-derived (`ironDescribe` below) and tags are edited later, never at creation. Optional `pid` assigns that project into the new iron in the same op (the UI picker's create-and-add). Persisted in the registry; broadcasts `irons`. **Direct mode only** — in fleet mode irons span machines, so the browser stores them relay-side (the relay `prefs` frame carries an `irons` field; member refs are projectKeys there, pids here) and these ops are never sent. |
+| `ironCreate` | `title`, `desc?`, `tags?`, `pid?` | 🔥 create an **iron** — a named group of projects tracked as one effort (tapping an iron dives straight into its warmest session, with a one-row chrome over the scoped tab strip; only a **sessionless** iron lands on its page, `#/i/<id>`, member project rows each with a ＋ spawn). Title trimmed/clipped (80 chars; blank refused), `desc` ≤400, `tags` ≤8×24 — though the UI sends a **title only**: the desc is AI-derived (`ironDescribe` below) and tags are edited later, never at creation. Optional `pid` assigns that project into the new iron in the same op (the UI picker's create-and-add). Persisted in the registry; broadcasts `irons`. **Direct mode only** — in fleet mode irons span machines, so the browser stores them relay-side (the relay `prefs` frame carries an `irons` field; member refs are projectKeys there, pids here) and these ops are never sent. |
 | `ironUpdate` | `id`, `title?`, `desc?`, `tags?` | Edit an iron's metadata in place (absent fields unchanged; blank title ignored). Broadcasts `irons`. |
 | `ironDelete` | `id` | Delete an iron. Its projects and their sessions are untouched — the grouping is pure metadata. Broadcasts `irons`. |
 | `ironAssign` | `pid`, `iron` | Put project `pid` into iron `iron` (**one iron per project** — assignment removes it from any other), or take it out of every iron with `iron:""`. Unknown pid/iron refused silently. A project dropped by the disk reconcile or `removeProject` is forgotten by every iron automatically. Broadcasts `irons`. |
@@ -169,6 +169,11 @@ no-op that would leave the previous session's stream flowing (that's how
 { "type":"localProjectMissing", "path" }               // to the sender of an addLocalProject whose
                                                        // path doesn't exist: the resolved absolute
                                                        // path — confirm, then retry with create:true
+{ "type":"irons", "irons":[...] }                      // re-broadcast on any iron op and when the
+                                                       // reconcile/removeProject drops a member pid
+                                                       // (same shape as the on-connect snapshot)
+{ "type":"ironDesc", "id", "desc" }                    // reply to the sender's ironDescribe (desc null
+                                                       // = naming unconfigured/failed; "" = throttled)
 ```
 
 ### Read-query replies (to the requesting client only)
@@ -185,6 +190,21 @@ no-op that would leave the previous session's stream flowing (that's how
 ---
 
 ## Object shapes
+
+### iron (and the fleet `prefs` form)
+```jsonc
+// direct mode — the harness `irons` frames above:
+{ "id", "title", "desc", "tags":[..], "pids":[..], "created":float, "rank":float }
+// fleet mode — the harness never sees irons; the browser stores the list in the
+// RELAY's `{type:"prefs", irons:[...]}` frame (both directions), one entry:
+{ "id", "title", "desc", "tags":[..], "keys":[..], "created":float }
+// `keys` (NOT pids): the fleet projectKeys the UI routes on, so a repo groups
+// once across machines. No rank — fleet priority is simply array order. The
+// relay sanitizes on write (clean_irons in fleet/relay.py: ≤64 irons, id ≤64,
+// title ≤80, desc ≤400, tags ≤8×24, keys ≤256×512, all code-point clipped) and
+// the browser mirrors that sanitizer exactly (index.html [irons-sanitizer]) —
+// its echo-ack depends on the two agreeing (fleet/test_irons_parity.py).
+```
 
 ### projectMeta
 ```jsonc

@@ -185,6 +185,28 @@ def main():
               and irons[0]["title"] == "keep")
         check("over-long texts are clipped",
               len(irons) == 2 and len(irons[1]["title"]) == 80 and len(irons[1]["desc"]) == 400)
+
+        # 8. a present-but-non-list field is a buggy client, NOT an empty list:
+        #    a string `irons` used to iterate as characters → sanitize to [] →
+        #    every iron on every device deleted. It must be ignored — and the
+        #    connection must survive junk that would once have raised.
+        in1.clear()
+        send1({"type": "prefs", "irons": "junk-string"})
+        send1({"type": "prefs", "irons": {"id": "x"}, "inactive": "ab"})
+        send1({"type": "prefs", "inactive": []})       # a valid write proves the socket is alive
+        after = wait_for(in1, lambda f: f.get("type") == "prefs")
+        check("non-list irons/inactive writes are ignored, not applied",
+              after and after.get("irons") and
+              [i["id"] for i in after["irons"]] == ["ok1", "ok3"])
+        check("the socket survives junk-typed writes", after is not None)
+
+        # 9. cap: the 65th iron is dropped by the sanitizer (the client refuses
+        #    earlier; this is the relay's own bound)
+        in1.clear()
+        send1({"type": "prefs",
+               "irons": [{"id": f"i{n}", "title": f"t{n}"} for n in range(70)]})
+        capped = wait_for(in1, lambda f: f.get("type") == "prefs" and f.get("irons"))
+        check("iron list capped at 64", capped and len(capped["irons"]) == 64)
     finally:
         for s in socks:
             try:

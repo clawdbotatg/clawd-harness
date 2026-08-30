@@ -107,13 +107,16 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
 6. **No file in this repo may quote the resume-modal option list verbatim**
    (a session replaying it would trip the PTY scan — the echo trap;
    `test_resume_gate.py` enforces).
-7. **Iron scope is entered only through irons** (list / `#/i/` link) — normal
-   session navigation never auto-enters an iron. Opening an iron dives into
-   its warmest session, waiting for session frames rather than mislabeling the
-   iron empty; only a **sessionless** iron lands on the iron page (`#ironview`
-   — member project rows, each with a ＋ that spawns a session *inside* the
-   iron; the page doubles as the dive-wait's waiting room). One create/filter
-   box; no second create form.
+7. **Iron scope is entered only through iron surfaces** — the list, a `#/i/`
+   link, a project card's 🔥 badge, or the picker (Ctrl+Space /
+   Enter-on-lone-match); normal session navigation never auto-enters an iron.
+   Opening an iron dives into its warmest session, waiting for session frames
+   rather than mislabeling the iron empty; only a **sessionless** iron lands
+   on the iron page (`#ironview` — member project rows, each with a ＋ that
+   spawns a session *inside* the iron; the page doubles as the dive-wait's
+   waiting room). The irons LIST has one combined create/filter box (never add
+   a second form there); the picker's create-and-assign is the one other
+   sanctioned create path.
 8. **Terminal is read-only on touch, always** — dictation through the
    composer, TUI menus through the key bar.
 9. **Never commit** runtime/secret files (`.clawd-harness.*`, uploads,

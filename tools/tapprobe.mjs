@@ -56,8 +56,8 @@ await page.evaluate(()=>{
 await page.waitForTimeout(400);
 check('isTouch is on under iPhone emulation', await page.evaluate(()=>isTouch));
 
-// The iron detail page (#ironbody) was removed 2026-08-26: opening a
-// member-less iron now lands the add-project picker directly over the list.
+// A MEMBER-less iron lands on the iron page (#ironview) with the add-project
+// picker auto-opened over it — adding a project is the only next step there.
 check('empty iron auto-opens the popup', await page.evaluate(()=>getComputedStyle(document.getElementById('ironaddmodal')).display!=='none'));
 
 // TAP THE THIRD ROW (index 2 ≠ ironAddSel 0) — the production gesture

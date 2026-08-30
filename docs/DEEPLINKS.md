@@ -24,6 +24,10 @@ Here a project is identified by its **local pid**.
 | One project's sessions | `#/p/<pid>` |
 | A session (transcript) | `#/p/<pid>/s/<cid>` |
 | A session (terminal) | `#/p/<pid>/s/<cid>/tty` |
+| 🔥 the irons list | `#/irons` |
+| One iron | `#/i/<ironId>` — dives into its warmest session; a sessionless iron lands on its page |
+| A session inside an iron's scope | `#/i/<ironId>/s/<cid>[/tty]` |
+| 📌 pin board | `#/pins` |
 
 `<pid>` = the project id (the self-project is `self`). `<cid>` = the stable
 console session id (NOT claude's rotating `session_id`).
@@ -40,6 +44,10 @@ the hash keys on that, not a per-machine pid. Two forms:
 | A session, machine inferred | `#/p/<projectKey>/s/<cid>` |
 | A session on a **specific machine** | `#/m/<machine>/p/<projectKey>/s/<cid>` |
 | …its terminal | `#/m/<machine>/p/<projectKey>/s/<cid>/tty` |
+
+The `#/irons`, `#/i/<ironId>` and `#/i/<ironId>/s/<cid>[/tty]` routes work the
+same in fleet mode (irons span machines; no `m/` prefix — the session resolver
+finds the cid anywhere on the fleet).
 
 ### ⚠️ Always include the machine for a session deep-link
 

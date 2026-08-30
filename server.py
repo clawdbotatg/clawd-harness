@@ -377,6 +377,10 @@ EXT_BY_CTYPE = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
                 "application/json": ".json", "text/yaml": ".yaml",
                 "text/xml": ".xml", "text/html": ".html"}
 REGISTRY_FILE = HERE / ".clawd-harness.sessions.json"   # persists projects+sessions across restarts
+# Serializes the tmp-write+replace in save_registry: two threads saving at once
+# (watch loop vs. a WS op) through one fixed tmp path can publish interleaved
+# bytes — an "atomic" write is only atomic if the tmp file has one writer.
+_REGISTRY_IO_LOCK = threading.Lock()
 # Every browser-initiated send is appended here (gitignored) — first-party data
 # for ranking the UI's quick-prompt chips (QUICK_PROMPTS in index.html; mined by
 # tools/mine_quick_prompts.py). `via:"quick"` marks a chip tap vs typed text.
@@ -4516,8 +4520,12 @@ class SessionManager:
             with self.lock:
                 p = self.projects.pop(pid, None)
                 cids = [c for c, s in self.sessions.items() if s.pid == pid]
-                if p and self._iron_forget_pid(pid):
-                    self.broadcast_irons()
+                iron_changed = bool(p) and self._iron_forget_pid(pid)
+            # Broadcast OUTSIDE the manager lock: a send blocks for as long as
+            # the slowest client's TCP buffer accepts bytes, and holding the
+            # lock through that freezes every session op in the process.
+            if iron_changed:
+                self.broadcast_irons()
             if not p:
                 continue
             what = ("failed clone/create entry expired" if p.status == "error"
@@ -4666,13 +4674,22 @@ class SessionManager:
         # Atomic write: a crash/power-cut mid-write must never leave a
         # truncated registry — _read_registry would fall back to {} and the
         # very next save would pave the wreckage over with an empty state
-        # (the "ALL my tabs rolled back" catastrophe).
+        # (the "ALL my tabs rolled back" catastrophe). The IO lock + pid'd tmp
+        # name keep concurrent saves from interleaving bytes in one tmp file
+        # and publishing garbage (which boot would then move aside as
+        # .corrupt — projects, sessions, accounts and irons all gone).
+        blob = json.dumps(data, indent=2)
         try:
-            tmp = REGISTRY_FILE.with_name(REGISTRY_FILE.name + ".tmp")
-            tmp.write_text(json.dumps(data, indent=2))
-            os.replace(tmp, REGISTRY_FILE)
-        except OSError:
-            pass
+            with _REGISTRY_IO_LOCK:
+                tmp = REGISTRY_FILE.with_name(
+                    REGISTRY_FILE.name + f".tmp{os.getpid()}")
+                tmp.write_text(blob)
+                os.replace(tmp, REGISTRY_FILE)
+        except OSError as e:
+            # Disk full / read-only FS: nothing persisted. Say so — a silent
+            # pass here means every restart quietly rolls the world back.
+            print(f"[registry] SAVE FAILED ({e}) — state not persisted",
+                  flush=True)
 
     # -- accounts: subscription logins + usage-aware routing --------------------
     def _ensure_default_account(self):
@@ -6824,10 +6841,33 @@ def generate_iron_desc(context):
     return d.strip()[:200] if isinstance(d, str) else ""
 
 
+_IRON_DESC_LAST = {}                     # iron id -> last accepted request ts
+_IRON_DESC_LOCK = threading.Lock()
+IRON_DESC_MIN_INTERVAL = 30.0            # per-iron floor between LLM calls
+
+
 def serve_iron_describe(client, frame):
     """Threaded `ironDescribe` op: stateless — the browser supplies the context
     (it owns iron storage in BOTH modes: relay prefs in fleet, iron ops here in
-    direct) and stores the reply itself. Replies to the sender only."""
+    direct) and stores the reply itself. Replies to the sender only.
+
+    Server-side per-iron throttle: the client's own throttle only engages once
+    a desc is STORED, so a gateway that answers garbage/empty (unconfigured,
+    failing) plus a list that repaints per frame meant continuous requests —
+    each one a spawned thread and a metered LLM call. A too-soon ask answers
+    desc:"" (the client keeps what it had and backs off) without touching the
+    gateway."""
+    iid = str(frame.get("id") or "")
+    now = time.time()
+    with _IRON_DESC_LOCK:
+        if now - _IRON_DESC_LAST.get(iid, 0.0) < IRON_DESC_MIN_INTERVAL:
+            client.send_json({"type": "ironDesc", "id": frame.get("id"),
+                              "desc": ""})
+            return
+        _IRON_DESC_LAST[iid] = now
+        if len(_IRON_DESC_LAST) > 512:   # ids are client-supplied — bound the memo
+            for k in sorted(_IRON_DESC_LAST, key=_IRON_DESC_LAST.get)[:256]:
+                _IRON_DESC_LAST.pop(k, None)
     desc = generate_iron_desc(str(frame.get("context") or "")[:6000])
     client.send_json({"type": "ironDesc", "id": frame.get("id"), "desc": desc})
 
@@ -7326,6 +7366,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Sec-WebSocket-Accept", accept)
         self.end_headers()
         self.close_connection = True
+        # Send-side deadline (SO_SNDTIMEO): a stalled viewer — dead cellular
+        # link, full TCP buffer — must fail its send (→ _Client marks itself
+        # dead) instead of blocking whoever is broadcasting, forever. Send-only
+        # on purpose: the recv side stays blocking (idle viewers are normal).
+        # Best-effort — a platform that rejects the timeval keeps old behavior.
+        try:
+            import socket as _sock
+            self.connection.setsockopt(_sock.SOL_SOCKET, _sock.SO_SNDTIMEO,
+                                       struct.pack("@qq", 20, 0))
+        except Exception:
+            pass
 
         client = _Client(self.wfile)
         MGR.add_client(client)
@@ -7354,7 +7405,20 @@ class Handler(BaseHTTPRequestHandler):
                     frame = json.loads(data.decode("utf-8"))
                 except Exception:
                     continue
-                self._dispatch(client, frame)
+                if not isinstance(frame, dict):
+                    continue
+                # One malformed frame (wrong-typed field, junk id) must not
+                # tear down the whole connection mid-session — every handler
+                # below assumes clean fields, so fence the dispatch.
+                try:
+                    self._dispatch(client, frame)
+                except Exception as e:
+                    ft = frame.get("type")
+                    print(f"[ws] dispatch error on {ft!r}: "
+                          f"{type(e).__name__}: {e}", flush=True)
+                    client.send_json({"type": "error",
+                                      "error": f"bad {ft!r} frame: "
+                                               f"{type(e).__name__}"})
         finally:
             MGR.remove_client(client)
             print("[ws] client disconnected", flush=True)

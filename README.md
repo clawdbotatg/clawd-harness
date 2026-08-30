@@ -74,18 +74,21 @@ Requires the `claude` CLI authenticated with a Claude subscription (OAuth, not a
 API key). Python 3, stdlib only.
 
 A **token** gates the WebSocket and `/hook` — printed at startup, persisted in
-`.clawd-harness.token`, or set via `CONSOLE_TOKEN`. The server binds `0.0.0.0` so
-it's reachable on your LAN; the token is the only thing gating command execution
-and the session runs with bypass-permissions — **don't expose it beyond a trusted
+`.clawd-harness.token`, or set via `CONSOLE_TOKEN`. The server binds
+**`127.0.0.1` by default** (localhost-only — remote access goes through the
+fleet relay's passkey/E2E stack). Set `BIND=0.0.0.0` to expose it on your LAN
+directly; the token is then the only thing gating command execution and the
+session runs with bypass-permissions — **don't do that beyond a trusted
 network.**
 
-Env knobs: `PORT` (8787), `BIND` (0.0.0.0), `WORKDIR` (cwd — where claude runs),
+Env knobs: `PORT` (8787), `BIND` (127.0.0.1), `WORKDIR` (cwd — where claude runs),
 `CLAUDE_BIN`, `COLS`/`ROWS` (120×34), `SEND_SETTLE` (1.5), `CONSOLE_TOKEN`.
 
 ### Phone / LAN
 
-Open `http://<lan-ip>:<port>/?t=<token>` on a phone on the same network for the
-same live session. (Both clients drive the one PTY and share its terminal size —
+With `BIND=0.0.0.0`, open `http://<lan-ip>:<port>/?t=<token>` on a phone on the
+same network for the same live session (the default localhost bind doesn't
+reach the LAN — the fleet relay is the supported remote path). (Both clients drive the one PTY and share its terminal size —
 fine for a prototype.)
 
 ### Run as a daemon (survives closing the terminal)

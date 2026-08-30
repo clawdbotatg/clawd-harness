@@ -1700,6 +1700,8 @@ let projectList = [];           // latest project metadata for the resolved mach
 let perMachine = {};            // machineId -> { projectList, sessionList, gotProjects, gotSessions }
 let unifiedProjects = new Map();// projectKey -> { key, name, repoUrl, pinned, machines:[{machineId,pid,online,sessionCount,busyCount,waitingCount,status}] }
 let projectKeyAlias = new Map();// folded key -> surviving group key (name:<name> strays merged into their URL group)
+let ironBasenameIndex = new Map();// repo basename -> URL-group key — resolves STORED name:<x> iron members
+                                  // whose name-keyed group no longer exists (see ironKeyCanon)
 let currentProjectKey = null;   // identity key of the open project (fleet); direct mode leaves this null
 let newSessionMachine = null;   // fleet: which of the open project's machines a new session spawns on (the ＋ selector)
 let projectFilter = '';         // live filter text in the projects add/search box
@@ -1919,6 +1921,12 @@ function setRelayAuthed() {
   const flushed = new Set(relayOutbox);   // frames the flush below delivers — don't double-send those
   relayAuthed = true;
   flushRelayOutbox();
+  // An iron edit whose prefs frame queued against a socket that DIED before
+  // authing was wiped with that socket's outbox (connect() resets it). The
+  // durable intent is ironsDirty + ironList — re-push them on every fresh
+  // auth, fresh clock, so the relay's follow-up prefs frame (its stale copy)
+  // reads as the race it is and our edit wins instead of being "too old".
+  if (ironsDirty) ironsPush();
   // Handshakes stranded by a socket flap (preserved by onclose): their last ctl
   // frame — hello / resume / ClientAuth — or the worker's reply died with the old
   // socket. Re-deliver the unanswered frame exactly once on this authed socket;
@@ -3971,6 +3979,12 @@ function mergeProjects() {
     const base = normRepo(g.repoUrl).split('/').pop();
     if (base && !byBasename.has(base)) byBasename.set(base, g);   // first URL group wins ties
   }
+  // Kept beyond this pass: an iron member stored as `name:<x>` while the repo
+  // URL was unknown (mid-clone, legacy registry) outlives the name-keyed
+  // GROUP — once every machine reports the URL there's no stray to fold and
+  // no alias, and without this index the membership silently orphans (iron
+  // shows "0 proj", its sessions invisible). ironKeyCanon falls back to it.
+  ironBasenameIndex = new Map([...byBasename].map(([base, g]) => [base, g.key]));
   const alias = new Map();
   for (const [key, g] of [...map]) {
     if (!key.startsWith('name:')) continue;
@@ -7495,7 +7509,16 @@ function ironById(id) { return ironList.find(i => i.id === id) || null; }
 function ironKeyCanon(k) {
   if (!FLEET || !k) return k;
   const g = projectGroup(k);
-  return (g && g.key) || k;
+  if (g) return g.key;
+  // A stored `name:<x>` whose machine has since learned the repo URL: the
+  // name-keyed group (and its fold alias) are gone, so resolve by the same
+  // basename match the unify pass uses — membership must survive a key form
+  // retiring, or the iron orphans with no self-heal.
+  if (k.startsWith('name:')) {
+    const t = ironBasenameIndex.get(k.slice(5).toLowerCase());
+    if (t) return t;
+  }
+  return k;
 }
 function ironHasKey(iron, rowId) {
   const ids = ironMemberIds(iron);
@@ -7505,8 +7528,10 @@ function ironHasKey(iron, rowId) {
 }
 function ironForRow(rowId) { return ironList.find(i => ironHasKey(i, rowId)) || null; }
 // One receive path for both modes (relay prefs echo / harness broadcast).
+let ironsLoaded = false;   // first irons/prefs frame landed — "unknown iron" is now a fact, not "still loading"
 function applyIrons(list) {
   const incoming = Array.isArray(list) ? list : [];
+  ironsLoaded = true;
   if (FLEET && ironsDirty) {
     // A local edit the relay hasn't echoed back yet. Applying a non-matching
     // server copy here would silently EAT the edit (the 2026-08-26 "added a
@@ -7514,8 +7539,11 @@ function applyIrons(list) {
     // gate, next prefs frame reverts). Matching echo = confirmation; a stale
     // copy racing our in-flight write gets our list re-pushed instead — the
     // relay sends prefs right after authOk, so that frame is the retry bell.
-    if (ironsFp(incoming) === ironsFp(ironList)) ironsDirty = false;
-    else if (Date.now() - ironsPushedAt < 15e3) { ironsPush(); return; }
+    // The retry does NOT reset ironsPushedAt (see ironsPush): the 15s escape
+    // must stay reachable, or a genuine mismatch loops push/echo forever.
+    if (ironsFp(incoming) === ironsFp(ironList)) { ironsDirty = ironsSoft = false; }
+    else if (ironsSoft) { ironsDirty = ironsSoft = false; }  // machine-derived desc lost a race to a real edit — take the server's; the desc re-derives
+    else if (Date.now() - ironsPushedAt < 15e3) { ironsPush(true); return; }
     else ironsDirty = false;             // too old to be a race — accept the server's truth
   }
   ironList = incoming;
@@ -7529,25 +7557,77 @@ function applyIrons(list) {
 // Fleet: push the whole list; the relay persists it and echoes it to every
 // device (the echo is the ack — ironsDirty stays up until it lands). NEVER
 // silently drop: relaySend queues behind the auth gate, so an edit made while
-// the phone's socket is still re-authing after wake goes out when it opens.
+// the phone's socket is still re-authing after wake goes out when it opens
+// (and setRelayAuthed re-pushes a still-dirty list in case that queue died
+// with its socket — connect() clears relayOutbox on every dial).
 let ironsDirty = false, ironsPushedAt = 0;
-// Semantic fingerprint mirroring the relay's clean_irons (trim/clip), so a
-// sanitizer-normalized echo still reads as "our write, confirmed".
+let ironsSoft = false;   // the pending push is ONLY a machine-derived desc — lose ties to real edits
+// Verbatim mirror of the relay's clean_irons (fleet/relay.py). The echo-ack
+// above compares fingerprints of the SANITIZED forms, so these two copies
+// must agree byte-for-byte on every input or edits re-push forever;
+// fleet/test_irons_parity.py runs this exact block under node against the
+// Python original. Python slices CODE POINTS, JS strings index UTF-16 units —
+// hence Array.from before every clip.
+// [irons-sanitizer-begin]
+const IRONS_MAX = 64, IRON_MAX_MEMBERS = 256;
+function cpLen(s) { return Array.from(s).length; }
+function cpClip(s, n) { const a = Array.from(s); return a.length > n ? a.slice(0, n).join('') : s; }
+function cleanIrons(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [], seen = new Set();
+  for (const e of list.slice(0, IRONS_MAX)) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
+    const iid = e.id, title = e.title;
+    if (typeof iid !== 'string' || !iid.length || cpLen(iid) > 64 || seen.has(iid)) continue;
+    if (typeof title !== 'string' || !title.trim()) continue;
+    seen.add(iid);
+    const tags = Array.isArray(e.tags) ? e.tags : [];
+    const keys = Array.isArray(e.keys) ? e.keys : [];
+    out.push({
+      id: iid,
+      title: cpClip(title.trim(), 80),
+      desc: cpClip(typeof e.desc === 'string' ? e.desc : '', 400),
+      tags: tags.slice(0, 8).filter(t => typeof t === 'string' && t.trim()).map(t => cpClip(t.trim(), 24)),
+      keys: keys.slice(0, IRON_MAX_MEMBERS).filter(k => typeof k === 'string' && k.length > 0 && cpLen(k) <= 512),
+      created: (typeof e.created === 'number' && isFinite(e.created)) ? e.created : 0,
+    });
+  }
+  return out;
+}
+// [irons-sanitizer-end]
+// Semantic fingerprint: both sides pass through the SAME sanitizer, so the
+// relay's normalized echo reads as "our write, confirmed". Direct mode has no
+// sanitizer round-trip (pids stay pids) — fingerprint the raw member list.
 function ironsFp(l) {
+  if (FLEET) return JSON.stringify(cleanIrons(l).map(i => [i.id, i.title, i.desc, i.tags, i.keys, i.created]));
   return JSON.stringify((l || []).map(i => [i.id, String(i.title || '').trim().slice(0, 80),
     String(i.desc || '').slice(0, 400),
     (i.tags || []).map(t => String(t).trim().slice(0, 24)).filter(Boolean),
-    (i.keys || i.pids || []).slice(), i.created || 0]));
+    (i.pids || []).slice(), i.created || 0]));
 }
-function ironsPush() {
+function ironsPush(isRetry, soft) {
   if (!FLEET) return;
+  // Normalize LOCALLY before sending: what we hold is then exactly what the
+  // relay stores and echoes (any cap/clip shows in the UI immediately instead
+  // of surfacing as a mismatched echo), and the ack is a trivial match.
+  ironList = cleanIrons(ironList);
   relaySend({ type: 'prefs', irons: JSON.parse(JSON.stringify(ironList)) });
-  ironsDirty = true; ironsPushedAt = Date.now();
+  // Only a FRESH push starts the race-window clock; the applyIrons retry
+  // keeps the original timestamp so the 15s escape can actually fire.
+  if (!isRetry) ironsPushedAt = Date.now();
+  ironsSoft = soft ? (ironsDirty ? ironsSoft : true) : false;   // a real edit always outranks a desc store
+  ironsDirty = true;
 }
 function ironNewId() { return 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 function parseIronTags(csv) { return (csv || '').split(',').map(t => t.trim()).filter(Boolean).slice(0, 8); }
 function ironCreate(title, desc, tags) {
   title = (title || '').trim(); if (!title) return null;
+  if (FLEET && ironList.length >= IRONS_MAX) {
+    // The relay hard-caps the list at IRONS_MAX; pushing a 65th would make
+    // the sanitizer silently drop the tail. Refuse visibly instead.
+    meta.textContent = `🔥 cap: ${IRONS_MAX} irons — delete one first`;
+    return null;
+  }
   if (FLEET) {
     const iron = { id: ironNewId(), title, desc: (desc || '').trim(), tags: tags || [],
                    keys: [], created: Date.now() / 1000 };
@@ -7607,6 +7687,12 @@ function openIron(id) {
   setIronFilter('');            // clear on the way in, so coming back shows all (projects-rung rule)
   currentIronId = id;
   const iron = ironById(id);
+  if (!iron && ironsLoaded) {
+    // The irons list HAS landed and this id isn't in it — a deep link to a
+    // deleted iron. Land on the list, not a zombie "loading…" page that only
+    // an unrelated edit would ever unstick.
+    currentIronId = null; setView('irons'); return;
+  }
   if (iron) {
     const rail = ironRail(iron);
     if (rail.length) { ironScope = id; focusSession(rail[0]); return; }
@@ -7818,11 +7904,19 @@ document.getElementById('ironlist').addEventListener('click', (e) => {
 function renderIronDetail() {
   const iron = ironById(currentIronId);
   document.getElementById('ironvtitle').textContent = '🔥 ' + (iron ? iron.title : '…');
-  document.getElementById('ironvdesc').textContent =
-    iron ? (iron.desc || (ironMemberIds(iron).length ? 'describing…' : 'no projects in this iron yet')) : 'loading…';
   const list = document.getElementById('ironvlist');
-  if (!iron) { list.innerHTML = ''; delete list.dataset.ids; return; }
+  if (!iron) {
+    document.getElementById('ironvdesc').textContent = 'loading…';
+    list.innerHTML = ''; delete list.dataset.ids; return;
+  }
   const st = ironStats(iron);
+  // Placeholder keys off RESOLVED members: an iron whose stored keys no
+  // longer match any machine's projects (all deleted) can't be described —
+  // "describing…" there would be a permanent lie.
+  document.getElementById('ironvdesc').textContent =
+    iron.desc || (st.members.length ? 'describing…'
+      : ironMemberIds(iron).length ? 'its projects aren’t on any machine right now'
+      : 'no projects in this iron yet');
   const byRow = new Map();                       // member sessions grouped under their project row
   for (const s of ironSessions(iron)) {
     const k = FLEET ? ironKeyCanon(s._pkey) : s.pid;
@@ -8216,6 +8310,7 @@ ironAddInput.addEventListener('keydown', (e) => {
 // device sees the same sentence without ever asking twice.
 const ironDescMeta = {};              // iron id -> {key, at, inflight} — per-browser throttle
 const IRON_DESC_TTL = 3600e3;         // re-describe an untouched iron at most hourly
+const IRON_DESC_RETRY = 600e3;        // an EMPTY answer (gateway unconfigured/failing) backs off too — else the repaint loop re-asks at round-trip rate
 function ironDescContext(iron) {
   const ids = ironMemberIds(iron);
   const rows = projectRows().filter(r => ids.includes(r.id));
@@ -8245,7 +8340,10 @@ function requestIronDesc(iron) {
   const key = ironMemberIds(iron).slice().sort().join('|');
   const now = Date.now();
   if (m.inflight && now - m.inflight < 30e3) return;            // one ask at a time
-  if (key === m.key && iron.desc && now - m.at < IRON_DESC_TTL) return;   // fresh + unchanged
+  // Fresh + unchanged → hold. The backoff applies with or WITHOUT a stored
+  // desc: m.at is set on every reply (onIronDesc), so a failing gateway is
+  // re-asked every IRON_DESC_RETRY, not on every repaint.
+  if (key === m.key && m.at && now - m.at < (iron.desc ? IRON_DESC_TTL : IRON_DESC_RETRY)) return;
   const ctx = ironDescContext(iron);
   if (!ctx) return;
   const frame = { type: 'ironDescribe', id: iron.id, context: ctx };
@@ -8260,7 +8358,11 @@ function onIronDesc(m) {
   if (typeof m.desc !== 'string' || !m.desc) return;   // naming unconfigured / call failed → keep what we had
   const iron = ironById(m.id);
   if (!iron || iron.desc === m.desc) return;
-  if (FLEET) { iron.desc = m.desc; ironsPush(); renderIronLive(); }
+  // soft push: a machine-derived desc must never clobber another device's
+  // concurrent REAL edit — on an echo mismatch it yields (applyIrons) and the
+  // desc simply re-derives later, instead of whole-list last-write-wins
+  // eating an edit because someone merely LOOKED at an iron page.
+  if (FLEET) { iron.desc = m.desc; ironsPush(false, true); renderIronLive(); }
   else ironUpdate(m.id, { desc: m.desc });             // broadcast repaints
 }
 
@@ -8455,6 +8557,9 @@ function currentView() {
 // machine is NOT in the URL: it's a per-project preference, resolved from the default.
 // Shapes (both modes): `#/` projects · `#/p/<key>` sessions · `…/s/<cid>` transcript ·
 // `…/s/<cid>/tty` tty. `<key>` is the project identity in fleet, the pid in direct mode.
+// Top-level views: `#/pm` · `#/pins` · `#/irons` (the 🔥 list). One iron:
+// `#/i/<id>` (its page, or a dive into its warmest session) ·
+// `#/i/<id>/s/<cid>[/tty]` (a session opened inside that iron's scope).
 function parseHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   const nav = { view: 'projects', key: null, cid: null, machine: null, iron: null };

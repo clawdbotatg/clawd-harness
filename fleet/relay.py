@@ -224,9 +224,12 @@ MAX_MACHINE_ID = 64
 def clean_inactive(ids):
     """Sanitize a client-supplied deny-list before it reaches disk. This is the
     one place a mobile writes persistent state on a shared production box, so
-    it's bounded and typed rather than trusted."""
+    it's bounded and typed rather than trusted. Non-list input is junk, not an
+    empty list — a STRING here would iterate as 1-char machine ids."""
+    if not isinstance(ids, list):
+        return []
     out = []
-    for x in (ids or [])[:MAX_INACTIVE]:
+    for x in ids[:MAX_INACTIVE]:
         if isinstance(x, str) and 0 < len(x) <= MAX_MACHINE_ID and x not in out:
             out.append(x)
     return out
@@ -243,8 +246,17 @@ MAX_IRON_MEMBERS = 256
 
 
 def clean_irons(irons):
+    # The browser mirrors this function verbatim (index.html [irons-sanitizer]:
+    # cleanIrons) and fingerprints its OWN list through it to recognize the
+    # relay's echo as its ack — any divergence between the two copies turns
+    # every edit into an echo-mismatch re-push loop. Change them TOGETHER;
+    # fleet/test_irons_parity.py holds them byte-for-byte equal. (JS strings
+    # index UTF-16 units, so the mirror slices code points via Array.from —
+    # same unit Python's str slicing uses.)
+    if not isinstance(irons, list):      # a string would iterate as characters
+        return []
     out, seen = [], set()
-    for e in (irons or [])[:MAX_IRONS]:
+    for e in irons[:MAX_IRONS]:
         if not isinstance(e, dict):
             continue
         iid, title = e.get("id"), e.get("title")
@@ -254,11 +266,15 @@ def clean_irons(irons):
             continue
         seen.add(iid)
         desc = e.get("desc") if isinstance(e.get("desc"), str) else ""
-        created = e.get("created") if isinstance(e.get("created"), (int, float)) else 0
+        tags = e.get("tags") if isinstance(e.get("tags"), list) else []
+        keys = e.get("keys") if isinstance(e.get("keys"), list) else []
+        created = e.get("created")
+        if isinstance(created, bool) or not isinstance(created, (int, float)):
+            created = 0
         out.append({"id": iid, "title": title.strip()[:80], "desc": desc[:400],
-                    "tags": [t.strip()[:24] for t in (e.get("tags") or [])[:8]
+                    "tags": [t.strip()[:24] for t in tags[:8]
                              if isinstance(t, str) and t.strip()],
-                    "keys": [k for k in (e.get("keys") or [])[:MAX_IRON_MEMBERS]
+                    "keys": [k for k in keys[:MAX_IRON_MEMBERS]
                              if isinstance(k, str) and 0 < len(k) <= 512],
                     "created": created})
     return out
@@ -269,16 +285,31 @@ def load_prefs():
         raw = json.loads(PREFS_FILE.read_text())
         return {"inactive": clean_inactive(raw.get("inactive")),
                 "irons": clean_irons(raw.get("irons"))}
-    except Exception:
+    except FileNotFoundError:
+        return {"inactive": [], "irons": []}
+    except Exception as e:
+        # A corrupt prefs file means every iron + the machines deny-list are
+        # about to look empty — and the FIRST client write would persist that
+        # loss. Loud, so a truncated file is evidence, not a mystery wipe.
+        print(f"[relay] PREFS FILE UNREADABLE ({e}) — starting empty; "
+              f"inspect {PREFS_FILE} before the next write pave it over",
+              flush=True)
         return {"inactive": [], "irons": []}
 
 
 def save_prefs(prefs):
+    # tmp + os.replace + 0600, same as the sessions file ten lines up: a crash
+    # mid-write must never leave a truncated file (see load_prefs), and iron
+    # titles/repo keys are user data on a shared box — no default-perm copies.
     with _prefs_lock:
         try:
-            PREFS_FILE.write_text(json.dumps(prefs))
-        except Exception:
-            pass
+            tmp = PREFS_FILE.with_name(PREFS_FILE.name + f".tmp{os.getpid()}")
+            tmp.write_text(json.dumps(prefs))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, PREFS_FILE)
+        except OSError as e:
+            print(f"[relay] prefs SAVE FAILED ({e}) — irons/deny-list edits "
+                  f"not persisted", flush=True)
 
 
 def find_passkey(cred_id):
@@ -706,12 +737,20 @@ class Relay:
             # reaches disk never silently looks applied. Only fields PRESENT in
             # the frame are overwritten — an irons-only write must not blow away
             # the machines deny-list (the client sends them separately).
+            # A present-but-non-list field is a buggy client, not an empty
+            # list: sanitizing it to [] would delete every iron (or re-enable
+            # every machine) on every device. Ignore it, loudly.
+            junk = [f for f in ("inactive", "irons")
+                    if f in frame and not isinstance(frame.get(f), list)]
+            if junk:
+                print(f"[relay] prefs write IGNORED non-list field(s): "
+                      f"{', '.join(junk)}", flush=True)
             parts = []
             with self.lock:
-                if "inactive" in frame:
+                if isinstance(frame.get("inactive"), list):
                     self.prefs["inactive"] = clean_inactive(frame.get("inactive"))
                     parts.append(f"{len(self.prefs['inactive'])} machine(s) switched off")
-                if "irons" in frame:
+                if isinstance(frame.get("irons"), list):
                     self.prefs["irons"] = clean_irons(frame.get("irons"))
                     parts.append(f"{len(self.prefs['irons'])} iron(s)")
                 snapshot = dict(self.prefs)
@@ -1116,10 +1155,19 @@ class Handler(BaseHTTPRequestHandler):
                     frame = json.loads(data.decode("utf-8"))
                 except Exception:
                     continue
-                if role == "worker":
-                    RELAY.from_worker(conn, frame)
-                else:
-                    RELAY.from_mobile(conn, frame)
+                if not isinstance(frame, dict):
+                    continue
+                # One malformed frame must not tear down the connection (and
+                # with it every tunneled session this peer is carrying).
+                try:
+                    if role == "worker":
+                        RELAY.from_worker(conn, frame)
+                    else:
+                        RELAY.from_mobile(conn, frame)
+                except Exception as e:
+                    print(f"[relay] {role} dispatch error on "
+                          f"{frame.get('type')!r}: {type(e).__name__}: {e}",
+                          flush=True)
         finally:
             conn.dead = True
             if role == "worker":
