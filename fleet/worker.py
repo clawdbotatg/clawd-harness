@@ -113,6 +113,142 @@ _load_env_file()
 # enabled — even a leaked mobile token then can't get a raw remote shell.
 ALLOW_EXEC = os.environ.get("FLEET_ALLOW_EXEC", "").lower() in ("1", "true", "yes")
 
+# ── fleet skills sync ────────────────────────────────────────────────────────
+# The relay holds the PRIVATE fleet skills library (.clawd-fleet.skills/ on the
+# box — see relay.py + docs/fleet/SKILLS.md). Every worker pulls it over the
+# token-gated HTTP endpoints and installs into ~/.claude/skills/, which
+# server.py's SHARE_PATHS symlink already fans into every account — so every
+# session on every machine natively sees every fleet skill within minutes of a
+# `skillput`. The worker owns this (not server.py) to keep the fleet↔harness
+# boundary: fleet code writes plain files; the harness just reads its own disk.
+# State (~/.clawd-fleet.skills.json) tracks what WE installed, per skill and per
+# file — deletions remove only tracked files, so repo-synced skills (todo) and
+# hand-placed ones are never touched.
+SKILLS_SYNC = os.environ.get("FLEET_SKILLS_SYNC", "1") != "0"
+SKILLS_SYNC_INTERVAL = float(os.environ.get("FLEET_SKILLS_SYNC_INTERVAL", "300"))
+SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def _skills_http_base(relay_url):
+    if relay_url.startswith("wss://"):
+        return "https://" + relay_url[len("wss://"):]
+    if relay_url.startswith("ws://"):
+        return "http://" + relay_url[len("ws://"):]
+    return relay_url
+
+
+def _ok_skill_relpath(p):
+    """Same fence as the relay's — never trust the wire even on our own fleet:
+    relative, shallow, no dot-segments/dotfiles."""
+    if not isinstance(p, str) or not p or "\\" in p or len(p) > 200:
+        return False
+    parts = p.split("/")
+    if len(parts) > 4:
+        return False
+    return all(seg and seg not in (".", "..") and not seg.startswith(".")
+               for seg in parts)
+
+
+def _skill_roots(home):
+    """Where skills install: ~/.claude/skills covers every symlinked account;
+    an account whose skills/ is a REAL dir opted out of the symlink, so write
+    there directly too (same roots rule as server.py's _sync_shared_kit)."""
+    roots = [home / ".claude" / "skills"]
+    try:
+        for acc in sorted((home / ".clawd-accounts").iterdir()):
+            sk = acc / "skills"
+            if sk.is_dir() and not sk.is_symlink():
+                roots.append(sk)
+    except OSError:
+        pass
+    return roots
+
+
+def _skills_fetch_json(url):
+    with urllib.request.urlopen(url, timeout=30) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def sync_skills_once(base, token, home, state_file=None):
+    """One manifest pull + install/update/delete pass. Returns a list of
+    human-readable change lines ([] = already in sync). Raises on a fetch
+    failure (caller logs + retries next tick)."""
+    state_file = state_file or (home / ".clawd-fleet.skills.json")
+    try:
+        state = json.loads(state_file.read_text()).get("managed") or {}
+    except Exception:
+        state = {}
+    man = _skills_fetch_json(f"{base}/skills/manifest?t={quote(token)}")
+    remote = {s["name"]: s for s in man.get("skills") or []
+              if SKILL_NAME_RE.match(s.get("name") or "")}
+    roots = _skill_roots(home)
+    changed = []
+
+    for name, meta in remote.items():
+        old = state.get(name)
+        if old and old.get("rev") == meta.get("rev"):
+            continue
+        got = _skills_fetch_json(f"{base}/skills/get?name={quote(name)}&t={quote(token)}")
+        files = {p: base64.b64decode(b64)
+                 for p, b64 in (got.get("files") or {}).items()
+                 if _ok_skill_relpath(p)}
+        if "SKILL.md" not in files:
+            continue
+        for root in roots:
+            for p, body in files.items():
+                dst = root / name / p
+                try:
+                    if dst.exists() and not dst.is_symlink() and dst.read_bytes() == body:
+                        continue
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = dst.parent / (dst.name + ".tmp")
+                    tmp.write_bytes(body)
+                    tmp.replace(dst)
+                except OSError as e:
+                    print(f"{ts()} [skills] {dst}: {e}", flush=True)
+            # files we installed before that this rev no longer ships
+            for p in (old or {}).get("files") or []:
+                if p not in files and _ok_skill_relpath(p):
+                    try:
+                        (root / name / p).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        state[name] = {"rev": meta.get("rev"), "files": sorted(files)}
+        changed.append(f"{'updated' if old else 'installed'} {name}")
+
+    for name in [n for n in state if n not in remote]:
+        # gone from the library → remove ONLY what we tracked, prune empty dirs
+        for root in roots:
+            for p in state[name].get("files") or []:
+                if not _ok_skill_relpath(p):
+                    continue
+                try:
+                    (root / name / p).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            d = root / name
+            for sub in sorted((x for x in d.rglob("*") if x.is_dir()),
+                              reverse=True) if d.is_dir() else []:
+                try:
+                    sub.rmdir()
+                except OSError:
+                    pass
+            try:
+                d.rmdir()
+            except OSError:
+                pass   # not empty (user files) — leave it
+        del state[name]
+        changed.append(f"removed {name}")
+
+    if changed:
+        try:
+            tmp = state_file.with_name(state_file.name + ".tmp")
+            tmp.write_text(json.dumps({"managed": state}))
+            tmp.replace(state_file)
+        except OSError as e:
+            print(f"{ts()} [skills] state save failed: {e}", flush=True)
+    return changed
+
 # End-to-end channel (fleet-e2e/1). The worker independently verifies a
 # channel-bound passkey and encrypts ALL harness traffic, so a compromised relay
 # can neither drive this machine nor read its sessions. See docs/fleet/E2E-PROTOCOL.md.
@@ -1144,12 +1280,25 @@ class Worker:
                   + (" (viewer attached — max wait hit)" if busy else ""), flush=True)
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
+    def skills_sync_loop(self):
+        base = _skills_http_base(self.relay)
+        while True:
+            try:
+                for line in sync_skills_once(base, self.token, Path.home()):
+                    print(f"{ts()} [worker {self.machine}] skills: {line}", flush=True)
+            except Exception as e:
+                print(f"{ts()} [worker {self.machine}] skills sync failed "
+                      f"(retrying in {SKILLS_SYNC_INTERVAL:.0f}s): {e}", flush=True)
+            time.sleep(SKILLS_SYNC_INTERVAL)
+
     def run(self):
         # A relay node has no harness behind it, so there are no stats to poll —
         # skip the loop (it would just spam "Connection refused" forever).
         if self.kind != "relay":
             threading.Thread(target=self.stats_loop, daemon=True).start()
             threading.Thread(target=self.sysstats_loop, daemon=True).start()
+            if SKILLS_SYNC:
+                threading.Thread(target=self.skills_sync_loop, daemon=True).start()
         if SELF_RESTART:
             threading.Thread(target=self.update_watch_loop, daemon=True).start()
         backoff = 1.0

@@ -212,6 +212,16 @@ Corollary directions baked into the design:
 - **gotcha:** `pkill -f "worker.py"` over SSH matches its own command line and
   kills the shell (exit 255). Use the bracket trick: `pkill -f "[w]orker.py"`.
 
+## Fleet skills library (2026-08-30)
+The relay box also holds the **private skill library** (`.clawd-fleet.skills/`,
+gitignored, worker-token-gated HTTP: `/skills/manifest|get|put`); every worker
+syncs it into `~/.claude/skills/` (`sync_skills_once`, ~5 min cadence, state in
+`~/.clawd-fleet.skills.json` — deletions touch only tracked files). Publish
+with `share/bin/skillput`; the UI's 📚 picker lists + auto-sends them. This
+respects the boundary: the worker writes plain files, the harness just reads
+its own disk (`skillsList` frame). **Deep doc: `../docs/fleet/SKILLS.md`**;
+test: `test_skills_sync.py`.
+
 ## Deep docs
 - **`../docs/fleet/ADD-MACHINE.md`** — self-contained checklist to add a new
   machine to the fleet (the doc to hand a fresh Claude on the new box). Covers the

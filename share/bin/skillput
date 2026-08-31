@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""skillput — publish a skill to the PRIVATE fleet skills library.
+
+The library lives on the relay box (gitignored `.clawd-fleet.skills/`, served
+over token-gated HTTP — fleet/relay.py); every fleet machine's worker syncs it
+into ~/.claude/skills/ within ~5 minutes, where the harness's account symlinks
+fan it into every session. Deep doc: docs/fleet/SKILLS.md in clawd-harness.
+
+Usage:
+    skillput <skill-dir>       publish (dir name = skill name; needs SKILL.md)
+    skillput list              list the library (name — description)
+    skillput rm <name>         delete a skill from the library (everywhere)
+
+Config (env wins, then the harness checkout's fleet/fleet.env):
+    FLEET_RELAY         wss://h.atg.link (→ https for these calls)
+    FLEET_WORKER_TOKEN  the worker token (FLEET_TOKEN also accepted)
+
+⚠ Skills may hold LAN-internal detail (the store is private) but NEVER raw
+credentials — reference a per-box env file (the todo pattern) so nothing
+leaks if a machine is lost. Exit codes: 0 ok, 1 error.
+"""
+import base64
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from urllib.parse import quote
+
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+ENV_CANDIDATES = [
+    Path(os.environ.get("CLAWD_HARNESS_DIR", "")) / "fleet" / "fleet.env",
+    Path.home() / "clawd" / "clawd-harness" / "fleet" / "fleet.env",
+    Path.home() / "clawd-harness" / "fleet" / "fleet.env",
+]
+
+
+def load_cfg():
+    cfg = {}
+    for f in ENV_CANDIDATES:
+        try:
+            if not f.is_file():
+                continue
+        except OSError:
+            continue
+        for line in f.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                cfg.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        break
+    relay = os.environ.get("FLEET_RELAY") or cfg.get("FLEET_RELAY") or ""
+    token = (os.environ.get("FLEET_WORKER_TOKEN") or os.environ.get("FLEET_TOKEN")
+             or cfg.get("FLEET_WORKER_TOKEN") or cfg.get("FLEET_TOKEN") or "")
+    if relay.startswith("wss://"):
+        relay = "https://" + relay[len("wss://"):]
+    elif relay.startswith("ws://"):
+        relay = "http://" + relay[len("ws://"):]
+    if not relay or not token:
+        sys.exit("skillput: no relay config — set FLEET_RELAY + FLEET_WORKER_TOKEN "
+                 "(env, or fleet/fleet.env in the clawd-harness checkout)")
+    return relay.rstrip("/"), token
+
+
+def call(url, payload=None):
+    req = urllib.request.Request(url, method="POST" if payload is not None else "GET",
+                                 data=json.dumps(payload).encode() if payload is not None else None,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read().decode()).get("error", "")
+        except Exception:
+            err = ""
+        sys.exit(f"skillput: {e.code} {err or e.reason}")
+    except Exception as e:
+        sys.exit(f"skillput: relay unreachable: {e}")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        sys.exit(__doc__.strip())
+    relay, token = load_cfg()
+    if args[0] == "list":
+        man = call(f"{relay}/skills/manifest?t={quote(token)}")
+        skills = man.get("skills") or []
+        if not skills:
+            print("library is empty — publish with: skillput <skill-dir>")
+        for s in skills:
+            print(f"{s['name']:<24} {s.get('description', '')}")
+        return
+    if args[0] == "rm":
+        if len(args) < 2:
+            sys.exit("skillput rm <name>")
+        call(f"{relay}/skills/put?t={quote(token)}",
+             {"name": args[1], "delete": True})
+        print(f"deleted {args[1]} — gone from every machine within ~5 min")
+        return
+    d = Path(args[0]).resolve()
+    if not d.is_dir() or not (d / "SKILL.md").is_file():
+        sys.exit(f"skillput: {d} must be a directory containing SKILL.md")
+    name = d.name
+    if not NAME_RE.match(name):
+        sys.exit(f"skillput: bad skill name {name!r} — lowercase [a-z0-9._-], "
+                 "starting with a letter or digit (the dir name is the name)")
+    files = {}
+    for f in sorted(d.rglob("*")):
+        if f.is_file() and not any(seg.startswith(".") for seg in
+                                   f.relative_to(d).parts):
+            files[str(f.relative_to(d))] = base64.b64encode(f.read_bytes()).decode()
+    call(f"{relay}/skills/put?t={quote(token)}", {"name": name, "files": files})
+    print(f"published {name} ({len(files)} files) — on every fleet machine "
+          "within ~5 min (~/.claude/skills/" + name + "/)")
+
+
+if __name__ == "__main__":
+    main()

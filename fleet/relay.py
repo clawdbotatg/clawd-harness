@@ -48,10 +48,13 @@ exposing publicly.
 Run:  python3 relay.py            # binds 0.0.0.0:8788
 """
 import base64
+import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
+import shutil
 import socket
 import sys
 import threading
@@ -310,6 +313,130 @@ def save_prefs(prefs):
         except OSError as e:
             print(f"[relay] prefs SAVE FAILED ({e}) — irons/deny-list edits "
                   f"not persisted", flush=True)
+
+
+# ── fleet skills library ─────────────────────────────────────────────────────
+# The PRIVATE distribution channel for skills that must never ride the public
+# repo (LAN device details, house automations). Canonical store: a gitignored
+# directory on this box, one subdir per skill (SKILL.md + helper files). Workers
+# pull it over these token-gated HTTP endpoints every few minutes and install
+# into ~/.claude/skills/ on their machine; `skillput` (share/bin) publishes from
+# anywhere in the fleet. Gated by the WORKER token — machines are the trust
+# domain; a phone never needs these endpoints. Secrets still don't belong in
+# skill BODIES (reference a per-box env file instead) — the store is private,
+# but defense-in-depth is free. Deep doc: docs/fleet/SKILLS.md.
+SKILLS_DIR = Path(os.environ.get("FLEET_SKILLS_DIR") or (HERE / ".clawd-fleet.skills"))
+_skills_lock = threading.Lock()
+SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+MAX_SKILL_FILES = 64
+MAX_SKILL_BYTES = 4 * 1024 * 1024
+
+
+def skill_desc(d):
+    """`description:` line from SKILL.md frontmatter — best-effort, '' if odd."""
+    try:
+        txt = (d / "SKILL.md").read_text(errors="replace")
+    except OSError:
+        return ""
+    lines = txt.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if line.startswith("description:"):
+            return line.split(":", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def _skill_rev(d):
+    """Content hash over the skill dir — the worker's did-it-change key."""
+    h = hashlib.sha256()
+    for f in sorted(d.rglob("*")):
+        if f.is_file():
+            h.update(str(f.relative_to(d)).encode() + b"\0")
+            h.update(f.read_bytes() + b"\0")
+    return h.hexdigest()[:16]
+
+
+def _skill_files(d):
+    return {str(f.relative_to(d)): f.read_bytes()
+            for f in sorted(d.rglob("*")) if f.is_file()}
+
+
+def skills_manifest():
+    out = []
+    with _skills_lock:
+        try:
+            entries = sorted(SKILLS_DIR.iterdir())
+        except OSError:
+            return out
+        for d in entries:
+            if d.is_dir() and SKILL_NAME_RE.match(d.name) and (d / "SKILL.md").is_file():
+                out.append({"name": d.name, "rev": _skill_rev(d),
+                            "description": skill_desc(d)})
+    return out
+
+
+def _ok_relpath(p):
+    """Relative, shallow, no dot-segments/dotfiles — nothing a hostile relpath
+    could use to write outside the skill dir on relay OR worker."""
+    if not isinstance(p, str) or not p or "\\" in p or len(p) > 200:
+        return False
+    parts = p.split("/")
+    if len(parts) > 4:
+        return False
+    return all(seg and seg not in (".", "..") and not seg.startswith(".")
+               for seg in parts)
+
+
+def skills_put(name, files):
+    """Replace one skill wholesale. files: {relpath: bytes}. Returns '' or an
+    error string. Whole-dir swap so a half-uploaded skill is never served."""
+    if not SKILL_NAME_RE.match(name or ""):
+        return "bad skill name (lowercase [a-z0-9._-], must start alnum)"
+    if "SKILL.md" not in files:
+        return "skill needs a SKILL.md at its root"
+    if len(files) > MAX_SKILL_FILES:
+        return f"too many files (max {MAX_SKILL_FILES})"
+    if sum(len(b) for b in files.values()) > MAX_SKILL_BYTES:
+        return f"skill too large (max {MAX_SKILL_BYTES} bytes)"
+    for p in files:
+        if not _ok_relpath(p):
+            return f"bad file path: {p!r}"
+    with _skills_lock:
+        tmp = SKILLS_DIR / f".put-tmp{os.getpid()}"
+        try:
+            if tmp.exists():
+                shutil.rmtree(tmp)
+            for p, body in files.items():
+                f = tmp / p
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(body)
+            dst = SKILLS_DIR / name
+            if dst.exists():
+                shutil.rmtree(dst)
+            os.replace(tmp, dst)
+        except OSError as e:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return f"store write failed: {e}"
+    print(f"[relay] skill published: {name} ({len(files)} files)", flush=True)
+    return ""
+
+
+def skills_delete(name):
+    if not SKILL_NAME_RE.match(name or ""):
+        return "bad skill name"
+    with _skills_lock:
+        d = SKILLS_DIR / name
+        if not d.is_dir():
+            return "no such skill"
+        try:
+            shutil.rmtree(d)
+        except OSError as e:
+            return f"delete failed: {e}"
+    print(f"[relay] skill deleted: {name}", flush=True)
+    return ""
 
 
 def find_passkey(cred_id):
@@ -1030,6 +1157,24 @@ class Handler(BaseHTTPRequestHandler):
             return self.wfile.write(body)
         if path == "/pm" or path.startswith("/pm/"):
             return self._proxy_pm("GET")
+        # Fleet skills library (worker-token gated; see the skills section up top).
+        if path in ("/skills/manifest", "/skills/get"):
+            if not _token_ok(q.get("t", [""])[0], WORKER_TOKEN):
+                self.close_connection = True
+                return self.send_error(403, "denied")
+            if path == "/skills/manifest":
+                return self._send_json({"skills": skills_manifest()})
+            name = q.get("name", [""])[0]
+            if not SKILL_NAME_RE.match(name):
+                return self._send_json({"error": "bad skill name"}, 400)
+            with _skills_lock:
+                d = SKILLS_DIR / name
+                if not d.is_dir():
+                    return self._send_json({"error": "no such skill"}, 404)
+                files = _skill_files(d)
+            return self._send_json({"name": name,
+                                    "files": {p: base64.b64encode(b).decode()
+                                              for p, b in files.items()}})
         if path != "/ws":
             return self.send_error(404, "not found")
         up = (self.headers.get("Upgrade", "").lower() == "websocket")
@@ -1073,6 +1218,34 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path.startswith("/pm/"):
             return self._proxy_pm("POST")
+        if path == "/skills/put":
+            # Publish (or delete) one skill in the fleet library. Worker-token
+            # gated like the GETs — `skillput` runs on fleet machines only.
+            if not _token_ok(q.get("t", [""])[0], WORKER_TOKEN):
+                self.close_connection = True
+                return self.send_error(403, "denied")
+            try:
+                n = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                n = 0
+            if n > MAX_UPLOAD:
+                self.close_connection = True
+                return self.send_error(413, "skill too large")
+            body = self.rfile.read(n) if n > 0 else b""
+            try:
+                frame = json.loads(body.decode("utf-8"))
+                name = frame.get("name", "")
+                if frame.get("delete"):
+                    err = skills_delete(name)
+                else:
+                    files = {p: base64.b64decode(b64)
+                             for p, b64 in (frame.get("files") or {}).items()}
+                    err = skills_put(name, files)
+            except Exception as e:
+                err = f"bad request: {e}"
+            if err:
+                return self._send_json({"error": err}, 400)
+            return self._send_json({"ok": True, "skills": skills_manifest()})
         if path != "/upload" or (not PASSKEY_ONLY and not _token_ok(q.get("t", [""])[0], MOBILE_TOKEN)):
             self.close_connection = True
             return self.send_error(403 if path == "/upload" else 404, "denied")

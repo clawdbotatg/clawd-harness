@@ -55,6 +55,7 @@ viewer** (each with its own `client.cid`).
 |---|---|---|
 | `subscribe` | `cid` | Attach to that session's live stream. Server immediately sends a `hello`, then a ring-buffer byte snapshot, then replays recent `transcript` history (see "On `subscribe`" below, incl. the unknown-cid error reply). |
 | `list` | — | Server replies with `projects`, `sessions`, then `irons` snapshots. |
+| `skillsList` | — | 📚 skill picker: server replies (to this client only) `{type:"skills", skills:[{name, description, path}]}` — every dir in `~/.claude/skills/` on this machine that holds a `SKILL.md` (repo-kit, fleet-synced and hand-placed alike), sorted; `description` is the SKILL.md frontmatter line, `path` the absolute SKILL.md the picker's auto-send points a session at. Library + sync: `docs/fleet/SKILLS.md`. |
 | `new` | `pid`, `account?`, `engine?` | Create a session in project `pid`, spawned under the ACTIVE subscription account (or the named `account` override). Server replies `{type:"focus", cid}` with the new id, and broadcasts `sessions`. `engine` picks the agent CLI — `"claude"` (default, and what an omitted field means) or `"codex"`; an unknown value falls back to claude. A non-claude engine ignores `account`: only claude participates in the subscription router. See docs/CODEX-ENGINE.md. |
 | `accountAdd` | `name` | Register a new subscription account (config dir under `~/.clawd-accounts/<name>` + settings symlinks) and spawn its **sign-in session** — a normal claude in the self project under that `CLAUDE_CONFIG_DIR`, where the user completes the OAuth login. Replies `{type:"focus", cid}` for the sign-in session; broadcasts `accounts`. Re-invoking on a still-pending account opens another sign-in session; a no-op on a ready one. |
 | `accountUse` | `name` | Flip which account NEW sessions spawn under (manual switch; running sessions untouched). Refused for a pending account. Broadcasts `accounts`. |
@@ -122,6 +123,7 @@ resolve; degrades, doesn't break.
 { "type":"sessions", "sessions":[<sessionMeta>...], "current":"<cid|null>" }
 { "type":"accounts", "accounts":[<accountMeta>...], "active":"<name>", "auto":bool }
 { "type":"irons", "irons":[{ "id","title","desc","tags":[..], "pids":[..], "created", "rank" }...] }  // rank-sorted: list order = priority (see ironOrder)
+{ "type":"skills", "skills":[{ "name","description","path" }...] }   // reply to skillsList (this client only) — 📚 picker
 // + a restart-state frame if a restart is already pending
 ```
 `boot` is a per-process id; the browser auto-reloads when it changes after a

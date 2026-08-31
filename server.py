@@ -1550,6 +1550,39 @@ def _sync_shared_kit(home=None, accounts_dir=None):
     return changed
 
 
+def skills_meta(home=None):
+    """The skills installed on THIS machine (~/.claude/skills — the repo kit,
+    fleet-synced ones, and hand-placed alike), for the UI's 📚 picker: name,
+    frontmatter description, and the absolute SKILL.md path the picker's
+    auto-send points the session at (a path pointer works in already-running
+    sessions and codex alike; a /slash only exists in sessions spawned after
+    the skill landed). `home` is for tests only."""
+    root = (Path(home) if home is not None else Path.home()) / ".claude" / "skills"
+    out = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return out
+    for d in entries:
+        f = d / "SKILL.md"
+        if d.name.startswith(".") or not f.is_file():
+            continue
+        desc = ""
+        try:
+            lines = f.read_text(errors="replace").splitlines()
+            if lines and lines[0].strip() == "---":
+                for line in lines[1:]:
+                    if line.strip() == "---":
+                        break
+                    if line.startswith("description:"):
+                        desc = line.split(":", 1)[1].strip().strip('"').strip("'")
+                        break
+        except OSError:
+            pass
+        out.append({"name": d.name, "description": desc, "path": str(f)})
+    return out
+
+
 def _share_projects(config_dir):
     """Point <account>/projects at the shared ~/.claude/projects store so
     EVERY account sees EVERY session transcript: --resume works under any
@@ -7452,6 +7485,10 @@ class Handler(BaseHTTPRequestHandler):
                               "sessions": MGR.sessions_meta(),
                               "current": MGR.default_cid()})
             client.send_json(MGR.irons_meta())
+        elif t == "skillsList":
+            # 📚 skill picker: what's installed on THIS machine, fetched on
+            # modal-open (cheap: a dir scan + frontmatter sniff per skill).
+            client.send_json({"type": "skills", "skills": skills_meta()})
         elif t == "new":
             s = MGR.create_session(frame.get("pid"),
                                    account=frame.get("account"),

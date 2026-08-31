@@ -33,6 +33,9 @@ fleet/.fleet.e2e_resume.json.tmp
 # relay edge-session tokens (bearer secrets, 24h TTL) — survive relay restarts
 fleet/.clawd-fleet.sessions.json
 fleet/.clawd-fleet.sessions.json.tmp
+# the PRIVATE fleet skills library (canonical store on the relay box; may hold
+# LAN-internal detail) — must never enter this public repo
+fleet/.clawd-fleet.skills*
 fleet/fleet.env
 fleet/*.log
 

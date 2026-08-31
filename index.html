@@ -810,6 +810,23 @@
   .sl-text { color:var(--ink); font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere;
              max-height:180px; overflow-y:auto; user-select:text; -webkit-user-select:text; }
   @media (pointer: coarse) { .sl-meta button { padding:9px 12px; font-size:13px; } }
+  /* 📚 skill book — the fleet skills picker, same modal skeleton as 🕘 */
+  #skillbook { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:66;
+               display:flex; align-items:center; justify-content:center; padding:20px; }
+  #skillbook[hidden] { display:none; }
+  #skillbookcard { background:var(--panel); border:1px solid var(--edge); border-radius:10px;
+                   padding:14px; width:min(560px, 94vw); max-height:82vh; overflow:hidden;
+                   display:flex; flex-direction:column; gap:8px; font-family:var(--mono); }
+  #skillbooklist { overflow-y:auto; -webkit-overflow-scrolling:touch; min-height:0;
+                   display:flex; flex-direction:column; gap:8px; }
+  .sk-item { border:1px solid var(--edge); border-radius:8px; padding:10px; display:flex;
+             flex-direction:column; gap:4px; cursor:pointer; text-align:left;
+             background:transparent; font-family:var(--mono); width:100%; }
+  .sk-item:hover { border-color:var(--accent-dim); background:var(--raised); }
+  .sk-item:active { background:var(--accent-bg); }
+  .sk-name { color:var(--accent); font-size:13px; }
+  .sk-desc { color:var(--dim); font-size:11px; overflow-wrap:anywhere; }
+  .sk-note { color:var(--dim); font-size:11px; }
   /* project cards reuse .scard; status colors + an add-project row */
   .scard.cloning, .scard.error { cursor:default; }
   .scard.cloning { opacity:.75; }
@@ -1194,6 +1211,19 @@
       <div id="sentloglist"></div>
     </div>
   </div>
+  <!-- 📚 skill book: the fleet skills picker. Lists what's installed in
+       ~/.claude/skills on the CURRENT machine (fetched on open via
+       {type:"skillsList"}); tapping a skill auto-sends a pointer at its
+       SKILL.md into the open session. Library + sync: docs/fleet/SKILLS.md. -->
+  <div id="skillbook" hidden>
+    <div id="skillbookcard">
+      <div class="sl-hdr">
+        <div class="ip-t">📚 skills</div>
+        <button id="skillbookclose">✕</button>
+      </div>
+      <div id="skillbooklist"></div>
+    </div>
+  </div>
   <div id="machinesmodal" hidden>
     <div id="machshead">
       <span class="bico">🖥️</span>
@@ -1330,7 +1360,7 @@
              title="🤖 autopilot — let the harness keep this session working on its goal, narrating progress in a status row. Bounded; your own messages steer it." />
       <div id="ttystat" hidden role="img"><span class="dot"></span></div>
       <div id="sessiondesc" title="AI-generated name for this session"></div>
-      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button></div>
+      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — the fleet skill library installed on this machine. Tap one to point the open session at it.">📚</button></div>
     </div>
     <!-- 🤖 the autopilot's narration row — same slot style as the upload chips:
          where the work stands / what the supervisor is doing, live per round -->
@@ -3152,6 +3182,8 @@ function handleJson(m) {
     if (!FLEET) applyIrons(m.irons);
   } else if (m.type === 'ironDesc') {
     onIronDesc(m);                        // haiku's take on an iron — store + repaint
+  } else if (m.type === 'skills') {
+    renderSkillbook(m.skills || []);      // 📚 reply to the picker's skillsList
   } else if (m.type === 'accounts') {
     accountsInfo = m;                     // subscription logins + headroom (direct mode)
     renderAccountsBody();                 // repaint the 🧠 overlay if it's open
@@ -7067,6 +7099,66 @@ document.getElementById('sentBtn').onclick = showSentLog;
 document.getElementById('sentlogclose').onclick = () => { sentlogEl.hidden = true; };
 sentlogEl.addEventListener('pointerdown', (e) => { if (e.target === sentlogEl) sentlogEl.hidden = true; });
 
+// ── 📚 skill book ────────────────────────────────────────────────────────────
+// The fleet skills picker: skills live in a private library on the relay box
+// and every machine's worker syncs them into ~/.claude/skills (see
+// docs/fleet/SKILLS.md), so the CURRENT machine's harness is the truth for
+// what's tappable here. The list is fetched fresh on every open (skillsList →
+// skills frame — routed to the current machine in fleet mode like any other
+// harness frame); tapping a skill AUTO-SENDS a pointer at its SKILL.md into
+// the open session via the quick-chip path, so it works mid-turn, in
+// already-running sessions, and under codex (no /slash dependency).
+const skillbookEl = document.getElementById('skillbook');
+function skillSendable() {
+  const v = currentView();
+  return !!currentCid && (v === 'tty' || v === 'transcript');
+}
+function skillInvocation(s) {
+  return `Use the "${s.name}" skill: read ${s.path} and follow it. If it needs details I haven't given, ask me.`;
+}
+function renderSkillbook(skills) {
+  if (skillbookEl.hidden) return;                 // stale reply after close — drop
+  const list = document.getElementById('skillbooklist');
+  list.innerHTML = '';                            // on-demand modal, rebuilt per reply (sentlog pattern)
+  if (!skillSendable()) {
+    const d = document.createElement('div'); d.className = 'sk-note';
+    d.textContent = 'open a session first — tapping a skill sends it there';
+    list.appendChild(d);
+  }
+  if (!skills.length) {
+    const d = document.createElement('div'); d.className = 'sk-note';
+    d.textContent = 'no skills installed on this machine yet — publish one with `skillput` (ask any session about the add-skill skill)';
+    list.appendChild(d);
+    return;
+  }
+  for (const s of skills) {
+    const b = document.createElement('button'); b.className = 'sk-item';
+    const name = document.createElement('div'); name.className = 'sk-name';
+    name.textContent = '📚 ' + s.name;
+    const desc = document.createElement('div'); desc.className = 'sk-desc';
+    desc.textContent = s.description || s.path || '';
+    b.append(name, desc);
+    b.onclick = () => {
+      if (!skillSendable()) return;               // note row above explains why
+      skillbookEl.hidden = true;
+      sendQuick(skillInvocation(s));
+    };
+    list.appendChild(b);
+  }
+}
+function showSkillbook() {
+  const list = document.getElementById('skillbooklist');
+  list.innerHTML = '';
+  const d = document.createElement('div'); d.className = 'sk-note';
+  d.textContent = 'loading skills…';
+  list.appendChild(d);
+  skillbookEl.hidden = false;
+  hsend({ type: 'skillsList' });                  // reply lands in renderSkillbook
+}
+document.getElementById('skillsBtn').onclick = showSkillbook;
+document.getElementById('skillbookclose').onclick = () => { skillbookEl.hidden = true; };
+skillbookEl.addEventListener('pointerdown', (e) => { if (e.target === skillbookEl) skillbookEl.hidden = true; });
+
 let activeDraftId = null;   // which context's draft is currently sitting in the box
 // Persist the box into the context it belongs to (called as you type, and before any swap).
 function saveDraft() {
@@ -7208,8 +7300,8 @@ function showChipTip(btn, text) {
 function hideChipTip() { chipTip.style.display = 'none'; }
 {
   const chipsEl = document.getElementById('quickchips');
-  // the 🕘 sent-history button is static markup at the end of the strip —
-  // chips insert BEFORE it so it stays the rightmost item, just past "doc"
+  // the 🕘 sent-history + 📚 skills buttons are static markup at the end of
+  // the strip — chips insert BEFORE 🕘 so those two stay rightmost, past "doc"
   const sentEnd = document.getElementById('sentBtn');
   for (const q of QUICK_PROMPTS) {
     const b = document.createElement('button');
