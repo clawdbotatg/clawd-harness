@@ -76,8 +76,9 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   (`controller/prompts/private.md`). Deep doc: `docs/CONTROLLER.md`.
 - Feature docs on demand: `docs/CODEX-ENGINE.md`, `docs/DEEPLINKS.md`,
   `docs/fleet/ACCOUNTS-PANEL.md`, voice in `docs/CONTROLLER.md` + `docs/voice/`,
-  `docs/fleet/SKILLS.md` (the private fleet skill library: relay store →
-  worker sync → `~/.claude/skills/` everywhere; 📚 picker; `skillput`).
+  `docs/fleet/SKILLS.md` (the private skill library on the relay: 📚 picker
+  pastes a skill's text into a session; `skillput` publishes; no machine
+  installs).
 
 ## Landmines (don't regress; stories in HISTORY.md)
 

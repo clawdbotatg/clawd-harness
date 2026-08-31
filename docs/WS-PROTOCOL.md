@@ -55,8 +55,8 @@ viewer** (each with its own `client.cid`).
 |---|---|---|
 | `subscribe` | `cid` | Attach to that session's live stream. Server immediately sends a `hello`, then a ring-buffer byte snapshot, then replays recent `transcript` history (see "On `subscribe`" below, incl. the unknown-cid error reply). |
 | `list` | — | Server replies with `projects`, `sessions`, then `irons` snapshots. |
-| `skillsList` | — | 📚 skill picker: server replies (to this client only) `{type:"skills", skills:[{name, description, path, hidden}]}` — every dir in `~/.claude/skills/` on this machine that holds a `SKILL.md` (repo-kit, fleet-synced and hand-placed alike), sorted; `description` is the SKILL.md frontmatter line, `path` the absolute SKILL.md the picker's auto-send points a session at, `hidden` the ✕ flag below. Library + sync: `docs/fleet/SKILLS.md`. |
-| `skillsHide` | `name`, `on?` | 📚 ✕: toggle a skill's hidden flag in this machine's picker (`on` defaults true; false restores). UI-only — the skill stays installed and usable; persisted machine-side (`.clawd-harness.skills-hidden.json`) so every device viewing this machine agrees. Replies with the same fresh `skills` frame as `skillsList` so the open modal repaints. |
+| `skillsLib` | — | 📚 skill library (DIRECT mode only — in fleet mode the browser sends this to the relay itself, not through a machine): the harness proxies to the relay's worker-token HTTP (`/skills/lib`, config from env / `fleet/fleet.env`) and replies (this client only) `{type:"skillsLib", skills:[{name, description, body}], error?}` — the user-written skill files stored on the relay, `body` the full SKILL.md text a tap pastes into the session. The library is deliberately decoupled from `~/.claude/skills` on any machine. Unconfigured/unreachable relay → empty list + explanatory `error`. `docs/fleet/SKILLS.md`. |
+| `skillsRm` | `name` | 📚 ✕ (direct mode; same proxy): remove one skill from the library — trashed relay-side (`.clawd-fleet.skills/.trash/`), so recoverable by an admin — then replies the same fresh `skillsLib` frame. |
 | `new` | `pid`, `account?`, `engine?` | Create a session in project `pid`, spawned under the ACTIVE subscription account (or the named `account` override). Server replies `{type:"focus", cid}` with the new id, and broadcasts `sessions`. `engine` picks the agent CLI — `"claude"` (default, and what an omitted field means) or `"codex"`; an unknown value falls back to claude. A non-claude engine ignores `account`: only claude participates in the subscription router. See docs/CODEX-ENGINE.md. |
 | `accountAdd` | `name` | Register a new subscription account (config dir under `~/.clawd-accounts/<name>` + settings symlinks) and spawn its **sign-in session** — a normal claude in the self project under that `CLAUDE_CONFIG_DIR`, where the user completes the OAuth login. Replies `{type:"focus", cid}` for the sign-in session; broadcasts `accounts`. Re-invoking on a still-pending account opens another sign-in session; a no-op on a ready one. |
 | `accountUse` | `name` | Flip which account NEW sessions spawn under (manual switch; running sessions untouched). Refused for a pending account. Broadcasts `accounts`. |
@@ -124,7 +124,7 @@ resolve; degrades, doesn't break.
 { "type":"sessions", "sessions":[<sessionMeta>...], "current":"<cid|null>" }
 { "type":"accounts", "accounts":[<accountMeta>...], "active":"<name>", "auto":bool }
 { "type":"irons", "irons":[{ "id","title","desc","tags":[..], "pids":[..], "created", "rank" }...] }  // rank-sorted: list order = priority (see ironOrder)
-{ "type":"skills", "skills":[{ "name","description","path" }...] }   // reply to skillsList (this client only) — 📚 picker
+{ "type":"skillsLib", "skills":[{ "name","description","body" }...], "error"? }  // reply to skillsLib/skillsRm (this client only) — 📚 library picker
 // + a restart-state frame if a restart is already pending
 ```
 `boot` is a per-process id; the browser auto-reloads when it changes after a

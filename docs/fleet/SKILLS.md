@@ -1,68 +1,62 @@
 # Fleet skills — the private skill library
 
-One library of Claude Code skills, available to **every session on every fleet
-machine**, for the automations that must never ride the public repo: LAN device
-control (3D printer, Vestaboard, cameras, kitchen speaker), phone/house
-integrations, anything with internal detail. The repo's `share/skills/` channel
-still exists for secret-free skills (todo) — this is its private sibling.
+One stack of **user-written skill files**, stored on the relay box, shown as
+one list on every machine and device via the harness **📚 picker**. Tap a
+skill → its SKILL.md text is **pasted into the open session** as a message.
+That's the whole product: Austin writes down how to do a thing once (drive the
+3D printer, post to the Vestaboard, speak in the kitchen), and hands it to any
+session anywhere with one tap.
+
+**The library is deliberately decoupled from machines.** It never scans,
+installs to, or deletes from `~/.claude/skills/` anywhere — a first build that
+synced skills onto every box (2026-08-30, same day) was ripped out for exactly
+that reason; a one-shot janitor in `worker.py` (`_skills_sync_cleanup`)
+removes what it had installed. Skills reach a session only as pasted text.
 
 ## How it flows
 
 ```
 skillput <dir>  ──POST──▶  relay box: fleet/.clawd-fleet.skills/<name>/
-                             (gitignored store, worker-token-gated HTTP)
-                                    │  every worker polls /skills/manifest
-                                    ▼  every ~5 min (FLEET_SKILLS_SYNC_INTERVAL)
-                          ~/.claude/skills/<name>/   on every machine
-                                    │  SHARE_PATHS symlink (server.py)
-                                    ▼
-                          every account → every session, natively
+                            (gitignored store, worker-token-gated HTTP)
+                                   │
+        📚 picker: {skillsLib} ────┤  fleet mode: browser → relay socket
+        one list, every device     │  direct mode: harness proxies over
+                                   ▼            /skills/lib (fleet.env creds)
+        tap a skill → SKILL.md body pasted into the open session
+        ✕ (confirm) → {skillsRm} → store dir moved to .trash/ everywhere-at-once
 ```
 
-- **Store** (`fleet/relay.py`): `.clawd-fleet.skills/` next to relay.py on the
-  box, one subdir per skill (`SKILL.md` + helpers). Endpoints:
-  `GET /skills/manifest`, `GET /skills/get?name=`, `POST /skills/put` — all
-  gated by the **worker token** (machines are the trust domain; phones never
-  need these). Names `[a-z0-9._-]`, relpaths fenced (no dotfiles/traversal,
-  ≤64 files, ≤4 MB), whole-dir swap on publish so a half-upload never serves.
-- **Sync** (`fleet/worker.py` `sync_skills_once`): pulls the manifest, installs
-  changed skills into `~/.claude/skills/` (plus any account whose `skills/` is
-  a real dir — the server.py opt-out case), removes library-deleted ones.
-  State in `~/.clawd-fleet.skills.json` tracks what the sync installed **per
-  file** — deletions only touch tracked files, so repo-kit and hand-placed
-  skills are never harmed. Off-switch: `FLEET_SKILLS_SYNC=0`.
-- **Publish** (`share/bin/skillput`, installed to `~/bin` on every box by the
-  shared-kit sync): `skillput <skill-dir>` / `skillput list` / `skillput rm
-  <name>`. Config from env or the checkout's `fleet/fleet.env`
-  (`FLEET_RELAY` + `FLEET_WORKER_TOKEN`).
-- **Picker** (`index.html`): the 📚 button at the right end of the quick-chip
-  strip (right of 🕘, visible in a session). Opens a modal listing this
-  machine's `~/.claude/skills` (`skillsList` WS frame → `skills` reply, so in
-  fleet mode you see the machine you're driving). Tapping a skill
-  **auto-sends** a pointer at its SKILL.md into the open session — a path
-  pointer rather than a `/slash` so it works mid-turn, in sessions started
-  before the skill synced, and under codex. Each row's **✕ hides** it from
-  that machine's picker (`skillsHide` frame → `.clawd-harness.skills-hidden.json`,
-  UI-only: the skill stays installed); a collapsed "N hidden" section at the
-  bottom restores with ↩.
+- **Store** (`fleet/relay.py`): `.clawd-fleet.skills/` next to relay.py, one
+  subdir per skill. HTTP (worker token): `GET /skills/manifest`,
+  `GET /skills/get?name=`, `GET /skills/lib` (bodies included),
+  `POST /skills/put` (publish, or `{delete:true}`). Names `[a-z0-9._-]`,
+  relpaths fenced, ≤64 files / ≤4 MB, whole-dir swap on publish. **Remove =
+  trash**: the dir moves to `.clawd-fleet.skills/.trash/<name>-<epoch>/` (a
+  dot-dir, never listed) so a fat-fingered ✕ is admin-recoverable.
+- **Picker frames**: fleet mode sends `{type:"skillsLib"}` / `{type:"skillsRm",
+  name}` straight over the authed mobile→relay socket; direct mode sends the
+  same frames to the harness, which proxies them (`serve_skills_lib`, config
+  from env / the checkout's `fleet/fleet.env`). Both paths reply
+  `{type:"skillsLib", skills:[{name, description, body}], error?}`.
+- **Publish** (`share/bin/skillput`, in `~/bin` on every box via the shared-kit
+  sync): `skillput <skill-dir>` / `skillput list` / `skillput rm <name>`.
+- **UI** (`index.html`): 📚 at the right end of the quick-chip strip (right of
+  🕘, visible in a session). Tap a row → `sendQuick(body)` pastes the file;
+  ✕ → `confirm()` → `skillsRm`; every reply repaints the open modal.
 
 ## Writing a skill
 
-The `add-skill` skill in the library is the canonical how-to (ask any session
-to "read the add-skill skill"). Short version: a dir named for the skill with
-a `SKILL.md` (`---\nname: …\ndescription: …\n---` frontmatter, then the
-instructions), then `skillput <dir>`. On every machine within ~5 min.
-
-**Never put credentials in a skill body.** The store is private (gitignored +
-token-gated), but skills fan out to every machine's disk — follow the todo
-pattern: the skill references a per-box env file (`~/.clawd-<thing>.env`),
-placed once by hand on the machines that need it, and instructs the session to
-read it. LAN hostnames/IPs and device quirks are fine; keys are not.
+The `add-skill` skill in the library is the canonical how-to. Short version: a
+dir named for the skill holding a `SKILL.md` (`---\nname: …\ndescription:
+…\n---` frontmatter, then instructions any session could follow), then
+`skillput <dir>`. **Never put credentials in a skill** — the store is private
+(gitignored + token-gated) but the text gets pasted into sessions; reference a
+per-box env file (the todo pattern) instead. LAN IPs/hostnames are fine.
 
 ## Tests
 
-- `fleet/test_skills_sync.py` — relay store + worker sync end to end (publish,
-  auth rejects, hostile paths, update, delete-only-tracked).
-- `test_skills_frame.py` — `skills_meta` (the picker's server half).
-- `tools/skillbookprobe.mjs` — the 📚 modal (open→fetch, rows, guarded
-  outside a session, one tap = one pointer send).
+- `fleet/test_skills_lib.py` — store + library end to end: auth, hostile-path
+  fences, bodies over HTTP and WS, trash-on-remove, the sync janitor.
+- `test_skills_frame.py` — the direct-mode harness proxy (real relay behind it).
+- `tools/skillbookprobe.mjs` — the 📚 modal: fetch on open, tap pastes the
+  body, ✕ is confirm-gated, error/stale replies handled. Real touch gestures.

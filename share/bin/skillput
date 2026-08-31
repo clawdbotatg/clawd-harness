@@ -2,14 +2,15 @@
 """skillput — publish a skill to the PRIVATE fleet skills library.
 
 The library lives on the relay box (gitignored `.clawd-fleet.skills/`, served
-over token-gated HTTP — fleet/relay.py); every fleet machine's worker syncs it
-into ~/.claude/skills/ within ~5 minutes, where the harness's account symlinks
-fan it into every session. Deep doc: docs/fleet/SKILLS.md in clawd-harness.
+over token-gated HTTP — fleet/relay.py). It is deliberately decoupled from any
+machine's installed skills: the harness 📚 picker shows the library on every
+device, and tapping a skill PASTES its SKILL.md text into the open session.
+Deep doc: docs/fleet/SKILLS.md in clawd-harness.
 
 Usage:
     skillput <skill-dir>       publish (dir name = skill name; needs SKILL.md)
     skillput list              list the library (name — description)
-    skillput rm <name>         delete a skill from the library (everywhere)
+    skillput rm <name>         remove from the library (trashed relay-side)
 
 Config (env wins, then the harness checkout's fleet/fleet.env):
     FLEET_RELAY         wss://h.atg.link (→ https for these calls)
@@ -99,7 +100,8 @@ def main():
             sys.exit("skillput rm <name>")
         call(f"{relay}/skills/put?t={quote(token)}",
              {"name": args[1], "delete": True})
-        print(f"deleted {args[1]} — gone from every machine within ~5 min")
+        print(f"removed {args[1]} from the library (trashed on the relay; "
+              "an admin can restore from .clawd-fleet.skills/.trash/)")
         return
     d = Path(args[0]).resolve()
     if not d.is_dir() or not (d / "SKILL.md").is_file():
@@ -114,8 +116,8 @@ def main():
                                    f.relative_to(d).parts):
             files[str(f.relative_to(d))] = base64.b64encode(f.read_bytes()).decode()
     call(f"{relay}/skills/put?t={quote(token)}", {"name": name, "files": files})
-    print(f"published {name} ({len(files)} files) — on every fleet machine "
-          "within ~5 min (~/.claude/skills/" + name + "/)")
+    print(f"published {name} ({len(files)} files) — in the 📚 picker on every "
+          "device now")
 
 
 if __name__ == "__main__":

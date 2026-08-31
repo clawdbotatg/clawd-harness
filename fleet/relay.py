@@ -425,6 +425,9 @@ def skills_put(name, files):
 
 
 def skills_delete(name):
+    """Remove a skill from the library — into `.trash/` (dot-dir, so it never
+    lists), not gone: the ✕ in the picker lands here, and a fat-fingered tap
+    on a hand-written skill must be recoverable by an admin on the box."""
     if not SKILL_NAME_RE.match(name or ""):
         return "bad skill name"
     with _skills_lock:
@@ -432,11 +435,40 @@ def skills_delete(name):
         if not d.is_dir():
             return "no such skill"
         try:
-            shutil.rmtree(d)
+            trash = SKILLS_DIR / ".trash"
+            trash.mkdir(parents=True, exist_ok=True)
+            # collision-proof: re-removing the same name in the same second
+            # must not os.replace onto an existing (non-empty) trash dir
+            dst, n = trash / f"{name}-{int(time.time())}", 0
+            while dst.exists():
+                n += 1
+                dst = trash / f"{name}-{int(time.time())}-{n}"
+            os.replace(d, dst)
         except OSError as e:
             return f"delete failed: {e}"
-    print(f"[relay] skill deleted: {name}", flush=True)
+    print(f"[relay] skill removed (→ .trash): {name}", flush=True)
     return ""
+
+
+def skills_lib():
+    """The picker's payload: every skill with its SKILL.md BODY — tapping a
+    skill pastes that text into a session, so the body rides the list."""
+    out = []
+    with _skills_lock:
+        try:
+            entries = sorted(SKILLS_DIR.iterdir())
+        except OSError:
+            return out
+        for d in entries:
+            f = d / "SKILL.md"
+            if d.is_dir() and SKILL_NAME_RE.match(d.name) and f.is_file():
+                try:
+                    body = f.read_text(errors="replace")
+                except OSError:
+                    continue
+                out.append({"name": d.name, "description": skill_desc(d),
+                            "body": body})
+    return out
 
 
 def find_passkey(cred_id):
@@ -885,6 +917,20 @@ class Relay:
             self.broadcast_prefs()
             print(f"[relay] prefs: {'; '.join(parts) or 'no-op write'}", flush=True)
             return
+        if t == "skillsLib":
+            # 📚 picker (fleet mode): the library straight from the store — one
+            # list, same on every device and machine. Bodies included: a tap
+            # pastes the skill text into a session.
+            mobile.send_json({"type": "skillsLib", "skills": skills_lib()})
+            return
+        if t == "skillsRm":
+            # ✕ in the picker: remove from the library (→ .trash, recoverable
+            # by an admin). Reply with the fresh list so the modal repaints.
+            err = skills_delete(str(frame.get("name") or ""))
+            if err:
+                mobile.send_json({"type": "error", "error": f"skillsRm: {err}"})
+            mobile.send_json({"type": "skillsLib", "skills": skills_lib()})
+            return
         if t == "pushSubscribe":
             # The phone enabled notifications: store its (opaque) Web Push
             # subscription and fan it out to every worker so they can ring it.
@@ -1158,12 +1204,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/pm" or path.startswith("/pm/"):
             return self._proxy_pm("GET")
         # Fleet skills library (worker-token gated; see the skills section up top).
-        if path in ("/skills/manifest", "/skills/get"):
+        if path in ("/skills/manifest", "/skills/get", "/skills/lib"):
             if not _token_ok(q.get("t", [""])[0], WORKER_TOKEN):
                 self.close_connection = True
                 return self.send_error(403, "denied")
             if path == "/skills/manifest":
                 return self._send_json({"skills": skills_manifest()})
+            if path == "/skills/lib":
+                # the picker payload (bodies included) — the direct-mode
+                # harness proxies its 📚 through this
+                return self._send_json({"skills": skills_lib()})
             name = q.get("name", [""])[0]
             if not SKILL_NAME_RE.match(name):
                 return self._send_json({"error": "bad skill name"}, 400)

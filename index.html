@@ -830,12 +830,8 @@
   .sk-item .sk-x { flex:0 0 auto; background:transparent; border:1px solid var(--edge); border-radius:5px;
                    color:var(--dim); font-family:var(--mono); font-size:12px; cursor:pointer; padding:6px 10px; }
   .sk-item .sk-x:hover { color:var(--err); border-color:var(--err); }
-  .sk-item.hiddenrow { opacity:.55; cursor:default; }
-  .sk-item.hiddenrow .sk-x:hover { color:var(--accent); border-color:var(--accent-dim); }
   @media (pointer: coarse) { .sk-item .sk-x { padding:9px 12px; font-size:13px; } }
   .sk-note { color:var(--dim); font-size:11px; }
-  .sk-note.tappable { cursor:pointer; padding:6px 0; }
-  .sk-note.tappable:hover { color:var(--accent); }
   /* project cards reuse .scard; status colors + an add-project row */
   .scard.cloning, .scard.error { cursor:default; }
   .scard.cloning { opacity:.75; }
@@ -1220,10 +1216,10 @@
       <div id="sentloglist"></div>
     </div>
   </div>
-  <!-- 📚 skill book: the fleet skills picker. Lists what's installed in
-       ~/.claude/skills on the CURRENT machine (fetched on open via
-       {type:"skillsList"}); tapping a skill auto-sends a pointer at its
-       SKILL.md into the open session. Library + sync: docs/fleet/SKILLS.md. -->
+  <!-- 📚 skill book: the fleet skill LIBRARY — user-written skill files
+       stored on the relay, one list everywhere; deliberately nothing to do
+       with any machine's installed skills. Tap = paste the skill text into
+       the open session; ✕ = remove from the library. docs/fleet/SKILLS.md. -->
   <div id="skillbook" hidden>
     <div id="skillbookcard">
       <div class="sl-hdr">
@@ -1369,7 +1365,7 @@
              title="🤖 autopilot — let the harness keep this session working on its goal, narrating progress in a status row. Bounded; your own messages steer it." />
       <div id="ttystat" hidden role="img"><span class="dot"></span></div>
       <div id="sessiondesc" title="AI-generated name for this session"></div>
-      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — the fleet skill library installed on this machine. Tap one to point the open session at it.">📚</button></div>
+      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — your skill library (same list everywhere). Tap one to paste it into the open session.">📚</button></div>
     </div>
     <!-- 🤖 the autopilot's narration row — same slot style as the upload chips:
          where the work stands / what the supervisor is doing, live per round -->
@@ -2303,6 +2299,10 @@ function handleRelay(m) {
     if (!machinesModal.hidden) renderMachines(machineList);
     return;
   }
+  if (m.type === 'skillsLib') {
+    renderSkillbook(m.skills || [], m.error);   // 📚 library reply (fleet mode: straight from the relay)
+    return;
+  }
   if (m.type === 'pushOk') return;   // relay ack'd our subscription; nothing to repaint
   if (m.type === 'pong') { onPong(m.id); return; }   // relay-hop liveness pong (probe fell back — no open e2e channel)
   if (m.type === 'machines') {
@@ -3191,8 +3191,8 @@ function handleJson(m) {
     if (!FLEET) applyIrons(m.irons);
   } else if (m.type === 'ironDesc') {
     onIronDesc(m);                        // haiku's take on an iron — store + repaint
-  } else if (m.type === 'skills') {
-    renderSkillbook(m.skills || []);      // 📚 reply to the picker's skillsList
+  } else if (m.type === 'skillsLib') {
+    renderSkillbook(m.skills || [], m.error);   // 📚 library reply (direct mode: harness→relay proxy)
   } else if (m.type === 'accounts') {
     accountsInfo = m;                     // subscription logins + headroom (direct mode)
     renderAccountsBody();                 // repaint the 🧠 overlay if it's open
@@ -7125,69 +7125,66 @@ function skillSendable() {
 function skillInvocation(s) {
   return `Use the "${s.name}" skill: read ${s.path} and follow it. If it needs details I haven't given, ask me.`;
 }
-let skillShowHidden = false;   // "N hidden" section expanded? (reset per open)
-function renderSkillbook(skills) {
+function renderSkillbook(skills, error) {
   if (skillbookEl.hidden) return;                 // stale reply after close — drop
   const list = document.getElementById('skillbooklist');
   list.innerHTML = '';                            // on-demand modal, rebuilt per reply (sentlog pattern)
+  if (error) {
+    const d = document.createElement('div'); d.className = 'sk-note';
+    d.textContent = error;
+    list.appendChild(d);
+    return;
+  }
   if (!skillSendable()) {
     const d = document.createElement('div'); d.className = 'sk-note';
-    d.textContent = 'open a session first — tapping a skill sends it there';
+    d.textContent = 'open a session first — tapping a skill pastes it there';
     list.appendChild(d);
   }
   if (!skills.length) {
     const d = document.createElement('div'); d.className = 'sk-note';
-    d.textContent = 'no skills installed on this machine yet — publish one with `skillput` (ask any session about the add-skill skill)';
+    d.textContent = 'the library is empty — write a SKILL.md and publish it with `skillput <dir>` (or ask any session to, via the add-skill skill)';
     list.appendChild(d);
     return;
   }
-  // ✕ hides a skill from THIS machine's picker (server-kept, so every device
-  // agrees; the skill itself stays installed and usable). Hidden ones live in
-  // a collapsed section below with a ↩ to bring them back — a fat-fingered ✕
-  // must never be a dead end. The server answers every toggle with a fresh
-  // skills frame, so this just repaints from truth.
-  const row = (s, isHidden) => {
-    const it = document.createElement('div');
-    it.className = 'sk-item' + (isHidden ? ' hiddenrow' : '');
+  for (const s of skills) {
+    const it = document.createElement('div'); it.className = 'sk-item';
     const main = document.createElement('div'); main.className = 'sk-main';
     const name = document.createElement('div'); name.className = 'sk-name';
     name.textContent = '📚 ' + s.name;
     const desc = document.createElement('div'); desc.className = 'sk-desc';
-    desc.textContent = s.description || s.path || '';
+    desc.textContent = s.description || '';
     main.append(name, desc);
     const x = document.createElement('button'); x.className = 'sk-x';
-    x.textContent = isHidden ? '↩' : '✕';
-    x.title = isHidden ? 'put it back in the list'
-                       : 'hide from this list (the skill stays installed)';
-    x.onclick = (e) => { e.stopPropagation();
-                         hsend({ type: 'skillsHide', name: s.name, on: !isHidden }); };
+    x.textContent = '✕';
+    x.title = 'remove from the library — everywhere';
+    x.onclick = (e) => {
+      e.stopPropagation();
+      if (!confirm(`Remove "${s.name}" from the skill library? Gone from every machine's list.`)) return;
+      skillbookSend({ type: 'skillsRm', name: s.name });   // reply = fresh library → repaint
+    };
     it.append(main, x);
-    if (!isHidden) it.onclick = () => {
+    it.onclick = () => {
       if (!skillSendable()) return;               // note row above explains why
       skillbookEl.hidden = true;
-      sendQuick(skillInvocation(s));
+      sendQuick(s.body || '');                    // paste the skill file into the session
     };
     list.appendChild(it);
-  };
-  const hidden = skills.filter(s => s.hidden);
-  for (const s of skills) if (!s.hidden) row(s, false);
-  if (hidden.length) {
-    const h = document.createElement('div'); h.className = 'sk-note tappable';
-    h.textContent = (skillShowHidden ? '▾ ' : '▸ ') + hidden.length + ' hidden';
-    h.onclick = () => { skillShowHidden = !skillShowHidden; renderSkillbook(skills); };
-    list.appendChild(h);
-    if (skillShowHidden) for (const s of hidden) row(s, true);
   }
 }
+// The library lives on the RELAY (one list, every machine and device). Fleet
+// mode asks it directly over the relay socket; direct mode sends the same
+// frames to the harness, which proxies them to the relay (serve_skills_lib).
+function skillbookSend(frame) {
+  if (FLEET) relaySend(frame); else hsend(frame);
+}
 function showSkillbook() {
-  skillShowHidden = false;
   const list = document.getElementById('skillbooklist');
   list.innerHTML = '';
   const d = document.createElement('div'); d.className = 'sk-note';
   d.textContent = 'loading skills…';
   list.appendChild(d);
   skillbookEl.hidden = false;
-  hsend({ type: 'skillsList' });                  // reply lands in renderSkillbook
+  skillbookSend({ type: 'skillsLib' });           // reply lands in renderSkillbook
 }
 document.getElementById('skillsBtn').onclick = showSkillbook;
 document.getElementById('skillbookclose').onclick = () => { skillbookEl.hidden = true; };

@@ -1550,67 +1550,62 @@ def _sync_shared_kit(home=None, accounts_dir=None):
     return changed
 
 
-def skills_meta(home=None):
-    """The skills installed on THIS machine (~/.claude/skills — the repo kit,
-    fleet-synced ones, and hand-placed alike), for the UI's 📚 picker: name,
-    frontmatter description, and the absolute SKILL.md path the picker's
-    auto-send points the session at (a path pointer works in already-running
-    sessions and codex alike; a /slash only exists in sessions spawned after
-    the skill landed). `home` is for tests only."""
-    root = (Path(home) if home is not None else Path.home()) / ".claude" / "skills"
-    out = []
+# 📚 skill library (direct mode). The library is a stack of user-written skill
+# files living ON THE RELAY BOX — one list, same everywhere; it deliberately
+# has NOTHING to do with what's installed in ~/.claude/skills on any machine.
+# In fleet mode the browser asks the relay directly; in direct mode (this
+# harness's own page) we proxy the same two ops to the relay over its
+# worker-token HTTP, using the fleet worker's own config (env, else the
+# checkout's fleet/fleet.env). Deep doc: docs/fleet/SKILLS.md.
+def _skills_relay_cfg():
+    """(https_base, token) for the relay's /skills/* — ('', '') if unconfigured."""
+    cfg = {}
     try:
-        entries = sorted(root.iterdir())
+        for line in (HERE / "fleet" / "fleet.env").read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                cfg[k.strip()] = v.strip().strip('"').strip("'")
     except OSError:
-        return out
-    for d in entries:
-        f = d / "SKILL.md"
-        if d.name.startswith(".") or not f.is_file():
-            continue
-        desc = ""
-        try:
-            lines = f.read_text(errors="replace").splitlines()
-            if lines and lines[0].strip() == "---":
-                for line in lines[1:]:
-                    if line.strip() == "---":
-                        break
-                    if line.startswith("description:"):
-                        desc = line.split(":", 1)[1].strip().strip('"').strip("'")
-                        break
-        except OSError:
-            pass
-        out.append({"name": d.name, "description": desc, "path": str(f)})
-    return out
+        pass
+    relay = os.environ.get("FLEET_RELAY") or cfg.get("FLEET_RELAY") or ""
+    token = (os.environ.get("FLEET_WORKER_TOKEN") or os.environ.get("FLEET_TOKEN")
+             or cfg.get("FLEET_WORKER_TOKEN") or cfg.get("FLEET_TOKEN") or "")
+    if relay.startswith("wss://"):
+        relay = "https://" + relay[len("wss://"):]
+    elif relay.startswith("ws://"):
+        relay = "http://" + relay[len("ws://"):]
+    return (relay.rstrip("/"), token) if relay and token else ("", "")
 
 
-# 📚 picker ✕: names hidden from THIS machine's skill picker. A hide is UI-only
-# — the skill stays installed and usable (fleet sync / the repo kit would just
-# reinstall a deleted one anyway); the file is machine-local so every device
-# viewing this machine agrees. Restored via the picker's "hidden" section.
-SKILLS_HIDDEN_FILE = HERE / ".clawd-harness.skills-hidden.json"
-
-
-def skills_hidden(path=None):
-    try:
-        names = json.loads((path or SKILLS_HIDDEN_FILE).read_text())
-        return {n for n in names if isinstance(n, str)}
-    except Exception:
-        return set()
-
-
-def skills_hide(name, on, path=None):
-    """Add/remove one name from the hidden set. Persisted tmp+replace."""
-    path = path or SKILLS_HIDDEN_FILE
-    if not name or len(name) > 100:
+def serve_skills_lib(client, frame):
+    """skillsLib / skillsRm in direct mode: proxy to the relay, reply the
+    fresh library (or an explanatory error). Threaded by the caller — this is
+    network I/O and must not block the WS reader loop."""
+    import urllib.parse
+    import urllib.request
+    base, token = _skills_relay_cfg()
+    if not base:
+        client.send_json({"type": "skillsLib", "skills": [],
+                          "error": "no relay configured on this machine "
+                                   "(fleet/fleet.env) — open h.atg.link instead"})
         return
-    names = skills_hidden(path)
-    (names.add if on else names.discard)(name)
     try:
-        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
-        tmp.write_text(json.dumps(sorted(names)))
-        tmp.replace(path)
-    except OSError as e:
-        print(f"[skills] hidden-list save failed: {e}", flush=True)
+        if frame.get("type") == "skillsRm":
+            req = urllib.request.Request(
+                f"{base}/skills/put?t={urllib.parse.quote(token)}",
+                data=json.dumps({"name": str(frame.get("name") or ""),
+                                 "delete": True}).encode(), method="POST")
+            with urllib.request.urlopen(req, timeout=20):
+                pass
+        with urllib.request.urlopen(
+                f"{base}/skills/lib?t={urllib.parse.quote(token)}",
+                timeout=20) as r:
+            skills = json.loads(r.read().decode()).get("skills") or []
+        client.send_json({"type": "skillsLib", "skills": skills})
+    except Exception as e:
+        client.send_json({"type": "skillsLib", "skills": [],
+                          "error": f"relay unreachable: {e}"})
 
 
 def _share_projects(config_dir):
@@ -7515,19 +7510,11 @@ class Handler(BaseHTTPRequestHandler):
                               "sessions": MGR.sessions_meta(),
                               "current": MGR.default_cid()})
             client.send_json(MGR.irons_meta())
-        elif t in ("skillsList", "skillsHide"):
-            # 📚 skill picker: what's installed on THIS machine, fetched on
-            # modal-open (cheap: a dir scan + frontmatter sniff per skill).
-            # skillsHide toggles a name's ✕-hidden flag first (UI-only — files
-            # untouched), then replies the same fresh list so the open modal
-            # repaints from server truth.
-            if t == "skillsHide":
-                skills_hide(str(frame.get("name") or ""),
-                            bool(frame.get("on", True)))
-            hid = skills_hidden()
-            client.send_json({"type": "skills",
-                              "skills": [dict(s, hidden=(s["name"] in hid))
-                                         for s in skills_meta()]})
+        elif t in ("skillsLib", "skillsRm"):
+            # 📚 skill library (direct mode): proxied to the relay store —
+            # threaded, it's network I/O (see serve_skills_lib).
+            threading.Thread(target=serve_skills_lib, args=(client, frame),
+                             daemon=True).start()
         elif t == "new":
             s = MGR.create_session(frame.get("pid"),
                                    account=frame.get("account"),

@@ -1,26 +1,37 @@
 #!/usr/bin/env python3
-"""The 📚 skill picker's server half: `skills_meta` + the skillsList frame.
+"""The 📚 picker's DIRECT-mode path: server.py proxying the skill library.
 
-The picker lists whatever is installed in ~/.claude/skills on the machine the
-viewer is driving — repo-kit skills, fleet-synced ones (docs/fleet/SKILLS.md)
-and hand-placed ones alike — and its auto-send points the session at the
-SKILL.md path, so the path in the frame must be real and absolute. Pins:
+The library lives on the relay (one list everywhere — see
+docs/fleet/SKILLS.md); in fleet mode the browser asks the relay itself, but a
+direct-mode page (127.0.0.1:8787) has no relay socket, so the harness proxies
+`skillsLib`/`skillsRm` over the relay's worker-token HTTP. Boots a REAL relay
+on a tmp store and drives server.serve_skills_lib with a fake client:
 
-  * every dir with a SKILL.md is listed, sorted, with its frontmatter
-    description parsed (quoted or bare),
-  * a skill without frontmatter still lists (empty description, no crash),
-  * dot-dirs and dirs without SKILL.md are skipped,
-  * a missing/empty skills root returns [] (fresh box, no error).
+  * skillsLib replies the library with descriptions + full bodies,
+  * skillsRm removes on the relay, then replies the fresh list,
+  * an unreachable relay replies an explanatory error, never crashes/hangs.
 
-Temp dirs only — no SessionManager, nothing spawned.
-
-    python3 test_skills_frame.py
+Run: python3 test_skills_frame.py
 """
+import base64
+import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
+import urllib.request
 from pathlib import Path
+from urllib.parse import quote
 
 import server
+
+HERE = Path(__file__).resolve().parent
+PORT = "8809"
+TOKEN = "frame-test-worker"
+TMP = Path(tempfile.mkdtemp(prefix="clawd-skillsframe-test."))
+BODY = "---\nname: vesta\ndescription: put words on the Vestaboard\n---\nthe how-to\n"
 
 FAILS = []
 
@@ -31,50 +42,67 @@ def check(name, ok, detail=""):
         FAILS.append(name)
 
 
+class FakeClient:
+    def __init__(self):
+        self.sent = []
+
+    def send_json(self, obj):
+        self.sent.append(obj)
+
+
+def ask(frame):
+    c = FakeClient()
+    server.serve_skills_lib(c, frame)
+    return c.sent[-1] if c.sent else None
+
+
 def main():
-    with tempfile.TemporaryDirectory() as td:
-        home = Path(td)
-        root = home / ".claude" / "skills"
+    env = {
+        **os.environ,
+        "FLEET_PORT": PORT, "FLEET_BIND": "127.0.0.1",
+        "FLEET_MOBILE_TOKEN": "frame-test-mobile", "FLEET_WORKER_TOKEN": TOKEN,
+        "FLEET_REQUIRE_PASSKEY": "0",
+        "FLEET_SKILLS_DIR": str(TMP / "store"),
+        "FLEET_PREFS_FILE": str(TMP / "prefs.json"),
+        "FLEET_SESSIONS_FILE": str(TMP / "sessions.json"),
+        "FLEET_PUSH_SUBS_FILE": str(TMP / "push.json"),
+    }
+    proc = subprocess.Popen([sys.executable, "relay.py"], env=env,
+                            cwd=str(HERE / "fleet"),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(1.2)
+    # point the proxy's config at OUR relay (env beats fleet/fleet.env)
+    os.environ["FLEET_RELAY"] = f"ws://127.0.0.1:{PORT}"
+    os.environ["FLEET_WORKER_TOKEN"] = TOKEN
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{PORT}/skills/put?t={quote(TOKEN)}",
+            data=json.dumps({"name": "vesta", "files": {
+                "SKILL.md": base64.b64encode(BODY.encode()).decode()}}).encode(),
+            method="POST")
+        with urllib.request.urlopen(req, timeout=10):
+            pass
 
-        check("missing root → []", server.skills_meta(home) == [])
+        got = ask({"type": "skillsLib"})
+        one = ((got or {}).get("skills") or [{}])[0]
+        check("skillsLib proxies the library (desc + full body)",
+              got and got.get("type") == "skillsLib"
+              and one.get("name") == "vesta"
+              and one.get("description") == "put words on the Vestaboard"
+              and one.get("body") == BODY, json.dumps(got)[:200])
 
-        (root / "vesta").mkdir(parents=True)
-        (root / "vesta" / "SKILL.md").write_text(
-            "---\nname: vesta\ndescription: \"put words on the Vestaboard\"\n---\nbody\n")
-        (root / "bare").mkdir()
-        (root / "bare" / "SKILL.md").write_text("no frontmatter at all\n")
-        (root / ".hidden").mkdir()
-        (root / ".hidden" / "SKILL.md").write_text("---\ndescription: nope\n---\n")
-        (root / "not-a-skill").mkdir()
-        (root / "not-a-skill" / "README.md").write_text("no SKILL.md here")
+        got = ask({"type": "skillsRm", "name": "vesta"})
+        check("skillsRm removes on the relay + replies the fresh list",
+              got and got.get("skills") == [] and not got.get("error"))
 
-        got = server.skills_meta(home)
-        names = [s["name"] for s in got]
-        check("lists exactly the SKILL.md dirs, sorted", names == ["bare", "vesta"], str(names))
-        vesta = next((s for s in got if s["name"] == "vesta"), {})
-        check("frontmatter description parsed (quotes stripped)",
-              vesta.get("description") == "put words on the Vestaboard")
-        check("path is the absolute SKILL.md",
-              vesta.get("path") == str(root / "vesta" / "SKILL.md"))
-        bare = next((s for s in got if s["name"] == "bare"), {})
-        check("no frontmatter → empty description, still listed",
-              bare.get("description") == "")
-
-        # the ✕ hidden set: UI-only, persisted, reversible (never touches files)
-        hf = home / "hidden.json"
-        check("fresh box → nothing hidden", server.skills_hidden(hf) == set())
-        server.skills_hide("vesta", True, hf)
-        server.skills_hide("bare", True, hf)
-        server.skills_hide("bare", False, hf)
-        check("hide persists, unhide reverses", server.skills_hidden(hf) == {"vesta"})
-        check("hiding never touches the skill's files",
-              (root / "vesta" / "SKILL.md").is_file())
-        server.skills_hide("", True, hf)
-        server.skills_hide("x" * 200, True, hf)
-        check("empty/absurd names refused", server.skills_hidden(hf) == {"vesta"})
-        hf.write_text("not json {{{")
-        check("corrupt hidden file → empty set, no crash",
-              server.skills_hidden(hf) == set())
+        os.environ["FLEET_RELAY"] = "ws://127.0.0.1:1"   # nothing listens here
+        got = ask({"type": "skillsLib"})
+        check("unreachable relay → explanatory error, no crash",
+              got and got.get("skills") == [] and "unreachable" in (got.get("error") or ""))
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+        shutil.rmtree(TMP, ignore_errors=True)
 
     print("\nall skills-frame checks passed" if not FAILS else f"\nFAILED: {FAILS}")
     return 1 if FAILS else 0

@@ -214,13 +214,15 @@ Corollary directions baked into the design:
 
 ## Fleet skills library (2026-08-30)
 The relay box also holds the **private skill library** (`.clawd-fleet.skills/`,
-gitignored, worker-token-gated HTTP: `/skills/manifest|get|put`); every worker
-syncs it into `~/.claude/skills/` (`sync_skills_once`, ~5 min cadence, state in
-`~/.clawd-fleet.skills.json` — deletions touch only tracked files). Publish
-with `share/bin/skillput`; the UI's 📚 picker lists + auto-sends them. This
-respects the boundary: the worker writes plain files, the harness just reads
-its own disk (`skillsList` frame). **Deep doc: `../docs/fleet/SKILLS.md`**;
-test: `test_skills_sync.py`.
+gitignored; worker-token HTTP `/skills/manifest|get|lib|put`): user-written
+skill files, one list on every device. The UI's 📚 picker fetches it
+(`skillsLib` over the mobile socket; direct-mode harness proxies) and a tap
+**pastes the SKILL.md body** into the open session; ✕ → `skillsRm` → the
+store dir moves to `.trash/` (recoverable). Publish with `share/bin/skillput`.
+**Deliberately decoupled from machines** — nothing installs into
+`~/.claude/skills/`; the same-day sync that did was removed and
+`_skills_sync_cleanup` (one-shot in worker.py) undoes its installs. **Deep
+doc: `../docs/fleet/SKILLS.md`**; test: `test_skills_lib.py`.
 
 ## Deep docs
 - **`../docs/fleet/ADD-MACHINE.md`** — self-contained checklist to add a new
