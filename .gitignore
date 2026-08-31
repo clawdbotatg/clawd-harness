@@ -9,6 +9,8 @@
 .clawd-harness.session*
 # first-party prompt log (quick-chip ranking data) — local usage, may hold anything
 .clawd-harness.prompts.jsonl*
+# 📚 picker ✕-hidden skill names (machine-local UI state)
+.clawd-harness.skills-hidden.json*
 # generated; embed the token in curl URLs (one per session)
 .clawd-harness.hooks.json
 .clawd-harness.hooks.*.json

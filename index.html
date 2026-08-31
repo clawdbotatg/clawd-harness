@@ -820,13 +820,22 @@
   #skillbooklist { overflow-y:auto; -webkit-overflow-scrolling:touch; min-height:0;
                    display:flex; flex-direction:column; gap:8px; }
   .sk-item { border:1px solid var(--edge); border-radius:8px; padding:10px; display:flex;
-             flex-direction:column; gap:4px; cursor:pointer; text-align:left;
+             align-items:center; gap:8px; cursor:pointer; text-align:left;
              background:transparent; font-family:var(--mono); width:100%; }
   .sk-item:hover { border-color:var(--accent-dim); background:var(--raised); }
   .sk-item:active { background:var(--accent-bg); }
+  .sk-main { display:flex; flex-direction:column; gap:4px; flex:1 1 auto; min-width:0; }
   .sk-name { color:var(--accent); font-size:13px; }
   .sk-desc { color:var(--dim); font-size:11px; overflow-wrap:anywhere; }
+  .sk-item .sk-x { flex:0 0 auto; background:transparent; border:1px solid var(--edge); border-radius:5px;
+                   color:var(--dim); font-family:var(--mono); font-size:12px; cursor:pointer; padding:6px 10px; }
+  .sk-item .sk-x:hover { color:var(--err); border-color:var(--err); }
+  .sk-item.hiddenrow { opacity:.55; cursor:default; }
+  .sk-item.hiddenrow .sk-x:hover { color:var(--accent); border-color:var(--accent-dim); }
+  @media (pointer: coarse) { .sk-item .sk-x { padding:9px 12px; font-size:13px; } }
   .sk-note { color:var(--dim); font-size:11px; }
+  .sk-note.tappable { cursor:pointer; padding:6px 0; }
+  .sk-note.tappable:hover { color:var(--accent); }
   /* project cards reuse .scard; status colors + an add-project row */
   .scard.cloning, .scard.error { cursor:default; }
   .scard.cloning { opacity:.75; }
@@ -7116,6 +7125,7 @@ function skillSendable() {
 function skillInvocation(s) {
   return `Use the "${s.name}" skill: read ${s.path} and follow it. If it needs details I haven't given, ask me.`;
 }
+let skillShowHidden = false;   // "N hidden" section expanded? (reset per open)
 function renderSkillbook(skills) {
   if (skillbookEl.hidden) return;                 // stale reply after close — drop
   const list = document.getElementById('skillbooklist');
@@ -7131,22 +7141,46 @@ function renderSkillbook(skills) {
     list.appendChild(d);
     return;
   }
-  for (const s of skills) {
-    const b = document.createElement('button'); b.className = 'sk-item';
+  // ✕ hides a skill from THIS machine's picker (server-kept, so every device
+  // agrees; the skill itself stays installed and usable). Hidden ones live in
+  // a collapsed section below with a ↩ to bring them back — a fat-fingered ✕
+  // must never be a dead end. The server answers every toggle with a fresh
+  // skills frame, so this just repaints from truth.
+  const row = (s, isHidden) => {
+    const it = document.createElement('div');
+    it.className = 'sk-item' + (isHidden ? ' hiddenrow' : '');
+    const main = document.createElement('div'); main.className = 'sk-main';
     const name = document.createElement('div'); name.className = 'sk-name';
     name.textContent = '📚 ' + s.name;
     const desc = document.createElement('div'); desc.className = 'sk-desc';
     desc.textContent = s.description || s.path || '';
-    b.append(name, desc);
-    b.onclick = () => {
+    main.append(name, desc);
+    const x = document.createElement('button'); x.className = 'sk-x';
+    x.textContent = isHidden ? '↩' : '✕';
+    x.title = isHidden ? 'put it back in the list'
+                       : 'hide from this list (the skill stays installed)';
+    x.onclick = (e) => { e.stopPropagation();
+                         hsend({ type: 'skillsHide', name: s.name, on: !isHidden }); };
+    it.append(main, x);
+    if (!isHidden) it.onclick = () => {
       if (!skillSendable()) return;               // note row above explains why
       skillbookEl.hidden = true;
       sendQuick(skillInvocation(s));
     };
-    list.appendChild(b);
+    list.appendChild(it);
+  };
+  const hidden = skills.filter(s => s.hidden);
+  for (const s of skills) if (!s.hidden) row(s, false);
+  if (hidden.length) {
+    const h = document.createElement('div'); h.className = 'sk-note tappable';
+    h.textContent = (skillShowHidden ? '▾ ' : '▸ ') + hidden.length + ' hidden';
+    h.onclick = () => { skillShowHidden = !skillShowHidden; renderSkillbook(skills); };
+    list.appendChild(h);
+    if (skillShowHidden) for (const s of hidden) row(s, true);
   }
 }
 function showSkillbook() {
+  skillShowHidden = false;
   const list = document.getElementById('skillbooklist');
   list.innerHTML = '';
   const d = document.createElement('div'); d.className = 'sk-note';

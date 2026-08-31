@@ -41,7 +41,10 @@ skillput <dir>  ──POST──▶  relay box: fleet/.clawd-fleet.skills/<name>
   fleet mode you see the machine you're driving). Tapping a skill
   **auto-sends** a pointer at its SKILL.md into the open session — a path
   pointer rather than a `/slash` so it works mid-turn, in sessions started
-  before the skill synced, and under codex.
+  before the skill synced, and under codex. Each row's **✕ hides** it from
+  that machine's picker (`skillsHide` frame → `.clawd-harness.skills-hidden.json`,
+  UI-only: the skill stays installed); a collapsed "N hidden" section at the
+  bottom restores with ↩.
 
 ## Writing a skill
 

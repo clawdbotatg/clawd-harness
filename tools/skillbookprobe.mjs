@@ -101,7 +101,40 @@ r.sentSkill = !!sendFrames[0] && sendFrames[0].via === 'quick'
   && sendFrames[0].text.includes('/Users/x/.claude/skills/print-3d/SKILL.md');
 r.closed = await page.evaluate(() => document.getElementById('skillbook').hidden);
 
-// 5. a stale reply after close must not resurrect the modal
+// 5. the ✕: a REAL tap hides (sends skillsHide on:true, NO send, modal stays);
+//    the hidden section expands and its ↩ unhides (on:false)
+await page.tap('#skillsBtn');
+await page.evaluate((fakes) => {
+  window.__sent = [];
+  renderSkillbook(fakes);
+}, FAKES);
+await page.tap('.sk-item .sk-x');
+await page.waitForTimeout(120);
+r.hideSent = await page.evaluate(() =>
+  window.__sent.length === 1
+  && window.__sent[0].type === 'skillsHide' && window.__sent[0].name === 'print-3d'
+  && window.__sent[0].on === true
+  && !document.getElementById('skillbook').hidden);
+// server's fresh reply: print-3d now hidden → one row + a collapsed "1 hidden"
+await page.evaluate((fakes) => {
+  window.__sent = [];
+  renderSkillbook([{ ...fakes[0], hidden: true }, fakes[1]]);
+}, FAKES);
+r.hiddenCollapsed = await page.evaluate(() =>
+  document.querySelectorAll('#skillbooklist .sk-item').length === 1
+  && document.querySelector('#skillbooklist .sk-note.tappable').textContent.includes('1 hidden'));
+await page.tap('#skillbooklist .sk-note.tappable');
+await page.waitForTimeout(120);
+r.hiddenExpands = await page.evaluate(() =>
+  document.querySelectorAll('#skillbooklist .sk-item.hiddenrow').length === 1);
+await page.tap('.sk-item.hiddenrow .sk-x');
+await page.waitForTimeout(120);
+r.unhideSent = await page.evaluate(() =>
+  window.__sent.some(f => f.type === 'skillsHide' && f.name === 'print-3d' && f.on === false)
+  && !window.__sent.some(f => f.type === 'send'));
+await page.evaluate(() => { document.getElementById('skillbook').hidden = true; });
+
+// 6. a stale reply after close must not resurrect the modal
 r.staleDropped = await page.evaluate(() => {
   renderSkillbook([{ name: 'late', description: '', path: '/x' }]);
   return document.getElementById('skillbook').hidden;
@@ -113,8 +146,10 @@ await page.evaluate(() => {   // restore what we faked (page closes right after)
 });
 console.log('SKILLBOOK:', JSON.stringify(r));
 const ok = r.btnAfterClock && r.modalUp && r.fetched && r.rows && r.noNote
-  && r.noopOutside && r.sentOne && r.sentSkill && r.closed && r.staleDropped;
-console.log(ok ? 'PASS — 📚 opens+fetches, rows render, guarded outside a session, one tap = one pointer send'
+  && r.noopOutside && r.sentOne && r.sentSkill && r.closed
+  && r.hideSent && r.hiddenCollapsed && r.hiddenExpands && r.unhideSent
+  && r.staleDropped;
+console.log(ok ? 'PASS — 📚 opens+fetches, rows render, guarded outside a session, one tap = one pointer send, ✕ hides / ↩ restores'
               : 'FAIL');
 await browser.close();
 process.exit(ok ? 0 : 1);

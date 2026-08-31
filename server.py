@@ -1583,6 +1583,36 @@ def skills_meta(home=None):
     return out
 
 
+# 📚 picker ✕: names hidden from THIS machine's skill picker. A hide is UI-only
+# — the skill stays installed and usable (fleet sync / the repo kit would just
+# reinstall a deleted one anyway); the file is machine-local so every device
+# viewing this machine agrees. Restored via the picker's "hidden" section.
+SKILLS_HIDDEN_FILE = HERE / ".clawd-harness.skills-hidden.json"
+
+
+def skills_hidden(path=None):
+    try:
+        names = json.loads((path or SKILLS_HIDDEN_FILE).read_text())
+        return {n for n in names if isinstance(n, str)}
+    except Exception:
+        return set()
+
+
+def skills_hide(name, on, path=None):
+    """Add/remove one name from the hidden set. Persisted tmp+replace."""
+    path = path or SKILLS_HIDDEN_FILE
+    if not name or len(name) > 100:
+        return
+    names = skills_hidden(path)
+    (names.add if on else names.discard)(name)
+    try:
+        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(sorted(names)))
+        tmp.replace(path)
+    except OSError as e:
+        print(f"[skills] hidden-list save failed: {e}", flush=True)
+
+
 def _share_projects(config_dir):
     """Point <account>/projects at the shared ~/.claude/projects store so
     EVERY account sees EVERY session transcript: --resume works under any
@@ -7485,10 +7515,19 @@ class Handler(BaseHTTPRequestHandler):
                               "sessions": MGR.sessions_meta(),
                               "current": MGR.default_cid()})
             client.send_json(MGR.irons_meta())
-        elif t == "skillsList":
+        elif t in ("skillsList", "skillsHide"):
             # 📚 skill picker: what's installed on THIS machine, fetched on
             # modal-open (cheap: a dir scan + frontmatter sniff per skill).
-            client.send_json({"type": "skills", "skills": skills_meta()})
+            # skillsHide toggles a name's ✕-hidden flag first (UI-only — files
+            # untouched), then replies the same fresh list so the open modal
+            # repaints from server truth.
+            if t == "skillsHide":
+                skills_hide(str(frame.get("name") or ""),
+                            bool(frame.get("on", True)))
+            hid = skills_hidden()
+            client.send_json({"type": "skills",
+                              "skills": [dict(s, hidden=(s["name"] in hid))
+                                         for s in skills_meta()]})
         elif t == "new":
             s = MGR.create_session(frame.get("pid"),
                                    account=frame.get("account"),

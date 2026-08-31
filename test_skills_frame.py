@@ -60,6 +60,22 @@ def main():
         check("no frontmatter → empty description, still listed",
               bare.get("description") == "")
 
+        # the ✕ hidden set: UI-only, persisted, reversible (never touches files)
+        hf = home / "hidden.json"
+        check("fresh box → nothing hidden", server.skills_hidden(hf) == set())
+        server.skills_hide("vesta", True, hf)
+        server.skills_hide("bare", True, hf)
+        server.skills_hide("bare", False, hf)
+        check("hide persists, unhide reverses", server.skills_hidden(hf) == {"vesta"})
+        check("hiding never touches the skill's files",
+              (root / "vesta" / "SKILL.md").is_file())
+        server.skills_hide("", True, hf)
+        server.skills_hide("x" * 200, True, hf)
+        check("empty/absurd names refused", server.skills_hidden(hf) == {"vesta"})
+        hf.write_text("not json {{{")
+        check("corrupt hidden file → empty set, no crash",
+              server.skills_hidden(hf) == set())
+
     print("\nall skills-frame checks passed" if not FAILS else f"\nFAILED: {FAILS}")
     return 1 if FAILS else 0
 
