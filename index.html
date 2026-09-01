@@ -524,6 +524,9 @@
   #voice button:disabled { opacity:.35; cursor:default; }
   #voice button.on { border-color:var(--accent); background:var(--accent-bg); }
   #ttsBtn.speaking { border-color:var(--accent); animation:vpulse 1.4s infinite; }
+  /* push-to-talk hold: the browser must never claim the gesture for a pan
+     (pointercancel kills dictation mid-sentence) or pop a long-press callout */
+  #micBtn { touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
   #micBtn.rec { border-color:var(--err); background:#1c0c0a; animation:vpulse 1s infinite; }
   @keyframes vpulse { 0%,100%{opacity:1} 50%{opacity:.45} }
   button { background:var(--accent); color:#000; border:0; padding:10px 16px;
@@ -7565,17 +7568,28 @@ function speak(text) {
 // --- speech-to-text: dictate into the box by press-and-holding the mic button.
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
 let rec = null, recOn = false, recBase = '';   // recBase = box text captured when recording began
+// recWrote = exactly what dictation last put in the box; recCtx = the composer
+// context it was dictating into. Results trail rec.stop() (the last chunk often
+// finalizes only after release), so onresult keeps writing after recOn drops —
+// but ONLY while the box still holds our own last write, in the same context.
+// The moment typing or a tab switch touches the box, the mic loses: dictation
+// must never replace text the user can see (2026-09-01: a recognition session
+// left running "rushed in and replaced what I was typing").
+let recWrote = null, recCtx = null;
 function buildRec() {
   const r = new SR();
   r.continuous = true; r.interimResults = true; r.lang = 'en-US';
   r.onresult = (e) => {
+    if (activeDraftId !== recCtx || (recWrote !== null && box.value !== recWrote)) { stopRec(); return; }
     let finalT = '', interim = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const tr = e.results[i];
       if (tr.isFinal) finalT += tr[0].transcript; else interim += tr[0].transcript;
     }
     if (finalT) recBase = (recBase + ' ' + finalT).replace(/\s+/g, ' ').trimStart();
-    box.value = (recBase + ' ' + interim).replace(/\s+/g, ' ').trimStart();
+    recWrote = (interim ? recBase + ' ' + interim : recBase).replace(/\s+/g, ' ').trimStart();
+    box.value = recWrote;
+    saveDraft(); autosizeBox();   // dictated text must survive a reload like typed text does
   };
   r.onend = () => { if (recOn) { try { r.start(); } catch {} } };  // Chrome auto-stops; keep alive while on
   r.onerror = (ev) => { if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') stopRec(); };
@@ -7585,7 +7599,8 @@ function startRec() {
   if (!SR || recOn) return;
   if (synth) synth.cancel();                  // barge-in: don't read replies back into the mic
   rec = rec || buildRec();
-  recBase = box.value; recOn = true;
+  recBase = box.value; recWrote = box.value; recCtx = activeDraftId;
+  recOn = true;
   micBtn.classList.add('rec'); box.focus();
   try { rec.start(); } catch {}
 }
@@ -7599,12 +7614,16 @@ else {
   // Push-to-talk: press and hold the mic to dictate, release to stop. The space
   // bar is intentionally NOT bound — it types a normal space like any textarea.
   micBtn.title = 'Hold to dictate (speech-to-text)';
-  const hold = (e) => { e.preventDefault(); startRec(); };
+  // Capture the pointer for the whole hold: a finger drifting off the button no
+  // longer kills dictation mid-sentence, and pointerup/cancel are guaranteed to
+  // land here — a missed release used to strand recognition in the on state.
+  const hold = (e) => { e.preventDefault(); try { micBtn.setPointerCapture(e.pointerId); } catch {} startRec(); };
   const release = () => stopRec();
   micBtn.addEventListener('pointerdown', hold);
   micBtn.addEventListener('pointerup', release);
   micBtn.addEventListener('pointerleave', release);
   micBtn.addEventListener('pointercancel', release);
+  micBtn.addEventListener('contextmenu', (e) => e.preventDefault());  // long-press must not pop a menu mid-hold
 }
 
 // ---- 🔥 irons: named groups of projects -------------------------------------
