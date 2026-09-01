@@ -101,7 +101,10 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
    scroll position, focus, un-mirrored input text, and the very card under a
    finger mid-tap. Only arrival may focus a filter box; never refill an input
    from its JS mirror. The pin board is the one sanctioned wholesale-rebuild
-   exception.
+   exception. Same law for dictation: STT results write into the composer only
+   while the box still holds dictation's own last write in the same draft
+   context (`recWrote`/`recCtx`); typing and tab switches always win
+   (`tools/sttprobe.mjs` enforces).
 5. **Shared-PTY sizing is ownership-based** (`claim_resize`) — deliberate acts
    claim the geometry; never regress to last-resize-wins. Respawns carry
    geometry + viewers via `clone_for_respawn`/`adopt_viewers` — never

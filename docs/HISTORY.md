@@ -6,7 +6,93 @@
 > deleted; read this when you need the deep story behind a rule or feature
 > (dates, commit hashes, measured evidence, failed approaches).
 
-# clawd-harness — orientation for Claude
+# Post-archive log
+
+New war stories since the 2026-08-29 reset land HERE, newest first. The
+archived original continues below under "orientation for Claude".
+
+## 2026-09-01 — dictation ownership: the mic must never replace what you typed (`0a72aee`, `acda642`)
+
+Austin, dictating from his phone, hit three faces of one bug in a single
+morning: (a) dictation captured fragments — his message arrived as
+`u uuuuuhi don'`; (b) it worked intermittently; (c) while he was **typing**,
+"text came rushing in and replaced my text". Root cause: the composer's STT
+`onresult` handler blindly did `box.value = recBase + interim` — no check
+that it still had any right to the box.
+
+Three mechanisms fed that one sink:
+
+1. **Results trail `rec.stop()`.** SpeechRecognition finalizes the last chunk
+   *after* release, so a late result landed on top of whatever the user had
+   typed since. (You *want* that trailing final when the box is untouched —
+   it completes the sentence — so "drop everything after stop" is the wrong
+   fix.)
+2. **A missed release stranded recognition ON.** The keep-alive
+   (`onend → r.start()` while `recOn`) is needed because Chrome auto-stops on
+   silence — but with no pointer capture on the 🎤 hold, a finger drifting off
+   the button fired `pointerleave` (fragment capture, symptom a), and a
+   missed `pointerup` left `recOn` true **forever**: recognition kept
+   transcribing ambient speech and stomping the box minutes later (symptom c).
+3. **The page could claim the touch.** `<html>` is `touch-action:manipulation`,
+   so a hold that wiggled became a pan → `pointercancel` → dictation died
+   mid-sentence (symptom b).
+
+**The fix — an ownership contract** (`index.html`, the STT block near
+`buildRec`): dictation tracks `recWrote` (the exact string it last wrote into
+the box) and `recCtx` (the `activeDraftId` it started in). `onresult` may
+write ONLY while `box.value === recWrote && activeDraftId === recCtx`;
+otherwise it calls `stopRec()` and touches nothing. Consequences, all
+deliberate:
+
+- Typing always wins — the first result that meets an edited box self-stops
+  the recognition, so even a stranded session heals itself on the user's
+  first keystroke.
+- A composer context switch (tab hop, rung change — `syncComposer` swaps
+  drafts) kills dictation instead of bleeding text into another session's
+  draft.
+- A trailing final into an *untouched* box still lands. Ownership, not a
+  timer, is the gate.
+- Every dictation write now calls `saveDraft()` (+`autosizeBox()`), so
+  dictated text survives a reload exactly like typed text — it used to live
+  only in the DOM until the next manual input event.
+- The hold itself: `setPointerCapture` on pointerdown (drift can't kill the
+  hold; release is guaranteed to land on the button), `touch-action:none` +
+  `user-select:none` + `-webkit-touch-callout:none` on `#micBtn`, and
+  `contextmenu` preventDefault (long-press menu). A final-only result no
+  longer leaves a trailing space (interim-empty compose path).
+
+**Space-hold push-to-talk** (same day, sibling session, `acda642`): on
+desktop, holding the SPACE BAR in the composer box is the same
+press-and-hold gesture. Quick tap = normal space; past 350ms
+(`SPACE_HOLD_MS`) the space(s) the key typed while waiting — auto-repeat
+included — are **rolled back from a snapshot taken at keydown**
+(value + selection), then dictation runs until keyup. Auto-repeat spaces are
+eaten while dictating; any other key during the wait cancels the pending
+hold (the space stays); `box` blur AND window blur stop it (a missed keyup
+must not strand the mic — same law as pointer capture). **Touch is
+excluded** (`isTouch`): a soft-keyboard space-hold is the cursor-trackpad
+gesture and must stay native.
+
+**The guard: `tools/sttprobe.mjs`** — stubbed `SpeechRecognition` +
+stubbed-relay fleet page (tapprobe pattern, nothing real touched), real CDP
+touch holds on an emulated iPhone for act one, a desktop page for the
+space-hold act. It pins: results land + draft saved; trailing final into an
+untouched box; typed text unclobberable; stranded recognition self-stops on
+typing; no cross-draft bleed on context switch; `touch-action:none` present;
+space tap vs hold vs cancel vs blur.
+
+**Probe-authoring traps found on the way** (will bite the next probe too):
+
+- In fleet mode `#/` is the HOME route: `resolvePendingNav` **waits** for
+  `machineList.length && allMachinesSessions()` and then dives into the
+  warmest session — it does not land on the projects rung. A probe that
+  never sends a `sessions` frame waits forever, and `pendingNav` stays
+  parked (nav appears to silently no-op). To probe a composer context
+  switch, hop **project → project** (`#/p/<key>` → `#/p/<other>`), which
+  resolves as soon as the projects frame is in.
+- `let`-declared globals in the page script (`recOn`, `activeDraftId`…) are
+  script-scoped, not `window` properties — but `page.evaluate` still reaches
+  them by bare identifier (global lexical environment). Probes rely on this.
 
 A web **harness** for driving interactive (subscription-billed) Claude Code
 sessions from a browser. Forked from `clawd-console`. `README.md` is the
