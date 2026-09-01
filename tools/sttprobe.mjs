@@ -12,6 +12,13 @@
 //   4. a composer context switch (leaving the rung) kills dictation the same way;
 //   5. #micBtn carries touch-action:none so a pan can't pointercancel the hold.
 //
+// Second act (desktop page): SPACE-HOLD push-to-talk in the composer —
+//   6. a quick space tap types a normal space, never records;
+//   7. holding space past the threshold rolls back the space(s) the key typed
+//      (auto-repeat included) and starts dictation; release stops it;
+//   8. auto-repeat spaces are eaten while dictating;
+//   9. any other key during the wait cancels the pending hold (space kept).
+//
 // Fleet mode + stubbed relay WebSocket (tapprobe pattern): no real server, no
 // real session, no mic. Real touch gestures via CDP, not element.click().
 //   cd tools && node sttprobe.mjs
@@ -30,7 +37,7 @@ let failed=false; const check=(n,ok,d)=>{console.log(`  ${ok?'✓':'✗'} ${n}${
 const errors=[];
 const iphone = devices['iPhone 12'];
 const page = await browser.newPage({ ...iphone, viewport:{width:390,height:844} });
-await page.addInitScript(() => {
+const initStub = () => {
   window.__sent=[]; const sockets=[];
   class FakeWS{constructor(u){this.url=u;this.readyState=0;this.binaryType='arraybuffer';sockets.push(this);
     setTimeout(()=>{this.readyState=1;this.onopen&&this.onopen({});},0);}
@@ -54,21 +61,25 @@ await page.addInitScript(() => {
     if (interim!=null) results.push(Object.assign([{transcript:interim}],{isFinal:false}));
     window.__sr.onresult({resultIndex:0,results});
   };
-});
+};
+await page.addInitScript(initStub);
 page.on('pageerror',e=>errors.push(String(e)));
-await page.route('https://fleet.probe/', r=>r.fulfill({status:200,contentType:'text/html; charset=utf-8',body:fleetHtml}));
-await page.goto('https://fleet.probe/',{waitUntil:'domcontentloaded'});
-await page.waitForTimeout(500);
-await page.evaluate(()=>{ window.__relayRx({type:'prefs',inactive:[],irons:[]});
-  window.__relayRx({type:'machines',machines:[{id:'clawd-atg',host:'atg',kind:'machine',online:true,lastSeen:0,stats:{projects:1,sessions:0,active:0}}]});
-  handleMachineJson('clawd-atg',{type:'projects',projects:[
-    {pid:'p1',name:'alpha',repoUrl:'https://github.com/clawdbotatg/alpha',kind:'gh',status:'ready',sessionCount:0,busyCount:0,waitingCount:0,created:1,pinned:false,lastTouched:100,emoji:''},
-    {pid:'p2',name:'bravo',repoUrl:'https://github.com/clawdbotatg/bravo',kind:'gh',status:'ready',sessionCount:0,busyCount:0,waitingCount:0,created:1,pinned:false,lastTouched:90,emoji:''}]});
-});
-await page.waitForTimeout(300);
-// land on alpha's sessions rung, where the "new session" composer lives
-await page.evaluate(()=>{ location.hash = '#/p/' + encodeURIComponent(projectRows().find(p=>p.name==='alpha').id); });
-await page.waitForTimeout(400);
+const bootPage = async (pg) => {
+  await pg.route('https://fleet.probe/', r=>r.fulfill({status:200,contentType:'text/html; charset=utf-8',body:fleetHtml}));
+  await pg.goto('https://fleet.probe/',{waitUntil:'domcontentloaded'});
+  await pg.waitForTimeout(500);
+  await pg.evaluate(()=>{ window.__relayRx({type:'prefs',inactive:[],irons:[]});
+    window.__relayRx({type:'machines',machines:[{id:'clawd-atg',host:'atg',kind:'machine',online:true,lastSeen:0,stats:{projects:1,sessions:0,active:0}}]});
+    handleMachineJson('clawd-atg',{type:'projects',projects:[
+      {pid:'p1',name:'alpha',repoUrl:'https://github.com/clawdbotatg/alpha',kind:'gh',status:'ready',sessionCount:0,busyCount:0,waitingCount:0,created:1,pinned:false,lastTouched:100,emoji:''},
+      {pid:'p2',name:'bravo',repoUrl:'https://github.com/clawdbotatg/bravo',kind:'gh',status:'ready',sessionCount:0,busyCount:0,waitingCount:0,created:1,pinned:false,lastTouched:90,emoji:''}]});
+  });
+  await pg.waitForTimeout(300);
+  // land on alpha's sessions rung, where the "new session" composer lives
+  await pg.evaluate(()=>{ location.hash = '#/p/' + encodeURIComponent(projectRows().find(p=>p.name==='alpha').id); });
+  await pg.waitForTimeout(400);
+};
+await bootPage(page);
 
 const cdp = await page.context().newCDPSession(page);
 const micXY = await page.evaluate(()=>{ const r=micBtn.getBoundingClientRect(); return {x:r.x+r.width/2, y:r.y+r.height/2, visible:r.width>0&&r.height>0}; });
@@ -120,6 +131,55 @@ const bled = await page.evaluate(()=>({v:box.value, on:recOn,
 check("context switch: bravo's empty box stays empty", bled.v==='' && !bled.on, JSON.stringify({v:bled.v,on:bled.on}));
 check("…and alpha's stashed draft never got 'bleed two'", bled.alpha.endsWith('bleed one'), bled.alpha);
 await releaseMic();
+
+// ---- desktop page: SPACE-HOLD push-to-talk ---------------------------------
+// A fresh non-emulated page: fine pointer → isTouch=false, real key events via
+// CDP (keyboard.down twice = held key with repeat, exactly what a hold sends).
+const dpage = await browser.newPage();
+await dpage.addInitScript(initStub);
+dpage.on('pageerror',e=>errors.push('desktop: '+String(e)));
+await bootPage(dpage);
+check('desktop page is not touch (space-hold armed)', await dpage.evaluate(()=>!isTouch));
+await dpage.evaluate(()=>{ box.focus(); });
+
+// --- 6. a quick space tap is just a space -----------------------------------
+await dpage.keyboard.type('hi');
+await dpage.keyboard.press(' ');
+await dpage.keyboard.type('there');
+await dpage.waitForTimeout(500);   // outlive the hold threshold: the tap must never fire it
+check('quick tap types a normal space, no recording',
+  await dpage.evaluate(()=>box.value==='hi there' && !recOn && !window.__sr));
+
+// --- 7. hold past threshold → spaces rolled back, dictation runs ------------
+await dpage.keyboard.down(' ');            // inserts a space…
+await dpage.waitForTimeout(120);
+await dpage.keyboard.down(' ');            // …auto-repeat inserts another…
+await dpage.waitForTimeout(450);           // …then the hold threshold passes
+const held = await dpage.evaluate(()=>({v:box.value, on:recOn, cls:micBtn.classList.contains('rec')}));
+check('hold starts recognition and lights the mic', held.on && held.cls, JSON.stringify(held));
+check('space(s) typed during the wait were rolled back', held.v==='hi there', JSON.stringify(held.v));
+await dpage.evaluate(()=>window.__emit(['space talk'],null));
+check('dictation lands after the rolled-back hold',
+  await dpage.evaluate(()=>box.value==='hi there space talk'));
+
+// --- 8. auto-repeat spaces are eaten while dictating ------------------------
+await dpage.keyboard.down(' ');
+await dpage.waitForTimeout(80);
+check('repeat spaces mid-dictation do not reach the box',
+  await dpage.evaluate(()=>box.value==='hi there space talk'));
+
+// --- 9. release stops; other key during the wait cancels the pending hold ---
+await dpage.keyboard.up(' ');
+await dpage.waitForTimeout(80);
+check('space release stops recognition', await dpage.evaluate(()=>!recOn && !micBtn.classList.contains('rec')));
+check('dictated text saved as the draft', await dpage.evaluate(()=>(localStorage.getItem(draftKey(activeDraftId))||'')==='hi there space talk'));
+await dpage.keyboard.down(' ');            // start a hold…
+await dpage.waitForTimeout(100);
+await dpage.keyboard.press('x');           // …but type through it: cancels the pending hold
+await dpage.keyboard.up(' ');
+await dpage.waitForTimeout(500);
+check('typing during the wait cancels the hold, space kept',
+  await dpage.evaluate(()=>box.value==='hi there space talk x' && !recOn));
 
 check('no page errors', errors.length===0, errors.join(' | '));
 await browser.close();

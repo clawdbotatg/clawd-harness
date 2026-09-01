@@ -7611,9 +7611,10 @@ function stopRec() {
 }
 if (!SR) { micBtn.disabled = true; micBtn.title = 'Speech-to-text not supported in this browser'; }
 else {
-  // Push-to-talk: press and hold the mic to dictate, release to stop. The space
-  // bar is intentionally NOT bound — it types a normal space like any textarea.
-  micBtn.title = 'Hold to dictate (speech-to-text)';
+  // Push-to-talk: press and hold the mic to dictate, release to stop. On
+  // desktop, holding the SPACE BAR in the composer is the same gesture — see
+  // the space-hold block below.
+  micBtn.title = 'Hold to dictate (speech-to-text) — or hold Space in the box';
   // Capture the pointer for the whole hold: a finger drifting off the button no
   // longer kills dictation mid-sentence, and pointerup/cancel are guaranteed to
   // land here — a missed release used to strand recognition in the on state.
@@ -7624,6 +7625,38 @@ else {
   micBtn.addEventListener('pointerleave', release);
   micBtn.addEventListener('pointercancel', release);
   micBtn.addEventListener('contextmenu', (e) => e.preventDefault());  // long-press must not pop a menu mid-hold
+
+  // Space-hold push-to-talk (desktop only): hold the space bar in the composer
+  // to dictate, release to stop. A quick tap is still a normal space — the hold
+  // is only recognized after SPACE_HOLD_MS, and the space(s) the key typed
+  // while we waited (key auto-repeat included) are rolled back from a snapshot
+  // taken at keydown before recording starts, so no stray spaces survive.
+  // Touch is excluded: a soft-keyboard space-hold is the cursor-trackpad
+  // gesture, which fires keydown without repeats and must stay native.
+  const SPACE_HOLD_MS = 350;
+  let spaceT = null, spaceSnap = null, spacePTT = false;
+  const spaceCancel = () => { if (spaceT) { clearTimeout(spaceT); spaceT = null; } spaceSnap = null; };
+  const spaceStop = () => { spaceCancel(); if (spacePTT) { spacePTT = false; stopRec(); } };
+  box.addEventListener('keydown', (e) => {
+    if (isTouch) return;
+    if (e.key !== ' ') { spaceCancel(); return; }   // any other key: it was never a hold
+    if (spacePTT) { e.preventDefault(); return; }   // eat auto-repeat spaces while dictating
+    if (e.repeat || spaceT || recOn || e.metaKey || e.ctrlKey || e.altKey) return;
+    spaceSnap = { v: box.value, s: box.selectionStart, e: box.selectionEnd };
+    spaceT = setTimeout(() => {
+      spaceT = null;
+      box.value = spaceSnap.v;                      // roll back the space(s) typed during the wait
+      try { box.setSelectionRange(spaceSnap.s, spaceSnap.e); } catch {}
+      spaceSnap = null;
+      saveDraft(); autosizeBox();
+      spacePTT = true;
+      startRec();
+    }, SPACE_HOLD_MS);
+  });
+  box.addEventListener('keyup', (e) => { if (e.key === ' ') spaceStop(); });
+  // a missed keyup (window blur mid-hold, focus stolen) must not strand the mic on
+  box.addEventListener('blur', spaceStop);
+  window.addEventListener('blur', spaceStop);
 }
 
 // ---- 🔥 irons: named groups of projects -------------------------------------
