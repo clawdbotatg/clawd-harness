@@ -67,7 +67,15 @@ def log(key, msg, every=0):
 
 
 def is_home(url):
-    return (url or "").rstrip("/").startswith(URL)
+    """The home page is the home ORIGIN at its root path (query/hash allowed).
+    A prefix match would also keep gizmo's `/watch` mirror or any other route
+    on the same server — those are strays on the glass too."""
+    try:
+        u = urllib.parse.urlsplit(url or "")
+        h = urllib.parse.urlsplit(URL)
+    except ValueError:
+        return False
+    return (u.scheme, u.netloc) == (h.scheme, h.netloc) and u.path in ("", "/", h.path or "/")
 
 
 # ---- processes ---------------------------------------------------------------
@@ -351,8 +359,16 @@ def guard_once():
         log("ok", "home screen up, kiosk in front", every=3600)
 
 
+def _self_mtime():
+    try:
+        return os.stat(os.path.abspath(__file__)).st_mtime
+    except OSError:
+        return 0
+
+
 def main():
     once = "--once" in sys.argv
+    born = _self_mtime()   # a git pull that changes this file re-execs us
     log("start", f"kiosk-guard: url={URL} profile={PROFILE} cdp={CDP_PORT} every {INTERVAL}s "
                  f"fullscreen={FULLSCREEN} activate={ACTIVATE} stale_login={STALE_LOGIN_S}s")
     while True:
@@ -363,6 +379,9 @@ def main():
         if once:
             return
         time.sleep(INTERVAL)
+        if born and _self_mtime() != born:
+            log("reexec", "kiosk-guard.py changed on disk — re-exec into the new code")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 if __name__ == "__main__":
