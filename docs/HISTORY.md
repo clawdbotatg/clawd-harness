@@ -11,6 +11,19 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-02 — kiosk-guard: the wall display must always show the home screen
+
+clawd-sat is a hands-off wall display (gizmo in a Chrome `--app` window, no
+keyboard/mouse). A launchd job (`com.leftclaw.auth-refresh` → `cont auth
+ensure` → `claude setup-token`) opened its OAuth login in the kiosk Chrome
+profile and it sat on the glass for hours — the existing keeper only counts
+gizmo's connected screens and saw nothing wrong. Fix: `tools/kiosk/`, a
+2-second launchd guard that closes non-home pages over the DevTools port,
+reopens/fullscreens/activates the home window, brings the kiosk to the front
+by pid without any Accessibility grant, and kills hung login flows. Driven
+onto the box through the fleet control path (no ssh route from heart to
+sat); details and the still-open token gap in `tools/kiosk/README.md`.
+
 ## 2026-09-01 — dictation ownership: the mic must never replace what you typed (`0a72aee`, `acda642`)
 
 Austin, dictating from his phone, hit three faces of one bug in a single

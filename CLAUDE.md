@@ -79,6 +79,7 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   `docs/fleet/SKILLS.md` (the private skill library on the relay: 📚 picker
   pastes a skill's text into a session; `skillput` publishes; no machine
   installs).
+  Wall-display boxes (clawd-sat): `tools/kiosk/README.md`.
 
 ## Landmines (don't regress; stories in HISTORY.md)
 
