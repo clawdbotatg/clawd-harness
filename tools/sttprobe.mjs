@@ -170,7 +170,7 @@ check('repeat spaces mid-dictation do not reach the box',
 
 // --- 9. release stops; other key during the wait cancels the pending hold ---
 await dpage.keyboard.up(' ');
-await dpage.waitForTimeout(80);
+await dpage.waitForTimeout(250);                  // outlives SPACE_REPEAT_GRACE_MS
 check('space release stops recognition', await dpage.evaluate(()=>!recOn && !micBtn.classList.contains('rec')));
 check('dictated text saved as the draft', await dpage.evaluate(()=>(localStorage.getItem(draftKey(activeDraftId))||'')==='hi there space talk'));
 await dpage.keyboard.down(' ');            // start a hold…

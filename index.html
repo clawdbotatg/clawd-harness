@@ -7633,13 +7633,21 @@ else {
   // taken at keydown before recording starts, so no stray spaces survive.
   // Touch is excluded: a soft-keyboard space-hold is the cursor-trackpad
   // gesture, which fires keydown without repeats and must stay native.
+  // Linux/Wayland Chromium delivers key auto-repeat as alternating keyup/keydown
+  // pairs (repeat:false, ~25ms apart), not macOS's keydown stream — so a keyup
+  // only ARMS a stop, deferred SPACE_REPEAT_GRACE_MS; a keydown for the same key
+  // inside that window proves it was auto-repeat and revokes it. Blur stops
+  // instantly (unambiguous release, no grace).
   const SPACE_HOLD_MS = 350;
-  let spaceT = null, spaceSnap = null, spacePTT = false;
+  const SPACE_REPEAT_GRACE_MS = 90;
+  let spaceT = null, spaceSnap = null, spacePTT = false, spaceUpT = null;
   const spaceCancel = () => { if (spaceT) { clearTimeout(spaceT); spaceT = null; } spaceSnap = null; };
-  const spaceStop = () => { spaceCancel(); if (spacePTT) { spacePTT = false; stopRec(); } };
+  const spaceUpCancel = () => { if (spaceUpT) { clearTimeout(spaceUpT); spaceUpT = null; } };
+  const spaceStop = () => { spaceUpCancel(); spaceCancel(); if (spacePTT) { spacePTT = false; stopRec(); } };
   box.addEventListener('keydown', (e) => {
     if (isTouch) return;
-    if (e.key !== ' ') { spaceCancel(); return; }   // any other key: it was never a hold
+    if (e.key !== ' ') { spaceCancel(); return; }   // any other key: it was never a hold (armed stop survives — genuine release)
+    spaceUpCancel();                                // same key came back inside the grace: that keyup was auto-repeat
     if (spacePTT) { e.preventDefault(); return; }   // eat auto-repeat spaces while dictating
     if (e.repeat || spaceT || recOn || e.metaKey || e.ctrlKey || e.altKey) return;
     spaceSnap = { v: box.value, s: box.selectionStart, e: box.selectionEnd };
@@ -7653,7 +7661,11 @@ else {
       startRec();
     }, SPACE_HOLD_MS);
   });
-  box.addEventListener('keyup', (e) => { if (e.key === ' ') spaceStop(); });
+  box.addEventListener('keyup', (e) => {
+    if (e.key !== ' ') return;
+    spaceUpCancel();
+    spaceUpT = setTimeout(() => { spaceUpT = null; spaceStop(); }, SPACE_REPEAT_GRACE_MS);
+  });
   // a missed keyup (window blur mid-hold, focus stolen) must not strand the mic on
   box.addEventListener('blur', spaceStop);
   window.addEventListener('blur', spaceStop);
