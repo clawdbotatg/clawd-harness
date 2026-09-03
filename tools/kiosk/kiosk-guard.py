@@ -20,6 +20,14 @@ This guard runs every few seconds and puts the home screen back:
      KIOSK_STALE_LOGIN_S are killed: a browser OAuth flow can never complete on
      a box with no input devices, and a hung one keeps its launchd job wedged.
 
+A human at the box wins (Austin, 2026-09-02: he opened System Settings over
+Screen Sharing to change the display and this pulled the kiosk back over it
+within 2 s — "I told you to give me 60 seconds"). Steps 1–3 are skipped while
+IOKit's HIDIdleTime is under KIOSK_GRACE_S: any keyboard/mouse/touch/Screen
+Sharing input counts, so whatever a person opened stays up until they have
+left it alone for a full minute. A robot-opened popup with nobody around
+(the OAuth case) still goes in seconds, because nothing reset the timer.
+
 Stdlib only. Configure with env (defaults fit clawd-sat's gizmo):
   KIOSK_URL            http://127.0.0.1:7912      home screen (prefix match)
   KIOSK_PROFILE        ~/.gizmo-chrome            Chrome --user-data-dir of the kiosk
@@ -28,6 +36,7 @@ Stdlib only. Configure with env (defaults fit clawd-sat's gizmo):
   KIOSK_FULLSCREEN     1                          force the home window fullscreen
   KIOSK_STALE_LOGIN_S  180                        kill setup-token/login older than this (0 = never)
   KIOSK_ACTIVATE       1                          bring the kiosk to front when another app is
+  KIOSK_GRACE_S        60                         leave the screen alone this long after any input (0 = never)
 Run with --once for a single pass (prints what it would do / did).
 """
 import base64
@@ -50,6 +59,7 @@ INTERVAL = float(os.environ.get("KIOSK_INTERVAL", "2"))
 FULLSCREEN = os.environ.get("KIOSK_FULLSCREEN", "1") not in ("0", "", "no", "false")
 STALE_LOGIN_S = int(os.environ.get("KIOSK_STALE_LOGIN_S", "180"))
 ACTIVATE = os.environ.get("KIOSK_ACTIVATE", "1") not in ("0", "", "no", "false")
+GRACE_S = float(os.environ.get("KIOSK_GRACE_S", "60"))
 CDP = f"http://127.0.0.1:{CDP_PORT}"
 
 _last = {}
@@ -130,6 +140,21 @@ def kill_stale_logins(rows):
                 log(f"kill{pid}", f"killed stale login flow pid {pid} ({age}s old): {cmd[:120]}")
             except ProcessLookupError:
                 pass
+
+
+# ---- is a person at the box? ---------------------------------------------------
+def hid_idle_s():
+    """Seconds since the last keyboard/mouse/touch input — Screen Sharing input
+    included — straight from IOKit. No TCC grant needed. None if unreadable."""
+    try:
+        out = subprocess.run(["ioreg", "-c", "IOHIDSystem", "-d", "4"], capture_output=True,
+                             text=True, timeout=5).stdout
+        for line in out.splitlines():
+            if "HIDIdleTime" in line:
+                return int(line.rsplit("=", 1)[1]) / 1e9
+    except Exception:
+        pass
+    return None
 
 
 # ---- front app (no Accessibility needed) ---------------------------------------
@@ -287,6 +312,14 @@ def guard_once():
         return
     log("nok", f"kiosk Chrome pid {kpid}")
 
+    idle = hid_idle_s()
+    if GRACE_S > 0 and idle is not None and idle < GRACE_S:
+        log("hold", f"someone is at the box — hands off until {GRACE_S:.0f}s without input",
+            every=300)
+        return
+    if idle is None:
+        log("hidwarn", "cannot read HIDIdleTime — acting without the input grace", every=3600)
+
     try:
         targets = cdp_http("/json/list")
     except Exception as e:
@@ -370,7 +403,8 @@ def main():
     once = "--once" in sys.argv
     born = _self_mtime()   # a git pull that changes this file re-execs us
     log("start", f"kiosk-guard: url={URL} profile={PROFILE} cdp={CDP_PORT} every {INTERVAL}s "
-                 f"fullscreen={FULLSCREEN} activate={ACTIVATE} stale_login={STALE_LOGIN_S}s")
+                 f"fullscreen={FULLSCREEN} activate={ACTIVATE} stale_login={STALE_LOGIN_S}s "
+                 f"grace={GRACE_S:.0f}s")
     while True:
         try:
             guard_once()

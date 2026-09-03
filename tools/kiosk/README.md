@@ -26,6 +26,14 @@ it had happened before.
 4. kills `claude setup-token` / `claude login` processes older than 3 min —
    they can't complete without input devices and they wedge their launchd job.
 
+**A person at the box wins.** Steps 1–3 are skipped while IOKit's
+`HIDIdleTime` is under `KIOSK_GRACE_S` (60 s) — keyboard, mouse, touch, and
+Screen Sharing input all reset it. Austin opened System Settings over Screen
+Sharing on 2026-09-02 and the guard yanked the kiosk back over it in 2 s;
+now whatever a person opens stays up until they've left it alone for a
+minute. A popup a launchd job opened with nobody around still goes in
+seconds, because nothing touched the timer.
+
 Why not AppleScript: `osascript` needs Accessibility/Automation consent, which
 only a human clicking System Settings on that box can grant. Everything the
 guard does works from a launchd agent with no TCC grant.
