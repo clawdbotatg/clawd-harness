@@ -7403,11 +7403,31 @@ term.attachCustomKeyEventHandler((e) => {
       ((e.metaKey && !e.ctrlKey) || (e.ctrlKey && e.shiftKey))) {
     e.preventDefault();
     e.stopPropagation();
-    copyToClipboard(term.getSelection());
+    copyToClipboard(selectedText());
     return false;
   }
   return true;
 });
+// Copy what you SAW, not what's in the cells now. xterm stores a selection as
+// cell coordinates and only reads the text out at copy time — and claude's TUI
+// repaints its bottom rows many times a second (spinner, streaming, the final
+// markdown re-render), so between mouse-up and Cmd+C the cells under a
+// selection get overwritten and getSelection() hands back a slice of whatever
+// landed there (2026-09-03: "I select a chunk, paste gets some cut-off bit at
+// the end"). So snapshot the text whenever the selection GEOMETRY changes —
+// xterm fires that on drag/mouse-up/clear, never on a repaint — and copy from
+// the snapshot. tools/copyprobe.mjs enforces.
+let selSnap = '';
+term.onSelectionChange(() => { selSnap = term.hasSelection() ? term.getSelection() : ''; });
+function selectedText() { return selSnap || term.getSelection(); }
+// Same snapshot for the browser's native copy (Edit ▸ Copy, right-click ▸ Copy):
+// xterm's own copy handler would read the live cells.
+document.getElementById('term').addEventListener('copy', (e) => {
+  if (!selSnap || !term.hasSelection() || !e.clipboardData) return;
+  e.clipboardData.setData('text/plain', selSnap);
+  e.preventDefault();
+  e.stopPropagation();
+}, true);
 // navigator.clipboard needs a secure context (https / localhost); on a plain-http
 // LAN URL it's undefined, so fall back to a throwaway textarea + execCommand.
 function copyToClipboard(text) {

@@ -11,6 +11,28 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-03 — copy copies what you SAW: the TTY selection snapshot
+
+"I select a chunk in claude code, hit copy, and the paste is some cut-off bit
+at the end, not what I selected." Suspects ruled out first: claude's own
+mouse selection + OSC 52 (the CLI here enables only focus reporting, bracketed
+paste and color-scheme notify — no mouse tracking, no OSC 52 in any session's
+ring), the server byte path (clean), the clipboard fallback (h.atg.link is
+https). The real cause is xterm.js itself: a selection is a rectangle of CELL
+COORDINATES, and `getSelection()` reads the cells at copy time. xterm clears a
+selection only on typed input, buffer switch, scrollback trim or reset — never
+on a repaint — while claude's Ink TUI rewrites its bottom rows many times a
+second (spinner, streaming, the final markdown re-render). Between mouse-up
+and Cmd+C the cells drift, and the copy is a slice of whatever landed there.
+Fix (`index.html`, next to the Cmd+C handler): snapshot the selection text on
+every `onSelectionChange` (fires on drag / mouse-up / clear, never on writes)
+and copy the snapshot, for both our Cmd+C path and the browser's native copy
+event (Edit ▸ Copy, right-click ▸ Copy). `tools/copyprobe.mjs` drives a real
+mouse drag, repaints the selected rows, and checks both copy paths return the
+pre-repaint text. Probe lesson: measure row rects AFTER the render settles —
+`bottomJustifyTTY` translates the screen down after each render, so
+coordinates taken before it land on the scroll viewport, not the rows.
+
 ## 2026-09-02 — kiosk-guard: the wall display must always show the home screen
 
 clawd-sat is a hands-off wall display (gizmo in a Chrome `--app` window, no
