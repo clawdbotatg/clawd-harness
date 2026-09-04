@@ -167,15 +167,41 @@ v.feed("waiting", "permission", [], "x"); time.sleep(0.3)
 check("waiting lines are flagged urgent", vsaid[-1] == ("I need permission to run the tests.", True))
 v.stop(); time.sleep(0.2)
 check("stop ends the loop", not v.thread.is_alive())
+dup_out = []
+def dup_runner(event, message, sents, tail, said): return "I need your permission to run the test suite now."
+v3 = server.VoiceAgent(lambda t, u: dup_out.append(t), dup_runner)
+v3.feed("stream", "", [("a", True)], "x"); time.sleep(0.25)
+v3.feed("stream", "", [("b", True)], "y"); time.sleep(0.25); v3.stop()
+check("a near-repeat of something already said is dropped", dup_out == ["I need your permission to run the test suite now."])
 def vboom(*a): raise RuntimeError("no voice today")
 v2 = server.VoiceAgent(lambda t, u: vsaid.append((t, u)), vboom)
-n = len(vsaid); v2.feed("done", "", [], "x"); time.sleep(0.3); v2.stop()
-check("a failed call is silence, loop survives", len(vsaid) == n)
+n = len(vsaid); v2.feed("stream", "", [], "x"); time.sleep(0.3)
+check("a failed call mid-stream is silence, loop survives", len(vsaid) == n and v2.thread.is_alive())
+v2.feed("done", "", [], "The fix is in. Tests pass. Ship it?"); time.sleep(0.3); v2.stop()
+check("a failed call at the finish with nothing said falls back to the reply's opening",
+      vsaid[-1] == ("The fix is in. Tests pass.", False))
 
 print("_voice_prompt:")
 pr = server._voice_prompt("waiting", "needs permission", [("Found it.", True), ("Maybe.", False)], "tail text", ["Found it."])
 check("prompt carries event, said-log, marked sentences, tail",
       "WAITING" in pr and "- Found it." in pr and "[settled] Found it." in pr and "[forming] Maybe." in pr and "tail text" in pr)
+
+print("VoiceAgent:")
+import time as _t
+said_out = []
+def mute(event, message, sents, tail, said): return ""
+va = server.VoiceAgent(lambda line, urgent: said_out.append((line, urgent)), mute)
+va.feed("stream", "", [("Found the bug.", False)], "Found the bug in the parser."); _t.sleep(0.2)
+check("a silent model stays silent mid-stream", said_out == [])
+va.feed("done", "", [("Found the bug.", True), ("Tests pass.", True), ("Pushed.", False)], "…"); _t.sleep(0.3)
+check("a finished turn with nothing said speaks the summary's settled opening",
+      said_out == [("Found the bug. Tests pass.", False)])
+def talk(event, message, sents, tail, said): return "" if said else "I need a decision from you."
+va2 = server.VoiceAgent(lambda line, urgent: said_out.append((line, urgent)), talk)
+va2.feed("waiting", "needs permission", [], "…"); _t.sleep(0.3)
+check("waiting lines are urgent", said_out[-1] == ("I need a decision from you.", True))
+va2.feed("done", "", [("Nothing new.", True)], "…"); _t.sleep(0.3)
+check("after something was said, a silent finish stays silent", said_out[-1] == ("I need a decision from you.", True))
 
 print()
 if FAILS:

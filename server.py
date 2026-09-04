@@ -35,6 +35,7 @@ Then open http://127.0.0.1:8787
 
 import base64
 import datetime
+import difflib
 import fcntl
 import glob
 import hashlib
@@ -363,26 +364,33 @@ VOICE_SYS = (
     "summary with each sentence marked settled or still forming, the tail of "
     "the raw reply, and everything you have already said this turn. Decide "
     "whether to say something now, and what.\n"
-    "Rules. (1) The listener test: speak only if the listener would act, decide, "
-    "or think differently for having heard it; otherwise say nothing. (2) Length "
-    "follows content: as long as the thing that changed and no longer — a yes/no "
-    "question is a few words, a tradeoff may take three sentences. (3) One idea "
-    "per utterance; if two things matter, say the more urgent one. (4) Never "
-    "repeat anything already said this turn, even if it is more precise now. "
-    "(5) Don't narrate process — outcomes and decisions, not steps. (6) Speak "
-    "for the ears: first person for the session (\"I found…\", \"I need…\"), no "
-    "file paths, symbols, URLs, hashes, or long identifiers — describe such a "
-    "thing, don't spell it; round numbers. Never announce the event or describe "
-    "what the reply did (\"the reply finished with a question\") — just say the "
-    "thing. (7) Speak as things become known, in pieces: a newly settled "
-    "sentence that tells the listener something they did not know yet normally "
-    "passes the test; do not save everything for the end. A forming sentence "
-    "only if it is clearly true from the raw text and urgent. (8) If "
-    "something you said earlier turned out wrong, say so plainly, starting with "
+    "Rules. (1) Speak as information arrives: whenever the summary or the raw "
+    "text holds something the listener has not heard yet, say it now — do not "
+    "wait for it to settle and do not save it for the end. Stay silent only "
+    "when there is genuinely nothing new. (2) Length follows content: as long "
+    "as the thing that changed and no longer — a yes/no question is a few "
+    "words, a tradeoff may take three sentences. (3) One idea per utterance; if "
+    "two things matter, say the more urgent one. (4) Never repeat anything "
+    "already said this turn, even if it is more precise now — not rephrased, not "
+    "expanded; if the only new thing is a better wording, say nothing. (5) Don't narrate "
+    "process — outcomes and decisions, not steps. (6) Speak for the ears: first "
+    "person for the session (\"I found…\", \"I need…\"), no file paths, symbols, "
+    "URLs, hashes, or long identifiers — describe such a thing, don't spell it; "
+    "round numbers. Never announce the event or describe what the reply did "
+    "(\"the reply finished with a question\") — just say the thing: never the words "
+    "'the reply', 'the assistant', 'cut off', 'finishing up'; ask the person's "
+    "question directly (\"Do you have other processes writing to the database?\"). "
+    "Say the one most important new thing in the shortest sentence that carries "
+    "it; the listener is hearing this over what they are doing. (7) Settled "
+    "sentences are safest, but a forming sentence clearly supported by the raw "
+    "text is fair to say now — speaking early is the point. (8) If something "
+    "you said earlier turned out wrong, say so plainly, starting with "
     "'Correction,'. (9) When the assistant is WAITING on the person, say what it "
     "needs from them right now — that beats everything. (10) When the reply just "
-    "finished, say only what has not been said yet: the outcome, and any "
-    "question asked of the person.\n"
+    "finished, say what has not been said yet: the outcome, and any question "
+    "asked of the person. If nothing at all has been said this turn, you MUST "
+    "say the gist now — the person has the speaker on and expects to hear the "
+    "reply; an empty answer is wrong then.\n"
     "Reply with ONLY compact JSON: {\"say\": \"<what to say, or empty>\"}.")
 
 
@@ -405,6 +413,8 @@ def _voice_prompt(event, message, sents, tail, said):
                             "waiting": "the assistant is WAITING on the person"}.get(event, event))
              + (f" — notification: {message}" if message else "")]
     lines.append("ALREADY SAID THIS TURN:" + ("" if said else " (nothing)"))
+    if event == "done" and not said:
+        lines.append("(Nothing has been said this turn — say the gist now. Do not return empty.)")
     lines += [f"- {x}" for x in said]
     lines.append("SUMMARY:" + ("" if sents else " (none yet)"))
     lines += [f"[{'settled' if ok else 'forming'}] {x}" for x, ok in sents]
@@ -486,6 +496,16 @@ class VoiceAgent:
                 line = ""
             if self.stopped:
                 return
+            if line and any(difflib.SequenceMatcher(None, line.lower(), x.lower()).ratio() > 0.6
+                            for x in self.said):
+                print(f"[voice] dropped near-repeat: {line[:60]!r}", flush=True)
+                line = ""
+            if not line and event == "done" and not self.said:
+                # the speaker is on and nothing was said all turn: the model's
+                # judgment doesn't get to leave it silent — speak the summary's
+                # opening (settled first), or the raw tail's first sentences
+                pool = [x for x, ok in sents if ok] or [x for x, _ in sents] or split_sentences(tail)
+                line = " ".join(pool[:2]).strip()
             if line:
                 self.said.append(line)
                 self.emit(line, event == "waiting")
@@ -4617,10 +4637,10 @@ class ClaudeSession:
         self._to_subscribers_json(self._tldr_frame(summary, final, sents))
         if final:
             self.manager.save_registry()         # the summary survives a restart / handoff
-        if self.voice_on:
-            settled = {x for x, ok in sents if ok}
-            if final or (settled - self._voice_settled):
-                self._voice_settled |= settled
+        if self.voice_on:                        # speak as information arrives…
+            new = {x for x, _ in sents} - self._voice_settled   # …but a pass that only reworded is not news
+            if final or new:
+                self._voice_settled |= new
                 self._voice_kick("done" if final else "stream")
 
     # -- 🔊 the voice (see VOICE_SYS) ------------------------------------------
