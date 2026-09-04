@@ -1531,11 +1531,12 @@ function bottomJustifyTTY() {
 }
 term.onRender(() => { bottomJustifyTTY(); positionTtyCover(); });
 
-// 🟦 tty cover (see the #ttycover CSS): mask the bottom TTY_COVER_ROWS rows of the
-// rendered grid while the live TLDR is on. Placed from the grid's own geometry
-// (screen bottom − N·cell, which follows the bottom-justify transform), but only
-// re-measured when something that moves it changed — a layout read on every
-// render would stutter touch scrolling (the same trap bottomJustifyTTY avoids).
+// 🟦 tty cover (see the #ttycover CSS): mask claude's bottom chrome while the live
+// TLDR is on — the TTY_COVER_ROWS rows ENDING AT THE LAST NON-BLANK ROW (the status
+// line; claude leaves blank rows under it, so anchoring to the grid bottom started
+// the cover too low and left the rule + cursor peeking — 2026-09-05). Row scan is
+// DOM-only; the one layout read happens only when something that moves it changed
+// (a layout read per render would stutter touch scrolling, bottomJustifyTTY's trap).
 const TTY_COVER_ROWS = 5;   // blank · ─── · ❯ input · ─── · status line
 const ttyCover = document.getElementById('ttycover');
 let ttyCoverKey = '';
@@ -1546,13 +1547,16 @@ function positionTtyCover() {
   const screen = term.element && term.element.querySelector('.xterm-screen');
   const rowsEl = term.element && term.element.querySelector('.xterm-rows');
   if (!screen || !rowsEl || !rowsEl.children.length) { ttyCover.hidden = true; return; }
-  const key = term.rows + '|' + term.cols + '|' + screen.style.transform + '|' + document.getElementById('left').clientHeight;
+  let last = -1;
+  for (let i = 0; i < rowsEl.children.length; i++)
+    if (rowsEl.children[i].textContent.trim()) last = i;
+  if (last < 0) { ttyCover.hidden = true; ttyCoverKey = ''; return; }   // nothing painted yet
+  const first = Math.max(0, last - TTY_COVER_ROWS + 1);                  // first covered row
+  const key = term.rows + '|' + term.cols + '|' + screen.style.transform + '|' + first + '|' + document.getElementById('left').clientHeight;
   if (key === ttyCoverKey && !ttyCover.hidden) return;
   ttyCoverKey = key;
-  const cell = rowsEl.children[0].offsetHeight || 0;
-  if (!cell) { ttyCover.hidden = true; return; }
   const leftTop = document.getElementById('left').getBoundingClientRect().top;
-  const top = screen.getBoundingClientRect().bottom - TTY_COVER_ROWS * cell - leftTop;
+  const top = rowsEl.children[first].getBoundingClientRect().top - leftTop;
   ttyCover.style.top = Math.max(0, Math.round(top)) + 'px';
   ttyCover.hidden = false;
 }
