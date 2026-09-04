@@ -544,8 +544,8 @@
   #tldr { position:absolute; left:0; right:0; bottom:0; z-index:12; background:var(--bg);
           display:flex; flex-direction:column;   /* + margin-top:auto below: slack goes ABOVE the text,
                                                     and unlike justify-content:flex-end it still scrolls */
-          overflow-y:auto; color:#4a9eff; padding:6px 10px 6px 8px; box-sizing:border-box;
-          font-size:13px; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere;
+          overflow-y:auto; color:#4a9eff; padding:4px 10px 5px 8px; box-sizing:border-box;
+          font-size:16px; line-height:1.4; white-space:pre-wrap; overflow-wrap:anywhere;
           cursor:pointer; -webkit-overflow-scrolling:touch; }
   #tldr > div { flex:0 0 auto; margin-top:auto; }
   #tldr[hidden] { display:none; }
@@ -1520,7 +1520,8 @@ function bottomJustifyTTY() {
       const termEl = document.getElementById('term'), tcs = getComputedStyle(termEl);
       const avail = termEl.clientHeight - parseFloat(tcs.paddingTop) - parseFloat(tcs.paddingBottom);
       // …plus a small breather so the last line doesn't sit hard on the footer
-      const over = Math.max(0, Math.ceil(screen.getBoundingClientRect().height - avail)) + TLDR_HOLD_GAP;
+      const over = Math.max(0, Math.ceil(screen.getBoundingClientRect().height - avail))
+                   + (tldrRowsNeeded() ? 0 : TLDR_HOLD_GAP);   // air only when the last line is bare
       const want2 = 'translateY(-' + over + 'px)';
       if (screen.style.transform !== want2) screen.style.transform = want2;
       return;
@@ -1595,7 +1596,7 @@ function tldrRowsNeeded() {
   if (!cell) return TTY_COVER_ROWS;
   const wasHidden = el.hidden;
   if (wasHidden) el.hidden = false;                 // lay it out to measure (width is fixed by left/right)
-  const need = Math.ceil((inner.offsetHeight + 12) / cell);   // + the box's vertical padding
+  const need = Math.ceil((inner.offsetHeight + 9) / cell);    // + the box's vertical padding (4 + 5)
   if (wasHidden) el.hidden = true;
   return Math.max(1, Math.min(TTY_COVER_ROWS, need));
 }
