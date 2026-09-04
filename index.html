@@ -535,9 +535,12 @@
      keeps it readable). Tap = "read this far": blanks it and marks the prose so far as read;
      the next summary covers only new text. Off = the terminal exactly as before. */
   #tldr { position:absolute; left:0; right:0; bottom:0; z-index:12; background:var(--bg);
-          overflow-y:auto; color:#4a9eff; padding:2px 10px 6px 8px; box-sizing:border-box;
+          display:flex; flex-direction:column;   /* + margin-top:auto below: slack goes ABOVE the text,
+                                                    and unlike justify-content:flex-end it still scrolls */
+          overflow-y:auto; color:#4a9eff; padding:6px 10px 6px 8px; box-sizing:border-box;
           font-size:13px; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere;
           cursor:pointer; -webkit-overflow-scrolling:touch; }
+  #tldr > div { flex:0 0 auto; margin-top:auto; }
   #tldr[hidden] { display:none; }
   #tldr.empty { color:var(--dim); cursor:default; }
   #tldr .tag { font-size:10px; letter-spacing:.14em; text-transform:uppercase;
@@ -1324,7 +1327,7 @@
       <div id="term"></div>
       <!-- 🟦 live TLDR: the rolling plain-English summary of the turn in flight. An
            overlay over claude's bottom chrome, flush under the thinking line (#tldr CSS) -->
-      <div id="tldr" hidden><span class="tag">tldr</span><span id="tldrText"></span></div>
+      <div id="tldr" hidden><div><span class="tag">tldr</span><span id="tldrText"></span></div></div>
       <div id="ttymeta"></div>
       <div id="splash" hidden></div>
       <div id="deadveil" hidden></div>
@@ -1540,7 +1543,23 @@ function tldrHold() {
   if (typeof tldrOn === 'undefined' || !tldrOn || currentView() !== 'tty') return 0;
   const s = currentCid && allSessions().find(x => x.cid === currentCid);
   if (!s || s.waiting) return 0;
-  return document.getElementById('tldrText').textContent ? 0 : TTY_COVER_ROWS;
+  // No summary: hide all the chrome rows. With one: hide the rows the text doesn't
+  // need, so the box is only as tall as its text and the content above comes down
+  // to meet it — no black under the summary (2026-09-05, complaint #3).
+  return TTY_COVER_ROWS - tldrRowsNeeded();
+}
+// rows of the grid the summary box needs (1..TTY_COVER_ROWS); 0 with no summary
+function tldrRowsNeeded() {
+  const el = document.getElementById('tldr'), inner = el.firstElementChild;
+  if (!inner || !inner.textContent.replace(/^tldr/, '').trim()) return 0;
+  const rowsEl = term.element && term.element.querySelector('.xterm-rows');
+  const cell = rowsEl && rowsEl.children.length ? rowsEl.children[0].offsetHeight : 0;
+  if (!cell) return TTY_COVER_ROWS;
+  const wasHidden = el.hidden;
+  if (wasHidden) el.hidden = false;                 // lay it out to measure (width is fixed by left/right)
+  const need = Math.ceil((inner.offsetHeight + 12) / cell);   // + the box's vertical padding
+  if (wasHidden) el.hidden = true;
+  return Math.max(1, Math.min(TTY_COVER_ROWS, need));
 }
 // "scroll to the bottom" as the reader sees it: the true bottom, minus the held rows.
 function ttyBottom() {
@@ -1586,16 +1605,26 @@ function positionTldr() {
   const screen = term.element && term.element.querySelector('.xterm-screen');
   const rowsEl = term.element && term.element.querySelector('.xterm-rows');
   if (!screen || !rowsEl || !rowsEl.children.length) { el.hidden = true; return; }
-  let last = -1;
-  for (let i = 0; i < rowsEl.children.length; i++)
-    if (rowsEl.children[i].textContent.trim()) last = i;
-  if (last < 0) { el.hidden = true; tldrPosKey = ''; return; }   // nothing painted yet
-  const first = Math.max(0, last - TTY_COVER_ROWS + 1);           // first covered row
-  const key = term.rows + '|' + term.cols + '|' + screen.style.transform + '|' + first + '|' + document.getElementById('left').clientHeight;
+  // The chrome = the TTY_COVER_ROWS buffer lines ending at the last non-blank line.
+  // Read the BUFFER, not the rendered rows: with a hold on, the last chrome rows are
+  // below the viewport and a DOM scan would take the line above the chrome for it.
+  const b = term.buffer.active;
+  let lastBuf = -1;                          // content ends within the last screenful (+ held rows)
+  for (let i = b.length - 1; i >= Math.max(0, b.length - term.rows - TTY_COVER_ROWS); i--) {
+    const ln = b.getLine(i);
+    if (ln && ln.translateToString(true).trim()) { lastBuf = i; break; }
+  }
+  if (lastBuf < 0) { el.hidden = true; tldrPosKey = ''; return; }   // nothing painted yet
+  const first = lastBuf - TTY_COVER_ROWS + 1 - b.viewportY;          // first covered row, as rendered
+  if (first < 0 || first >= rowsEl.children.length) { el.hidden = true; tldrPosKey = ''; return; }
+  const key = term.rows + '|' + term.cols + '|' + screen.style.transform + '|' + first + '|' + b.viewportY + '|' + document.getElementById('left').clientHeight;
   if (key === tldrPosKey && !el.hidden) return;
   tldrPosKey = key;
+  // arithmetic from the screen's box + cell height, not the row's own rect: right after
+  // a scrollLines() the rows repaint on the next frame, so a row rect can be stale
   const leftTop = document.getElementById('left').getBoundingClientRect().top;
-  const top = rowsEl.children[first].getBoundingClientRect().top - leftTop;
+  const cell = rowsEl.children[0].offsetHeight || 0;
+  const top = screen.getBoundingClientRect().top + first * cell - leftTop;
   el.style.top = Math.max(0, Math.round(top)) + 'px';
   el.hidden = false;
 }

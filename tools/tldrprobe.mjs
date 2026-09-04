@@ -110,9 +110,7 @@ const h1 = await page.evaluate(()=>({h:tldrEl.getBoundingClientRect().height, fo
 check('painting text changed neither the footer nor #term height', h1.footer===h0.footer && h1.term===h0.term, JSON.stringify({h0,h1}));
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:('Long line of summary text. ').repeat(40),final:false}), CID);
 const h2 = await page.evaluate(()=>({h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, term:document.getElementById('term').getBoundingClientRect().height, scrolls:tldrEl.scrollHeight>tldrEl.clientHeight}));
-check('a long summary scrolls inside; footer and #term unchanged', h2.h===h1.h && h2.footer===h0.footer && h2.term===h0.term && h2.scrolls, JSON.stringify({h0,h2}));
-check('overlay covers the chrome rows (5 rows tall or more)', h1.h >= 5*13, JSON.stringify(h1));
-check('with a summary the hold is off (overlay does the hiding)', await page.evaluate(()=>tldrHold()===0));
+check('a long summary scrolls inside; footer and #term unchanged', h2.footer===h0.footer && h2.term===h0.term && h2.scrolls, JSON.stringify({h0,h2}));
 // scrollback regime: fill the buffer, then with no summary the viewport sits 5 rows up
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'',final:false}), CID);
 await page.evaluate(()=>new Promise(res=>{ let t=''; for (let i=0;i<80;i++) t+='line '+i+'\r\n'; t+='* Thinking…\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n'; term.write(t, res); }));
@@ -120,8 +118,22 @@ await page.waitForTimeout(150);
 const sb = await page.evaluate(()=>{ ttyBottom(); const b=term.buffer.active; return {baseY:b.baseY, dist:b.baseY-b.viewportY, atBottom:ttyAtBottom(), hold:tldrHold()}; });
 check('scrollback: viewport held 5 rows up, still counts as at-bottom', sb.baseY>0 && sb.dist===5 && sb.atBottom && sb.hold===5, JSON.stringify(sb));
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'summary back',final:false}), CID);
-const sb2 = await page.evaluate(()=>{ const b=term.buffer.active; return {dist:b.baseY-b.viewportY, hidden:tldrEl.hidden}; });
-check('summary lands: viewport back to the true bottom, overlay covers the chrome', sb2.dist===0 && !sb2.hidden, JSON.stringify(sb2));
+await page.waitForTimeout(120);
+const sb2 = await page.evaluate(()=>{ const b=term.buffer.active; const rowsEl=term.element.querySelector('.xterm-rows');
+  const r=tldrEl.getBoundingClientRect(), left=document.getElementById('left').getBoundingClientRect();
+  // the line above the chrome ("* Thinking…") must be the last visible terminal row, right above the box
+  let think=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.includes('Thinking')) think=i;
+  const tr = think>=0 ? rowsEl.children[think].getBoundingClientRect() : null;
+  return {dist:b.baseY-b.viewportY, hidden:tldrEl.hidden, hold:tldrHold(), boxTop:r.top, boxBottom:r.bottom, leftBottom:left.bottom, thinkBottom: tr&&tr.bottom}; });
+check('one-line summary in scrollback: viewport held (5 − rows needed) up, box sits on the footer right under the thinking line',
+  sb2.dist===sb2.hold && sb2.hold>0 && sb2.hold<5 && !sb2.hidden && Math.abs(sb2.boxBottom-sb2.leftBottom)<=1 && sb2.thinkBottom!=null && Math.abs(sb2.boxTop-sb2.thinkBottom)<=2, JSON.stringify(sb2));
+const fit1 = await page.evaluate(()=>{ const rowsEl=term.element.querySelector('.xterm-rows'); const cell=rowsEl.children[0].offsetHeight;
+  const r=tldrEl.getBoundingClientRect(), t=tldrEl.firstElementChild.getBoundingClientRect();
+  const screen=term.element.querySelector('.xterm-screen'); let last=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) last=i;
+  return {cell, boxH:r.height, textH:t.height, slackBelow:r.bottom-t.bottom, hold:tldrHold(), need:tldrRowsNeeded(), transform:screen.style.transform, last, baseY:term.buffer.active.baseY, screenTop:screen.getBoundingClientRect().top, boxTop:r.top, holdLast:tldrHoldLast}; });
+const needWant = Math.ceil((fit1.textH + 12) / fit1.cell);
+check('one-line summary: box only as tall as its text, text at its bottom, the rest of the chrome held out of sight',
+  fit1.need===needWant && fit1.hold===5-needWant && fit1.boxH <= (needWant+1)*fit1.cell && fit1.slackBelow <= 8, JSON.stringify(fit1));
 await page.evaluate(()=>new Promise(res=>term.write('\x1b[2J\x1b[H* Churned for 1m\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n\r\n\r\n', res)));
 await page.waitForTimeout(150);
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass.',final:false}), CID);
