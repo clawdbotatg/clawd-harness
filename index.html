@@ -524,19 +524,18 @@
   #voice button:disabled { opacity:.35; cursor:default; }
   #voice button.on { border-color:var(--accent); background:var(--accent-bg); }
   #ttsBtn.speaking { border-color:var(--accent); animation:vpulse 1.4s infinite; }
-  /* 🟦 live TLDR: a plain-English summary of what claude is saying, floating over the
-     TOP of the terminal. An overlay, not a push: pushing would resize the PTY on every
-     added line and make claude redraw its whole screen. Facebook blue on purpose — nothing
-     else in this UI is that color, so the eye finds it instantly. Grows as the summary
-     grows (capped, scrolls inside), clears the moment you type. Tap = dismiss. */
-  #tldr { position:absolute; top:0; left:0; right:0; z-index:15; max-height:46%; overflow-y:auto;
-          background:#1877f2; color:#fff; padding:9px 14px 12px;
-          font:15px/1.42 -apple-system, system-ui, "Segoe UI", sans-serif;
-          white-space:pre-wrap; overflow-wrap:anywhere; box-shadow:0 5px 16px rgba(0,0,0,.5);
+  /* 🟦 live TLDR: a plain-English summary of what claude is saying, as light-blue text
+     on the footer's normal background, right above the session-name row (2026-09-04:
+     first cut was a blue box floating over the terminal; Austin wanted it down here).
+     It sits in the footer flow, so the terminal shrinks as the summary grows — capped,
+     scrolls inside. Blue on purpose — nothing else in this UI is that color, so the eye
+     finds it instantly. Clears the moment you type. Tap = dismiss. */
+  #tldr { max-height:40vh; overflow-y:auto; color:#4a9eff; padding:6px 10px 4px;
+          font-size:13px; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere;
           cursor:pointer; -webkit-overflow-scrolling:touch; }
   #tldr[hidden] { display:none; }
-  #tldr .tag { display:block; font-size:10px; letter-spacing:.14em; text-transform:uppercase;
-               opacity:.72; margin-bottom:4px; white-space:normal; }
+  #tldr .tag { font-size:10px; letter-spacing:.14em; text-transform:uppercase;
+               opacity:.6; margin-right:8px; white-space:normal; }
   #tldr.live .tag::after { content:" · updating…"; }
   #tldrBtn { flex:0 0 auto; height:17px; padding:0 3px; margin:0; background:none;
              border:1px solid var(--edge); color:var(--ink); font-size:11px; line-height:15px;
@@ -1317,7 +1316,6 @@
     </section>
     <section class="col" id="left">
       <div id="term"></div>
-      <div id="tldr" hidden><span class="tag">tldr</span><span id="tldrText"></span></div>
       <div id="ttymeta"></div>
       <div id="splash" hidden></div>
       <div id="deadveil" hidden></div>
@@ -1377,6 +1375,9 @@
     </section>
   </main>
   <footer>
+    <!-- 🟦 live TLDR: the rolling plain-English summary of the turn in flight, as
+         light-blue text right above the session-name row (see the #tldr rules) -->
+    <div id="tldr" hidden><span class="tag">tldr</span><span id="tldrText"></span></div>
     <div id="descrow">
       <!-- state of this session as one colored square; the words are the tooltip,
            written by updateTtyStat() (title + aria-label) so it always names the

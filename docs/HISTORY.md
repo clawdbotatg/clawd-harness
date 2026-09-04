@@ -785,8 +785,10 @@ user-facing overview; this file orients an agent working **on** the code.
   for 25s: first blue text at 8s, 8 more updates, 1-2s behind the stream,
   final 5s after the end. `claude -p` bills the subscription (the announced
   June-15 metered pool was paused that day; the old header note said
-  otherwise). Overlay, not push: pushing the terminal down would SIGWINCH
-  claude on every added line. With 🔊 on, the speaker reads the final
+  otherwise). Shown as light-blue text in the footer right above the
+  session-name row (the first cut was a blue box floating over the terminal;
+  Austin wanted it down here) — the 🟦 toggle sits left of the 🤖 checkbox.
+  With 🔊 on, the speaker reads the final
   summary instead of the raw stream. Knobs: `API_TEE=0` (sessions go direct,
   feature off), `API_TEE_PORT` (8791), `TLDR_MODEL`, `TLDR_MIN/CTX/TIMEOUT`.
   An operator-exported `ANTHROPIC_BASE_URL` (a gateway) wins and disables

@@ -7,8 +7,8 @@
 //   5. a frame for another session is ignored;
 //   6. an empty-text frame (new prompt) blanks it; so does UserPromptSubmit;
 //   7. typing in the composer hides it (you're done reading);
-//   8. it's an overlay over #term (position absolute, inside #left) — never a
-//      layout push that would resize the PTY;
+//   8. it sits in the footer directly above the session-name row (#descrow), as
+//      light-blue text on the normal background — not a box over the terminal;
 //   9. subscribe re-asserts the preference (tldr frame right after subscribe).
 // Fleet mode + stubbed relay WebSocket (tapprobe pattern): no server, no session.
 //   cd tools && node tldrprobe.mjs
@@ -82,10 +82,12 @@ check('tap turns it on + persists + sends the verb', on.on && on.cls && on.ls===
 // 3. a frame paints the block, live
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass.',final:false}), CID);
 let st = await page.evaluate(()=>({hidden:tldrEl.hidden, text:tldrText.textContent, live:tldrEl.classList.contains('live'),
-  pos:getComputedStyle(tldrEl).position, parent:tldrEl.parentElement.id, bg:getComputedStyle(tldrEl).backgroundColor}));
-check('frame paints the block, marked updating', !st.hidden && st.text==='Fixed the bug. Tests pass.' && st.live, JSON.stringify(st));
-check('overlay over the terminal, not a layout push', st.pos==='absolute' && st.parent==='left', JSON.stringify(st));
-check('it is blue', st.bg==='rgb(24, 119, 242)', st.bg);
+  pos:getComputedStyle(tldrEl).position, parent:tldrEl.parentElement.tagName, next:tldrEl.nextElementSibling&&tldrEl.nextElementSibling.id,
+  color:getComputedStyle(tldrEl).color, bg:getComputedStyle(tldrEl).backgroundColor,
+  above: tldrEl.getBoundingClientRect().bottom <= descrow.getBoundingClientRect().top + 1}));
+check('frame paints the row, marked updating', !st.hidden && st.text==='Fixed the bug. Tests pass.' && st.live, JSON.stringify(st));
+check('sits in the footer right above the session-name row', st.pos==='static' && st.parent==='FOOTER' && st.next==='descrow' && st.above, JSON.stringify(st));
+check('light-blue text on the normal background', st.color==='rgb(74, 158, 255)' && st.bg==='rgba(0, 0, 0, 0)', JSON.stringify(st));
 
 // 4. a later frame replaces the text; final drops "updating"
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass. Pushed.',final:true}), CID);
