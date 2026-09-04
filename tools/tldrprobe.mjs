@@ -85,7 +85,13 @@ check('tap turns it on + persists + sends the verb', on.on && on.cls && on.ls===
 await page.evaluate(()=>new Promise(res=>term.write('\x1b[2J\x1b[H* Churned for 1m\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n\r\n\r\n', res)));
 await page.waitForTimeout(150);
 const h0 = await page.evaluate(()=>{ positionTldr(); return {hidden:tldrEl.hidden, h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, term:document.getElementById('term').getBoundingClientRect().height}; });
-check('mode on but no summary yet: no overlay (terminal shows as normal)', h0.hidden, JSON.stringify(h0));
+check('mode on but no summary yet: no overlay', h0.hidden, JSON.stringify(h0));
+// …and no chrome either: the hold slides claude's bottom rows past #term's clip edge (short regime)
+const hold0 = await page.evaluate(()=>{ applyTldrHold(); const rowsEl=term.element.querySelector('.xterm-rows');
+  let last=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) last=i;
+  const tb=document.getElementById('term').getBoundingClientRect().bottom;
+  return {hold:tldrHold(), thinkingBottom:rowsEl.children[0].getBoundingClientRect().bottom, ruleTop:rowsEl.children[last-3].getBoundingClientRect().top, statusTop:rowsEl.children[last].getBoundingClientRect().top, termBottom:tb}; });
+check('no summary: thinking line visible, input box + status pushed below the fold', hold0.hold===5 && hold0.thinkingBottom<=hold0.termBottom && hold0.ruleTop>=hold0.termBottom-1 && hold0.statusTop>=hold0.termBottom, JSON.stringify(hold0));
 
 // 3. a frame paints the overlay, live
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass.',final:false}), CID);
@@ -106,6 +112,18 @@ await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:('Long line of s
 const h2 = await page.evaluate(()=>({h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, term:document.getElementById('term').getBoundingClientRect().height, scrolls:tldrEl.scrollHeight>tldrEl.clientHeight}));
 check('a long summary scrolls inside; footer and #term unchanged', h2.h===h1.h && h2.footer===h0.footer && h2.term===h0.term && h2.scrolls, JSON.stringify({h0,h2}));
 check('overlay covers the chrome rows (5 rows tall or more)', h1.h >= 5*13, JSON.stringify(h1));
+check('with a summary the hold is off (overlay does the hiding)', await page.evaluate(()=>tldrHold()===0));
+// scrollback regime: fill the buffer, then with no summary the viewport sits 5 rows up
+await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'',final:false}), CID);
+await page.evaluate(()=>new Promise(res=>{ let t=''; for (let i=0;i<80;i++) t+='line '+i+'\r\n'; t+='* Thinking…\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n'; term.write(t, res); }));
+await page.waitForTimeout(150);
+const sb = await page.evaluate(()=>{ ttyBottom(); const b=term.buffer.active; return {baseY:b.baseY, dist:b.baseY-b.viewportY, atBottom:ttyAtBottom(), hold:tldrHold()}; });
+check('scrollback: viewport held 5 rows up, still counts as at-bottom', sb.baseY>0 && sb.dist===5 && sb.atBottom && sb.hold===5, JSON.stringify(sb));
+await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'summary back',final:false}), CID);
+const sb2 = await page.evaluate(()=>{ const b=term.buffer.active; return {dist:b.baseY-b.viewportY, hidden:tldrEl.hidden}; });
+check('summary lands: viewport back to the true bottom, overlay covers the chrome', sb2.dist===0 && !sb2.hidden, JSON.stringify(sb2));
+await page.evaluate(()=>new Promise(res=>term.write('\x1b[2J\x1b[H* Churned for 1m\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n\r\n\r\n', res)));
+await page.waitForTimeout(150);
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass.',final:false}), CID);
 
 // 4. a later frame replaces the text; final drops "updating"

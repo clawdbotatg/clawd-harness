@@ -1495,6 +1495,12 @@ function bottomJustifyTTY() {
   // only matters for short, non-scrolling content.
   if (term.buffer && term.buffer.active && term.buffer.active.baseY > 0) {
     if (screen.style.transform) screen.style.transform = '';
+    // 🟦 hold: with the live TLDR on and no summary yet, keep the viewport `hold` rows
+    // above the bottom so claude's chrome (input box + status line) is below the fold
+    // and real scrollback fills the top — no black hole either way. Only nudge when
+    // the reader is at (our notion of) the bottom; a deliberate scroll-up stands.
+    const hold = tldrHold(), b = term.buffer.active, dist = b.baseY - b.viewportY;
+    if (hold && dist < hold) term.scrollLines(-(Math.min(hold, b.baseY) - dist));
     return;
   }
   let last = -1;
@@ -1517,8 +1523,38 @@ function bottomJustifyTTY() {
   const termEl = document.getElementById('term');
   const tcs = termEl && getComputedStyle(termEl);
   const availH = termEl ? termEl.clientHeight - parseFloat(tcs.paddingTop) - parseFloat(tcs.paddingBottom) : screen.clientHeight;
-  const off = Math.max(0, availH - (last + 1) * cell - GAP);
+  // 🟦 hold: pretend the last `hold` content rows (claude's chrome) aren't there, so the
+  // row above them lands at the bottom and the chrome slides past the clip edge.
+  const off = Math.max(0, availH - (last + 1 - tldrHold()) * cell - GAP);
   screen.style.transform = off ? 'translateY(' + off + 'px)' : '';
+}
+
+// 🟦 how many bottom rows to keep out of sight: claude's chrome, while the live TLDR
+// is on and there is no summary to show in its place (with a summary, the overlay
+// covers those rows instead — positionTldr). 0 whenever the mode is off, off the tty
+// view, or the session is waiting on you (a prompt renders exactly there).
+function tldrHold() {
+  // same boot gate as positionTldr: currentView() reads consts declared near the end
+  // of the script — reachable from a render during boot (the TDZ crash of 2026-09-04)
+  if (typeof uiBooted === 'undefined' || !uiBooted) return 0;
+  if (typeof tldrOn === 'undefined' || !tldrOn || currentView() !== 'tty') return 0;
+  const s = currentCid && allSessions().find(x => x.cid === currentCid);
+  if (!s || s.waiting) return 0;
+  return document.getElementById('tldrText').textContent ? 0 : TTY_COVER_ROWS;
+}
+// "scroll to the bottom" as the reader sees it: the true bottom, minus the held rows.
+function ttyBottom() {
+  term.scrollToBottom();
+  const hold = tldrHold(), b = term.buffer && term.buffer.active;
+  if (hold && b && b.baseY > 0) term.scrollLines(-Math.min(hold, b.baseY));
+}
+let tldrHoldLast = 0;
+// the hold flipped (summary landed / cleared, mode toggled, waiting) → re-seat the view
+function applyTldrHold() {
+  if (typeof uiBooted === 'undefined' || !uiBooted) return;
+  const h = tldrHold();
+  if (h !== tldrHoldLast) { tldrHoldLast = h; ttyBottom(); bottomJustifyTTY(); }
+  positionTldr();
 }
 term.onRender(() => { bottomJustifyTTY(); positionTldr(); });
 
@@ -1611,7 +1647,7 @@ let ttyTouchHold = 0;   // Infinity while a finger is down; a timestamp grace af
 function ttyAtBottom() {
   if (Date.now() < ttyTouchHold) return false;
   const b = term.buffer && term.buffer.active;
-  return !b || (b.baseY - b.viewportY) <= 1;
+  return !b || (b.baseY - b.viewportY) <= 1 + tldrHold();   // 🟦 held rows still count as "at the bottom"
 }
 
 // Inserting/removing a header row (the session-tabs bar, the restart banner)
@@ -1621,7 +1657,7 @@ function ttyAtBottom() {
 // terminal). rAF so we measure after the browser has reflowed the new bar.
 function refitTTY() {
   if (currentView() !== 'tty') return;
-  requestAnimationFrame(() => { fit.fit(); sendResize(); term.refresh(0, term.rows - 1); term.scrollToBottom(); bottomJustifyTTY(); positionTldr(); });
+  requestAnimationFrame(() => { fit.fit(); sendResize(); term.refresh(0, term.rows - 1); ttyBottom(); bottomJustifyTTY(); positionTldr(); });
 }
 
 // A HARD repaint — exactly what dragging the window border does. The real bug:
@@ -1645,7 +1681,7 @@ function hardRepaint() {
   term.options.fontSize = fs;              // …ending back at the right size, now measured while visible
   fit.fit();                               // recompute rows/cols against the corrected cell size
   sendResize();
-  term.scrollToBottom();
+  ttyBottom();
   bottomJustifyTTY();
 }
 
@@ -5541,7 +5577,7 @@ function softFlush() {
   term.reset();
   term.write(all, () => {
     const b = term.buffer && term.buffer.active;
-    if (s.wasAtBottom || !b) term.scrollToBottom();
+    if (s.wasAtBottom || !b) ttyBottom();
     else term.scrollToLine(Math.max(0, b.baseY - s.dist));  // put the reader back where they were
     term.refresh(0, term.rows - 1);
   });
@@ -5560,7 +5596,7 @@ function paintPty(payload) {
     return;
   }
   const stick = ttyAtBottom();
-  term.write(payload, () => { if (stick) term.scrollToBottom(); });
+  term.write(payload, () => { if (stick) ttyBottom(); });
   scheduleHardRepaint();
 }
 
@@ -5702,7 +5738,7 @@ function renderPilotUI() {
   const show = !!s && (v === 'tty' || v === 'transcript');
   pilotChk.hidden = !show;
   tldrBtn.hidden = !show;                  // 🟦 lives beside it, same rule
-  positionTldr();                          // 🟦 overlay: on with the mode; waiting-on-you lifts it; leaving the view drops it
+  applyTldrHold();                         // 🟦 hold + overlay: on with the mode; waiting-on-you lifts both; leaving the view drops them
   if (!show) { pilotRow.hidden = true; return; }
   if (s.cid !== pilotCidShown) { pilotCidShown = s.cid; pilotPendingAt = 0; }
   if (Date.now() - pilotPendingAt > 4000) pilotChk.checked = !!s.autopilot;
@@ -7598,17 +7634,17 @@ function showTldr(text, final) {
   tldrTextEl.textContent = text;
   tldrEl.classList.toggle('live', !final);
   tldrEl.classList.remove('empty');
-  positionTldr();                            // text arrived → cover the chrome (no-op if already placed)
+  applyTldrHold();                           // text arrived → un-hold, cover the chrome with the text
 }
 // blank it — and with no text the overlay comes down, the terminal shows as normal
-function clearTldr() { tldrTextEl.textContent = ''; tldrEl.classList.remove('live'); tldrEl.classList.add('empty'); positionTldr(); }
+function clearTldr() { tldrTextEl.textContent = ''; tldrEl.classList.remove('live'); tldrEl.classList.add('empty'); applyTldrHold(); }
 function setTldr(on) {
   tldrOn = on;
   tldrBtn.classList.toggle('on', on);
   try { localStorage.setItem('cc_tldr', on ? '1' : '0'); } catch {}
   if (currentCid) hsend({ type: 'tldr', cid: currentCid, on });
   clearTldr();
-  tldrPosKey = ''; renderPilotUI();          // shows/places or drops the overlay with the mode
+  tldrPosKey = ''; renderPilotUI();          // hold / overlay follow the mode
 }
 tldrBtn.onclick = () => setTldr(!tldrOn);
 // tap = "read this far": hide it, and tell the server so later passes summarize only NEW prose
@@ -9364,7 +9400,7 @@ stage.addEventListener('touchend', (e) => {
 }, { capture: true, passive: true });
 
 // A window resize/rotation is the user manipulating THIS device → claim the PTY size.
-window.addEventListener('resize', () => { fit.fit(); sendResize(true); term.scrollToBottom(); bottomJustifyTTY(); positionTldr(); });
+window.addEventListener('resize', () => { fit.fit(); sendResize(true); ttyBottom(); bottomJustifyTTY(); positionTldr(); });
 
 // -- machines roster page (the 🖥️ button) ------------------------------------
 // Read-only fleet overview with per-machine stats. Replaces the old machines rung;
@@ -10026,7 +10062,7 @@ setInterval(() => {
 if (parseHash().view === 'pm') openPM();   // deep-linked straight to the PM
 
 uiBooted = true;       // every declaration above is live: the 🟦 overlay may now read the view state
-positionTldr();
+applyTldrHold();
 hydrateFleetCache();   // last-known roster+tabs render immediately (offline-marked) — live frames replace them
 connect();   // fleet: the passkey gate is the door. direct: the loopback harness needs no token, so always
              // connect; only a non-loopback (BIND=0.0.0.0) server that actually rejects surfaces a login
