@@ -492,6 +492,13 @@
                  padding:7px 10px; font-size:13px; white-space:pre-wrap; word-break:break-word; }
   .pending-msg .tag { flex:0 0 auto; font-size:10px; text-transform:uppercase; letter-spacing:.1em;
                       color:var(--accent); padding-top:2px; }
+  /* held: Enter landed while an attachment was still uploading — the box is
+     the promise that it goes the moment the upload lands (see holdSend) */
+  .pending-msg.hold .tag { animation: holdpulse 1.2s ease-in-out infinite; }
+  .pending-msg.hold > div { flex:1 1 auto; }
+  .pending-msg.hold button { background:transparent; border:0; color:var(--dim); cursor:pointer; padding:0 2px; }
+  .pending-msg.hold button:hover { color:var(--err); }
+  @keyframes holdpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
   .chip { display:flex; align-items:center; gap:6px; background:var(--raised); border:1px solid var(--edge);
           padding:4px 8px; font-size:12px; color:var(--ink); }
   .chip img { width:30px; height:30px; object-fit:cover; border:1px solid var(--edge); }
@@ -7051,6 +7058,7 @@ async function uploadFile(file) {
   const isImage = (ctype || '').startsWith('image/');
   const slot = { pending: true, url: isImage ? URL.createObjectURL(file) : null,
                  name: file.name };
+  slot.done = new Promise(res => { slot.settle = res; });   // resolves on success OR error (holdSend waits on it)
   attachments.push(slot); renderChips();
   try {
     if (!ctype) throw new Error(`unsupported type${file.name ? ` (${file.name})` : ''}`);
@@ -7078,6 +7086,7 @@ async function uploadFile(file) {
     slot.pending = false; slot.error = `⚠ ${String(e.message || e)}`;
   }
   renderChips();
+  slot.settle();
 }
 
 // File picker button → hidden <input type=file> → same uploadFile pipeline as
@@ -7460,25 +7469,83 @@ function sendMessage() {
   // `/new` is a console-level command — it spins up a fresh claude session
   // rather than being typed into the current one.
   if (/^\/new(\s|$)/.test(text)) { box.value = ''; autosizeBox(); clearDraft(); newSession(); return; }
+  // Enter while an attachment is still uploading: DON'T send the text alone
+  // (the image would be orphaned — pasted, typed, Enter, and it never went).
+  // Park the whole message in the queued box and let it go when the upload
+  // lands (see holdSend).
+  if (attachments.some(a => a.pending)) { holdSend(text, attachments); return; }
   const ready = attachments.filter(a => a.path);
-  if ((!text && !ready.length) || !ws || ws.readyState !== 1) return;
+  if (!dispatchSend(text, ready)) return;
+  box.value = ''; autosizeBox(); clearDraft(); attachments = []; renderChips();
+}
+// Actually send `text` + the uploaded `ready` attachments to the current
+// context. Returns false when nothing went out (nothing to send, link down, no
+// project). Never touches the composer box — callers own that.
+function dispatchSend(text, ready) {
+  if ((!text && !ready.length) || !ws || ws.readyState !== 1) return false;
   // claude reads each path via its Read tool → sees the image
   const full = [text, ...ready.map(a => a.path)].filter(Boolean).join(' ');
   // On the sessions list there's no session to talk to — spin up a fresh one in
   // this project and deliver the text once it's booted (see flushPendingSend).
   if (currentView() === 'sessions') {
-    if (!currentPid) return;
+    if (!currentPid) return false;
     pendingSendText = full;
     stashPending(text || full);       // survive a reload before the session even exists
-    box.value = ''; autosizeBox(); clearDraft(); attachments = []; renderChips();
     newSession();                     // focus reply → openSession → queued box shown
     setTimeout(flushPendingSend, 8000);   // fallback if the SessionStart hook never lands
-    return;
+    return true;
   }
   deliverSend(currentCid, full, text || full);  // send now if live; if the link is down, queue + reconnect so you never re-hit-enter (also kept in the outbox for a reload)
   viewBeforeQuestion = null;          // you're acting here on purpose — don't auto-return
   addPending(full, text || ready.map(a => a.name).join(', ') || full);
-  box.value = ''; autosizeBox(); clearDraft(); attachments = []; renderChips();
+  return true;
+}
+// Enter landed while an upload was in flight. The message is committed — the
+// box empties and an amber "📎 uploading…" box appears where the queued box
+// will be — but the send itself waits for every attachment in the batch to
+// settle, then goes out as ONE message (text + every path). The composer is
+// free meanwhile: a new message typed during the wait is untouched. If any
+// upload FAILS the message comes back into the box with the ⚠ chip, rather than
+// going out without the image (the exact thing this exists to prevent). ✕ on
+// the box cancels the same way. The draft is kept until the send actually
+// goes, so a reload mid-wait still recovers the text (the upload itself dies
+// with the page either way).
+function holdSend(text, batch) {
+  const ctx = currentDraftId(), cid = currentCid;
+  attachments = []; renderChips();
+  box.value = ''; autosizeBox();
+  const d = document.createElement('div');
+  d.className = 'pending-msg hold';
+  const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = '📎 uploading…';
+  const body = document.createElement('div');
+  body.textContent = text || batch.map(a => a.name || 'image').join(', ');
+  const x = document.createElement('button'); x.textContent = '✕'; x.title = 'cancel — back into the box';
+  let cancelled = false;
+  const restore = () => {          // message back where it came from, chips and all
+    d.remove();
+    if (currentDraftId() !== ctx) return;   // you've moved on — the draft copy is still there for that context
+    attachments = [...batch, ...attachments]; renderChips();
+    box.value = text + (box.value && text ? '\n' : '') + box.value; autosizeBox(); saveDraft();
+    box.focus();
+  };
+  x.onclick = () => { cancelled = true; restore(); };
+  d.appendChild(tag); d.appendChild(body); d.appendChild(x);
+  pendingEl.appendChild(d);
+  Promise.all(batch.map(a => a.done || Promise.resolve())).then(() => {
+    if (cancelled) return;
+    d.remove();
+    if (batch.some(a => a.error)) { restore(); return; }
+    const ready = batch.filter(a => a.path);
+    if (currentDraftId() !== ctx) {
+      // You navigated away mid-upload. A session target still gets its message
+      // (the outbox is per-cid, so it recovers there); a sessions-list target
+      // has no session to go to — leave it in that context's draft.
+      if (cid && ctx === cid) deliverSend(cid, [text, ...ready.map(a => a.path)].filter(Boolean).join(' '), text);
+      return;
+    }
+    if (!dispatchSend(text, ready)) { restore(); return; }
+    try { localStorage.removeItem(draftKey(ctx)); } catch {}
+  });
 }
 
 // ── quick-prompt chips ────────────────────────────────────────────────────────
