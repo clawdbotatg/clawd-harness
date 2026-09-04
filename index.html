@@ -502,6 +502,7 @@
   .chip { display:flex; align-items:center; gap:6px; background:var(--raised); border:1px solid var(--edge);
           padding:4px 8px; font-size:12px; color:var(--ink); }
   .chip img { width:30px; height:30px; object-fit:cover; border:1px solid var(--edge); }
+  .chip .glyph { font-size:18px; line-height:30px; }   /* 📚 skill chip: the glyph where a thumbnail would be */
   .chip.up { color:var(--dim); font-style:italic; }
   .chip.err { color:var(--err); border-color:var(--err); }
   .chip button { background:transparent; border:0; color:var(--dim); cursor:pointer; padding:0 2px;
@@ -1261,8 +1262,9 @@
   </div>
   <!-- 📚 skill book: the fleet skill LIBRARY — user-written skill files
        stored on the relay, one list everywhere; deliberately nothing to do
-       with any machine's installed skills. Tap = paste the skill text into
-       the open session; ✕ = remove from the library. docs/fleet/SKILLS.md. -->
+       with any machine's installed skills. Tap = attach the skill to your
+       next message (📚 chip, like a dropped .md file); ✕ = remove from the
+       library. docs/fleet/SKILLS.md. -->
   <div id="skillbook" hidden>
     <div id="skillbookcard">
       <div class="sl-hdr">
@@ -1414,7 +1416,7 @@
              title="🤖 autopilot — let the harness keep this session working on its goal, narrating progress in a status row. Bounded; your own messages steer it." />
       <div id="ttystat" hidden role="img"><span class="dot"></span></div>
       <div id="sessiondesc" title="AI-generated name for this session"></div>
-      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — your skill library (same list everywhere). Tap one to paste it into the open session.">📚</button></div>
+      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — your skill library (same list everywhere). Tap one to attach it to your next message; Enter sends your text with a one-line pointer claude reads.">📚</button></div>
     </div>
     <!-- 🤖 the autopilot's narration row — same slot style as the upload chips:
          where the work stands / what the supervisor is doing, live per round -->
@@ -7051,16 +7053,21 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 // -- attachments: images + text files (paste / drop → upload → fold path into message) ------
-let attachments = [];   // {path, name, url}
+// {path, name, url} for a pasted file; a 📚 skill chip (see the skill book)
+// adds {glyph, label, fold}: the glyph stands where an image thumbnail would,
+// the label is the skill name, and `fold` is the one-line instruction that
+// rides in the message instead of the bare path.
+let attachments = [];
 const attachEl = document.getElementById('attachments');
 
 function renderChips() {
   attachEl.innerHTML = '';
   attachments.forEach((a, i) => {
     const c = document.createElement('div');
-    c.className = 'chip' + (a.pending ? ' up' : '') + (a.error ? ' err' : '');
+    c.className = 'chip' + (a.pending ? ' up' : '') + (a.error ? ' err' : '') + (a.glyph ? ' skill' : '');
     if (a.url) { const im = document.createElement('img'); im.src = a.url; c.appendChild(im); }
-    c.appendChild(document.createTextNode(a.pending ? 'uploading…' : (a.error || a.name)));
+    else if (a.glyph) { const g = document.createElement('span'); g.className = 'glyph'; g.textContent = a.glyph; c.appendChild(g); }
+    c.appendChild(document.createTextNode(a.pending ? 'uploading…' : (a.error || a.label || a.name)));
     if (!a.pending) {
       const x = document.createElement('button'); x.textContent = '✕';
       x.onclick = () => { attachments.splice(i, 1); renderChips(); };
@@ -7112,12 +7119,14 @@ function fileCtype(f) {   // null → not an accepted type
   return (f.type || '').startsWith('text/') ? f.type : null;
 }
 
-async function uploadFile(file) {
+// `opts` (skill chips): {glyph, label, fold(path) → the message line}. A plain
+// file needs none — its path is what gets folded into the message.
+async function uploadFile(file, opts = {}) {
   if (FLEET && !currentMachine) return;   // fleet: no machine selected → nowhere to upload to
   const ctype = fileCtype(file);
   const isImage = (ctype || '').startsWith('image/');
   const slot = { pending: true, url: isImage ? URL.createObjectURL(file) : null,
-                 name: file.name };
+                 name: file.name, glyph: opts.glyph || null, label: opts.label || null };
   slot.done = new Promise(res => { slot.settle = res; });   // resolves on success OR error (holdSend waits on it)
   attachments.push(slot); renderChips();
   try {
@@ -7139,6 +7148,7 @@ async function uploadFile(file) {
     if (!res.ok) throw new Error(`upload failed (${res.status})`);
     const j = await res.json();
     slot.pending = false; slot.path = j.path; slot.name = j.name;
+    if (opts.fold) slot.fold = opts.fold(j.path);
   } catch (e) {
     // Keep the chip, visibly failed — a silently vanishing chip reads as "the
     // button is broken" (it hid a proxy 413 for days). No path → never folded
@@ -7360,20 +7370,28 @@ sentlogEl.addEventListener('pointerdown', (e) => { if (e.target === sentlogEl) s
 
 // ── 📚 skill book ────────────────────────────────────────────────────────────
 // The fleet skills picker: skills live in a private library on the relay box
-// and every machine's worker syncs them into ~/.claude/skills (see
-// docs/fleet/SKILLS.md), so the CURRENT machine's harness is the truth for
-// what's tappable here. The list is fetched fresh on every open (skillsList →
-// skills frame — routed to the current machine in fleet mode like any other
-// harness frame); tapping a skill AUTO-SENDS a pointer at its SKILL.md into
-// the open session via the quick-chip path, so it works mid-turn, in
+// (docs/fleet/SKILLS.md) — one list everywhere, nothing to do with any
+// machine's installed skills. The list is fetched fresh on every open
+// (skillsLib). Tapping a skill ATTACHES it: the SKILL.md body the reply
+// already carries goes through the same upload pipeline as a dropped .md
+// file, and a 📚 chip sits above the composer while you keep typing. Enter
+// sends your text plus one instruction line per skill pointing claude at the
+// uploaded file (it Reads it — one short line of context, not the whole
+// file). Empty box + Enter is the old one-tap flow. Works mid-turn, in
 // already-running sessions, and under codex (no /slash dependency).
 const skillbookEl = document.getElementById('skillbook');
-function skillSendable() {
+function skillSendable() {           // somewhere a chip can attach: a session, or a project's sessions rung
   const v = currentView();
-  return !!currentCid && (v === 'tty' || v === 'transcript');
+  if (FLEET && !currentMachine) return false;
+  return (v === 'tty' || v === 'transcript') ? !!currentCid : (v === 'sessions' && !!currentPid);
 }
-function skillInvocation(s) {
-  return `Use the "${s.name}" skill: read ${s.path} and follow it. If it needs details I haven't given, ask me.`;
+function skillInvocation(name, path) {
+  return `Use the "${name}" skill: read ${path} and follow it. If it needs details I haven't given, ask me.`;
+}
+function attachSkill(s) {
+  if (attachments.some(a => a.glyph && a.label === s.name)) return;   // already on the message
+  const file = new File([s.body || ''], `${s.name}-SKILL.md`, { type: 'text/markdown' });
+  uploadFile(file, { glyph: '📚', label: s.name, fold: (path) => skillInvocation(s.name, path) });
 }
 function renderSkillbook(skills, error) {
   if (skillbookEl.hidden) return;                 // stale reply after close — drop
@@ -7387,7 +7405,7 @@ function renderSkillbook(skills, error) {
   }
   if (!skillSendable()) {
     const d = document.createElement('div'); d.className = 'sk-note';
-    d.textContent = 'open a session first — tapping a skill pastes it there';
+    d.textContent = 'open a project or session first — a tapped skill attaches to your next message';
     list.appendChild(d);
   }
   if (!skills.length) {
@@ -7416,7 +7434,8 @@ function renderSkillbook(skills, error) {
     it.onclick = () => {
       if (!skillSendable()) return;               // note row above explains why
       skillbookEl.hidden = true;
-      sendQuick(s.body || '');                    // paste the skill file into the session
+      attachSkill(s);                             // 📚 chip above the composer; goes with your next Enter
+      box.focus();                                // you came from the box — back to typing
     };
     list.appendChild(it);
   }
@@ -7543,8 +7562,7 @@ function sendMessage() {
 // project). Never touches the composer box — callers own that.
 function dispatchSend(text, ready) {
   if ((!text && !ready.length) || !ws || ws.readyState !== 1) return false;
-  // claude reads each path via its Read tool → sees the image
-  const full = [text, ...ready.map(a => a.path)].filter(Boolean).join(' ');
+  const full = composeSend(text, ready);
   // On the sessions list there's no session to talk to — spin up a fresh one in
   // this project and deliver the text once it's booted (see flushPendingSend).
   if (currentView() === 'sessions') {
@@ -7568,8 +7586,15 @@ function dispatchSend(text, ready) {
   }
   deliverSend(currentCid, full, text || full);  // send now if live; if the link is down, queue + reconnect so you never re-hit-enter (also kept in the outbox for a reload)
   viewBeforeQuestion = null;          // you're acting here on purpose — don't auto-return
-  addPending(full, text || ready.map(a => a.name).join(', ') || full);
+  addPending(full, text || ready.map(a => a.label || a.name).join(', ') || full);
   return true;
+}
+// The message that actually goes: your text, then each plain file's path on
+// the same line (claude reads each path via its Read tool → sees the image),
+// then each 📚 skill's instruction line on a line of its own.
+function composeSend(text, ready) {
+  const head = [text, ...ready.filter(a => !a.fold).map(a => a.path)].filter(Boolean).join(' ');
+  return [head, ...ready.filter(a => a.fold).map(a => a.fold)].filter(Boolean).join('\n');
 }
 // Enter landed while an upload was in flight. The message is committed — the
 // box empties and an amber "📎 uploading…" box appears where the queued box
@@ -7611,7 +7636,7 @@ function holdSend(text, batch) {
       // You navigated away mid-upload. A session target still gets its message
       // (the outbox is per-cid, so it recovers there); a sessions-list target
       // has no session to go to — leave it in that context's draft.
-      if (cid && ctx === cid) deliverSend(cid, [text, ...ready.map(a => a.path)].filter(Boolean).join(' '), text);
+      if (cid && ctx === cid) deliverSend(cid, composeSend(text, ready), text);
       return;
     }
     if (!dispatchSend(text, ready)) { restore(); return; }

@@ -11,6 +11,29 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-04 — 📚 skills attach like a dropped .md instead of firing on tap
+
+"I go to the books, pick the vision skill, and it just spews it into the
+session." The 2026-08-30 picker tapped straight into `sendQuick(body)`: the
+whole SKILL.md hit the PTY as one bracketed paste, mid-sentence, with no
+composer step at all. Asked for: pick a skill while typing, see it sit above
+the box like an uploaded file, keep typing, Enter sends both. The harness
+already had that exact machine for files (drop a `.md` → upload → chip → the
+path folds into the message and claude Reads it), so a picked skill now IS a
+dropped `.md`: the body the library reply already carries becomes a `File`
+and rides `uploadFile` with `{glyph:'📚', label, fold}`; `composeSend` folds
+the chip's one-line instruction ("Use the "vision" skill: read <path> and
+follow it…", the dead helper from the first build, revived) on its own line
+after the text. Chosen over pasting the body under the text on purpose: one
+short line of context per pick, a readable transcript, one attachment
+behavior to know. Falls out for free: hold-on-Enter while the upload is in
+flight, the red chip on a 413, the fleet upload bridge, mixing skills with
+images, and picking from the sessions rung (spawns a session and delivers on
+boot). The old "open a session first" gate relaxed to "a project or session".
+`tools/skillbookprobe.mjs` rewritten around it (stubbed `/upload`, real taps,
+real typing + 📤). Probe lesson: the probe emulates touch, and on touch Enter
+is a newline — tap `#send`, not `keyboard.press('Enter')`.
+
 ## 2026-09-03 — copy copies what you SAW: the TTY selection snapshot
 
 "I select a chunk in claude code, hit copy, and the paste is some cut-off bit

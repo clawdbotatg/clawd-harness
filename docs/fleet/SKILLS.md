@@ -2,16 +2,21 @@
 
 One stack of **user-written skill files**, stored on the relay box, shown as
 one list on every machine and device via the harness **📚 picker**. Tap a
-skill → its SKILL.md text is **pasted into the open session** as a message.
-That's the whole product: Austin writes down how to do a thing once (drive the
-3D printer, post to the Vestaboard, speak in the kitchen), and hands it to any
-session anywhere with one tap.
+skill → it **attaches to your next message** as a 📚 chip above the composer,
+exactly like a dropped `.md` file; keep typing, and Enter sends your text plus
+one instruction line per skill pointing claude at the uploaded SKILL.md (it
+Reads it). That's the whole product: Austin writes down how to do a thing once
+(drive the 3D printer, post to the Vestaboard, speak in the kitchen), and
+hands it to any session anywhere with one tap — without the tap itself firing
+anything off.
 
 **The library is deliberately decoupled from machines.** It never scans,
 installs to, or deletes from `~/.claude/skills/` anywhere — a first build that
 synced skills onto every box (2026-08-30, same day) was ripped out for exactly
 that reason; a one-shot janitor in `worker.py` (`_skills_sync_cleanup`)
-removes what it had installed. Skills reach a session only as pasted text.
+removes what it had installed. Skills reach a session only as a file in that
+machine's upload dir (`.clawd-harness-uploads/paste-…-<name>-SKILL.md`, the
+same place a dropped `.md` lands) plus the one-line pointer in the message.
 
 ## How it flows
 
@@ -22,7 +27,8 @@ skillput <dir>  ──POST──▶  relay box: fleet/.clawd-fleet.skills/<name>
         📚 picker: {skillsLib} ────┤  fleet mode: browser → relay socket
         one list, every device     │  direct mode: harness proxies over
                                    ▼            /skills/lib (fleet.env creds)
-        tap a skill → SKILL.md body pasted into the open session
+        tap a skill → body → POST /upload (as <name>-SKILL.md) → 📚 chip
+        Enter → "your text⏎Use the "<name>" skill: read <path> and follow it…"
         ✕ (confirm) → {skillsRm} → store dir moved to .trash/ everywhere-at-once
 ```
 
@@ -41,8 +47,19 @@ skillput <dir>  ──POST──▶  relay box: fleet/.clawd-fleet.skills/<name>
 - **Publish** (`share/bin/skillput`, in `~/bin` on every box via the shared-kit
   sync): `skillput <skill-dir>` / `skillput list` / `skillput rm <name>`.
 - **UI** (`index.html`): 📚 at the right end of the quick-chip strip (right of
-  🕘, visible in a session). Tap a row → `sendQuick(body)` pastes the file;
-  ✕ → `confirm()` → `skillsRm`; every reply repaints the open modal.
+  🕘, visible in a session). Tap a row → `attachSkill(s)`: the body the reply
+  already carries becomes a `File` and rides `uploadFile` with
+  `{glyph:'📚', label, fold}` — the same pipeline, hold-on-Enter, and red
+  error chip a dropped `.md` gets (fleet: bridged to the current machine; no
+  protocol change). `composeSend` then folds the chip's one-line instruction
+  (`skillInvocation`) on its own line after the text. One chip per skill;
+  the box refocuses so you keep typing; empty box + Enter is the old one-tap
+  flow. Chips don't survive a reload (same as any attachment) — re-pick.
+  Row ✕ → `confirm()` → `skillsRm`; every reply repaints the open modal.
+  Why a pointer, not the body pasted under your text: one short line of
+  context per pick, a readable transcript, and one attachment behavior to
+  understand (a picked skill *is* a dropped `.md`). Writing it into the
+  project as an installed skill stays off the table (see above).
 
 ## Writing a skill
 
@@ -58,5 +75,8 @@ per-box env file (the todo pattern) instead. LAN IPs/hostnames are fine.
 - `fleet/test_skills_lib.py` — store + library end to end: auth, hostile-path
   fences, bodies over HTTP and WS, trash-on-remove, the sync janitor.
 - `test_skills_frame.py` — the direct-mode harness proxy (real relay behind it).
-- `tools/skillbookprobe.mjs` — the 📚 modal: fetch on open, tap pastes the
-  body, ✕ is confirm-gated, error/stale replies handled. Real touch gestures.
+- `tools/skillbookprobe.mjs` — the 📚 modal: fetch on open, a tap uploads the
+  body (stubbed `/upload`) and attaches a 📚 chip with nothing sent, a second
+  tap dedupes, typing + 📤 sends ONE message (text ⏎ pointer line), the chip
+  ✕ drops it, a 413 stays as a red chip, row ✕ is confirm-gated, error/stale
+  replies handled. Real touch gestures and keystrokes.
