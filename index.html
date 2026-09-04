@@ -1574,17 +1574,36 @@ function tldrHold() {
   // No summary: hide all the chrome rows. With one: hide the rows the text doesn't
   // need, so the box is only as tall as its text and the content above comes down
   // to meet it — no black under the summary (2026-09-05, complaint #3).
-  return TTY_COVER_ROWS - tldrRowsNeeded();
+  return Math.max(0, tldrChromeRows() - tldrRowsNeeded());
 }
 // the buffer line of the last content (claude's status line) — within the last screenful
 function tldrLastBuf() {
   const b = term.buffer && term.buffer.active;
   if (!b) return -1;
-  for (let i = b.length - 1; i >= Math.max(0, b.length - term.rows - TTY_COVER_ROWS); i--) {
+  for (let i = b.length - 1; i >= Math.max(0, b.length - term.rows - 8); i--) {
     const ln = b.getLine(i);
     if (ln && ln.translateToString(true).trim()) return i;
   }
   return -1;
+}
+// The chrome's TOP buffer line: above the status line sit "─ · ❯ · ─" (3 rows), then
+// one blank row while claude runs (the tip line fills the other) but TWO once it's
+// done — a fixed 5 left a blank row showing under the done line (2026-09-05). So
+// walk up over the blank rows to the line above them; that line stays visible.
+function tldrChromeTop() {
+  const b = term.buffer && term.buffer.active, lb = tldrLastBuf();
+  if (!b || lb < 0) return -1;
+  let i = Math.max(0, lb - 3);                 // the top rule
+  for (let n = 0; n < 3 && i > 0; n++) {       // at most 3 blank rows above it
+    const ln = b.getLine(i - 1);
+    if (ln && ln.translateToString(true).trim()) break;
+    i--;
+  }
+  return i;
+}
+function tldrChromeRows() {                    // 5 running · 6 done · whatever it is
+  const lb = tldrLastBuf(), top = tldrChromeTop();
+  return (lb < 0 || top < 0) ? TTY_COVER_ROWS : (lb - top + 1);
 }
 // blank buffer lines under the status line (claude parks the cursor there): with a
 // hold on they're hidden too, or they'd sit as black inside the summary box
@@ -1628,7 +1647,7 @@ term.onRender(() => { bottomJustifyTTY(); positionTldr(); });
 // one layout read happens only when something that moves it changed (a layout read per
 // render would stutter touch scrolling, bottomJustifyTTY's trap). The element itself is
 // declared further down with the rest of the 🟦 code; this runs after load.
-const TTY_COVER_ROWS = 5;   // blank · ─── · ❯ input · ─── · status line
+const TTY_COVER_ROWS = 5;   // blank · ─── · ❯ input · ─── · status line (the usual; tldrChromeRows() measures)
 const TLDR_HOLD_GAP = 4;    // px of air under the last visible line while holding
 let tldrPosKey = '';
 // Set at the very end of the script, right before connect(). positionTldr is reached
@@ -1655,7 +1674,7 @@ function positionTldr() {
   // below the viewport and a DOM scan would take the line above the chrome for it.
   const b = term.buffer.active, lastBuf = tldrLastBuf();
   if (lastBuf < 0) { el.hidden = true; tldrPosKey = ''; return; }   // nothing painted yet
-  const first = lastBuf - TTY_COVER_ROWS + 1 - b.viewportY;          // first covered row, as rendered
+  const first = tldrChromeTop() - b.viewportY;                        // first covered row, as rendered
   if (first < 0 || first >= rowsEl.children.length) { el.hidden = true; tldrPosKey = ''; return; }
   const key = term.rows + '|' + term.cols + '|' + screen.style.transform + '|' + first + '|' + b.viewportY + '|' + document.getElementById('left').clientHeight;
   el.hidden = false;
@@ -1675,7 +1694,7 @@ function tldrPlace(tries) {
     const rowsEl = term.element && term.element.querySelector('.xterm-rows');
     const b = term.buffer && term.buffer.active, lastBuf = tldrLastBuf();
     if (!rowsEl || !b || lastBuf < 0) return;
-    const first = lastBuf - TTY_COVER_ROWS + 1 - b.viewportY;
+    const first = tldrChromeTop() - b.viewportY;
     if (first < 0 || first >= rowsEl.children.length) { el.hidden = true; tldrPosKey = ''; return; }
     const leftTop = document.getElementById('left').getBoundingClientRect().top;
     const top = Math.max(0, rowsEl.children[first].getBoundingClientRect().top - leftTop);

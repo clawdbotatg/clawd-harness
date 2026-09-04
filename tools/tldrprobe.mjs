@@ -204,6 +204,17 @@ await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
 await page.waitForTimeout(200);
 check('tap on the summary blanks it + sends mark', (await gone()) && await page.evaluate((CID)=>window.__frames.some(f=>f.type==='tldr'&&f.cid===CID&&f.mark===true), CID));
 
+// 8b2. the DONE layout has two blank rows above the rules: the box must still start right under the done line
+await page.evaluate(()=>new Promise(res=>{ let t=''; for (let i=0;i<80;i++) t+='line '+i+'\r\n'; t+='* Crunched for 20s · done\r\n\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n'; term.write(t, res); }));
+await page.waitForTimeout(150);
+await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'done-state summary',final:true}), CID);
+await page.waitForTimeout(150);
+const dn = await page.evaluate(()=>{ const rowsEl=term.element.querySelector('.xterm-rows'); const r=tldrEl.getBoundingClientRect();
+  let done=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.includes('Crunched')) done=i;
+  const dr = done>=0 ? rowsEl.children[done].getBoundingClientRect() : null;
+  return {chromeRows:tldrChromeRows(), hold:tldrHold(), boxTop:r.top, doneBottom:dr&&dr.bottom, gap: dr ? +(r.top-dr.bottom).toFixed(1) : null}; });
+check('done layout (two blank rows): chrome measured as 6, box starts right under the done line', dn.chromeRows===6 && dn.doneBottom!=null && Math.abs(dn.gap)<=0.6, JSON.stringify(dn));
+
 // 8c. the overlay lifts while the session waits on you (prompts render right there)
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'text again',final:false}), CID);
 check('overlay up before the wait', await page.evaluate(()=>!tldrEl.hidden));
