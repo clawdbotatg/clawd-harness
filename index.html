@@ -1531,13 +1531,21 @@ term.onRender(() => { bottomJustifyTTY(); positionTldr(); });
 // declared further down with the rest of the 🟦 code; this runs after load.
 const TTY_COVER_ROWS = 5;   // blank · ─── · ❯ input · ─── · status line
 let tldrPosKey = '';
+// Set at the very end of the script, right before connect(). positionTldr is reached
+// DURING boot (the 🟦 block's clearTldr(), xterm renders) and, with the mode persisted
+// on, walked into currentView() → a const declared a thousand lines later → TDZ
+// ReferenceError that aborted the whole script before connect(): every h.atg.link
+// load with tldr on sat at "connecting…" with a black terminal (2026-09-04, the
+// hour the overlay shipped). Until boot is done the overlay simply stays down.
+let uiBooted = false;
 function positionTldr() {
   const el = document.getElementById('tldr');
-  const s = currentCid && allSessions().find(x => x.cid === currentCid);
+  if (!uiBooted) { el.hidden = true; tldrPosKey = ''; return; }
   // Only while there IS a summary: an empty cover is just a black hole where the
   // input box was (a tool-only turn has no prose for minutes — 2026-09-05).
-  const on = typeof tldrOn !== 'undefined' && tldrOn && currentView() === 'tty' && !!s && !s.waiting
-             && document.getElementById('tldrText').textContent !== '';
+  if (!tldrOn || document.getElementById('tldrText').textContent === '') { el.hidden = true; tldrPosKey = ''; return; }
+  const s = currentCid && allSessions().find(x => x.cid === currentCid);
+  const on = currentView() === 'tty' && !!s && !s.waiting;
   if (!on) { el.hidden = true; tldrPosKey = ''; return; }
   const screen = term.element && term.element.querySelector('.xterm-screen');
   const rowsEl = term.element && term.element.querySelector('.xterm-rows');
@@ -10017,6 +10025,8 @@ setInterval(() => {
 }, 5000);
 if (parseHash().view === 'pm') openPM();   // deep-linked straight to the PM
 
+uiBooted = true;       // every declaration above is live: the 🟦 overlay may now read the view state
+positionTldr();
 hydrateFleetCache();   // last-known roster+tabs render immediately (offline-marked) — live frames replace them
 connect();   // fleet: the passkey gate is the door. direct: the loopback harness needs no token, so always
              // connect; only a non-loopback (BIND=0.0.0.0) server that actually rejects surfaces a login

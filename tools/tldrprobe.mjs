@@ -177,5 +177,29 @@ await page.evaluate((CID)=>{handleJson({type:'tldr',cid:CID,text:'bye',final:tru
 check('off drops the overlay + sends the verb', await page.evaluate(()=>tldrEl.hidden && !tldrOn && window.__frames.some(f=>f.type==='tldr'&&f.on===false)));
 
 check('no page errors', errors.length===0, errors.join(' | '));
+
+// 10. COLD START with the mode persisted on: the page must still boot and dial the
+// relay. The overlay code runs during boot (clearTldr(), xterm renders); walking into
+// currentView() there hit a not-yet-declared const and aborted the script before
+// connect() — every h.atg.link load sat at "connecting…" (2026-09-04).
+const errors2=[];
+const page2 = await browser.newPage({ ...iphone, viewport:{width:390,height:844} });
+await page2.addInitScript(() => {
+  window.__sockets=0;
+  class FakeWS{constructor(u){this.url=u;this.readyState=0;this.binaryType='arraybuffer';window.__sockets++;
+    setTimeout(()=>{this.readyState=1;this.onopen&&this.onopen({});},0);}
+   send(){} close(){this.readyState=3;this.onclose&&this.onclose({});}}
+  FakeWS.prototype.addEventListener=function(){}; window.WebSocket=FakeWS;
+  try{localStorage.clear(); localStorage.setItem('cc_tldr','1');}catch{}
+});
+page2.on('pageerror',e=>errors2.push(String(e)));
+await page2.route('https://fleet.probe/', r=>r.fulfill({status:200,contentType:'text/html; charset=utf-8',body:fleetHtml}));
+await page2.goto('https://fleet.probe/#/p/self/s/abc/tty',{waitUntil:'domcontentloaded'});
+await page2.waitForTimeout(800);
+const cold = await page2.evaluate(()=>({sockets:window.__sockets, meta:document.getElementById('meta').textContent, on:tldrOn, hidden:tldrEl.hidden}));
+check('cold start with tldr persisted on: no page errors', errors2.length===0, errors2.join(' | '));
+check('…the relay socket is dialed', cold.sockets>=1 && cold.meta!=='connecting…', JSON.stringify(cold));
+check('…mode is on, overlay down until there is text', cold.on===true && cold.hidden===true, JSON.stringify(cold));
+await page2.close();
 await browser.close();
 if (failed) { console.log('tldrprobe: FAIL'); process.exit(1); } else console.log('tldrprobe: all green');
