@@ -2948,7 +2948,8 @@ class ClaudeSession:
                  account="default", config_dir="", ceremony=False,
                  pinned=0.0, test_hint="", model="", ctx_tokens=0,
                  engine="claude", autopilot=0.0, pilot_goal="",
-                 pilot_status="", pilot_rounds=0):
+                 pilot_status="", pilot_rounds=0,
+                 tldr_text="", tldr_on=False, voice_on=False):
         self.manager = manager
         # Which agent CLI drives this session ("claude" | "codex"). Chosen at
         # spawn and durable: a --resume must reach for the same binary, and an
@@ -3061,12 +3062,13 @@ class ClaudeSession:
         self.digest = ""                          # volatile "what it's doing now" (LLM, refreshed each Stop)
         self.auto_tldr_armed = False              # volatile: browser send seen, no Stop yet (AUTO_TLDR)
         # 🟦 live TLDR (volatile; the viewer re-asserts its preference on subscribe)
-        self.tldr_on = False                      # a viewer wants the blue block
+        self.tldr_on = bool(tldr_on)              # a viewer wants the blue block (ctor param: survives respawn/restart)
         self.tldr_turn_text = ""                  # this turn's streamed assistant prose (API tee)
-        self.tldr_text = ""                       # current summary (re-sent to late subscribers)
+        self.tldr_text = tldr_text or ""          # current summary (re-sent to late subscribers; persisted — a
+                                                  # daemon restart or account handoff used to wipe it, 2026-09-04)
         self.tldr_read_at = 0                     # chars of tldr_turn_text the viewer marked read (tap)
-        self.tldr_sents = []                      # last pass's sentences (the annealing baseline)
-        self.voice_on = False                     # a viewer has 🟦 + 🔊: the voice loop runs
+        self.tldr_sents = split_sentences(self.tldr_text)   # last pass's sentences (the annealing baseline)
+        self.voice_on = bool(voice_on)            # a viewer has 🟦 + 🔊: the voice loop runs
         self._voice = None                        # VoiceAgent for the turn in flight
         self._voice_settled = set()               # settled sentences the voice has been shown
         self._tldr = None                         # RollingTldr for the turn in flight
@@ -3094,7 +3096,9 @@ class ClaudeSession:
                 "autopilot": self.autopilot, "pilot_goal": self.pilot_goal,
                 "pilot_status": self.pilot_status,
                 "pilot_rounds": self.pilot_rounds,
-                "model": self.model, "ctx_tokens": self.ctx_tokens}
+                "model": self.model, "ctx_tokens": self.ctx_tokens,
+                "tldr_text": (self.tldr_text or "")[:3000],
+                "tldr_on": self.tldr_on, "voice_on": self.voice_on}
 
     def clone_for_respawn(self, **overrides):
         """A fresh session object for an in-place respawn under the SAME cid
@@ -4573,9 +4577,12 @@ class ClaudeSession:
             c.send_json(obj)
 
     # -- 🟦 live TLDR (see the API_TEE block up top) ---------------------------
-    def _tldr_frame(self, text, final):
+    def _tldr_frame(self, text, final, sents=None):
+        if sents is None and text:
+            sents = [(x, True) for x in split_sentences(text)]   # restored/known text: all settled
         return {"type": "tldr", "cid": self.cid, "text": text,
-                "final": bool(final), "turn": self.prompt_count}
+                "final": bool(final), "turn": self.prompt_count,
+                "sents": [[x, ok] for x, ok in (sents or [])]}
 
     def tee_text(self, kind, text):
         """API tee → this turn's streamed assistant prose. Called from the
@@ -4607,9 +4614,9 @@ class ClaudeSession:
         self.tldr_text = summary
         sents = settle_sentences(self.tldr_sents, summary)
         self.tldr_sents = [x for x, _ in sents]
-        frame = self._tldr_frame(summary, final)
-        frame["sents"] = [[x, ok] for x, ok in sents]
-        self._to_subscribers_json(frame)
+        self._to_subscribers_json(self._tldr_frame(summary, final, sents))
+        if final:
+            self.manager.save_registry()         # the summary survives a restart / handoff
         if self.voice_on:
             settled = {x for x, ok in sents if ok}
             if final or (settled - self._voice_settled):
@@ -4992,7 +4999,9 @@ class SessionManager:
                     pilot_goal=e.get("pilot_goal", ""),
                     pilot_status=e.get("pilot_status", ""),
                     pilot_rounds=e.get("pilot_rounds", 0),
-                    model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0))
+                    model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0),
+                    tldr_text=e.get("tldr_text", ""), tldr_on=bool(e.get("tldr_on")),
+                    voice_on=bool(e.get("voice_on")))
                 self.sessions[s.cid] = s
                 s.start()
                 continue
@@ -5068,7 +5077,9 @@ class SessionManager:
                 pilot_goal=e.get("pilot_goal", ""),
                 pilot_status=e.get("pilot_status", ""),
                 pilot_rounds=e.get("pilot_rounds", 0),
-                model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0))
+                model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0),
+                tldr_text=e.get("tldr_text", ""), tldr_on=bool(e.get("tldr_on")),
+                voice_on=bool(e.get("voice_on")))
             self.sessions[s.cid] = s
             s.start()
         # Backfill the 📌 board's blue line for pins that predate the field (or

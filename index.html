@@ -5747,6 +5747,7 @@ function subscribe(cid, opts) {
   // soft = flap recovery of the session already on screen: don't blank the
   // terminal now — buffer the replay and swap it in as one repaint (softSwap).
   const soft = !!(opts && opts.soft) && cid === currentCid && currentView() === 'tty';
+  const switching = cid !== currentCid;   // 🟦 a reconnect to the SAME session keeps its summary on screen
   currentCid = cid;
   // Wipe both views; the server re-streams this session's screen + history right
   // after. Always clearing (even re-subscribing the same cid on reconnect) keeps
@@ -5760,7 +5761,7 @@ function subscribe(cid, opts) {
     term.reset();
   }
   feed.innerHTML = '';
-  clearTldr();                 // 🟦 the summary belongs to the session we're leaving (the new one re-sends its own)
+  if (switching) clearTldr();  // 🟦 the summary belongs to the session we're leaving (the new one re-sends its own)
   clearPending();              // queued boxes belong to the session we're leaving
   hideThinking();
   if (activeType) { activeType.finish(); activeType = null; }
