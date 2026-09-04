@@ -85,7 +85,7 @@ check('tap turns it on + persists + sends the verb', on.on && on.cls && on.ls===
 await page.evaluate(()=>new Promise(res=>term.write('\x1b[2J\x1b[H* Churned for 1m\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n\r\n\r\n', res)));
 await page.waitForTimeout(150);
 const h0 = await page.evaluate(()=>{ positionTldr(); return {hidden:tldrEl.hidden, h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, term:document.getElementById('term').getBoundingClientRect().height}; });
-check('mode on: the overlay is up (blank) over the chrome', !h0.hidden && h0.h>40, JSON.stringify(h0));
+check('mode on but no summary yet: no overlay (terminal shows as normal)', h0.hidden, JSON.stringify(h0));
 
 // 3. a frame paints the overlay, live
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass.',final:false}), CID);
@@ -105,6 +105,7 @@ check('painting text changed neither the footer nor #term height', h1.footer===h
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:('Long line of summary text. ').repeat(40),final:false}), CID);
 const h2 = await page.evaluate(()=>({h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, term:document.getElementById('term').getBoundingClientRect().height, scrolls:tldrEl.scrollHeight>tldrEl.clientHeight}));
 check('a long summary scrolls inside; footer and #term unchanged', h2.h===h1.h && h2.footer===h0.footer && h2.term===h0.term && h2.scrolls, JSON.stringify({h0,h2}));
+check('overlay covers the chrome rows (5 rows tall or more)', h1.h >= 5*13, JSON.stringify(h1));
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass.',final:false}), CID);
 
 // 4. a later frame replaces the text; final drops "updating"
@@ -118,7 +119,7 @@ check('other session ignored', await page.evaluate(()=>tldrText.textContent==='F
 
 // 6. empty text = new turn → blank; UserPromptSubmit too
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'',final:false}), CID);
-check('empty frame blanks it', await gone());
+check('empty frame blanks it and drops the overlay', (await gone()) && await page.evaluate(()=>tldrEl.hidden));
 await page.evaluate((CID)=>{handleJson({type:'tldr',cid:CID,text:'again',final:false}); handleJson({type:'hook',cid:CID,event:'UserPromptSubmit',busy:true,waiting:false,tool:null,data:{prompt:'x'}});}, CID);
 check('UserPromptSubmit blanks it', await gone());
 
@@ -149,8 +150,8 @@ check('subscribe is followed by the tldr verb', sub[0]==='subscribe' && sub[1]==
 // (subscribe() reset the grid; repaint claude-like chrome so the overlay has rows to sit on)
 await page.evaluate(()=>new Promise(res=>term.write('\x1b[2J\x1b[H* Churned for 1m\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n\r\n\r\n', res)));
 await page.waitForTimeout(150);
-await page.evaluate(()=>{ tldrPosKey=''; positionTldr(); });
-check('overlay back after a repaint', await page.evaluate(()=>!tldrEl.hidden));
+await page.evaluate((CID)=>{ handleJson({type:'tldr',cid:CID,text:'back with text',final:false}); }, CID);
+check('overlay back once there is text again', await page.evaluate(()=>!tldrEl.hidden));
 
 // 8b. tapping the summary marks it read: hides + sends the mark
 await page.evaluate((CID)=>{ handleJson({type:'tldr',cid:CID,text:'read me now',final:false}); window.__frames.length=0; }, CID);
@@ -162,6 +163,8 @@ await page.waitForTimeout(200);
 check('tap on the summary blanks it + sends mark', (await gone()) && await page.evaluate((CID)=>window.__frames.some(f=>f.type==='tldr'&&f.cid===CID&&f.mark===true), CID));
 
 // 8c. the overlay lifts while the session waits on you (prompts render right there)
+await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'text again',final:false}), CID);
+check('overlay up before the wait', await page.evaluate(()=>!tldrEl.hidden));
 const sessFrame = (waiting) => ({type:'sessions',sessions:[
   {cid:'cid-probe-1',pid:'p1',title:'probe tldr',desc:'',promptCount:2,alive:true,busy:true,waiting,autopilot:false,pilotStatus:'',pilotRounds:0,lastActive:Date.now()/1000,promptedAt:Date.now()/1000}]});
 await page.evaluate((f)=>{ handleMachineJson('clawd-atg', f); renderPilotUI(); }, sessFrame(true));

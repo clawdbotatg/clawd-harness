@@ -1534,7 +1534,10 @@ let tldrPosKey = '';
 function positionTldr() {
   const el = document.getElementById('tldr');
   const s = currentCid && allSessions().find(x => x.cid === currentCid);
-  const on = typeof tldrOn !== 'undefined' && tldrOn && currentView() === 'tty' && !!s && !s.waiting;
+  // Only while there IS a summary: an empty cover is just a black hole where the
+  // input box was (a tool-only turn has no prose for minutes — 2026-09-05).
+  const on = typeof tldrOn !== 'undefined' && tldrOn && currentView() === 'tty' && !!s && !s.waiting
+             && document.getElementById('tldrText').textContent !== '';
   if (!on) { el.hidden = true; tldrPosKey = ''; return; }
   const screen = term.element && term.element.querySelector('.xterm-screen');
   const rowsEl = term.element && term.element.querySelector('.xterm-rows');
@@ -7587,9 +7590,10 @@ function showTldr(text, final) {
   tldrTextEl.textContent = text;
   tldrEl.classList.toggle('live', !final);
   tldrEl.classList.remove('empty');
+  positionTldr();                            // text arrived → cover the chrome (no-op if already placed)
 }
-// blank the row but keep its slot: its height never moves (see the #tldr CSS)
-function clearTldr() { tldrTextEl.textContent = ''; tldrEl.classList.remove('live'); tldrEl.classList.add('empty'); }
+// blank it — and with no text the overlay comes down, the terminal shows as normal
+function clearTldr() { tldrTextEl.textContent = ''; tldrEl.classList.remove('live'); tldrEl.classList.add('empty'); positionTldr(); }
 function setTldr(on) {
   tldrOn = on;
   tldrBtn.classList.toggle('on', on);
