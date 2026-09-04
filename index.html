@@ -540,6 +540,14 @@
           cursor:pointer; -webkit-overflow-scrolling:touch; }
   #tldr[hidden] { display:none; }
   #tldr.empty { color:var(--dim); cursor:default; }
+  /* 🟦 tty cover: with the live TLDR on, mask claude's bottom chrome (the input box and
+     the status line) so the last visible terminal line is the thinking/done line — the
+     summary row below is the thing to read instead. Sized in rows from the rendered grid
+     and re-placed on every render; lifted while the session waits on you (a permission /
+     question prompt lives exactly there). Off = the terminal exactly as before. */
+  #ttycover { position:absolute; left:0; right:0; bottom:0; background:var(--bg); z-index:12;
+              pointer-events:none; }
+  #ttycover[hidden] { display:none; }
   #tldr .tag { font-size:10px; letter-spacing:.14em; text-transform:uppercase;
                opacity:.6; margin-right:8px; white-space:normal; }
   #tldr.live .tag::after { content:" · updating…"; }
@@ -1322,6 +1330,7 @@
     </section>
     <section class="col" id="left">
       <div id="term"></div>
+      <div id="ttycover" hidden></div>
       <div id="ttymeta"></div>
       <div id="splash" hidden></div>
       <div id="deadveil" hidden></div>
@@ -1520,7 +1529,33 @@ function bottomJustifyTTY() {
   const off = Math.max(0, availH - (last + 1) * cell - GAP);
   screen.style.transform = off ? 'translateY(' + off + 'px)' : '';
 }
-term.onRender(bottomJustifyTTY);
+term.onRender(() => { bottomJustifyTTY(); positionTtyCover(); });
+
+// 🟦 tty cover (see the #ttycover CSS): mask the bottom TTY_COVER_ROWS rows of the
+// rendered grid while the live TLDR is on. Placed from the grid's own geometry
+// (screen bottom − N·cell, which follows the bottom-justify transform), but only
+// re-measured when something that moves it changed — a layout read on every
+// render would stutter touch scrolling (the same trap bottomJustifyTTY avoids).
+const TTY_COVER_ROWS = 5;   // blank · ─── · ❯ input · ─── · status line
+const ttyCover = document.getElementById('ttycover');
+let ttyCoverKey = '';
+function positionTtyCover() {
+  const s = currentCid && allSessions().find(x => x.cid === currentCid);
+  const on = tldrOn && currentView() === 'tty' && !!s && !s.waiting;
+  if (!on) { ttyCover.hidden = true; ttyCoverKey = ''; return; }
+  const screen = term.element && term.element.querySelector('.xterm-screen');
+  const rowsEl = term.element && term.element.querySelector('.xterm-rows');
+  if (!screen || !rowsEl || !rowsEl.children.length) { ttyCover.hidden = true; return; }
+  const key = term.rows + '|' + term.cols + '|' + screen.style.transform + '|' + document.getElementById('left').clientHeight;
+  if (key === ttyCoverKey && !ttyCover.hidden) return;
+  ttyCoverKey = key;
+  const cell = rowsEl.children[0].offsetHeight || 0;
+  if (!cell) { ttyCover.hidden = true; return; }
+  const leftTop = document.getElementById('left').getBoundingClientRect().top;
+  const top = screen.getBoundingClientRect().bottom - TTY_COVER_ROWS * cell - leftTop;
+  ttyCover.style.top = Math.max(0, Math.round(top)) + 'px';
+  ttyCover.hidden = false;
+}
 
 // Repaint on scroll — the companion to the touch-scroll fix above. xterm's DOM
 // renderer diff-updates only the cells it believes changed. When the viewport is
@@ -1579,7 +1614,7 @@ function ttyAtBottom() {
 // terminal). rAF so we measure after the browser has reflowed the new bar.
 function refitTTY() {
   if (currentView() !== 'tty') return;
-  requestAnimationFrame(() => { fit.fit(); sendResize(); term.refresh(0, term.rows - 1); term.scrollToBottom(); bottomJustifyTTY(); });
+  requestAnimationFrame(() => { fit.fit(); sendResize(); term.refresh(0, term.rows - 1); term.scrollToBottom(); bottomJustifyTTY(); positionTtyCover(); });
 }
 
 // A HARD repaint — exactly what dragging the window border does. The real bug:
@@ -5661,6 +5696,7 @@ function renderPilotUI() {
   pilotChk.hidden = !show;
   tldrBtn.hidden = !show;                  // 🟦 lives beside it, same rule
   tldrEl.hidden = !(show && tldrOn);       // the row is part of the footer whenever the mode is on (fixed height)
+  positionTtyCover();                      // waiting-on-you lifts the cover; leaving the view drops it
   if (!show) { pilotRow.hidden = true; return; }
   if (s.cid !== pilotCidShown) { pilotCidShown = s.cid; pilotPendingAt = 0; }
   if (Date.now() - pilotPendingAt > 4000) pilotChk.checked = !!s.autopilot;
@@ -7566,6 +7602,7 @@ function setTldr(on) {
   if (currentCid) hsend({ type: 'tldr', cid: currentCid, on });
   clearTldr();
   renderPilotUI();                           // shows/hides the row with the mode
+  ttyCoverKey = ''; positionTtyCover();      // …and the tty cover
 }
 tldrBtn.onclick = () => setTldr(!tldrOn);
 // tap = "read this far": hide it, and tell the server so later passes summarize only NEW prose
@@ -9321,7 +9358,7 @@ stage.addEventListener('touchend', (e) => {
 }, { capture: true, passive: true });
 
 // A window resize/rotation is the user manipulating THIS device → claim the PTY size.
-window.addEventListener('resize', () => { fit.fit(); sendResize(true); term.scrollToBottom(); bottomJustifyTTY(); });
+window.addEventListener('resize', () => { fit.fit(); sendResize(true); term.scrollToBottom(); bottomJustifyTTY(); positionTtyCover(); });
 
 // -- machines roster page (the 🖥️ button) ------------------------------------
 // Read-only fleet overview with per-machine stats. Replaces the old machines rung;

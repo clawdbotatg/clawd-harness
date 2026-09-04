@@ -148,9 +148,24 @@ await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
 await page.waitForTimeout(200);
 check('tap on the summary blanks it + sends mark', (await gone()) && await page.evaluate((CID)=>window.__frames.some(f=>f.type==='tldr'&&f.cid===CID&&f.mark===true), CID));
 
+// 8c. the tty cover: on with the mode, sized to the bottom rows of the grid, lifted while waiting
+const cov = await page.evaluate(()=>{ positionTtyCover();
+  const rowsEl=term.element.querySelector('.xterm-rows'); const cell=rowsEl.children[0].offsetHeight;
+  const sb=term.element.querySelector('.xterm-screen').getBoundingClientRect().bottom;
+  const r=ttyCover.getBoundingClientRect(); const left=document.getElementById('left').getBoundingClientRect();
+  return {hidden:ttyCover.hidden, top:r.top, want:sb-TTY_COVER_ROWS*cell, bottom:r.bottom, leftBottom:left.bottom, cell}; });
+check('cover shows with the mode, starting N rows above the grid bottom', !cov.hidden && Math.abs(cov.top-cov.want)<=2 && Math.abs(cov.bottom-cov.leftBottom)<=1, JSON.stringify(cov));
+const sessFrame = (waiting) => ({type:'sessions',sessions:[
+  {cid:'cid-probe-1',pid:'p1',title:'probe tldr',desc:'',promptCount:2,alive:true,busy:true,waiting,autopilot:false,pilotStatus:'',pilotRounds:0,lastActive:Date.now()/1000,promptedAt:Date.now()/1000}]});
+await page.evaluate((f)=>{ handleMachineJson('clawd-atg', f); renderPilotUI(); }, sessFrame(true));
+check('cover lifts while the session waits on you', await page.evaluate(()=>ttyCover.hidden));
+await page.evaluate((f)=>{ handleMachineJson('clawd-atg', f); renderPilotUI(); }, sessFrame(false));
+check('…and returns', await page.evaluate(()=>!ttyCover.hidden));
+
 // 9. off again hides + sends off
 await page.evaluate((CID)=>{handleJson({type:'tldr',cid:CID,text:'bye',final:true}); window.__frames.length=0; setTldr(false);}, CID);
 check('off hides the slot + sends the verb', await page.evaluate(()=>tldrEl.hidden && !tldrOn && window.__frames.some(f=>f.type==='tldr'&&f.on===false)));
+check('off drops the tty cover', await page.evaluate(()=>ttyCover.hidden));
 
 check('no page errors', errors.length===0, errors.join(' | '));
 await browser.close();
