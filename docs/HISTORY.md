@@ -793,6 +793,23 @@ user-facing overview; this file orients an agent working **on** the code.
   last run 2026-06, next ≈2026-09.** The script reuses `server.NAME_SYS_PROMPT`
   and the `.clawd-harness.env` creds, so it never drifts from the app or hardcodes
   a key.
+- **🔊 The voice** (2026-09-05): with 🟦 and 🔊 both on, a third loop speaks
+  for the session. Speech is slow and can't be unsaid, so it never reads the
+  summary: `VoiceAgent` (server.py) watches the summary's *settled* sentences
+  (a sentence that came back unchanged from the previous pass — the
+  annealing, drawn solid vs 70% on screen via the `tldr` frame's `sents`),
+  the raw reply tail, and its own said-log for the turn, and decides per pass
+  whether to say something (`say` frames). No word caps — Austin's rules
+  instead (`VOICE_SYS`): the listener test (speak only if the listener would
+  act, decide, or think differently), length follows the thing that changed,
+  one idea per utterance, never repeat, outcomes not steps, ears-first
+  wording (first person, no paths/symbols/long identifiers, round numbers),
+  corrections start with "Correction,", waiting-on-you beats everything,
+  the finish says only what's new. It speaks in broken phrases as facts
+  settle, not all at once at the end. Client: lines are held while the mic
+  is open and spoken on release; a new prompt cancels the queue; the voice
+  flag rides the `tldr` verb (`voice:true/false`) with every subscribe and
+  either toggle. Cost: one more haiku call per pass that settled something.
 - **🟦 Live TLDR** (2026-09-04): "every answer is too verbose and I always
   hit the tldr button" → a rolling plain-English summary of the turn in
   flight, in a Facebook-blue block floating over the top of the terminal,

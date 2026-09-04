@@ -83,7 +83,10 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   that tees the streamed reply to a rolling `claude -p haiku` summary (the
   blue block over the terminal). Pure pass-through, never logs, must never
   break a session; `claude -p` bills the subscription (the June-15 credit
-  pool was paused — don't "fix" that). `test_tldr.py` + `tldrprobe.mjs`.
+  pool was paused — don't "fix" that). **🔊 the voice** = `VoiceAgent`/`VOICE_SYS`
+  in the same block: with 🟦 + 🔊 on, a third loop speaks settled summary
+  sentences that pass the listener test (`say` frames); rules, not word caps.
+  `test_tldr.py` + `tldrprobe.mjs`.
   Wall-display boxes (clawd-sat): `tools/kiosk/README.md`.
 
 ## Landmines (don't regress; stories in HISTORY.md)

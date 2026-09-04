@@ -131,6 +131,52 @@ r3.feed("c" * 50); r3.done(); time.sleep(0.3)
 check("a failed pass keeps the previous summary and doesn't crash the loop",
       emitted == [] and not r3.thread.is_alive())
 
+print("split/settle_sentences:")
+check("splits on sentence ends and newlines",
+      server.split_sentences("Fixed it. Tests pass!\nWant me to push?") == ["Fixed it.", "Tests pass!", "Want me to push?"])
+check("first pass: nothing settled",
+      server.settle_sentences([], "Fixed it. Tests pass.") == [("Fixed it.", False), ("Tests pass.", False)])
+check("a sentence that survives verbatim settles; a reworded one doesn't",
+      server.settle_sentences(["Fixed it.", "Tests pass."], "Fixed it. Tests pass now. Pushed.")
+      == [("Fixed it.", True), ("Tests pass now.", False), ("Pushed.", False)])
+
+print("VoiceAgent:")
+vcalls, vsaid = [], []
+vgate = threading.Event()
+def vrunner(event, message, sents, tail, said):
+    vcalls.append((event, message, [x for x, ok in sents if ok], list(said)))
+    vgate.wait(2)
+    return {"stream": "Found it.", "done": "Pushed. Want a PR?", "waiting": "I need permission to run the tests."}[event] \
+        if len(vcalls) != 2 else ""
+v = server.VoiceAgent(lambda t, u: vsaid.append((t, u)), vrunner)
+v.feed("stream", "", [("Found it.", True), ("Looking more.", False)], "raw one")
+time.sleep(0.15)
+v.feed("stream", "", [("Found it.", True), ("Looking more.", True)], "raw two")   # while call 1 is in flight
+v.feed("waiting", "needs permission", [("Found it.", True)], "raw three")        # more urgent: keeps rank
+time.sleep(0.15)
+check("one call in flight", len(vcalls) == 1 and vcalls[0][0] == "stream")
+vgate.set(); time.sleep(0.3)
+check("first line spoken, not urgent", vsaid[:1] == [("Found it.", False)])
+check("pending coalesced to the MOST URGENT event with the newest state",
+      len(vcalls) == 2 and vcalls[1][0] == "waiting" and vcalls[1][1] == "needs permission" and vcalls[1][3] == ["Found it."])
+time.sleep(0.2)
+check("an empty decision is silence (nothing emitted, said-log unchanged)", len(vsaid) == 1 and v.said == ["Found it."])
+v.feed("done", "", [("Found it.", True), ("Pushed.", True)], "raw four"); time.sleep(0.3)
+check("done: spoken, said-log carries everything said", vsaid[-1] == ("Pushed. Want a PR?", False) and vcalls[-1][3] == ["Found it."])
+v.feed("waiting", "permission", [], "x"); time.sleep(0.3)
+check("waiting lines are flagged urgent", vsaid[-1] == ("I need permission to run the tests.", True))
+v.stop(); time.sleep(0.2)
+check("stop ends the loop", not v.thread.is_alive())
+def vboom(*a): raise RuntimeError("no voice today")
+v2 = server.VoiceAgent(lambda t, u: vsaid.append((t, u)), vboom)
+n = len(vsaid); v2.feed("done", "", [], "x"); time.sleep(0.3); v2.stop()
+check("a failed call is silence, loop survives", len(vsaid) == n)
+
+print("_voice_prompt:")
+pr = server._voice_prompt("waiting", "needs permission", [("Found it.", True), ("Maybe.", False)], "tail text", ["Found it."])
+check("prompt carries event, said-log, marked sentences, tail",
+      "WAITING" in pr and "- Found it." in pr and "[settled] Found it." in pr and "[forming] Maybe." in pr and "tail text" in pr)
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}"); raise SystemExit(1)

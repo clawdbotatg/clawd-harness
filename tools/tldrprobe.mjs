@@ -37,6 +37,9 @@ await page.addInitScript(() => {
   FakeWS.prototype.addEventListener=function(){}; window.WebSocket=FakeWS;
   window.__relayRx=(o)=>{const s=sockets[sockets.length-1]; if(s&&s.onmessage) s.onmessage({data:JSON.stringify(o)});};
   try{localStorage.clear();}catch{}
+  window.__spoken=[]; window.__cancelled=0;
+  Object.defineProperty(window, 'speechSynthesis', { configurable:true, value:{ speak(u){ window.__spoken.push(u.text); }, cancel(){ window.__cancelled++; }, speaking:false, pending:false } });
+  window.SpeechSynthesisUtterance=class{ constructor(t){ this.text=t; } };
   for (const m of ['clawd-atg'])
     try{localStorage.setItem('cc_e2e_rs_'+m, JSON.stringify({id:'p-'+m,master:'AAAA',exp:Date.now()+3600e3}));}catch{}
 });
@@ -231,6 +234,29 @@ await page.evaluate((f)=>{ handleMachineJson('clawd-atg', f); renderPilotUI(); }
 check('overlay lifts while the session waits on you', await page.evaluate(()=>tldrEl.hidden));
 await page.evaluate((f)=>{ handleMachineJson('clawd-atg', f); renderPilotUI(); }, sessFrame(false));
 check('…and returns', await page.evaluate(()=>!tldrEl.hidden));
+
+// 10. 🔊 the voice: annealed sentences render solid/forming; say frames speak; held while the mic is open; a new prompt cancels
+await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Found it. Looking more.',final:false,sents:[['Found it.',true],['Looking more.',false]]}), CID);
+const an = await page.evaluate(()=>{ const sp=[...tldrText.querySelectorAll('span')]; return {n:sp.length, cls:sp.map(x=>x.className), op:sp.map(x=>getComputedStyle(x).opacity), text:tldrText.textContent}; });
+check('annealing: settled sentence solid, forming one at 70%', an.n===2 && an.cls[0]==='set' && an.cls[1]==='form' && an.op[0]==='1' && Math.abs(parseFloat(an.op[1])-0.7)<0.01 && an.text==='Found it. Looking more.', JSON.stringify(an));
+await page.evaluate(()=>{ window.__frames.length=0; setTts(true); });
+check('🔊 on (with 🟦 on) sends voice:true', await page.evaluate(()=>window.__frames.some(f=>f.type==='tldr'&&f.voice===true)));
+await page.evaluate((CID)=>{ window.__frames.length=0; handleJson({type:'say',cid:CID,text:'Found it.',urgent:false}); }, CID);
+const ttsReq = await page.evaluate(()=>window.__frames.find(f=>f.type==='tts'));
+check('fleet: a say frame asks the box for ElevenLabs over the socket', !!ttsReq && ttsReq.text==='Found it.' && !!ttsReq.id, JSON.stringify(ttsReq));
+await page.evaluate((id)=>handleJson({type:'tts',id,error:'tts not configured'}), ttsReq.id);
+await page.waitForTimeout(100);
+check('…and falls back to the browser voice when the box has no key', await page.evaluate(()=>window.__spoken.includes('Found it.')));
+await page.evaluate(()=>handleJson({type:'say',cid:'cid-other',text:'WRONG SESSION',urgent:false}));
+check('another session\'s say is ignored', await page.evaluate(()=>!window.__spoken.includes('WRONG SESSION')));
+await page.evaluate((CID)=>{ recOn=true; handleJson({type:'say',cid:CID,text:'Held line.',urgent:false}); }, CID);
+check('held while the mic is open', await page.evaluate(()=>!window.__frames.some(f=>f.type==='tts'&&f.text==='Held line.') && heldSay.length===1));
+await page.evaluate(()=>{ recOn=false; flushHeldSay(); });
+check('spoken on mic release', await page.evaluate(()=>window.__frames.some(f=>f.type==='tts'&&f.text==='Held line.') && heldSay.length===0));
+await page.evaluate((CID)=>{ heldSay.push('stale'); const c=window.__cancelled; handleJson({type:'hook',cid:CID,event:'UserPromptSubmit',busy:true,waiting:false,tool:null,data:{prompt:'x'}}); window.__cancelDelta=window.__cancelled-c; }, CID);
+check('a new prompt cancels queued + held speech', await page.evaluate(()=>heldSay.length===0 && window.__cancelDelta>=1));
+await page.evaluate(()=>{ window.__frames.length=0; setTts(false); });
+check('🔊 off sends voice:false', await page.evaluate(()=>window.__frames.some(f=>f.type==='tldr'&&f.voice===false)));
 
 // 9. off again hides + sends off
 await page.evaluate((CID)=>{handleJson({type:'tldr',cid:CID,text:'bye',final:true}); window.__frames.length=0; setTldr(false);}, CID);

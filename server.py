@@ -172,7 +172,7 @@ BANKR_API      = os.environ.get("BANKR_API", "openai").lower()   # openai | anth
 # POSTs prose to /tts and we proxy to ElevenLabs (Flash v2.5, ~200ms TTFB),
 # piping the MP3 straight back. Voice ID defaults to "Brian" if unset.
 ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "") or "nPczCjzI2devNBz1zQrb"
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "") or "ogwqBH5bbF03DSbNiRNN"   # Austin's pick (2026-09-05)
 
 # The AI controller (PM brain) runs as a *separate* process (see controller/), but
 # we reverse-proxy /pm/* to it so the whole UI lives on one origin — the browser
@@ -344,6 +344,153 @@ TLDR_FINAL = (
     "TLDR MUST end with that question, kept close to verbatim; the question "
     "is exempt from the word limit. Same rules otherwise. Output only the "
     "TLDR, plain text, no markdown.")
+
+
+# ── 🔊 the voice (2026-09-05): speaks for the session as the summary anneals ──
+# Speech is slow and can't be unsaid, so the voice is a third loop with its own
+# job: watch the reply and the summary, keep a log of what it already said this
+# turn, and say something only when a SETTLED fact (a summary sentence that came
+# back unchanged on the next pass) passes the listener test. No word caps —
+# length follows the thing that changed. Rules live in VOICE_SYS; the said-log,
+# the settle diff, and the urgency order (waiting > done > streaming) are the
+# only code around it. Runs only while a viewer has both 🟦 and 🔊 on.
+VOICE_MODEL   = os.environ.get("VOICE_MODEL", "") or TLDR_MODEL
+VOICE_TAIL    = int(os.environ.get("VOICE_TAIL", "1500"))     # raw reply chars the voice also sees
+VOICE_SYS = (
+    "You are the spoken voice of a coding-assistant session, speaking to the "
+    "person who runs it. You get: the event (the reply is still streaming, it "
+    "just finished, or the assistant is WAITING on the person), the live "
+    "summary with each sentence marked settled or still forming, the tail of "
+    "the raw reply, and everything you have already said this turn. Decide "
+    "whether to say something now, and what.\n"
+    "Rules. (1) The listener test: speak only if the listener would act, decide, "
+    "or think differently for having heard it; otherwise say nothing. (2) Length "
+    "follows content: as long as the thing that changed and no longer — a yes/no "
+    "question is a few words, a tradeoff may take three sentences. (3) One idea "
+    "per utterance; if two things matter, say the more urgent one. (4) Never "
+    "repeat anything already said this turn, even if it is more precise now. "
+    "(5) Don't narrate process — outcomes and decisions, not steps. (6) Speak "
+    "for the ears: first person for the session (\"I found…\", \"I need…\"), no "
+    "file paths, symbols, URLs, hashes, or long identifiers — describe such a "
+    "thing, don't spell it; round numbers. Never announce the event or describe "
+    "what the reply did (\"the reply finished with a question\") — just say the "
+    "thing. (7) Speak as things become known, in pieces: a newly settled "
+    "sentence that tells the listener something they did not know yet normally "
+    "passes the test; do not save everything for the end. A forming sentence "
+    "only if it is clearly true from the raw text and urgent. (8) If "
+    "something you said earlier turned out wrong, say so plainly, starting with "
+    "'Correction,'. (9) When the assistant is WAITING on the person, say what it "
+    "needs from them right now — that beats everything. (10) When the reply just "
+    "finished, say only what has not been said yet: the outcome, and any "
+    "question asked of the person.\n"
+    "Reply with ONLY compact JSON: {\"say\": \"<what to say, or empty>\"}.")
+
+
+def split_sentences(text):
+    """Summary → sentences (the unit the voice reasons about)."""
+    parts = re.split(r"(?<=[.!?])\s+|\n+", (text or "").strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def settle_sentences(prev_sentences, text):
+    """[(sentence, settled)] — settled iff it appeared verbatim in the previous
+    pass. The annealing: solid on screen, and what the voice may speak."""
+    prev = set(prev_sentences or ())
+    return [(x, x in prev) for x in split_sentences(text)]
+
+
+def _voice_prompt(event, message, sents, tail, said):
+    lines = ["EVENT: " + ({"stream": "the reply is still streaming",
+                            "done": "the reply just FINISHED",
+                            "waiting": "the assistant is WAITING on the person"}.get(event, event))
+             + (f" — notification: {message}" if message else "")]
+    lines.append("ALREADY SAID THIS TURN:" + ("" if said else " (nothing)"))
+    lines += [f"- {x}" for x in said]
+    lines.append("SUMMARY:" + ("" if sents else " (none yet)"))
+    lines += [f"[{'settled' if ok else 'forming'}] {x}" for x, ok in sents]
+    lines.append("LATEST REPLY TEXT (tail):\n<<<\n" + (tail or "")[-VOICE_TAIL:] + "\n>>>")
+    return "\n".join(lines)
+
+
+def _voice_call(event, message, sents, tail, said, config_dir=None):
+    """One voice decision: `claude -p` (VOICE_MODEL), thinking off, no tools.
+    Returns the line to say ("" = silence). Raises on a failed call."""
+    env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
+    env.pop("ANTHROPIC_BASE_URL", None)
+    env["MAX_THINKING_TOKENS"] = "0"
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    else:
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    with tempfile.TemporaryDirectory() as d:
+        r = subprocess.run(
+            [CLAUDE_BIN, "-p", "--model", VOICE_MODEL, "--system-prompt", VOICE_SYS,
+             "--tools", "", "--no-session-persistence", "--setting-sources", "",
+             "--strict-mcp-config", "--output-format", "text", "--",
+             _voice_prompt(event, message, sents, tail, said)],
+            cwd=d, env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=TLDR_TIMEOUT)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip()[-300:])
+    m = re.search(r"\{[\s\S]*?\}", r.stdout)
+    try:
+        say = (json.loads(m.group(0)) if m else {}).get("say", "")
+    except Exception:
+        say = ""
+    return say.strip() if isinstance(say, str) else ""
+
+
+class VoiceAgent:
+    """One turn's voice: feed(state) whenever there is something new (a pass
+    with newly settled sentences, the turn finishing, the assistant waiting);
+    one runner call in flight, newest state wins, `waiting` jumps the queue.
+    Keeps the said-log; emit(text, urgent) for every non-empty line.
+    `runner(event, message, sents, tail, said)` is injectable (tests)."""
+    URGENCY = {"stream": 0, "done": 1, "waiting": 2}
+
+    def __init__(self, emit, runner):
+        self.emit, self.runner = emit, runner
+        self.said, self.pending, self.stopped = [], None, False
+        self.cv = threading.Condition()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def feed(self, event, message, sents, tail):
+        with self.cv:
+            cur = self.pending
+            # newest wins, except a more urgent pending event keeps its rank
+            if cur and self.URGENCY[cur[0]] > self.URGENCY[event]:
+                event, message = cur[0], cur[1]
+            self.pending = (event, message, list(sents), tail)
+            self.cv.notify()
+
+    def stop(self):
+        with self.cv:
+            self.stopped = True
+            self.cv.notify()
+
+    def _run(self):
+        while True:
+            with self.cv:
+                while not self.stopped and self.pending is None:
+                    self.cv.wait()
+                if self.stopped:
+                    return
+                event, message, sents, tail = self.pending
+                self.pending = None
+                said = list(self.said)
+            try:
+                line = self.runner(event, message, sents, tail, said)
+            except Exception as e:
+                print(f"[voice] call failed: {e}", flush=True)
+                line = ""
+            if self.stopped:
+                return
+            if line:
+                self.said.append(line)
+                self.emit(line, event == "waiting")
+            else:
+                print(f"[voice] silence ({event})", flush=True)
 
 
 def tee_upstream_path(path):
@@ -2918,6 +3065,10 @@ class ClaudeSession:
         self.tldr_turn_text = ""                  # this turn's streamed assistant prose (API tee)
         self.tldr_text = ""                       # current summary (re-sent to late subscribers)
         self.tldr_read_at = 0                     # chars of tldr_turn_text the viewer marked read (tap)
+        self.tldr_sents = []                      # last pass's sentences (the annealing baseline)
+        self.voice_on = False                     # a viewer has 🟦 + 🔊: the voice loop runs
+        self._voice = None                        # VoiceAgent for the turn in flight
+        self._voice_settled = set()               # settled sentences the voice has been shown
         self._tldr = None                         # RollingTldr for the turn in flight
         self._tldr_lock = threading.Lock()
         self.blocked_on = None                    # the open question if it ended asking the human (LLM)
@@ -3300,6 +3451,8 @@ class ClaudeSession:
             # masquerade as waiting-for-you.
             if self.busy:
                 self.waiting = True
+                if self.voice_on:                # 🔊 what it needs from you beats everything
+                    self._voice_kick("waiting", obj.get("message", ""))
             data = {"message": obj.get("message", "")}
         elif ev == "SessionStart":
             self.busy = False
@@ -4452,15 +4605,57 @@ class ClaudeSession:
 
     def _tldr_emit(self, summary, final):
         self.tldr_text = summary
-        self._to_subscribers_json(self._tldr_frame(summary, final))
+        sents = settle_sentences(self.tldr_sents, summary)
+        self.tldr_sents = [x for x, _ in sents]
+        frame = self._tldr_frame(summary, final)
+        frame["sents"] = [[x, ok] for x, ok in sents]
+        self._to_subscribers_json(frame)
+        if self.voice_on:
+            settled = {x for x, ok in sents if ok}
+            if final or (settled - self._voice_settled):
+                self._voice_settled |= settled
+                self._voice_kick("done" if final else "stream")
+
+    # -- 🔊 the voice (see VOICE_SYS) ------------------------------------------
+    def _voice_kick(self, event, message=""):
+        with self._tldr_lock:
+            if self._voice is None:
+                cfg = self.config_dir
+                self._voice = VoiceAgent(
+                    self._voice_emit,
+                    lambda ev, msg, sents, tail, said: _voice_call(ev, msg, sents, tail, said, cfg))
+            sents = settle_sentences(self.tldr_sents, self.tldr_text)
+            tail = self.tldr_turn_text[self.tldr_read_at:]
+        self._voice.feed(event, message, sents, tail)
+
+    def _voice_emit(self, text, urgent):
+        print(f"[voice {self.cid[:8]}] say: {text[:80]!r}", flush=True)
+        self._to_subscribers_json({"type": "say", "cid": self.cid, "text": text,
+                                   "urgent": bool(urgent), "turn": self.prompt_count})
+
+    def _voice_reset(self):
+        with self._tldr_lock:
+            v, self._voice = self._voice, None
+            self._voice_settled = set()
+        if v:
+            v.stop()
+
+    def set_voice(self, on):
+        """The viewer's 🔊 (with 🟦): the voice loop runs for this session."""
+        self.voice_on = bool(on)
+        print(f"[voice {self.cid[:8]}] {'on' if on else 'off'}", flush=True)
+        if not on:
+            self._voice_reset()
 
     def tldr_turn_reset(self):
         """A new prompt: abandon the old loop, blank the block everywhere."""
         with self._tldr_lock:
             self.tldr_turn_text, self.tldr_text, self.tldr_read_at = "", "", 0
+            self.tldr_sents = []
             r, self._tldr = self._tldr, None
         if r:
             r.stop()
+        self._voice_reset()                      # a new turn: new said-log, nothing pending
         self._to_subscribers_json(self._tldr_frame("", False))
 
     def tldr_mark(self):
@@ -4484,6 +4679,8 @@ class ClaudeSession:
                 r = self._tldr
         if r:
             r.done()
+        elif self.voice_on and self.tldr_turn_text:
+            self._voice_kick("done")             # too short for a summary; the voice still gets its say
 
     def set_tldr(self, on):
         """The viewer's 🟦 toggle. Turning it on mid-turn catches up on the
@@ -7038,6 +7235,12 @@ class SessionManager:
         if s:
             s.tldr_mark()
 
+    def tldr_voice(self, cid, on):
+        """🔊 a viewer with 🟦 + 🔊 wants the voice (or no longer does)."""
+        s = self.get(cid)
+        if s:
+            s.set_voice(on)
+
     def autopilot(self, cid, on):
         """🤖 engage/disengage autopilot on a session (the checkbox beside the
         state square). Engaging derives the goal and — if the session is idle —
@@ -7636,6 +7839,40 @@ class _Client:
 
 
 # ── HTTP + WS handler ──────────────────────────────────────────────────────────
+def eleven_tts(text):
+    """One ElevenLabs render → MP3 bytes (whole; the WS path can't stream).
+    Raises on any failure. Same voice/model/settings as the /tts HTTP proxy."""
+    url = (f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
+           "?output_format=mp3_44100_64")
+    body = json.dumps({"text": text[:4000], "model_id": "eleven_flash_v2_5",
+                       "voice_settings": {"stability": 0.65, "similarity_boost": 0.5,
+                                          "use_speaker_boost": True, "speed": 1.0}}).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json",
+        "Accept": "audio/mpeg"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return resp.read()
+
+
+def serve_tts(client, frame):
+    """WS `tts`: the fleet path for ElevenLabs (the relay doesn't proxy /tts and
+    the browser can't reach a machine's HTTP). The text rides the E2E channel
+    like any frame; the MP3 goes back base64 in a `tts` reply. Unconfigured or
+    failed → an error reply, and the browser falls back to its own voice."""
+    tid = frame.get("id")
+    text = (frame.get("text") or "").strip()
+    if not ELEVENLABS_API_KEY:
+        return client.send_json({"type": "tts", "id": tid, "error": "tts not configured"})
+    if not text:
+        return client.send_json({"type": "tts", "id": tid, "error": "empty text"})
+    try:
+        audio = eleven_tts(text)
+        client.send_json({"type": "tts", "id": tid,
+                          "audio": base64.b64encode(audio).decode("ascii")})
+    except Exception as e:
+        client.send_json({"type": "tts", "id": tid, "error": f"tts upstream error: {e}"[:200]})
+
+
 class ApiTeeHandler(BaseHTTPRequestHandler):
     """The 🟦 API tee (see API_TEE): a pass-through proxy for the sessions'
     api.anthropic.com traffic. Forwards method/path/headers/body untouched
@@ -7890,7 +8127,7 @@ class Handler(BaseHTTPRequestHandler):
             "text": text,
             "model_id": "eleven_flash_v2_5",
             "voice_settings": {"stability": 0.65, "similarity_boost": 0.5,
-                               "use_speaker_boost": True, "speed": 1.2},
+                               "use_speaker_boost": True, "speed": 1.0},   # tempo is the browser's 1.25×
         }).encode()
         req = urllib.request.Request(url, data=req_body, method="POST", headers={
             "xi-api-key": ELEVENLABS_API_KEY,
@@ -8098,6 +8335,10 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=MGR.serve_read_query, args=(client, frame),
                              daemon=True).start()
             return
+        if t == "tts":
+            # 🔊 ElevenLabs over the socket (fleet) — network call, threaded.
+            threading.Thread(target=serve_tts, args=(client, frame), daemon=True).start()
+            return
         if t == "ironDescribe":
             # 🔥 iron description — an LLM call, threaded for the same reason.
             threading.Thread(target=serve_iron_describe, args=(client, frame),
@@ -8141,6 +8382,8 @@ class Handler(BaseHTTPRequestHandler):
         elif t == "tldr":
             if frame.get("mark"):
                 MGR.tldr_mark(frame.get("cid"))
+            elif "voice" in frame:
+                MGR.tldr_voice(frame.get("cid"), bool(frame.get("voice")))
             else:
                 MGR.tldr(frame.get("cid"), bool(frame.get("on", True)))
         elif t == "createProject":

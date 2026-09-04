@@ -555,6 +555,9 @@
   #tldr > div { flex:0 0 auto; margin:auto 0; }   /* row-rounding slack splits above/below (half the top gap) */
   #tldr[hidden] { display:none; }
   #tldr.empty { color:var(--dim); cursor:default; }
+  /* annealing: a sentence that survived a pass unchanged is settled (solid); the rest
+     is still forming (70%). Settled is also what the 🔊 voice may speak. */
+  #tldrText .form { opacity:.7; }
   #tldr .tag { font-size:10px; letter-spacing:.14em; text-transform:uppercase;
                opacity:.6; margin-right:8px; white-space:normal; }
   #tldr.live .tag::after { content:" · updating…"; }
@@ -3495,8 +3498,14 @@ function handleJson(m) {
   } else if (m.type === 'tldr') {
     // 🟦 live summary of the viewed session's current turn (empty text = new turn, blank it)
     if (m.cid !== currentCid) return;
-    showTldr(m.text, !!m.final);
-    if (m.final && m.text && ttsOn) speak(speakable(m.text));   // the speaker reads the summary
+    showTldr(m.text, !!m.final, m.sents);
+  } else if (m.type === 'tts') {
+    const r = ttsPending.get(m.id); if (r) { ttsPending.delete(m.id); r(m); }
+    return;
+  } else if (m.type === 'say') {
+    // 🔊 the voice: one spoken line for the viewed session (server-side decision, see VoiceAgent)
+    if (m.cid !== currentCid) return;
+    sayVoice(m.text);
   } else if (m.type === 'transcript') {
     // A user prompt visible in the transcript IS delivery confirmation — including
     // the history replay after a reload, which is exactly when the UserPromptSubmit
@@ -6819,7 +6828,7 @@ function handleHook(m) {
   const tool = d.tool || m.tool;
   // A fresh user prompt means you're driving the TTY yourself — cancel any pending
   // auto-return (don't yank you back to where a question pulled you from).
-  if (ev === 'UserPromptSubmit') { setBusy(true, null); viewBeforeQuestion = null; deferredView = null; clearTldr(); }
+  if (ev === 'UserPromptSubmit') { setBusy(true, null); viewBeforeQuestion = null; deferredView = null; clearTldr(); stopSpeech(); }
   else if (ev === 'PreToolUse')  {
     setBusy(true, tool);
     // these tools render an interactive prompt that only shows in the TUI
@@ -7839,10 +7848,22 @@ const tldrTextEl = document.getElementById('tldrText');
 const tldrBtn = document.getElementById('tldrBtn');
 let tldrOn = false;
 try { tldrOn = localStorage.getItem('cc_tldr') === '1'; } catch {}
-function tldrHello(cid) { if (tldrOn && cid) hsend({ type: 'tldr', cid, on: true }); }
-function showTldr(text, final) {
+function tldrHello(cid) {
+  if (!cid) return;
+  if (tldrOn) hsend({ type: 'tldr', cid, on: true });
+  hsend({ type: 'tldr', cid, voice: !!(tldrOn && ttsOn) });   // 🔊 the voice runs only with both on
+}
+function showTldr(text, final, sents) {
   if (!text) { clearTldr(); return; }
-  tldrTextEl.textContent = text;
+  if (sents && sents.length) {
+    tldrTextEl.textContent = '';
+    sents.forEach(([t, ok], i) => {
+      const sp = document.createElement('span');
+      sp.className = ok ? 'set' : 'form';
+      sp.textContent = (i ? ' ' : '') + t;
+      tldrTextEl.appendChild(sp);
+    });
+  } else tldrTextEl.textContent = text;
   tldrEl.classList.toggle('live', !final);
   tldrEl.classList.remove('empty');
   applyTldrHold();                           // text arrived → un-hold, cover the chrome with the text
@@ -7853,7 +7874,7 @@ function setTldr(on) {
   tldrOn = on;
   tldrBtn.classList.toggle('on', on);
   try { localStorage.setItem('cc_tldr', on ? '1' : '0'); } catch {}
-  if (currentCid) hsend({ type: 'tldr', cid: currentCid, on });
+  if (currentCid) { hsend({ type: 'tldr', cid: currentCid, on }); hsend({ type: 'tldr', cid: currentCid, voice: !!(on && ttsOn) }); }
   clearTldr();
   tldrPosKey = ''; renderPilotUI();          // hold / overlay follow the mode
 }
@@ -7878,7 +7899,8 @@ const micBtn = document.getElementById('micBtn');
 // --- text-to-speech: speak live assistant prose, chunk by chunk as it streams.
 const synth = window.speechSynthesis || null;
 let ttsOn = false;
-let serverTts = false;                 // true once /config reports an ElevenLabs key
+let serverTts = FLEET;                 // direct: true once /config reports an ElevenLabs key; fleet: try the
+                                       // socket path (`tts` verb) and fall back per line if the box has no key
 try { ttsOn = localStorage.getItem('cc_tts') === '1'; } catch {}
 // Probe the server once: with a key we route audio through /tts (better voice).
 // /config is token-gated (it leaks workdir/lanIp); send the token we hold. In
@@ -7901,9 +7923,14 @@ function playNext() {
   if (!item) { if (!audioEl) ttsBtn.classList.remove('speaking'); return; }
   audioPlaying = true;
   item.urlP.then(url => {
-    if (!ttsOn || url == null) { audioPlaying = false; return playNext(); }
+    if (!ttsOn) { audioPlaying = false; return playNext(); }
+    if (url == null) {      // no ElevenLabs for this line (no key on the box / upstream error) → browser voice
+      audioPlaying = false;
+      if (synth && item.text) { const u = new SpeechSynthesisUtterance(item.text); u.rate = TTS_RATE; synth.speak(u); }
+      return playNext();
+    }
     const a = new Audio(url); audioEl = a;
-    a.playbackRate = 1.4;   // bump ElevenLabs read-aloud ~40% (pitch preserved by browser)
+    a.playbackRate = TTS_RATE;   // tempo (pitch preserved by the browser)
     ttsBtn.classList.add('speaking');
     a.onended = a.onerror = () => {
       URL.revokeObjectURL(url); audioPlaying = false;
@@ -7913,18 +7940,41 @@ function playNext() {
     a.play().catch(() => { audioPlaying = false; playNext(); });
   });
 }
+const TTS_RATE = 1.25;                 // Austin's tempo (2026-09-05), ElevenLabs and browser voice alike
+// fleet: ElevenLabs rides the socket — {type:'tts', id, text} → {type:'tts', id, audio|error}
+const ttsPending = new Map();
+function ttsViaWs(text) {
+  return new Promise(resolve => {
+    const id = Math.random().toString(36).slice(2);
+    const timer = setTimeout(() => { ttsPending.delete(id); resolve(null); }, 12000);
+    ttsPending.set(id, (m) => {
+      clearTimeout(timer);
+      if (!m.audio) { resolve(null); return; }
+      try {
+        const bin = atob(m.audio), buf = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+        resolve(URL.createObjectURL(new Blob([buf], { type: 'audio/mpeg' })));
+      } catch { resolve(null); }
+    });
+    if (!hsend({ type: 'tts', id, text })) { clearTimeout(timer); ttsPending.delete(id); resolve(null); }
+  });
+}
 function speakServer(text) {
   // Fire the fetch immediately (parallel), but keep play order = enqueue order.
-  const ac = new AbortController(); audioAborts.add(ac);
-  const urlP = fetch(`/tts?t=${encodeURIComponent(token)}`, {
-    method: 'POST', signal: ac.signal,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
-  }).then(r => r.ok ? r.blob() : null)
-    .then(b => b ? URL.createObjectURL(b) : null)
-    .catch(() => null)
-    .finally(() => audioAborts.delete(ac));
-  audioQueue.push({ urlP });
+  let urlP;
+  if (FLEET) urlP = ttsViaWs(text);
+  else {
+    const ac = new AbortController(); audioAborts.add(ac);
+    urlP = fetch(`/tts?t=${encodeURIComponent(token)}`, {
+      method: 'POST', signal: ac.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    }).then(r => r.ok ? r.blob() : null)
+      .then(b => b ? URL.createObjectURL(b) : null)
+      .catch(() => null)
+      .finally(() => audioAborts.delete(ac));
+  }
+  audioQueue.push({ urlP, text });
   playNext();
 }
 
@@ -7932,6 +7982,7 @@ function setTts(on) {
   ttsOn = on;
   ttsBtn.classList.toggle('on', on);
   try { localStorage.setItem('cc_tts', on ? '1' : '0'); } catch {}
+  if (currentCid) hsend({ type: 'tldr', cid: currentCid, voice: !!(tldrOn && on) });   // 🔊 the voice follows the speaker
   // Chrome's cancel() doesn't reliably fire onend, so drop the pulse class by
   // hand — otherwise the button keeps animating as if it's still reading.
   if (!on) {
@@ -7942,6 +7993,23 @@ function setTts(on) {
 }
 ttsBtn.onclick = () => setTts(!ttsOn);
 setTts(ttsOn);
+
+// 🔊 the voice's mouth. Lines arrive as `say` frames (server decides what and when);
+// while the mic is open they're held and spoken on release (don't talk over the
+// listener); a new prompt throws away whatever hasn't been said (it's stale).
+const heldSay = [];
+function sayVoice(text) {
+  if (!ttsOn || !text) return;
+  if (recOn) { heldSay.push(text); return; }
+  speak(text);
+}
+function flushHeldSay() { while (heldSay.length) speak(heldSay.shift()); }
+function stopSpeech() {
+  heldSay.length = 0;
+  if (synth) synth.cancel();
+  stopServerAudio();
+  ttsBtn.classList.remove('speaking');
+}
 
 // Strip markdown down to something worth hearing: drop fenced code (reading it
 // aloud is useless), unwrap inline code/bold/italic/links, flatten bullets.
@@ -7964,7 +8032,7 @@ function speak(text) {
   for (const p of (text.match(/[^.!?]+[.!?]*/g) || [text])) {
     const s = p.trim(); if (!s) continue;
     const u = new SpeechSynthesisUtterance(s);
-    u.rate = 1.05;
+    u.rate = TTS_RATE;
     u.onstart = () => ttsBtn.classList.add('speaking');
     u.onend = () => { if (!synth.speaking && !synth.pending) ttsBtn.classList.remove('speaking'); };
     synth.speak(u);
@@ -8014,6 +8082,7 @@ function stopRec() {
   if (!recOn) return;
   recOn = false; micBtn.classList.remove('rec');
   try { rec.stop(); } catch {}
+  flushHeldSay();                                  // 🔊 whatever the voice held while you talked
 }
 if (!SR) { micBtn.disabled = true; micBtn.title = 'Speech-to-text not supported in this browser'; }
 else {
