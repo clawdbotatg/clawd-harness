@@ -83,13 +83,14 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   that tees the streamed reply to a rolling `claude -p haiku` summary (the
   blue block over the terminal). Pure pass-through, never logs, must never
   break a session; `claude -p` bills the subscription (the June-15 credit
-  pool was paused — don't "fix" that). **🔊 the voice** = `VoiceAgent`/`VOICE_SYS`
-  in the same block: with 🟦 + 🔊 on, a third loop speaks for the session as
-  the summary forms (`say` frames) — one short sentence per line, never a
-  repeat, a finished reply always speaks, total capped at a tenth of the
-  reply's words (`voice_budget`, enforced in code, not just the prompt).
-  Summary + both flags persist (ctor params + registry) so restarts and
-  handoffs don't wipe them. `test_tldr.py` + `tldrprobe.mjs`.
+  pool was paused — don't "fix" that). **🔊 the voice** = `voice_pick` in the
+  same block: with 🟦 + 🔊 on, the summary is READ ALOUD as it solidifies —
+  each sentence once it survives a pass unchanged (settled = solid on
+  screen), the rest at the final pass, a reply too short for a summary as
+  is (`say` frames). What you see is what you hear; no separate model
+  decides what to say (that third loop existed for a few hours and was
+  removed). Summary + both flags persist (ctor params + registry) so
+  restarts and handoffs don't wipe them. `test_tldr.py` + `tldrprobe.mjs`.
   Wall-display boxes (clawd-sat): `tools/kiosk/README.md`.
 
 ## Landmines (don't regress; stories in HISTORY.md)

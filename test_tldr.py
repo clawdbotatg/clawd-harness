@@ -140,84 +140,19 @@ check("a sentence that survives verbatim settles; a reworded one doesn't",
       server.settle_sentences(["Fixed it.", "Tests pass."], "Fixed it. Tests pass now. Pushed.")
       == [("Fixed it.", True), ("Tests pass now.", False), ("Pushed.", False)])
 
-print("VoiceAgent:")
-vcalls, vsaid = [], []
-vgate = threading.Event()
-def vrunner(event, message, sents, tail, said, left=None):
-    vcalls.append((event, message, [x for x, ok in sents if ok], list(said)))
-    vgate.wait(2)
-    return {"stream": "Found it.", "done": "Pushed. Want a PR?", "waiting": "I need permission to run the tests."}[event] \
-        if len(vcalls) != 2 else ""
-v = server.VoiceAgent(lambda t, u: vsaid.append((t, u)), vrunner)
-v.feed("stream", "", [("Found it.", True), ("Looking more.", False)], "raw one")
-time.sleep(0.15)
-v.feed("stream", "", [("Found it.", True), ("Looking more.", True)], "raw two")   # while call 1 is in flight
-v.feed("waiting", "needs permission", [("Found it.", True)], "raw three")        # more urgent: keeps rank
-time.sleep(0.15)
-check("one call in flight", len(vcalls) == 1 and vcalls[0][0] == "stream")
-vgate.set(); time.sleep(0.3)
-check("first line spoken, not urgent", vsaid[:1] == [("Found it.", False)])
-check("pending coalesced to the MOST URGENT event with the newest state",
-      len(vcalls) == 2 and vcalls[1][0] == "waiting" and vcalls[1][1] == "needs permission" and vcalls[1][3] == ["Found it."])
-time.sleep(0.2)
-check("an empty decision is silence (nothing emitted, said-log unchanged)", len(vsaid) == 1 and v.said == ["Found it."])
-v.feed("done", "", [("Found it.", True), ("Pushed.", True)], "raw four"); time.sleep(0.3)
-check("done: spoken, said-log carries everything said", vsaid[-1] == ("Pushed. Want a PR?", False) and vcalls[-1][3] == ["Found it."])
-v.feed("waiting", "permission", [], "x"); time.sleep(0.3)
-check("waiting lines are flagged urgent", vsaid[-1] == ("I need permission to run the tests.", True))
-v.stop(); time.sleep(0.2)
-check("stop ends the loop", not v.thread.is_alive())
-dup_out = []
-def dup_runner(event, message, sents, tail, said, left=None): return "I need your permission to run the test suite now."
-v3 = server.VoiceAgent(lambda t, u: dup_out.append(t), dup_runner)
-v3.feed("stream", "", [("a", True)], "x"); time.sleep(0.25)
-v3.feed("stream", "", [("b", True)], "y"); time.sleep(0.25); v3.stop()
-check("a near-repeat of something already said is dropped", dup_out == ["I need your permission to run the test suite now."])
-def vboom(*a, **k): raise RuntimeError("no voice today")
-v2 = server.VoiceAgent(lambda t, u: vsaid.append((t, u)), vboom)
-n = len(vsaid); v2.feed("stream", "", [], "x"); time.sleep(0.3)
-check("a failed call mid-stream is silence, loop survives", len(vsaid) == n and v2.thread.is_alive())
-v2.feed("done", "", [], "The fix is in. Tests pass. Ship it?"); time.sleep(0.3); v2.stop()
-check("a failed call at the finish with nothing said falls back to the reply's opening",
-      vsaid[-1] == ("The fix is in. Tests pass.", False))
-
-print("_voice_prompt:")
-pr = server._voice_prompt("waiting", "needs permission", [("Found it.", True), ("Maybe.", False)], "tail text", ["Found it."])
-check("prompt carries event, said-log, marked sentences, tail",
-      "WAITING" in pr and "- Found it." in pr and "[settled] Found it." in pr and "[forming] Maybe." in pr and "tail text" in pr)
-
-print("VoiceAgent:")
-import time as _t
-said_out = []
-def mute(event, message, sents, tail, said, left=None): return ""
-va = server.VoiceAgent(lambda line, urgent: said_out.append((line, urgent)), mute)
-va.feed("stream", "", [("Found the bug.", False)], "Found the bug in the parser."); _t.sleep(0.2)
-check("a silent model stays silent mid-stream", said_out == [])
-va.feed("done", "", [("Found the bug.", True), ("Tests pass.", True), ("Pushed.", False)], "…"); _t.sleep(0.3)
-check("a finished turn with nothing said speaks the summary's settled opening",
-      said_out == [("Found the bug. Tests pass.", False)])
-def talk(event, message, sents, tail, said, left=None): return "" if said else "I need a decision from you."
-va2 = server.VoiceAgent(lambda line, urgent: said_out.append((line, urgent)), talk)
-va2.feed("waiting", "needs permission", [], "…"); _t.sleep(0.3)
-check("waiting lines are urgent", said_out[-1] == ("I need a decision from you.", True))
-va2.feed("done", "", [("Nothing new.", True)], "…"); _t.sleep(0.3)
-check("after something was said, a silent finish stays silent", said_out[-1] == ("I need a decision from you.", True))
-
-print("voice budget:")
-check("a tenth of the reply, floor 10", server.voice_budget(400) == 40 and server.voice_budget(50) == 10)
-bud = []
-def windy(event, message, sents, tail, said, left=None):
-    return "First fact here. Second sentence with more detail that goes on and on and on and on and on."
-vb = server.VoiceAgent(lambda t, u: bud.append(t), windy)
-vb.feed("stream", "", [("a", True)], "w " * 100, reply_words=100); time.sleep(0.3)   # budget 10
-check("over-budget line is clipped to its first sentence", bud == ["First fact here."])
-vb.feed("stream", "", [("b", True)], "w " * 100, reply_words=100); time.sleep(0.3)
-check("once the budget is spent, further lines are dropped", bud == ["First fact here."])
-def asker(event, message, sents, tail, said, left=None): return "Do you want me to push it?"
-vb2 = server.VoiceAgent(lambda t, u: bud.append(t), asker)
-vb2.words_said = 100
-vb2.feed("done", "", [("x", True)], "w " * 100, reply_words=100); time.sleep(0.3)
-check("the finish still gets the question past a spent budget", bud[-1] == "Do you want me to push it?")
+print("voice_pick (the voice reads the blue text as it solidifies):")
+said = []
+p1 = server.voice_pick(said, [("Found the bug.", False), ("Tests pass.", False)], False)
+check("nothing settled yet → nothing read", p1 == [])
+p2 = server.voice_pick(said, [("Found the bug.", True), ("Tests pass.", False)], False)
+check("a settled sentence is read", p2 == ["Found the bug."]); said += p2
+p3 = server.voice_pick(said, [("Found the bug.", True), ("Tests pass.", True)], False)
+check("already-read sentences are not read again", p3 == ["Tests pass."]); said += p3
+p4 = server.voice_pick(said, [("Found the bug in the parser.", True)], False)
+check("a reworded near-twin of something read is skipped", p4 == [])
+p5 = server.voice_pick(said, [("Found the bug.", True), ("Pushed. Want a PR?", False)], True)
+check("final reads what is left, settled or not", p5 == ["Pushed. Want a PR?"])
+check("voice_pick never mutates the said-log", said == ["Found the bug.", "Tests pass."])
 
 print()
 if FAILS:

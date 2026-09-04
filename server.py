@@ -347,197 +347,44 @@ TLDR_FINAL = (
     "TLDR, plain text, no markdown.")
 
 
-# ── 🔊 the voice (2026-09-05): speaks for the session as the summary anneals ──
-# Speech is slow and can't be unsaid, so the voice is a third loop with its own
-# job: watch the reply and the summary, keep a log of what it already said this
-# turn, and say something only when a SETTLED fact (a summary sentence that came
-# back unchanged on the next pass) passes the listener test. No word caps —
-# length follows the thing that changed. Rules live in VOICE_SYS; the said-log,
-# the settle diff, and the urgency order (waiting > done > streaming) are the
-# only code around it. Runs only while a viewer has both 🟦 and 🔊 on.
-VOICE_MODEL   = os.environ.get("VOICE_MODEL", "") or TLDR_MODEL
-VOICE_TAIL    = int(os.environ.get("VOICE_TAIL", "1500"))     # raw reply chars the voice also sees
-VOICE_SYS = (
-    "You are the spoken voice of a coding-assistant session, speaking to the "
-    "person who runs it. You get: the event (the reply is still streaming, it "
-    "just finished, or the assistant is WAITING on the person), the live "
-    "summary with each sentence marked settled or still forming, the tail of "
-    "the raw reply, and everything you have already said this turn. Decide "
-    "whether to say something now, and what.\n"
-    "Rules. (1) Speak as information arrives: when there is a new fact the "
-    "listener has not heard, say it now; do not save it for the end. Stay "
-    "silent when there is nothing new. (2) EXTREMELY short. ONE sentence per "
-    "utterance, text-message short — the fact itself, nothing around it: no "
-    "context, no reasons, no examples, no restating, no adjectives. The voice "
-    "may total at most a tenth of the reply's words; a running WORD BUDGET is "
-    "given with each request — if the new fact does not fit, say nothing. "
-    "(3) One idea per utterance; if two things matter, say the more urgent one. "
-    "(4) Never repeat anything "
-    "already said this turn, even if it is more precise now — not rephrased, not "
-    "expanded; if the only new thing is a better wording, say nothing. (5) Don't narrate "
-    "process — outcomes and decisions, not steps. (6) Speak for the ears: first "
-    "person for the session (\"I found…\", \"I need…\"), no file paths, symbols, "
-    "URLs, hashes, or long identifiers — describe such a thing, don't spell it; "
-    "round numbers. Never announce the event or describe what the reply did "
-    "(\"the reply finished with a question\") — just say the thing: never the words "
-    "'the reply', 'the assistant', 'cut off', 'finishing up'; ask the person's "
-    "question directly (\"Do you have other processes writing to the database?\"). "
-    "Say the one most important new thing in the shortest sentence that carries "
-    "it; the listener is hearing this over what they are doing. (7) Settled "
-    "sentences are safest, but a forming sentence clearly supported by the raw "
-    "text is fair to say now — speaking early is the point. (8) If something "
-    "you said earlier turned out wrong, say so plainly, starting with "
-    "'Correction,'. (9) When the assistant is WAITING on the person, say what it "
-    "needs from them right now — that beats everything. (10) When the reply just "
-    "finished, say what has not been said yet: the outcome, and any question "
-    "asked of the person. If nothing at all has been said this turn, you MUST "
-    "say the gist now — the person has the speaker on and expects to hear the "
-    "reply; an empty answer is wrong then.\n"
-    "Reply with ONLY compact JSON: {\"say\": \"<what to say, or empty>\"}.")
+# ── 🔊 the voice (2026-09-05): reads the blue text aloud as it solidifies ─────
+# Speech is slow and can't be unsaid, so the voice never reads a sentence that
+# is still changing: a summary sentence that came back unchanged on the next
+# pass is SETTLED (solid on screen) and is spoken then, verbatim; the final
+# pass speaks whatever is left. A reply too short for a summary is read as is.
+# What you see is what you hear. (The first cut had a third model loop
+# deciding what to say in its own words — Austin: "no more third thread
+# deciding what to read out loud, it is clear the blue text is what we should
+# read". Its rules and word budget went with it.) Runs only while a viewer
+# has both 🟦 and 🔊 on.
 
 
 def split_sentences(text):
-    """Summary → sentences (the unit the voice reasons about)."""
+    """Summary → sentences (the unit the voice reads)."""
     parts = re.split(r"(?<=[.!?])\s+|\n+", (text or "").strip())
     return [p.strip() for p in parts if p.strip()]
 
 
 def settle_sentences(prev_sentences, text):
     """[(sentence, settled)] — settled iff it appeared verbatim in the previous
-    pass. The annealing: solid on screen, and what the voice may speak."""
+    pass. The annealing: solid on screen, and what the voice may read."""
     prev = set(prev_sentences or ())
     return [(x, x in prev) for x in split_sentences(text)]
 
 
-def voice_budget(reply_words):
-    """Words the voice may speak over a whole reply: a tenth of the reply (Austin:
-    'it could have said 10% of what it said'), floor 10 so a short reply still
-    gets one line."""
-    return max(10, int(reply_words) // 10)
-
-
-def _voice_prompt(event, message, sents, tail, said, budget_left=None):
-    lines = ["EVENT: " + ({"stream": "the reply is still streaming",
-                            "done": "the reply just FINISHED",
-                            "waiting": "the assistant is WAITING on the person"}.get(event, event))
-             + (f" — notification: {message}" if message else "")]
-    if budget_left is not None:
-        lines.append(f"WORD BUDGET LEFT FOR THIS REPLY: {budget_left} words"
-                     + (" — spent: only the question asked of the person, or nothing." if budget_left <= 0 else ""))
-    lines.append("ALREADY SAID THIS TURN:" + ("" if said else " (nothing)"))
-    if event == "done" and not said:
-        lines.append("(Nothing has been said this turn — say the gist in ONE short sentence. Do not return empty.)")
-    lines += [f"- {x}" for x in said]
-    lines.append("SUMMARY:" + ("" if sents else " (none yet)"))
-    lines += [f"[{'settled' if ok else 'forming'}] {x}" for x, ok in sents]
-    lines.append("LATEST REPLY TEXT (tail):\n<<<\n" + (tail or "")[-VOICE_TAIL:] + "\n>>>")
-    return "\n".join(lines)
-
-
-def _voice_call(event, message, sents, tail, said, config_dir=None, budget_left=None):
-    """One voice decision: `claude -p` (VOICE_MODEL), thinking off, no tools.
-    Returns the line to say ("" = silence). Raises on a failed call."""
-    env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
-    env.pop("ANTHROPIC_BASE_URL", None)
-    env["MAX_THINKING_TOKENS"] = "0"
-    if config_dir:
-        env["CLAUDE_CONFIG_DIR"] = config_dir
-    else:
-        env.pop("CLAUDE_CONFIG_DIR", None)
-    with tempfile.TemporaryDirectory() as d:
-        r = subprocess.run(
-            [CLAUDE_BIN, "-p", "--model", VOICE_MODEL, "--system-prompt", VOICE_SYS,
-             "--tools", "", "--no-session-persistence", "--setting-sources", "",
-             "--strict-mcp-config", "--output-format", "text", "--",
-             _voice_prompt(event, message, sents, tail, said, budget_left)],
-            cwd=d, env=env, stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, timeout=TLDR_TIMEOUT)
-    if r.returncode != 0:
-        raise RuntimeError((r.stderr or r.stdout).strip()[-300:])
-    m = re.search(r"\{[\s\S]*?\}", r.stdout)
-    try:
-        say = (json.loads(m.group(0)) if m else {}).get("say", "")
-    except Exception:
-        say = ""
-    return say.strip() if isinstance(say, str) else ""
-
-
-class VoiceAgent:
-    """One turn's voice: feed(state) whenever there is something new (a pass
-    with newly settled sentences, the turn finishing, the assistant waiting);
-    one runner call in flight, newest state wins, `waiting` jumps the queue.
-    Keeps the said-log; emit(text, urgent) for every non-empty line.
-    `runner(event, message, sents, tail, said)` is injectable (tests)."""
-    URGENCY = {"stream": 0, "done": 1, "waiting": 2}
-
-    def __init__(self, emit, runner):
-        self.emit, self.runner = emit, runner
-        self.said, self.pending, self.stopped = [], None, False
-        self.words_said, self.reply_words = 0, 0
-        self.cv = threading.Condition()
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-
-    def feed(self, event, message, sents, tail, reply_words=0):
-        with self.cv:
-            self.reply_words = max(self.reply_words, int(reply_words or 0))
-            cur = self.pending
-            # newest wins, except a more urgent pending event keeps its rank
-            if cur and self.URGENCY[cur[0]] > self.URGENCY[event]:
-                event, message = cur[0], cur[1]
-            self.pending = (event, message, list(sents), tail)
-            self.cv.notify()
-
-    def stop(self):
-        with self.cv:
-            self.stopped = True
-            self.cv.notify()
-
-    def _run(self):
-        while True:
-            with self.cv:
-                while not self.stopped and self.pending is None:
-                    self.cv.wait()
-                if self.stopped:
-                    return
-                event, message, sents, tail = self.pending
-                self.pending = None
-                said = list(self.said)
-                left = voice_budget(self.reply_words) - self.words_said
-            try:
-                line = self.runner(event, message, sents, tail, said, left)
-            except Exception as e:
-                print(f"[voice] call failed: {e}", flush=True)
-                line = ""
-            if self.stopped:
-                return
-            # The budget is enforced here, not hoped for: clip a long line to its
-            # first sentence, drop a near-repeat of anything said, then drop what
-            # still doesn't fit (a finish with a question keeps the question —
-            # that is what the end is for).
-            if line and event != "waiting" and len(line.split()) > max(left, 0) + 4:
-                first = split_sentences(line)[:1]
-                line = first[0] if first else ""
-            if line and any(difflib.SequenceMatcher(None, line.lower(), x.lower()).ratio() > 0.6
-                            for x in self.said):
-                print(f"[voice] dropped near-repeat: {line[:60]!r}", flush=True)
-                line = ""
-            if line and event != "waiting" and len(line.split()) > max(left, 0) + 4 \
-                    and not (event == "done" and line.rstrip().endswith("?")):
-                print(f"[voice] dropped over budget ({left} left): {line[:60]!r}", flush=True)
-                line = ""
-            if not line and event == "done" and not self.said:
-                # the speaker is on and nothing was said all turn: the model's
-                # judgment doesn't get to leave it silent — speak the summary's
-                # opening (settled first), or the raw tail's first sentences
-                pool = [x for x, ok in sents if ok] or [x for x, _ in sents] or split_sentences(tail)
-                line = " ".join(pool[:2]).strip()
-            if line:
-                self.said.append(line)
-                self.words_said += len(line.split())
-                self.emit(line, event == "waiting")
-            else:
-                print(f"[voice] silence ({event})", flush=True)
+def voice_pick(said, sents, final):
+    """The sentences to read now: settled ones (all of them, once final) that
+    have not been read this turn — a reworded near-twin (difflib > 0.6) of
+    something already read counts as read."""
+    out = []
+    for x, ok in sents:
+        if not (ok or final):
+            continue
+        if any(difflib.SequenceMatcher(None, x.lower(), y.lower()).ratio() > 0.6
+               for y in list(said) + out):
+            continue
+        out.append(x)
+    return out
 
 
 def tee_upstream_path(path):
@@ -3116,8 +2963,7 @@ class ClaudeSession:
         self.tldr_read_at = 0                     # chars of tldr_turn_text the viewer marked read (tap)
         self.tldr_sents = split_sentences(self.tldr_text)   # last pass's sentences (the annealing baseline)
         self.voice_on = bool(voice_on)            # a viewer has 🟦 + 🔊: the voice loop runs
-        self._voice = None                        # VoiceAgent for the turn in flight
-        self._voice_settled = set()               # settled sentences the voice has been shown
+        self._voice_said = []                     # summary sentences read aloud this turn
         self._tldr = None                         # RollingTldr for the turn in flight
         self._tldr_lock = threading.Lock()
         self.blocked_on = None                    # the open question if it ended asking the human (LLM)
@@ -3502,8 +3348,8 @@ class ClaudeSession:
             # masquerade as waiting-for-you.
             if self.busy:
                 self.waiting = True
-                if self.voice_on:                # 🔊 what it needs from you beats everything
-                    self._voice_kick("waiting", obj.get("message", ""))
+                if self.voice_on and obj.get("message"):   # 🔊 what it needs from you, right now
+                    self._voice_emit(obj.get("message", ""), True)
             data = {"message": obj.get("message", "")}
         elif ev == "SessionStart":
             self.busy = False
@@ -4664,23 +4510,14 @@ class ClaudeSession:
         self._to_subscribers_json(self._tldr_frame(summary, final, sents))
         if final:
             self.manager.save_registry()         # the summary survives a restart / handoff
-        if self.voice_on:                        # speak as information arrives…
-            new = {x for x, _ in sents} - self._voice_settled   # …but a pass that only reworded is not news
-            if final or new:
-                self._voice_settled |= new
-                self._voice_kick("done" if final else "stream")
+        if self.voice_on:                        # 🔊 read what just solidified
+            self._voice_read(sents, final)
 
-    # -- 🔊 the voice (see VOICE_SYS) ------------------------------------------
-    def _voice_kick(self, event, message=""):
-        with self._tldr_lock:
-            if self._voice is None:
-                cfg = self.config_dir
-                self._voice = VoiceAgent(
-                    self._voice_emit,
-                    lambda ev, msg, sents, tail, said, left=None: _voice_call(ev, msg, sents, tail, said, cfg, left))
-            sents = settle_sentences(self.tldr_sents, self.tldr_text)
-            tail = self.tldr_turn_text[self.tldr_read_at:]
-        self._voice.feed(event, message, sents, tail, len(tail.split()))
+    # -- 🔊 the voice: reads the blue text as it solidifies ---------------------
+    def _voice_read(self, sents, final):
+        for line in voice_pick(self._voice_said, sents, final):
+            self._voice_said.append(line)
+            self._voice_emit(line, False)
 
     def _voice_emit(self, text, urgent):
         print(f"[voice {self.cid[:8]}] say: {text[:80]!r}", flush=True)
@@ -4688,18 +4525,12 @@ class ClaudeSession:
                                    "urgent": bool(urgent), "turn": self.prompt_count})
 
     def _voice_reset(self):
-        with self._tldr_lock:
-            v, self._voice = self._voice, None
-            self._voice_settled = set()
-        if v:
-            v.stop()
+        self._voice_said = []
 
     def set_voice(self, on):
-        """The viewer's 🔊 (with 🟦): the voice loop runs for this session."""
+        """The viewer's 🔊 (with 🟦): read the summary aloud as it solidifies."""
         self.voice_on = bool(on)
         print(f"[voice {self.cid[:8]}] {'on' if on else 'off'}", flush=True)
-        if not on:
-            self._voice_reset()
 
     def tldr_turn_reset(self):
         """A new prompt: abandon the old loop, blank the block everywhere."""
@@ -4734,7 +4565,9 @@ class ClaudeSession:
         if r:
             r.done()
         elif self.voice_on and self.tldr_turn_text:
-            self._voice_kick("done")             # too short for a summary; the voice still gets its say
+            # too short for a summary: the reply itself is the thing to read
+            text = self.tldr_turn_text[self.tldr_read_at:]
+            self._voice_read([(x, True) for x in split_sentences(text)], True)
 
     def set_tldr(self, on):
         """The viewer's 🟦 toggle. Turning it on mid-turn catches up on the

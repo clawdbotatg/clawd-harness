@@ -793,30 +793,25 @@ user-facing overview; this file orients an agent working **on** the code.
   last run 2026-06, next ≈2026-09.** The script reuses `server.NAME_SYS_PROMPT`
   and the `.clawd-harness.env` creds, so it never drifts from the app or hardcodes
   a key.
-- **🔊 The voice** (2026-09-05): with 🟦 and 🔊 both on, a third loop speaks
-  for the session. Speech is slow and can't be unsaid, so it never reads the
-  summary: `VoiceAgent` (server.py) watches the summary's *settled* sentences
-  (a sentence that came back unchanged from the previous pass — the
-  annealing, drawn solid vs 70% on screen via the `tldr` frame's `sents`),
-  the raw reply tail, and its own said-log for the turn, and decides per pass
-  whether to say something (`say` frames). Rules in `VOICE_SYS`: speak as
-  information arrives (forming sentences included — the first cut waited for
-  settled ones and stayed silent through whole replies), one idea per line,
-  never repeat, outcomes not steps, ears-first wording (first person, no
-  paths/symbols/long identifiers, round numbers, never "the reply is
-  asking…" — ask the question directly), corrections start with
-  "Correction,", waiting-on-you beats everything, a finished reply ALWAYS
-  speaks (if the model returns empty the loop speaks the summary's opening).
-  **Word budget** (same day, after the voice spoke more words than the
-  reply had typed): the whole turn may total a tenth of the reply's words
-  (`voice_budget`, floor 10), the remainder rides in each prompt, and the
-  loop enforces it — clip a long line to its first sentence, drop
-  near-repeats (difflib > 0.6), drop what still doesn't fit; the finish
-  keeps its question. Measured: 43 words over a 400-word reply, five lines,
-  first at +9s. Client: lines are held while the mic
-  is open and spoken on release; a new prompt cancels the queue; the voice
-  flag rides the `tldr` verb (`voice:true/false`) with every subscribe and
-  either toggle. Cost: one more haiku call per pass that settled something.
+- **🔊 The voice** (2026-09-05): with 🟦 and 🔊 both on, the blue summary is
+  read aloud as it solidifies. Speech is slow and can't be unsaid, so a
+  sentence is spoken only once it is SETTLED — came back unchanged from the
+  previous pass (the annealing: solid vs 70% on screen, `sents` on the
+  `tldr` frame) — the final pass reads whatever is left, a reply too short
+  for a summary is read as is, and a permission/question notification is
+  spoken at once. `voice_pick` (near-twin aware, so a reworded sentence isn't
+  read twice) is the whole decision. What you see is what you hear.
+  **History of the day:** the first cut was a THIRD model loop (`VoiceAgent`)
+  deciding what to say in its own words — the listener test, ears-first
+  wording, a said-log, then "speak as things arrive", then a word budget of a
+  tenth of the reply enforced in code. It kept mismatching the screen and
+  talked too much or too little; Austin: "no more third thread deciding what
+  to read out loud, it is clear that the blue text is what we should read".
+  Removed the same day. Client: lines are held while the mic is open and
+  spoken on release; a new prompt cancels the queue; the voice flag rides the
+  `tldr` verb (`voice:true/false`) with every subscribe and either toggle;
+  ElevenLabs (Austin's voice, 1.0×) over the socket via the `tts` verb so it
+  works through the relay, browser voice when a box has no key.
 - **🟦 Live TLDR** (2026-09-04): "every answer is too verbose and I always
   hit the tldr button" → a rolling plain-English summary of the turn in
   flight, in a Facebook-blue block floating over the top of the terminal,
