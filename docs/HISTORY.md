@@ -511,7 +511,11 @@ user-facing overview; this file orients an agent working **on** the code.
   (`rescue_bounced_prompt`, `BOUNCE_*` knobs); and the limit banner itself,
   spotted in the PTY stream, triggers an endpoint-confirmed handoff in
   seconds with auto-redeliver / auto-"continue" (`_scan_for_limit` →
-  `rescue_limit_wall`, `LIMIT_CONTINUE`) — the never-see-a-rate-limit
+  `rescue_limit_wall`, `LIMIT_CONTINUE`). A confirmed wall also persists a
+  pool-wide quarantine through the matching reset (`walled_until`), because a
+  real 2026-09-03 wall arrived while the lagging usage snapshot still said 47%:
+  rescue and new spawns must trust the CLI evidence and pick another pool even
+  across a harness restart (`test_wall_quarantine.py`) — the never-see-a-rate-limit
   contract in `EXPECTATIONS.md`. That scan catches **two paints** (2026-08-13):
   the classic one-line banner (spaced needle) and the newer
   **extra-usage-credits modal** ("You've reached your <model> limit … uses

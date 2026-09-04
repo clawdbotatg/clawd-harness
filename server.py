@@ -817,6 +817,16 @@ SUB_REFRESH_EXIT_GRACE = float(os.environ.get("SUB_REFRESH_EXIT_GRACE", "900")) 
 # automatic 'continue' (LIMIT_CONTINUE=0 opts out).
 SUB_HOT = float(os.environ.get("SUB_HOT", "97"))                 # % used
 LIMIT_CONTINUE = os.environ.get("LIMIT_CONTINUE", "1") != "0"
+# A confirmed CLI wall is stronger evidence than the usage endpoint's cached
+# percentage.  The endpoint can lag (2026-09-03: Claude painted a real session
+# wall while /usage still said 47%), so quarantine the whole organization pool
+# until the window reset instead of immediately routing new work back to it.
+# The cached window supplies the normal expiry; these bounds are only for a
+# degraded/missing payload.  The state is persisted because a harness restart
+# during the wall must not forget the verdict and spawn straight back onto it.
+WALL_SESSION_FALLBACK = float(os.environ.get("WALL_SESSION_FALLBACK", "18000"))  # 5h
+WALL_WEEKLY_FALLBACK = float(os.environ.get("WALL_WEEKLY_FALLBACK", "604800"))  # 7d
+WALL_RESET_GRACE = float(os.environ.get("WALL_RESET_GRACE", "60"))
 # ── model-capability gate (2026-08-09) ───────────────────────────────────────
 # Headroom is not the only thing that makes a pool usable: a plan can be
 # BILLED for a narrower set of models than the fleet actually works on. The
@@ -1926,7 +1936,8 @@ class Account:
     (i.e. the sign-in ceremony completed)."""
 
     def __init__(self, name, config_dir="", email="", org="", org_name="",
-                 tier="", ready=False, created=0.0, usage=None, fable_seen=0.0):
+                 tier="", ready=False, created=0.0, usage=None, fable_seen=0.0,
+                 walled_until=0.0, wall_kind=""):
         self.name = name
         self.config_dir = config_dir
         self.email = email
@@ -1941,6 +1952,9 @@ class Account:
                                                  # only meaningful across readings, and a restart
                                                  # that forgot it would re-convict every pool
                                                  # whose payload is momentarily degraded.
+        self.walled_until = walled_until or 0.0  # CLI-confirmed pool wall; stronger than
+                                                 # a lagging usage percentage. Persisted.
+        self.wall_kind = wall_kind or ""         # "session" | "weekly" (expiry source)
         self.error = ""                          # last poll error (in-memory)
         self.broken = False                      # ready but credentials now refused →
                                                  # excluded from routing until re-sign-in
@@ -1954,6 +1968,8 @@ class Account:
                 "email": self.email, "org": self.org,
                 "org_name": self.org_name, "tier": self.tier,
                 "ready": self.ready, "fable_seen": self.fable_seen,
+                "walled_until": self.walled_until,
+                "wall_kind": self.wall_kind,
                 "created": self.created, "usage": self.usage}
 
     def record_usage(self, pct, windows, now=None):
@@ -2002,6 +2018,8 @@ class Account:
                 "headroom": None if pct is None else round(100 - pct, 1),
                 "windows": (self.usage or {}).get("windows") or [],
                 "checkedAt": (self.usage or {}).get("checkedAt"),
+                "walledUntil": self.walled_until if self.walled_until > time.time() else 0,
+                "wallKind": self.wall_kind if self.walled_until > time.time() else "",
                 "error": self.error,
                 "configDir": self.config_dir}
 
@@ -3556,6 +3574,11 @@ class ClaudeSession:
         if not control:
             self.prompted_at = time.time()   # belt-and-braces: a bounced prompt fires no hook
         pre_hooks = self.hook_count
+        if not control:
+            # Remember the delivery before the hook arrives: a hard wall can
+            # eat a fresh session's very first prompt and emit no hook at all.
+            self.last_prompt = text
+            self.hooks_at_prompt = pre_hooks
         data = text.encode("utf-8")
         # Messages ride as a bracketed paste (see Engine.bracketed_paste — an
         # unbracketed burst loses its HEAD in claude's TUI). Control sends stay
@@ -3790,9 +3813,14 @@ class ClaudeSession:
         # whitespace-stripped text).
         self._limit_raw = (self._limit_raw + chunk)[-LIMIT_RAW_MAX:]
         stripped = _PTY_ANSI_RE.sub(b"", self._limit_raw).decode("utf-8", "ignore")
-        if not (_LIMIT_BANNER_RE.search(re.sub(r"\s+", " ", stripped))
-                or _LIMIT_MODAL_RE.search(re.sub(r"\s+", "", stripped))):
+        spaced = re.sub(r"\s+", " ", stripped)
+        flat = re.sub(r"\s+", "", stripped)
+        banner = _LIMIT_BANNER_RE.search(spaced)
+        modal = _LIMIT_MODAL_RE.search(flat)
+        if not (banner or modal):
             return
+        self._limit_kind = ("weekly" if modal or re.search(
+            r"weekly limit|usage for this week", spaced, re.I) else "session")
         self._limit_raw = b""                    # don't re-match this paint
         now = time.time()
         if now - self._limit_seen_at < BOUNCE_COOLDOWN:
@@ -4701,7 +4729,9 @@ class SessionManager:
                         org_name=e.get("org_name", ""), tier=e.get("tier", ""),
                         ready=e.get("ready", False),
                         created=e.get("created", 0.0), usage=e.get("usage"),
-                        fable_seen=e.get("fable_seen", 0.0))
+                        fable_seen=e.get("fable_seen", 0.0),
+                        walled_until=e.get("walled_until", 0.0),
+                        wall_kind=e.get("wall_kind", ""))
             if not a.org_name:
                 # registries predating org_name (and BROKEN logins, whose
                 # token-bound profile fetch can never run) still deserve a
@@ -5296,6 +5326,7 @@ class SessionManager:
         with self.lock:
             have = [a for a in self.accounts.values()
                     if a.ready and not a.broken
+                    and now >= getattr(a, "walled_until", 0.0)
                     and (a.usage or {}).get("pct") is not None]
         fresh, stale = [], []
         for a in have:
@@ -5305,6 +5336,42 @@ class SessionManager:
             elif age < USAGE_STALE_TRUST and a.usage["pct"] < SUB_HOT:
                 stale.append(a)
         return fresh, stale
+
+    def _mark_pool_walled(self, acct, kind="session"):
+        """Quarantine a CLI-confirmed limit pool until its matching reset.
+
+        The terminal wall plus a failed/rate-limited usage confirmation is an
+        oracle even when the last GOOD usage percentage is misleading. Mark
+        every login alias for the same organization so `_best_account`, prompt
+        preflight, sweeps, and future spawns all agree that this pool is dead.
+        """
+        if not acct:
+            return 0.0
+        now = time.time()
+        weekly = kind == "weekly"
+        resets = []
+        for w in (acct.usage or {}).get("windows") or []:
+            label = str(w.get("label", "")).lower()
+            if (weekly and label.startswith("7d")) or (not weekly and label == "5h"):
+                reset = _parse_reset(w.get("resets"))
+                if reset and reset > now:
+                    resets.append(reset)
+        fallback = WALL_WEEKLY_FALLBACK if weekly else WALL_SESSION_FALLBACK
+        until = (min(resets) + WALL_RESET_GRACE) if resets else (now + fallback)
+        pool = acct.org or ("\x00solo:" + acct.name)
+        with self.lock:
+            members = [a for a in self.accounts.values()
+                       if (a.org or ("\x00solo:" + a.name)) == pool]
+            for a in members:
+                if until >= getattr(a, "walled_until", 0.0):
+                    a.walled_until = until
+                    a.wall_kind = kind
+        print(f"[accounts] {acct.name} pool quarantined after a confirmed "
+              f"{kind} wall until "
+              f"{time.strftime('%m-%d %H:%M:%S', time.localtime(until))}",
+              flush=True)
+        self.save_registry()
+        return until
 
     def _pick_pool(self, fresh, stale, key):
         """min(fresh, key) — unless that pick is hot or incapable and the
@@ -5415,6 +5482,7 @@ class SessionManager:
                      and now - (cur_u.get("checkedAt") or 0) < 3 * USAGE_TTL)
         cur_pct = 100.0 if cur_u.get("pct") is None else cur_u["pct"]
         cur_dead = (cur is None or cur.broken
+                    or now < getattr(cur, "walled_until", 0.0)
                     or (cur_fresh and cur_pct >= SUB_EXHAUSTED))
         if cur and cur.org and best.org and cur.org == best.org:
             return ("stay", None, "best pool shares this org — one limit, a move buys nothing")
@@ -5784,12 +5852,13 @@ class SessionManager:
             drained, dead, hot, incapable, pcts = set(), set(), set(), set(), {}
             for a in self.accounts.values():
                 pct = (a.usage or {}).get("pct", 0)
+                walled = now < getattr(a, "walled_until", 0.0)
                 pcts[a.name] = pct
-                if a.broken or pct >= SUB_EXHAUSTED:
+                if a.broken or walled or pct >= SUB_EXHAUSTED:
                     drained.add(a.name)
-                if a.broken or pct >= 100:
+                if a.broken or walled or pct >= 100:
                     dead.add(a.name)             # an in-flight turn CANNOT finish here
-                if a.broken or pct >= SUB_HOT:
+                if a.broken or walled or pct >= SUB_HOT:
                     hot.add(a.name)              # heating toward the wall — stop feeding it
                 if not a.routable():
                     incapable.add(a.name)        # plan can't do fable — wrong pool at 0%
@@ -5959,6 +6028,10 @@ class SessionManager:
             dead = acct.broken or (fresh_poll and u.get("pct", 0) >= 100)
         if not dead:
             return
+        # Independent evidence (silent bounced prompt + endpoint refusal/429)
+        # overrides a stale-low usage snapshot. Quarantine BEFORE asking the
+        # router for a target, or it can select this same dead pool again.
+        self._mark_pool_walled(acct, "session")
         best = self.accounts.get(self._best_account() or "")
         if (not best or best.name == s.account
                 or (acct and acct.org and best.org and acct.org == best.org)
@@ -5974,7 +6047,8 @@ class SessionManager:
         print(f"[handoff {s.cid[:8]}] prompt bounced off dead plan {s.account} "
               "— rescuing now and redelivering", flush=True)
         self._handoff(s, best,
-                      why="prompt bounced off the dead plan; resuming under the fresh one")
+                      why="prompt bounced off the dead plan; resuming under the fresh one",
+                      fresh_if_empty=True)
         fresh = self.sessions.get(s.cid)
         if fresh is s or not fresh or not fresh.alive or not prompt.strip():
             return                               # handoff declined/failed — nothing to redeliver
@@ -6040,6 +6114,9 @@ class SessionManager:
                     acct.broken = False
         if not walled:
             return                               # echoed/stale banner on a cool pool
+        # Persist the CLI's stronger verdict before selection so this rescue
+        # AND brand-new sessions cannot route straight back to the same pool.
+        self._mark_pool_walled(acct, getattr(s, "_limit_kind", "session"))
         best = self.accounts.get(self._best_account() or "")
         if (not best or best.name == s.account
                 or (acct and acct.org and best.org and acct.org == best.org)
@@ -6047,12 +6124,13 @@ class SessionManager:
             self._stay_put_log(s, best, "limit banner confirmed")
             self.broadcast_accounts()
             return                               # nowhere better to go — stay put
-        bounced = s.busy and s.hook_count == s.hooks_at_prompt and s.last_prompt.strip()
+        bounced = s.hook_count == s.hooks_at_prompt and s.last_prompt.strip()
         cut_midturn = s.busy and not bounced
         self.broadcast_accounts()
         # The walled turn will never emit Stop — reclaim busy so _handoff runs.
         s.busy = False
-        self._handoff(s, best, why="limit banner on screen; resuming under the fresh pool")
+        self._handoff(s, best, why="limit banner on screen; resuming under the fresh pool",
+                      fresh_if_empty=True)
         fresh = self.sessions.get(s.cid)
         if fresh is s or not fresh or not fresh.alive:
             return                               # handoff declined/failed
@@ -6189,7 +6267,8 @@ class SessionManager:
                f"pool {pct:.0f}% hot — moving before the limit wall")
         self._handoff(s, best, why)
 
-    def _handoff(self, s, target, why="plan drained; resuming under the fresh one"):
+    def _handoff(self, s, target, why="plan drained; resuming under the fresh one",
+                 fresh_if_empty=False):
         """Move one idle session to `target`'s account: link its transcript
         into the target config dir (real-file-wins, never clobber), replace
         the session object under the SAME cid with a --resume respawn, and
@@ -6197,7 +6276,8 @@ class SessionManager:
         if s.busy or not s.alive or s.ceremony:  # re-check after the network call
             return
         src = s.transcript_path or s._find_transcript()
-        if not src or not s._has_conversation():
+        has_conversation = bool(src and s._has_conversation())
+        if not has_conversation and not fresh_if_empty:
             # Nothing to --resume: a zero-turn session has no conversation in
             # its transcript (the FILE exists from the first hook — content is
             # the test), and respawning it resuming=True kills it ("No
@@ -6211,7 +6291,7 @@ class SessionManager:
         s.last_handoff = time.time()
         base_src = Path(s.config_dir or os.path.expanduser("~/.claude"))
         base_dst = Path(target.config_dir or os.path.expanduser("~/.claude"))
-        if src and base_src != base_dst:
+        if has_conversation and base_src != base_dst:
             try:
                 src = Path(src)
                 rel = src.relative_to(base_src)  # projects/<munged-cwd>/<sid>.jsonl
@@ -6229,7 +6309,9 @@ class SessionManager:
         print(f"[handoff {s.cid[:8]}] {s.account} → {target.name} "
               f"({why})", flush=True)
         fresh = s.clone_for_respawn(
-            resuming=True, last_active=time.time(),
+            resuming=has_conversation,
+            session_id=s.session_id if has_conversation else str(uuid.uuid4()),
+            last_active=time.time(),
             account=target.name, config_dir=target.config_dir)
         with self.lock:
             self.sessions[s.cid] = fresh
@@ -6254,12 +6336,15 @@ class SessionManager:
             cur = self.accounts.get(self.active_account)
             ready = [a for a in self.accounts.values()
                      if a.ready and not a.broken
+                     and time.time() >= getattr(a, "walled_until", 0.0)
                      and (a.usage or {}).get("pct") is not None]
-        if not cur or len(ready) < 2:
+        if not cur or not ready:
             return
         cur_pct = (cur.usage or {}).get("pct")
-        if cur_pct is None:
+        cur_walled = time.time() < getattr(cur, "walled_until", 0.0)
+        if cur_pct is None and not cur_walled:
             return
+        cur_pct = 100.0 if cur_pct is None else cur_pct
         best = min(self._routable_first(ready), key=self._route_key)
         if best.name == cur.name:
             return
@@ -6276,7 +6361,7 @@ class SessionManager:
         # two accounts both over the threshold would otherwise ping-pong every
         # poll (each switch making the other one "best"), debounce ignored.
         # All-hot falls back to the debounced rules below.
-        exhausted = cur_k[H] and not best_k[H]
+        exhausted = (cur_walled or cur_k[H]) and not best_k[H]
         # Did best win on the weekly-reset clock (sooner reset, or a known
         # reset vs an unknown one)? That ordering only changes when a window
         # actually resets, so debounce alone is enough to prevent flap.
@@ -6287,7 +6372,8 @@ class SessionManager:
                 why = (f"{cur.name} can't do fable on its current plan — "
                        "routing new sessions to a pool that can")
             elif exhausted:
-                why = ("active exhausted" if cur_pct >= SUB_EXHAUSTED
+                why = ("active hit a confirmed limit wall" if cur_walled
+                       else "active exhausted" if cur_pct >= SUB_EXHAUSTED
                        else f"active pool {cur_pct:.0f}% hot — routing around the wall")
             elif by_reset and not (cur_k[N] or best_k[N]):
                 why = (f"weekly resets {max(1, int((cur_k[R] - best_k[R]) // 3600))}h "
@@ -6837,6 +6923,19 @@ class SessionManager:
             name = (self._best_account() if SUB_AUTOSWITCH else None) \
                    or self.active_account
         acct = self.accounts.get(name)
+        # `_best_account` needs a usage reading. If every measured pool is
+        # quarantined but an unmeasured ready login exists, its None result
+        # must not fall back to the ACTIVE (known-walled) pool. A blind healthy
+        # login is a better bet than a CLI-proven wall; its first session will
+        # refresh the reading and the normal router takes over from there.
+        if not account and acct and time.time() < getattr(acct, "walled_until", 0.0):
+            with self.lock:
+                alts = [a for a in self.accounts.values()
+                        if a.ready and not a.broken
+                        and time.time() >= getattr(a, "walled_until", 0.0)]
+            if alts:
+                acct = min(self._routable_first(alts), key=self._route_key)
+                name = acct.name
         if acct is None:
             if account:                          # explicit ask for a missing account
                 print(f"[accounts] unknown account {account!r} requested — "
@@ -6868,7 +6967,8 @@ class SessionManager:
             with self.lock:
                 alts = sorted(
                     [x for x in self.accounts.values()
-                     if x.ready and not x.broken and x.name != name],
+                     if x.ready and not x.broken and x.name != name
+                     and time.time() >= getattr(x, "walled_until", 0.0)],
                     key=lambda x: (not x.routable(),          # capability first…
                                    (x.usage or {}).get("pct", 100.0)))
             name, acct = "default", None         # last resort: plain ~/.claude

@@ -4631,8 +4631,13 @@ function renderAccountsPanel(container, info, mid) {
     // SUB_REQUIRE_FABLE) — say so on the card rather than leaving a healthy
     // 90%-headroom number that nothing ever spends looking like an idle option
     const nocap = live.length > 0 && live.every(x => x.routable === false);
+    // A CLI-confirmed wall outranks a lagging usage percentage. The server
+    // persists this through restarts and excludes the pool until its reset;
+    // surface that stronger evidence instead of presenting stale "headroom"
+    // as though the router were inexplicably ignoring it.
+    const walled = members.some(x => (x.walledUntil || 0) > Date.now() / 1000);
     const card = document.createElement('div');
-    card.className = 'acct' + (routed ? ' active' : '') + (nocap ? ' nocap' : '');
+    card.className = 'acct' + (routed ? ' active' : '') + ((nocap || walled) ? ' nocap' : '');
 
     // headline: identity on the left, the big headroom number on the right
     const row = document.createElement('div'); row.className = 'arow2';
@@ -4689,6 +4694,16 @@ function renderAccountsPanel(container, info, mid) {
                + 'with SUB_FABLE_OK=<name>, or turn the gate off with '
                + 'SUB_REQUIRE_FABLE=0.';
       card.appendChild(nc);
+    }
+
+    if (walled) {
+      const wall = members.reduce((best, x) =>
+        (x.walledUntil || 0) > (best.walledUntil || 0) ? x : best, a);
+      const wh = document.createElement('div'); wh.className = 'ahint2';
+      wh.style.color = 'var(--err)';
+      wh.textContent = `⚠ Claude confirmed this ${wall.wallKind || 'usage'} limit — `
+                     + `excluded from routing for ${fmtUntil(new Date(wall.walledUntil * 1000).toISOString())}`;
+      card.appendChild(wh);
     }
 
     // a failing usage poll is data too — say so instead of silently going stale

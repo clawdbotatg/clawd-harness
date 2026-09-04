@@ -307,7 +307,8 @@ no-op that would leave the previous session's stream flowing (that's how
   "fable":<bool|null>, "routable":bool,
   "usagePct":<float|null>, "headroom":<float|null>,
   "windows":[{ "key", "label", "used":float, "resets":<iso|null> }...],
-  "checkedAt":<float|null>, "error":str, "configDir":str }
+  "checkedAt":<float|null>, "walledUntil":<float>,
+  "wallKind":"session|weekly|", "error":str, "configDir":str }
 ```
 - `status:"pending"` = the account dir exists but no credentials yet (the
   sign-in ceremony hasn't been completed). It flips to `ready` on its own once
@@ -315,6 +316,10 @@ no-op that would leave the previous session's stream flowing (that's how
 - `usagePct` = the most-constrained usage window (0–100, from Claude's OAuth
   usage endpoint — **undocumented**, so `null`/stale data must degrade to "no
   opinion"). `headroom` = `100 − usagePct`. `active` = new sessions spawn here.
+- `walledUntil` is a stronger, CLI-confirmed limit verdict (epoch seconds; `0`
+  when inactive). The router excludes every login sharing that organization
+  until the matching 5h/session or weekly reset even if the undocumented usage
+  endpoint still reports a low percentage. `wallKind` names that reset class.
 - `fable` = does this plan carry Fable? `true`/`false` from the usage payload's
   scoped weekly window, **`null` = not known yet** (never had a good reading) —
   consumers must treat `null` as "yes", never as "no". `routable:false` = the

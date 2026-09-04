@@ -36,7 +36,8 @@ def fake_session(tmp):
     no .claude.json — so the onboarding/trust seeders decline untouched."""
     cfg = os.path.join(tmp, "acct")
     os.makedirs(cfg, exist_ok=True)
-    return types.SimpleNamespace(config_dir=cfg, workdir=lambda: tmp)
+    return types.SimpleNamespace(cid="test-session", config_dir=cfg,
+                                 workdir=lambda: tmp)
 
 
 def child_env(s):
