@@ -7940,7 +7940,7 @@ function playNext() {
     a.play().catch(() => { audioPlaying = false; playNext(); });
   });
 }
-const TTS_RATE = 1.25;                 // Austin's tempo (2026-09-05), ElevenLabs and browser voice alike
+const TTS_RATE = 1.0;                  // tempo, ElevenLabs and browser voice alike (1.25 was too fast — 2026-09-05)
 // fleet: ElevenLabs rides the socket — {type:'tts', id, text} → {type:'tts', id, audio|error}
 const ttsPending = new Map();
 function ttsViaWs(text) {
