@@ -524,30 +524,22 @@
   #voice button:disabled { opacity:.35; cursor:default; }
   #voice button.on { border-color:var(--accent); background:var(--accent-bg); }
   #ttsBtn.speaking { border-color:var(--accent); animation:vpulse 1.4s infinite; }
-  /* 🟦 live TLDR: a plain-English summary of what claude is saying, as light-blue text
-     on the footer's normal background, right above the session-name row (2026-09-04:
-     first cut was a blue box floating over the terminal; Austin wanted it down here).
-     FIXED height, present the whole time the mode is on (blank when there's nothing yet):
-     the footer is under a ResizeObserver that refits the terminal — and a refit is a PTY
-     resize, a claude redraw, and a reset-and-replay on every other viewer. A row that grew
-     with each summary pass made every session "reload over and over" (2026-09-04, the
-     night it shipped). So the row's size never moves during a turn; long text scrolls
-     inside. Blue on purpose — nothing else in this UI is that color. Blanks when you SEND
-     (typing keeps it readable). Tap = "read this far": blanks it and marks the prose so far
-     as read; the next summary covers only new text. */
-  #tldr { height:5.5em; overflow-y:auto; color:#4a9eff; padding:6px 10px 4px; box-sizing:border-box;
+  /* 🟦 live TLDR: a plain-English summary of what claude is saying, in light blue, sitting
+     exactly where claude's bottom chrome (the rules, the ❯ input box, the status line) would
+     be — an overlay over the last TTY_COVER_ROWS rows of the grid, flush under the thinking /
+     done line, down to the footer. It's an OVERLAY on purpose: it never enters the footer or
+     #term layout, so the PTY never resizes for it (a footer row that grew per pass made
+     every session "reload over and over", 2026-09-04). Placed by positionTldr() from the
+     grid's own rows; lifted while the session waits on you (prompts render right there).
+     Blue on purpose — nothing else in this UI is that color. Blanks when you SEND (typing
+     keeps it readable). Tap = "read this far": blanks it and marks the prose so far as read;
+     the next summary covers only new text. Off = the terminal exactly as before. */
+  #tldr { position:absolute; left:0; right:0; bottom:0; z-index:12; background:var(--bg);
+          overflow-y:auto; color:#4a9eff; padding:2px 10px 6px 8px; box-sizing:border-box;
           font-size:13px; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere;
           cursor:pointer; -webkit-overflow-scrolling:touch; }
   #tldr[hidden] { display:none; }
   #tldr.empty { color:var(--dim); cursor:default; }
-  /* 🟦 tty cover: with the live TLDR on, mask claude's bottom chrome (the input box and
-     the status line) so the last visible terminal line is the thinking/done line — the
-     summary row below is the thing to read instead. Sized in rows from the rendered grid
-     and re-placed on every render; lifted while the session waits on you (a permission /
-     question prompt lives exactly there). Off = the terminal exactly as before. */
-  #ttycover { position:absolute; left:0; right:0; bottom:0; background:var(--bg); z-index:12;
-              pointer-events:none; }
-  #ttycover[hidden] { display:none; }
   #tldr .tag { font-size:10px; letter-spacing:.14em; text-transform:uppercase;
                opacity:.6; margin-right:8px; white-space:normal; }
   #tldr.live .tag::after { content:" · updating…"; }
@@ -1330,7 +1322,9 @@
     </section>
     <section class="col" id="left">
       <div id="term"></div>
-      <div id="ttycover" hidden></div>
+      <!-- 🟦 live TLDR: the rolling plain-English summary of the turn in flight. An
+           overlay over claude's bottom chrome, flush under the thinking line (#tldr CSS) -->
+      <div id="tldr" hidden><span class="tag">tldr</span><span id="tldrText"></span></div>
       <div id="ttymeta"></div>
       <div id="splash" hidden></div>
       <div id="deadveil" hidden></div>
@@ -1390,9 +1384,6 @@
     </section>
   </main>
   <footer>
-    <!-- 🟦 live TLDR: the rolling plain-English summary of the turn in flight, as
-         light-blue text right above the session-name row (see the #tldr rules) -->
-    <div id="tldr" hidden><span class="tag">tldr</span><span id="tldrText"></span></div>
     <div id="descrow">
       <!-- state of this session as one colored square; the words are the tooltip,
            written by updateTtyStat() (title + aria-label) so it always names the
@@ -1529,36 +1520,37 @@ function bottomJustifyTTY() {
   const off = Math.max(0, availH - (last + 1) * cell - GAP);
   screen.style.transform = off ? 'translateY(' + off + 'px)' : '';
 }
-term.onRender(() => { bottomJustifyTTY(); positionTtyCover(); });
+term.onRender(() => { bottomJustifyTTY(); positionTldr(); });
 
-// 🟦 tty cover (see the #ttycover CSS): mask claude's bottom chrome while the live
-// TLDR is on — the TTY_COVER_ROWS rows ENDING AT THE LAST NON-BLANK ROW (the status
-// line; claude leaves blank rows under it, so anchoring to the grid bottom started
-// the cover too low and left the rule + cursor peeking — 2026-09-05). Row scan is
-// DOM-only; the one layout read happens only when something that moves it changed
-// (a layout read per render would stutter touch scrolling, bottomJustifyTTY's trap).
+// 🟦 place the summary overlay (see the #tldr CSS): over claude's bottom chrome while
+// the live TLDR is on — the TTY_COVER_ROWS rows ENDING AT THE LAST NON-BLANK ROW (the
+// status line; claude leaves blank rows under it, so anchoring to the grid bottom sat
+// too low and left the rule + cursor peeking — 2026-09-05). Row scan is DOM-only; the
+// one layout read happens only when something that moves it changed (a layout read per
+// render would stutter touch scrolling, bottomJustifyTTY's trap). The element itself is
+// declared further down with the rest of the 🟦 code; this runs after load.
 const TTY_COVER_ROWS = 5;   // blank · ─── · ❯ input · ─── · status line
-const ttyCover = document.getElementById('ttycover');
-let ttyCoverKey = '';
-function positionTtyCover() {
+let tldrPosKey = '';
+function positionTldr() {
+  const el = document.getElementById('tldr');
   const s = currentCid && allSessions().find(x => x.cid === currentCid);
-  const on = tldrOn && currentView() === 'tty' && !!s && !s.waiting;
-  if (!on) { ttyCover.hidden = true; ttyCoverKey = ''; return; }
+  const on = typeof tldrOn !== 'undefined' && tldrOn && currentView() === 'tty' && !!s && !s.waiting;
+  if (!on) { el.hidden = true; tldrPosKey = ''; return; }
   const screen = term.element && term.element.querySelector('.xterm-screen');
   const rowsEl = term.element && term.element.querySelector('.xterm-rows');
-  if (!screen || !rowsEl || !rowsEl.children.length) { ttyCover.hidden = true; return; }
+  if (!screen || !rowsEl || !rowsEl.children.length) { el.hidden = true; return; }
   let last = -1;
   for (let i = 0; i < rowsEl.children.length; i++)
     if (rowsEl.children[i].textContent.trim()) last = i;
-  if (last < 0) { ttyCover.hidden = true; ttyCoverKey = ''; return; }   // nothing painted yet
-  const first = Math.max(0, last - TTY_COVER_ROWS + 1);                  // first covered row
+  if (last < 0) { el.hidden = true; tldrPosKey = ''; return; }   // nothing painted yet
+  const first = Math.max(0, last - TTY_COVER_ROWS + 1);           // first covered row
   const key = term.rows + '|' + term.cols + '|' + screen.style.transform + '|' + first + '|' + document.getElementById('left').clientHeight;
-  if (key === ttyCoverKey && !ttyCover.hidden) return;
-  ttyCoverKey = key;
+  if (key === tldrPosKey && !el.hidden) return;
+  tldrPosKey = key;
   const leftTop = document.getElementById('left').getBoundingClientRect().top;
   const top = rowsEl.children[first].getBoundingClientRect().top - leftTop;
-  ttyCover.style.top = Math.max(0, Math.round(top)) + 'px';
-  ttyCover.hidden = false;
+  el.style.top = Math.max(0, Math.round(top)) + 'px';
+  el.hidden = false;
 }
 
 // Repaint on scroll — the companion to the touch-scroll fix above. xterm's DOM
@@ -1618,7 +1610,7 @@ function ttyAtBottom() {
 // terminal). rAF so we measure after the browser has reflowed the new bar.
 function refitTTY() {
   if (currentView() !== 'tty') return;
-  requestAnimationFrame(() => { fit.fit(); sendResize(); term.refresh(0, term.rows - 1); term.scrollToBottom(); bottomJustifyTTY(); positionTtyCover(); });
+  requestAnimationFrame(() => { fit.fit(); sendResize(); term.refresh(0, term.rows - 1); term.scrollToBottom(); bottomJustifyTTY(); positionTldr(); });
 }
 
 // A HARD repaint — exactly what dragging the window border does. The real bug:
@@ -5699,8 +5691,7 @@ function renderPilotUI() {
   const show = !!s && (v === 'tty' || v === 'transcript');
   pilotChk.hidden = !show;
   tldrBtn.hidden = !show;                  // 🟦 lives beside it, same rule
-  tldrEl.hidden = !(show && tldrOn);       // the row is part of the footer whenever the mode is on (fixed height)
-  positionTtyCover();                      // waiting-on-you lifts the cover; leaving the view drops it
+  positionTldr();                          // 🟦 overlay: on with the mode; waiting-on-you lifts it; leaving the view drops it
   if (!show) { pilotRow.hidden = true; return; }
   if (s.cid !== pilotCidShown) { pilotCidShown = s.cid; pilotPendingAt = 0; }
   if (Date.now() - pilotPendingAt > 4000) pilotChk.checked = !!s.autopilot;
@@ -7605,8 +7596,7 @@ function setTldr(on) {
   try { localStorage.setItem('cc_tldr', on ? '1' : '0'); } catch {}
   if (currentCid) hsend({ type: 'tldr', cid: currentCid, on });
   clearTldr();
-  renderPilotUI();                           // shows/hides the row with the mode
-  ttyCoverKey = ''; positionTtyCover();      // …and the tty cover
+  tldrPosKey = ''; renderPilotUI();          // shows/places or drops the overlay with the mode
 }
 tldrBtn.onclick = () => setTldr(!tldrOn);
 // tap = "read this far": hide it, and tell the server so later passes summarize only NEW prose
@@ -9362,7 +9352,7 @@ stage.addEventListener('touchend', (e) => {
 }, { capture: true, passive: true });
 
 // A window resize/rotation is the user manipulating THIS device → claim the PTY size.
-window.addEventListener('resize', () => { fit.fit(); sendResize(true); term.scrollToBottom(); bottomJustifyTTY(); positionTtyCover(); });
+window.addEventListener('resize', () => { fit.fit(); sendResize(true); term.scrollToBottom(); bottomJustifyTTY(); positionTldr(); });
 
 // -- machines roster page (the 🖥️ button) ------------------------------------
 // Read-only fleet overview with per-machine stats. Replaces the old machines rung;

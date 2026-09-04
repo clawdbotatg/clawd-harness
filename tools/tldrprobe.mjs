@@ -81,24 +81,31 @@ await page.waitForTimeout(200);
 const on = await page.evaluate((CID)=>({on:tldrOn, cls:tldrBtn.classList.contains('on'), ls:localStorage.getItem('cc_tldr'),
   frame:window.__frames.find(f=>f.type==='tldr'&&f.cid===CID&&f.on===true)}), CID);
 check('tap turns it on + persists + sends the verb', on.on && on.cls && on.ls==='1' && !!on.frame, JSON.stringify(on));
-const h0 = await page.evaluate(()=>({hidden:tldrEl.hidden, h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height}));
-check('mode on: the empty slot is already in the footer', !h0.hidden && h0.h>40, JSON.stringify(h0));
+// paint claude-like chrome first: a thinking line, blank, rule, prompt, rule, status, 2 blank rows under
+await page.evaluate(()=>new Promise(res=>term.write('\x1b[2J\x1b[H* Churned for 1m\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n\r\n\r\n', res)));
+await page.waitForTimeout(150);
+const h0 = await page.evaluate(()=>{ positionTldr(); return {hidden:tldrEl.hidden, h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, term:document.getElementById('term').getBoundingClientRect().height}; });
+check('mode on: the overlay is up (blank) over the chrome', !h0.hidden && h0.h>40, JSON.stringify(h0));
 
-// 3. a frame paints the block, live
+// 3. a frame paints the overlay, live
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass.',final:false}), CID);
-let st = await page.evaluate(()=>({hidden:tldrEl.hidden, text:tldrText.textContent, live:tldrEl.classList.contains('live'),
-  pos:getComputedStyle(tldrEl).position, parent:tldrEl.parentElement.tagName, next:tldrEl.nextElementSibling&&tldrEl.nextElementSibling.id,
+let st = await page.evaluate(()=>{ const rowsEl=term.element.querySelector('.xterm-rows');
+  let last=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) last=i;
+  const r=tldrEl.getBoundingClientRect(); const left=document.getElementById('left').getBoundingClientRect();
+  return {hidden:tldrEl.hidden, text:tldrText.textContent, live:tldrEl.classList.contains('live'),
+  pos:getComputedStyle(tldrEl).position, parent:tldrEl.parentElement.id,
   color:getComputedStyle(tldrEl).color, bg:getComputedStyle(tldrEl).backgroundColor,
-  above: tldrEl.getBoundingClientRect().bottom <= descrow.getBoundingClientRect().top + 1}));
-check('frame paints the row, marked updating', !st.hidden && st.text==='Fixed the bug. Tests pass.' && st.live, JSON.stringify(st));
-const h1 = await page.evaluate(()=>({h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height}));
-check('painting text did not change the row or footer height', h1.h===h0.h && h1.footer===h0.footer, JSON.stringify({h0,h1}));
+  top:r.top, want:rowsEl.children[last-TTY_COVER_ROWS+1].getBoundingClientRect().top,
+  thinking:rowsEl.children[0].getBoundingClientRect().bottom, bottom:r.bottom, leftBottom:left.bottom}; });
+check('frame paints the overlay, marked updating', !st.hidden && st.text==='Fixed the bug. Tests pass.' && st.live, JSON.stringify(st));
+check('overlay in #left, flush under the thinking line, down to the footer', st.pos==='absolute' && st.parent==='left' && Math.abs(st.top-st.want)<=2 && st.top>=st.thinking-1 && Math.abs(st.bottom-st.leftBottom)<=1, JSON.stringify(st));
+check('light-blue text on black', st.color==='rgb(74, 158, 255)' && st.bg==='rgb(0, 0, 0)', JSON.stringify(st));
+const h1 = await page.evaluate(()=>({h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, term:document.getElementById('term').getBoundingClientRect().height}));
+check('painting text changed neither the footer nor #term height', h1.footer===h0.footer && h1.term===h0.term, JSON.stringify({h0,h1}));
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:('Long line of summary text. ').repeat(40),final:false}), CID);
-const h2 = await page.evaluate(()=>({h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, scrolls:tldrEl.scrollHeight>tldrEl.clientHeight}));
-check('a long summary scrolls inside; footer height still unchanged', h2.h===h0.h && h2.footer===h0.footer && h2.scrolls, JSON.stringify({h0,h2}));
+const h2 = await page.evaluate(()=>({h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, term:document.getElementById('term').getBoundingClientRect().height, scrolls:tldrEl.scrollHeight>tldrEl.clientHeight}));
+check('a long summary scrolls inside; footer and #term unchanged', h2.h===h1.h && h2.footer===h0.footer && h2.term===h0.term && h2.scrolls, JSON.stringify({h0,h2}));
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass.',final:false}), CID);
-check('sits in the footer right above the session-name row', st.pos==='static' && st.parent==='FOOTER' && st.next==='descrow' && st.above, JSON.stringify(st));
-check('light-blue text on the normal background', st.color==='rgb(74, 158, 255)' && st.bg==='rgba(0, 0, 0, 0)', JSON.stringify(st));
 
 // 4. a later frame replaces the text; final drops "updating"
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass. Pushed.',final:true}), CID);
@@ -139,6 +146,12 @@ await page.evaluate((CID)=>{ window.__frames.length=0; subscribe(CID); }, CID);
 const sub = await page.evaluate(()=>window.__frames.map(f=>f.type));
 check('subscribe is followed by the tldr verb', sub[0]==='subscribe' && sub[1]==='tldr', JSON.stringify(sub));
 
+// (subscribe() reset the grid; repaint claude-like chrome so the overlay has rows to sit on)
+await page.evaluate(()=>new Promise(res=>term.write('\x1b[2J\x1b[H* Churned for 1m\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n\r\n\r\n', res)));
+await page.waitForTimeout(150);
+await page.evaluate(()=>{ tldrPosKey=''; positionTldr(); });
+check('overlay back after a repaint', await page.evaluate(()=>!tldrEl.hidden));
+
 // 8b. tapping the summary marks it read: hides + sends the mark
 await page.evaluate((CID)=>{ handleJson({type:'tldr',cid:CID,text:'read me now',final:false}); window.__frames.length=0; }, CID);
 const txy = await page.evaluate(()=>{const r=tldrEl.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};});
@@ -148,30 +161,17 @@ await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
 await page.waitForTimeout(200);
 check('tap on the summary blanks it + sends mark', (await gone()) && await page.evaluate((CID)=>window.__frames.some(f=>f.type==='tldr'&&f.cid===CID&&f.mark===true), CID));
 
-// 8c. the tty cover: on with the mode, sized to the bottom rows of the grid, lifted while waiting
-check('cover hides on a blank grid', await page.evaluate(()=>{ positionTtyCover(); return ttyCover.hidden; }));
-// paint claude-like chrome: a thinking line, blank, rule, prompt, rule, status, then 2 blank rows under it
-await page.evaluate(()=>new Promise(res=>term.write('\x1b[2J\x1b[H* Churned for 1m\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n\r\n\r\n', res)));
-await page.waitForTimeout(150);
-const cov = await page.evaluate(()=>{ positionTtyCover();
-  const rowsEl=term.element.querySelector('.xterm-rows');
-  let last=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) last=i;
-  const want=rowsEl.children[last-TTY_COVER_ROWS+1].getBoundingClientRect().top;
-  const thinking=rowsEl.children[0].getBoundingClientRect().bottom;
-  const r=ttyCover.getBoundingClientRect(); const left=document.getElementById('left').getBoundingClientRect();
-  return {hidden:ttyCover.hidden, top:r.top, want, thinking, bottom:r.bottom, leftBottom:left.bottom, last}; });
-check('cover starts at the blank row under the thinking line and runs to the bottom', !cov.hidden && Math.abs(cov.top-cov.want)<=2 && cov.top>=cov.thinking-1 && Math.abs(cov.bottom-cov.leftBottom)<=1, JSON.stringify(cov));
+// 8c. the overlay lifts while the session waits on you (prompts render right there)
 const sessFrame = (waiting) => ({type:'sessions',sessions:[
   {cid:'cid-probe-1',pid:'p1',title:'probe tldr',desc:'',promptCount:2,alive:true,busy:true,waiting,autopilot:false,pilotStatus:'',pilotRounds:0,lastActive:Date.now()/1000,promptedAt:Date.now()/1000}]});
 await page.evaluate((f)=>{ handleMachineJson('clawd-atg', f); renderPilotUI(); }, sessFrame(true));
-check('cover lifts while the session waits on you', await page.evaluate(()=>ttyCover.hidden));
+check('overlay lifts while the session waits on you', await page.evaluate(()=>tldrEl.hidden));
 await page.evaluate((f)=>{ handleMachineJson('clawd-atg', f); renderPilotUI(); }, sessFrame(false));
-check('…and returns', await page.evaluate(()=>!ttyCover.hidden));
+check('…and returns', await page.evaluate(()=>!tldrEl.hidden));
 
 // 9. off again hides + sends off
 await page.evaluate((CID)=>{handleJson({type:'tldr',cid:CID,text:'bye',final:true}); window.__frames.length=0; setTldr(false);}, CID);
-check('off hides the slot + sends the verb', await page.evaluate(()=>tldrEl.hidden && !tldrOn && window.__frames.some(f=>f.type==='tldr'&&f.on===false)));
-check('off drops the tty cover', await page.evaluate(()=>ttyCover.hidden));
+check('off drops the overlay + sends the verb', await page.evaluate(()=>tldrEl.hidden && !tldrOn && window.__frames.some(f=>f.type==='tldr'&&f.on===false)));
 
 check('no page errors', errors.length===0, errors.join(' | '));
 await browser.close();
