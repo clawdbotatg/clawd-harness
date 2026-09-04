@@ -15,7 +15,9 @@
 //      scoped strip, 📌 pinned members at the END, marked; an iron with NO
 //      sessions lands on the iron page (#ironview) instead: member project
 //      rows, each with a ＋ that spawns a session in that project INSIDE the
-//      iron (2026-08-29)
+//      iron (2026-08-29); the scoped row's member chips carry the same ＋
+//      (2026-09-04) — a real tap spawns there, focuses the composer, and
+//      Enter typed before the focus reply is parked for the fresh session
 //   5. the ONE box (filter + create-name, a live <input> — there is NO separate
 //      create form) survives the repaint a frame triggers: focus + un-mirrored
 //      text intact (the projects-rung rule); ＋ create names the iron from it
@@ -563,6 +565,50 @@ check('the focus lands the fresh session INSIDE the iron (row chrome + scoped st
       && spawn.after.rowShown && /🔥 quiet/.test(spawn.after.rowText)
       && spawn.after.tabs.length===1 && /fresh/.test(spawn.after.tabs[0]),
       JSON.stringify(spawn.after));
+
+// 4c. ＋ INSIDE an iron-row chip (2026-09-04): with a session open in the iron,
+// the row's member chips each carry a ＋ that spawns a fresh session in that
+// project WITHOUT leaving the iron, and focuses the composer inside the tap so
+// you can start typing at once. A real click (not element.click()) — the ＋
+// must swallow the tap so the chip's own "open the project" doesn't fire.
+// Enter typed BEFORE the focus reply is parked for the fresh session, never
+// sent down the link still bound to the session being left.
+await page.evaluate(()=>{ window.__hs=[]; window.__realHsend=hsend; hsend=(f)=>{ window.__hs.push(f); return true; }; });
+const rowPlusSel = '#ironrow .iprojchip:not(.iadd) .sp';
+const hasRowPlus = await page.$(rowPlusSel);
+check('every member chip in the iron row wears a ＋', !!hasRowPlus);
+if (hasRowPlus) {
+  await page.click(rowPlusSel);
+  const tapped = await page.evaluate(()=>({ frames: window.__hs.slice(), view: currentView(), scope: ironScope,
+    pending: pendingNewFocus, cid: currentCid, boxFocused: document.activeElement===document.getElementById('box'),
+    rowShown: !document.getElementById('ironrow').hidden }));
+  check('＋ in the chip asks for a session in THAT project (`new` with its pid), scope kept, chip tap swallowed',
+        tapped.frames.some(f=>f.type==='new'&&f.pid==='pa3') && tapped.view==='tty' && tapped.scope===quietId
+        && tapped.pending===true && tapped.cid===null && tapped.rowShown,
+        JSON.stringify({frames:tapped.frames,view:tapped.view,scope:tapped.scope,cid:tapped.cid}));
+  check('the composer is focused inside the tap — type immediately', tapped.boxFocused);
+  await page.keyboard.type('hello fresh');
+  await page.keyboard.press('Enter');
+  const early = await page.evaluate(()=>({ sends: window.__hs.filter(f=>f.type==='send'), parked: pendingSendText,
+                                           box: document.getElementById('box').value }));
+  check('Enter before the spawn lands is PARKED for the fresh session (no `send` down the old link)',
+        early.sends.length===0 && early.parked==='hello fresh' && early.box==='', JSON.stringify(early));
+  const landed = await page.evaluate(()=>{
+    hsend=window.__realHsend;
+    handleMachineJson('clawd-atg',{type:'sessions',sessions:[
+      {cid:'ca1',pid:'pa1',title:'wire the mic',tab:'mic',alive:true,busy:true,pinned:0,promptedAt:Date.now()/1000-60,lastActive:Date.now()/1000},
+      {cid:'cq1',pid:'pa3',title:'fresh spawn',tab:'fresh',alive:true,busy:false,pinned:0,promptedAt:Date.now()/1000-30,lastActive:Date.now()/1000},
+      {cid:'cq2',pid:'pa3',title:'second spawn',tab:'again',alive:true,busy:false,pinned:0,promptedAt:Date.now()/1000,lastActive:Date.now()/1000}]});
+    handleMachineJson('clawd-atg',{type:'focus',cid:'cq2'});
+    return { view: currentView(), cid: currentCid, scope: ironScope,
+             rowShown: !document.getElementById('ironrow').hidden,
+             queued: [...document.querySelectorAll('.pending-msg')].some(d=>/hello fresh/.test(d.textContent)),
+             tabs: [...document.querySelectorAll('#sessionbar .stab')].map(t=>(t.querySelector('.lbl')||{}).textContent||'') };
+  });
+  check('the focus lands the chip-spawned session INSIDE the iron, parked text shown as queued',
+        landed.view==='tty' && landed.cid==='cq2' && landed.scope===quietId && landed.rowShown && landed.queued
+        && landed.tabs.length===2 && landed.tabs.some(t=>/again/.test(t)), JSON.stringify(landed));
+}
 await page.close();
 
 // ---- direct mode ------------------------------------------------------------

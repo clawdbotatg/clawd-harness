@@ -778,6 +778,11 @@
   .iprojchip .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .iprojchip .rm { color:var(--dim); cursor:pointer; padding:0 2px; }
   .iprojchip .rm:hover { color:var(--err); }
+  /* ＋ inside an iron-row chip: a NEW session in that project, right here in
+     the iron (the row's answer to the iron page's .ivplus) */
+  .iprojchip .sp { color:var(--accent); cursor:pointer; padding:0 3px; font-size:13px; line-height:1; }
+  .iprojchip .sp:hover { background:var(--raised); }
+  @media (pointer:coarse) { .iprojchip .sp { padding:2px 7px; font-size:15px; } }
   /* project card: 🔥 corner control (mirrors the pincard second-button layout)
      + the "in iron X" badge */
   .scard .sfire { position:absolute; top:8px; right:9px; background:transparent;
@@ -4013,6 +4018,13 @@ function renderIronRow(view) {
       nm.className = 'nm';
       nm.textContent = (shortEmoji(r.emoji) ? shortEmoji(r.emoji) + ' ' : '') + r.name + ' · ' + (r.sessionCount || 0);
       chip.appendChild(nm);
+      // ＋: a fresh session in THIS project without leaving the iron — the
+      // chip's name still opens the project (leaves the iron), the ＋ doesn't
+      const sp = document.createElement('span');
+      sp.className = 'sp'; sp.textContent = '＋';
+      sp.title = 'new session in ' + r.name + ', here in this iron';
+      sp.onclick = (e) => { e.stopPropagation(); ironSpawnIn(r.id, iron.id); };
+      chip.appendChild(sp);
       const rm = document.createElement('span');
       rm.className = 'rm'; rm.textContent = '✕';
       rm.title = 'take ' + r.name + ' out of this iron (project untouched)';
@@ -7524,6 +7536,17 @@ function dispatchSend(text, ready) {
     setTimeout(flushPendingSend, 8000);   // fallback if the SessionStart hook never lands
     return true;
   }
+  // A `new` is in flight and its focus hasn't landed (the iron-row ＋ focuses
+  // the composer inside the tap, so Enter CAN beat the spawn): currentCid is
+  // null and the link is still bound to the session being left — a send now
+  // would land THERE. Park it for the fresh session instead, same delivery as
+  // the sessions-list path (the focus reply shows the queued box).
+  if (pendingNewFocus && !currentCid) {
+    pendingSendText = full;
+    stashPending(text || full);
+    setTimeout(flushPendingSend, 8000);
+    return true;
+  }
   deliverSend(currentCid, full, text || full);  // send now if live; if the link is down, queue + reconnect so you never re-hit-enter (also kept in the outbox for a reload)
   viewBeforeQuestion = null;          // you're acting here on purpose — don't auto-return
   addPending(full, text || ready.map(a => a.name).join(', ') || full);
@@ -8505,17 +8528,27 @@ function fillIronProjRow(card, r, ss) {
     card.appendChild(sr);
   }
 }
-// ＋ on an iron-page project row: spawn a session there WITHOUT leaving the
-// iron — scope is set first, so newSession's drop into the tty keeps it and
-// the focus reply opens the fresh session under the iron's chrome.
-function ironSpawnIn(rowId) {
-  if (!ironById(currentIronId)) return;
+// ＋ on an iron-page project row (or inside an iron-row chip): spawn a session
+// there WITHOUT leaving the iron — scope is set first, so newSession's drop
+// into the tty keeps it and the focus reply opens the fresh session under the
+// iron's chrome. `ironId` names the iron explicitly (the row's chips work off
+// ironScope, which may differ from currentIronId); the page's ＋ omits it.
+// The composer is focused right here, inside the tap, so you can start typing
+// before the spawn even lands — on touch that's the only moment the keyboard
+// is allowed to pop, and it's exactly what "＋ then talk" means. Anything
+// typed before the focus reply is parked (dispatchSend) and delivered once
+// the fresh session boots, never sent to the session being left.
+function ironSpawnIn(rowId, ironId) {
+  const id = ironId || currentIronId;
+  if (!ironById(id)) return;
   cancelIronDive();
-  ironScope = currentIronId;
+  currentIronId = id;
+  ironScope = id;
   newSessionMachine = null;        // never inherit another project's ＋ machine pick
   if (FLEET) currentProjectKey = rowId;
   else currentPid = rowId;
   newSession();
+  if (pendingNewFocus) box.focus();   // the `new` went out — ready to type (skipped when nothing was asked)
 }
 // The ONE click listener for the iron page's rows — delegated, same rule as
 // #ironlist: a frame's repaint can never eat a tap.
