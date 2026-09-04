@@ -143,9 +143,9 @@ const fit1 = await page.evaluate(()=>{ const rowsEl=term.element.querySelector('
   const r=tldrEl.getBoundingClientRect(), t=tldrEl.firstElementChild.getBoundingClientRect();
   const screen=term.element.querySelector('.xterm-screen'); let last=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) last=i;
   return {cell, boxH:r.height, textH:t.height, slackBelow:r.bottom-t.bottom, hold:tldrHold(), need:tldrRowsNeeded(), transform:screen.style.transform, last, baseY:term.buffer.active.baseY, screenTop:screen.getBoundingClientRect().top, boxTop:r.top, holdLast:tldrHoldLast}; });
-const needWant = Math.ceil((fit1.textH + 9) / fit1.cell);
+const needWant = Math.ceil((fit1.textH + 5) / fit1.cell);
 check('one-line summary: box only as tall as its text, text at its bottom, the rest of the chrome held out of sight',
-  fit1.need===needWant && fit1.hold===5-needWant && fit1.boxH <= (needWant+1)*fit1.cell && fit1.slackBelow <= 8, JSON.stringify(fit1));
+  fit1.need===needWant && fit1.hold===5-needWant && fit1.boxH <= (needWant+1)*fit1.cell && fit1.slackBelow <= fit1.cell/2 + 4, JSON.stringify(fit1));
 await page.evaluate(()=>new Promise(res=>term.write('\x1b[2J\x1b[H* Churned for 1m\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n\r\n\r\n', res)));
 await page.waitForTimeout(150);
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass.',final:false}), CID);

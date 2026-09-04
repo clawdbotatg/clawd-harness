@@ -544,10 +544,10 @@
   #tldr { position:absolute; left:0; right:0; bottom:0; z-index:12; background:var(--bg);
           display:flex; flex-direction:column;   /* + margin-top:auto below: slack goes ABOVE the text,
                                                     and unlike justify-content:flex-end it still scrolls */
-          overflow-y:auto; color:#4a9eff; padding:4px 10px 5px 8px; box-sizing:border-box;
+          overflow-y:auto; color:#4a9eff; padding:2px 10px 3px 8px; box-sizing:border-box;
           font-size:16px; line-height:1.4; white-space:pre-wrap; overflow-wrap:anywhere;
           cursor:pointer; -webkit-overflow-scrolling:touch; }
-  #tldr > div { flex:0 0 auto; margin-top:auto; }
+  #tldr > div { flex:0 0 auto; margin:auto 0; }   /* row-rounding slack splits above/below (half the top gap) */
   #tldr[hidden] { display:none; }
   #tldr.empty { color:var(--dim); cursor:default; }
   #tldr .tag { font-size:10px; letter-spacing:.14em; text-transform:uppercase;
@@ -1601,7 +1601,7 @@ function tldrRowsNeeded() {
   if (!cell) return TTY_COVER_ROWS;
   const wasHidden = el.hidden;
   if (wasHidden) el.hidden = false;                 // lay it out to measure (width is fixed by left/right)
-  const need = Math.ceil((inner.offsetHeight + 9) / cell);    // + the box's vertical padding (4 + 5)
+  const need = Math.ceil((inner.offsetHeight + 5) / cell);    // + the box's vertical padding (2 + 3)
   if (wasHidden) el.hidden = true;
   return Math.max(1, Math.min(TTY_COVER_ROWS, need));
 }
