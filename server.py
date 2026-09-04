@@ -364,13 +364,15 @@ VOICE_SYS = (
     "summary with each sentence marked settled or still forming, the tail of "
     "the raw reply, and everything you have already said this turn. Decide "
     "whether to say something now, and what.\n"
-    "Rules. (1) Speak as information arrives: whenever the summary or the raw "
-    "text holds something the listener has not heard yet, say it now — do not "
-    "wait for it to settle and do not save it for the end. Stay silent only "
-    "when there is genuinely nothing new. (2) Length follows content: as long "
-    "as the thing that changed and no longer — a yes/no question is a few "
-    "words, a tradeoff may take three sentences. (3) One idea per utterance; if "
-    "two things matter, say the more urgent one. (4) Never repeat anything "
+    "Rules. (1) Speak as information arrives: when there is a new fact the "
+    "listener has not heard, say it now; do not save it for the end. Stay "
+    "silent when there is nothing new. (2) EXTREMELY short. ONE sentence per "
+    "utterance, text-message short — the fact itself, nothing around it: no "
+    "context, no reasons, no examples, no restating, no adjectives. The voice "
+    "may total at most a tenth of the reply's words; a running WORD BUDGET is "
+    "given with each request — if the new fact does not fit, say nothing. "
+    "(3) One idea per utterance; if two things matter, say the more urgent one. "
+    "(4) Never repeat anything "
     "already said this turn, even if it is more precise now — not rephrased, not "
     "expanded; if the only new thing is a better wording, say nothing. (5) Don't narrate "
     "process — outcomes and decisions, not steps. (6) Speak for the ears: first "
@@ -407,14 +409,24 @@ def settle_sentences(prev_sentences, text):
     return [(x, x in prev) for x in split_sentences(text)]
 
 
-def _voice_prompt(event, message, sents, tail, said):
+def voice_budget(reply_words):
+    """Words the voice may speak over a whole reply: a tenth of the reply (Austin:
+    'it could have said 10% of what it said'), floor 10 so a short reply still
+    gets one line."""
+    return max(10, int(reply_words) // 10)
+
+
+def _voice_prompt(event, message, sents, tail, said, budget_left=None):
     lines = ["EVENT: " + ({"stream": "the reply is still streaming",
                             "done": "the reply just FINISHED",
                             "waiting": "the assistant is WAITING on the person"}.get(event, event))
              + (f" — notification: {message}" if message else "")]
+    if budget_left is not None:
+        lines.append(f"WORD BUDGET LEFT FOR THIS REPLY: {budget_left} words"
+                     + (" — spent: only the question asked of the person, or nothing." if budget_left <= 0 else ""))
     lines.append("ALREADY SAID THIS TURN:" + ("" if said else " (nothing)"))
     if event == "done" and not said:
-        lines.append("(Nothing has been said this turn — say the gist now. Do not return empty.)")
+        lines.append("(Nothing has been said this turn — say the gist in ONE short sentence. Do not return empty.)")
     lines += [f"- {x}" for x in said]
     lines.append("SUMMARY:" + ("" if sents else " (none yet)"))
     lines += [f"[{'settled' if ok else 'forming'}] {x}" for x, ok in sents]
@@ -422,7 +434,7 @@ def _voice_prompt(event, message, sents, tail, said):
     return "\n".join(lines)
 
 
-def _voice_call(event, message, sents, tail, said, config_dir=None):
+def _voice_call(event, message, sents, tail, said, config_dir=None, budget_left=None):
     """One voice decision: `claude -p` (VOICE_MODEL), thinking off, no tools.
     Returns the line to say ("" = silence). Raises on a failed call."""
     env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
@@ -437,7 +449,7 @@ def _voice_call(event, message, sents, tail, said, config_dir=None):
             [CLAUDE_BIN, "-p", "--model", VOICE_MODEL, "--system-prompt", VOICE_SYS,
              "--tools", "", "--no-session-persistence", "--setting-sources", "",
              "--strict-mcp-config", "--output-format", "text", "--",
-             _voice_prompt(event, message, sents, tail, said)],
+             _voice_prompt(event, message, sents, tail, said, budget_left)],
             cwd=d, env=env, stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=TLDR_TIMEOUT)
     if r.returncode != 0:
@@ -461,12 +473,14 @@ class VoiceAgent:
     def __init__(self, emit, runner):
         self.emit, self.runner = emit, runner
         self.said, self.pending, self.stopped = [], None, False
+        self.words_said, self.reply_words = 0, 0
         self.cv = threading.Condition()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
-    def feed(self, event, message, sents, tail):
+    def feed(self, event, message, sents, tail, reply_words=0):
         with self.cv:
+            self.reply_words = max(self.reply_words, int(reply_words or 0))
             cur = self.pending
             # newest wins, except a more urgent pending event keeps its rank
             if cur and self.URGENCY[cur[0]] > self.URGENCY[event]:
@@ -489,16 +503,28 @@ class VoiceAgent:
                 event, message, sents, tail = self.pending
                 self.pending = None
                 said = list(self.said)
+                left = voice_budget(self.reply_words) - self.words_said
             try:
-                line = self.runner(event, message, sents, tail, said)
+                line = self.runner(event, message, sents, tail, said, left)
             except Exception as e:
                 print(f"[voice] call failed: {e}", flush=True)
                 line = ""
             if self.stopped:
                 return
+            # The budget is enforced here, not hoped for: clip a long line to its
+            # first sentence, drop a near-repeat of anything said, then drop what
+            # still doesn't fit (a finish with a question keeps the question —
+            # that is what the end is for).
+            if line and event != "waiting" and len(line.split()) > max(left, 0) + 4:
+                first = split_sentences(line)[:1]
+                line = first[0] if first else ""
             if line and any(difflib.SequenceMatcher(None, line.lower(), x.lower()).ratio() > 0.6
                             for x in self.said):
                 print(f"[voice] dropped near-repeat: {line[:60]!r}", flush=True)
+                line = ""
+            if line and event != "waiting" and len(line.split()) > max(left, 0) + 4 \
+                    and not (event == "done" and line.rstrip().endswith("?")):
+                print(f"[voice] dropped over budget ({left} left): {line[:60]!r}", flush=True)
                 line = ""
             if not line and event == "done" and not self.said:
                 # the speaker is on and nothing was said all turn: the model's
@@ -508,6 +534,7 @@ class VoiceAgent:
                 line = " ".join(pool[:2]).strip()
             if line:
                 self.said.append(line)
+                self.words_said += len(line.split())
                 self.emit(line, event == "waiting")
             else:
                 print(f"[voice] silence ({event})", flush=True)
@@ -4650,10 +4677,10 @@ class ClaudeSession:
                 cfg = self.config_dir
                 self._voice = VoiceAgent(
                     self._voice_emit,
-                    lambda ev, msg, sents, tail, said: _voice_call(ev, msg, sents, tail, said, cfg))
+                    lambda ev, msg, sents, tail, said, left=None: _voice_call(ev, msg, sents, tail, said, cfg, left))
             sents = settle_sentences(self.tldr_sents, self.tldr_text)
             tail = self.tldr_turn_text[self.tldr_read_at:]
-        self._voice.feed(event, message, sents, tail)
+        self._voice.feed(event, message, sents, tail, len(tail.split()))
 
     def _voice_emit(self, text, urgent):
         print(f"[voice {self.cid[:8]}] say: {text[:80]!r}", flush=True)

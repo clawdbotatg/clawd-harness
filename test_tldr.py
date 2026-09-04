@@ -143,7 +143,7 @@ check("a sentence that survives verbatim settles; a reworded one doesn't",
 print("VoiceAgent:")
 vcalls, vsaid = [], []
 vgate = threading.Event()
-def vrunner(event, message, sents, tail, said):
+def vrunner(event, message, sents, tail, said, left=None):
     vcalls.append((event, message, [x for x, ok in sents if ok], list(said)))
     vgate.wait(2)
     return {"stream": "Found it.", "done": "Pushed. Want a PR?", "waiting": "I need permission to run the tests."}[event] \
@@ -168,12 +168,12 @@ check("waiting lines are flagged urgent", vsaid[-1] == ("I need permission to ru
 v.stop(); time.sleep(0.2)
 check("stop ends the loop", not v.thread.is_alive())
 dup_out = []
-def dup_runner(event, message, sents, tail, said): return "I need your permission to run the test suite now."
+def dup_runner(event, message, sents, tail, said, left=None): return "I need your permission to run the test suite now."
 v3 = server.VoiceAgent(lambda t, u: dup_out.append(t), dup_runner)
 v3.feed("stream", "", [("a", True)], "x"); time.sleep(0.25)
 v3.feed("stream", "", [("b", True)], "y"); time.sleep(0.25); v3.stop()
 check("a near-repeat of something already said is dropped", dup_out == ["I need your permission to run the test suite now."])
-def vboom(*a): raise RuntimeError("no voice today")
+def vboom(*a, **k): raise RuntimeError("no voice today")
 v2 = server.VoiceAgent(lambda t, u: vsaid.append((t, u)), vboom)
 n = len(vsaid); v2.feed("stream", "", [], "x"); time.sleep(0.3)
 check("a failed call mid-stream is silence, loop survives", len(vsaid) == n and v2.thread.is_alive())
@@ -189,19 +189,35 @@ check("prompt carries event, said-log, marked sentences, tail",
 print("VoiceAgent:")
 import time as _t
 said_out = []
-def mute(event, message, sents, tail, said): return ""
+def mute(event, message, sents, tail, said, left=None): return ""
 va = server.VoiceAgent(lambda line, urgent: said_out.append((line, urgent)), mute)
 va.feed("stream", "", [("Found the bug.", False)], "Found the bug in the parser."); _t.sleep(0.2)
 check("a silent model stays silent mid-stream", said_out == [])
 va.feed("done", "", [("Found the bug.", True), ("Tests pass.", True), ("Pushed.", False)], "…"); _t.sleep(0.3)
 check("a finished turn with nothing said speaks the summary's settled opening",
       said_out == [("Found the bug. Tests pass.", False)])
-def talk(event, message, sents, tail, said): return "" if said else "I need a decision from you."
+def talk(event, message, sents, tail, said, left=None): return "" if said else "I need a decision from you."
 va2 = server.VoiceAgent(lambda line, urgent: said_out.append((line, urgent)), talk)
 va2.feed("waiting", "needs permission", [], "…"); _t.sleep(0.3)
 check("waiting lines are urgent", said_out[-1] == ("I need a decision from you.", True))
 va2.feed("done", "", [("Nothing new.", True)], "…"); _t.sleep(0.3)
 check("after something was said, a silent finish stays silent", said_out[-1] == ("I need a decision from you.", True))
+
+print("voice budget:")
+check("a tenth of the reply, floor 10", server.voice_budget(400) == 40 and server.voice_budget(50) == 10)
+bud = []
+def windy(event, message, sents, tail, said, left=None):
+    return "First fact here. Second sentence with more detail that goes on and on and on and on and on."
+vb = server.VoiceAgent(lambda t, u: bud.append(t), windy)
+vb.feed("stream", "", [("a", True)], "w " * 100, reply_words=100); time.sleep(0.3)   # budget 10
+check("over-budget line is clipped to its first sentence", bud == ["First fact here."])
+vb.feed("stream", "", [("b", True)], "w " * 100, reply_words=100); time.sleep(0.3)
+check("once the budget is spent, further lines are dropped", bud == ["First fact here."])
+def asker(event, message, sents, tail, said, left=None): return "Do you want me to push it?"
+vb2 = server.VoiceAgent(lambda t, u: bud.append(t), asker)
+vb2.words_said = 100
+vb2.feed("done", "", [("x", True)], "w " * 100, reply_words=100); time.sleep(0.3)
+check("the finish still gets the question past a spent budget", bud[-1] == "Do you want me to push it?")
 
 print()
 if FAILS:
