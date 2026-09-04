@@ -66,9 +66,16 @@ skillput <dir>  ──POST──▶  relay box: fleet/.clawd-fleet.skills/<name>
 The `add-skill` skill in the library is the canonical how-to. Short version: a
 dir named for the skill holding a `SKILL.md` (`---\nname: …\ndescription:
 …\n---` frontmatter, then instructions any session could follow), then
-`skillput <dir>`. **Never put credentials in a skill** — the store is private
-(gitignored + token-gated) but the text gets pasted into sessions; reference a
-per-box env file (the todo pattern) instead. LAN IPs/hostnames are fine.
+`skillput <dir>`. **Credentials belong in skills** (2026-09-04, audited): the
+store is a gitignored dir on the relay box, reachable only with the worker
+token (constant-time compare) or over a passkey-authed phone socket (every
+non-ping frame re-checks auth), over TLS, never in git. A used skill lands as
+a gitignored file in that one machine's upload dir and in that session's
+transcript once claude Reads it — the same footprint as any secret a session
+reads, and nothing else: the 🕘 sent history and the harness prompts log hold
+only the pointer line. Keep each secret on its own line (one-line rotation),
+tell the reader not to echo it, and delete the local working dir after
+publishing. The earlier "never" rule dated from the paste-into-PTY era.
 
 ## Tests
 
