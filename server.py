@@ -340,8 +340,10 @@ TLDR_FINAL = (
     "The reply is now COMPLETE. Produce the final TLDR from it and the "
     "previous TLDR: keep the structure the reader has been watching, but "
     "tighten hard — fewest words that still carry every fact, decision, "
-    "open problem, next step, and question asked of the person. Same rules "
-    "otherwise. Output only the TLDR, plain text, no markdown.")
+    "open problem, and next step. If the reply asks the person anything, the "
+    "TLDR MUST end with that question, kept close to verbatim; the question "
+    "is exempt from the word limit. Same rules otherwise. Output only the "
+    "TLDR, plain text, no markdown.")
 
 
 def tee_upstream_path(path):
