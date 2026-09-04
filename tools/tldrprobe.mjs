@@ -6,7 +6,7 @@
 //   4. a later frame REPLACES the text (rolling summary), final drops "updating";
 //   5. a frame for another session is ignored;
 //   6. an empty-text frame (new prompt) blanks it; so does UserPromptSubmit;
-//   7. typing in the composer hides it (you're done reading);
+//   7. typing in the composer KEEPS it; sending clears it (you're done reading);
 //   8. it sits in the footer directly above the session-name row (#descrow), as
 //      light-blue text on the normal background — not a box over the terminal;
 //   9. subscribe re-asserts the preference (tldr frame right after subscribe).
@@ -104,12 +104,24 @@ check('empty frame blanks it', await page.evaluate(()=>tldrEl.hidden));
 await page.evaluate((CID)=>{handleJson({type:'tldr',cid:CID,text:'again',final:false}); handleJson({type:'hook',cid:CID,event:'UserPromptSubmit',busy:true,waiting:false,tool:null,data:{prompt:'x'}});}, CID);
 check('UserPromptSubmit blanks it', await page.evaluate(()=>tldrEl.hidden));
 
-// 7. typing hides it
+// 7. typing keeps it; sending clears it
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'read me',final:true}), CID);
 check('shown before typing', await page.evaluate(()=>!tldrEl.hidden));
 await page.evaluate(()=>{ box.focus(); });
 await page.keyboard.type('ok');
-check('typing hides it', await page.evaluate(()=>tldrEl.hidden && box.value==='ok'));
+check('typing keeps it on screen', await page.evaluate(()=>!tldrEl.hidden && box.value==='ok'));
+await page.evaluate((CID)=>deliverSend(CID, 'ok', null, 'typed'), CID);
+check('sending clears it', await page.evaluate(()=>tldrEl.hidden));
+await page.evaluate(()=>{ box.value=''; });
+
+// 7b. switching to another session blanks it — the summary must not follow you
+await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'stay here',final:true}), CID);
+check('shown before the switch', await page.evaluate(()=>!tldrEl.hidden));
+await page.evaluate(()=>{ subscribe('cid-other'); });
+check('switching sessions blanks the summary', await page.evaluate(()=>tldrEl.hidden && currentCid==='cid-other'));
+await page.evaluate(()=>handleJson({type:'tldr',cid:'cid-probe-1',text:'late frame for the OLD session',final:true}));
+check("the old session's late frame doesn't paint", await page.evaluate(()=>tldrEl.hidden));
+await page.evaluate((CID)=>{ subscribe(CID); }, CID);
 
 // 8. subscribe re-asserts the preference
 await page.evaluate((CID)=>{ window.__frames.length=0; subscribe(CID); }, CID);

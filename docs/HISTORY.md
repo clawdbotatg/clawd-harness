@@ -770,7 +770,8 @@ user-facing overview; this file orients an agent working **on** the code.
   hit the tldr button" → a rolling plain-English summary of the turn in
   flight, in a Facebook-blue block floating over the top of the terminal,
   updating every few seconds as claude writes, tightened once at Stop,
-  cleared the moment you type. The live text source was the whole problem:
+  cleared when you send (typing keeps it; it never follows you to another
+  session's tab). The live text source was the whole problem:
   the transcript JSONL lands each block whole (a 2k-char reply is one line,
   written when it finishes) and the PTY is never parsed — so the harness now
   runs an **API tee**: each claude session's `ANTHROPIC_BASE_URL` points at

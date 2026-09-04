@@ -529,7 +529,7 @@
      first cut was a blue box floating over the terminal; Austin wanted it down here).
      It sits in the footer flow, so the terminal shrinks as the summary grows — capped,
      scrolls inside. Blue on purpose — nothing else in this UI is that color, so the eye
-     finds it instantly. Clears the moment you type. Tap = dismiss. */
+     finds it instantly. Clears when you SEND (typing keeps it readable). Tap = dismiss. */
   #tldr { max-height:40vh; overflow-y:auto; color:#4a9eff; padding:6px 10px 4px;
           font-size:13px; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere;
           cursor:pointer; -webkit-overflow-scrolling:touch; }
@@ -1388,7 +1388,7 @@
            composer. Bounded (PILOT_MAX_ROUNDS); any send from you refills it. -->
       <!-- 🟦 live TLDR toggle: a rolling plain-English summary of the turn in
            flight, in a blue block over the terminal (see the #tldr rules) -->
-      <button id="tldrBtn" hidden title="Live TLDR — a plain-English summary of what claude is saying, in blue over the terminal, updating as it writes. Clears when you type. With 🔊 on, the speaker reads the summary instead of the whole reply.">🟦</button>
+      <button id="tldrBtn" hidden title="Live TLDR — a plain-English summary of what claude is saying, in blue over the terminal, updating as it writes. Clears when you send. With 🔊 on, the speaker reads the summary instead of the whole reply.">🟦</button>
       <input type="checkbox" id="pilotchk" hidden
              title="🤖 autopilot — let the harness keep this session working on its goal, narrating progress in a status row. Bounded; your own messages steer it." />
       <div id="ttystat" hidden role="img"><span class="dot"></span></div>
@@ -2044,6 +2044,7 @@ function flushOutbound() {
 // exactly that (controller sends have no via, so they never arm it).
 function deliverSend(cid, full, recover, via) {
   via = via || 'typed';
+  hideTldr();                                  // 🟦 sending = done reading (typing keeps it)
   stashOutbox(cid, recover);
   if (via !== 'quick') recordSent(cid, full);   // chips are canned one-liners — nothing to recover
   if (!hsend({ type: 'send', text: full, via })) { outbound.push({ cid, full, via }); scheduleReconnect(0); return; }
@@ -5534,6 +5535,7 @@ function subscribe(cid, opts) {
     term.reset();
   }
   feed.innerHTML = '';
+  hideTldr();                  // 🟦 the summary belongs to the session we're leaving (the new one re-sends its own)
   clearPending();              // queued boxes belong to the session we're leaving
   hideThinking();
   if (activeType) { activeType.finish(); activeType = null; }
@@ -5637,7 +5639,7 @@ function renderPilotUI() {
   const show = !!s && (v === 'tty' || v === 'transcript');
   pilotChk.hidden = !show;
   tldrBtn.hidden = !show;                  // 🟦 lives beside it, same rule
-  if (!show) { pilotRow.hidden = true; return; }
+  if (!show) { pilotRow.hidden = true; hideTldr(); return; }   // off the session view: no summary either
   if (s.cid !== pilotCidShown) { pilotCidShown = s.cid; pilotPendingAt = 0; }
   if (Date.now() - pilotPendingAt > 4000) pilotChk.checked = !!s.autopilot;
   const on = pilotChk.checked;
@@ -7295,7 +7297,7 @@ function autosizeBox() {
   box.style.height = 'auto';                       // let it shrink back when lines are removed
   box.style.height = box.scrollHeight + 'px';      // CSS min/max-height clamp the result
 }
-box.addEventListener('input', () => { saveDraft(); autosizeBox(); if (box.value) hideTldr(); });   // 🟦 typing = done reading
+box.addEventListener('input', () => { saveDraft(); autosizeBox(); });
 
 // -- don't yank the view while you're mid-message. Hook-driven auto-switches (a
 // question surfacing the TUI, then restoring) go through autoSetView, which parks
@@ -7519,7 +7521,7 @@ document.getElementById('keys').addEventListener('click', (e) => {
 // The server keeps a rolling haiku summary of the turn in flight (API tee →
 // RollingTldr, see server.py's API_TEE block) and streams it as `tldr` frames.
 // This side is deliberately dumb: show the latest text, blank it on a new turn,
-// hide it the moment the user types (they're done reading), and re-assert the
+// hide it when the user SENDS (typing keeps it on screen), and re-assert the
 // preference on every subscribe (server-side it's volatile). Per browser, like 🔊.
 const tldrEl = document.getElementById('tldr');
 const tldrTextEl = document.getElementById('tldrText');
