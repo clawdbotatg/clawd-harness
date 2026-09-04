@@ -9,7 +9,7 @@
 #   cd tools && ./checkall.sh          # everything; non-zero exit on any red
 #
 # Excluded by name (debug tools, not guards): uiprobe (screenshot driver),
-# probe-geom (needs a live pid/cid), brain_probe (screenshot driver).
+# probe-geom + tldrgeom (need a live pid/cid), brain_probe (screenshot driver).
 # Probes need server.py running on :8787 (it usually is — launchd KeepAlive).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -35,7 +35,7 @@ echo "== UI probes =="
 cd "$HERE" || exit 2
 for p in "$HERE"/*.mjs; do
   b=$(basename "$p")
-  case "$b" in uiprobe.mjs|probe-geom.mjs|brain_probe.mjs) continue;; esac
+  case "$b" in uiprobe.mjs|probe-geom.mjs|brain_probe.mjs|tldrgeom.mjs) continue;; esac
   run "$b" node "$p"
 done
 

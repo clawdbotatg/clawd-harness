@@ -90,7 +90,10 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   is (`say` frames). What you see is what you hear; no separate model
   decides what to say (that third loop existed for a few hours and was
   removed). Summary + both flags persist (ctor params + registry) so
-  restarts and handoffs don't wipe them. `test_tldr.py` + `tldrprobe.mjs`.
+  restarts and handoffs don't wipe them. `test_tldr.py` + `tldrprobe.mjs`;
+  the handoff doc is **`docs/TLDR-VOICE.md`** (data flow, every knob, the
+  client landmines, `tools/tldr_e2e.py` for a real isolated run,
+  `tools/tldrgeom.mjs` to measure a live session's overlay).
   Wall-display boxes (clawd-sat): `tools/kiosk/README.md`.
 
 ## Landmines (don't regress; stories in HISTORY.md)

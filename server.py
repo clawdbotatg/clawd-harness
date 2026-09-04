@@ -319,7 +319,9 @@ API_TEE_UPSTREAM = os.environ.get("API_TEE_UPSTREAM", "api.anthropic.com")
 API_TEE_TIMEOUT  = float(os.environ.get("API_TEE_TIMEOUT", "600"))
 API_TEE_MAIN_MIN = int(os.environ.get("API_TEE_MAIN_MIN", "15000"))  # request bytes: main-conversation call vs a small side call (title etc.)
 TLDR_MODEL       = os.environ.get("TLDR_MODEL", "") or "haiku"
-TLDR_MIN         = int(os.environ.get("TLDR_MIN", "160"))      # reply chars before the first pass
+TLDR_MIN         = int(os.environ.get("TLDR_MIN", "40"))       # reply chars before the first pass (was 160:
+                                                               # a 101-char reply got no blue text and the voice
+                                                               # read it raw, URL and all — 2026-09-05)
 TLDR_CTX         = int(os.environ.get("TLDR_CTX", "30000"))    # reply chars the summarizer reads (head)
 TLDR_TIMEOUT     = float(os.environ.get("TLDR_TIMEOUT", "90"))
 TLDR_SYS = (

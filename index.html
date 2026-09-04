@@ -7996,6 +7996,10 @@ setTts(ttsOn);
 const heldSay = [];
 function sayVoice(text) {
   if (!ttsOn || !text) return;
+  // for the ears: markdown/code stripped, a URL becomes "a link" (the summary is
+  // written for eyes; a short reply is read as is and may carry either)
+  text = speakable(text.replace(/https?:\/\/\S+/g, 'a link')).trim();
+  if (!text) return;
   if (recOn) { heldSay.push(text); return; }
   speak(text);
 }
