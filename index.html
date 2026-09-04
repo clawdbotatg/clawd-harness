@@ -1504,7 +1504,6 @@ function bottomJustifyTTY() {
   // making scrolling stutter. Bail cheaply (no layout reads) in that regime; justify
   // only matters for short, non-scrolling content.
   if (term.buffer && term.buffer.active && term.buffer.active.baseY > 0) {
-    if (screen.style.transform) screen.style.transform = '';
     // 🟦 hold: with the live TLDR on and no summary yet, keep the viewport `hold` rows
     // above the bottom so claude's chrome (input box + status line) is below the fold
     // and real scrollback fills the top — no black hole either way. Only nudge when
@@ -1513,7 +1512,19 @@ function bottomJustifyTTY() {
     if (hold) {
       const want = Math.min(hold + tldrTrailing(), b.baseY);
       if (dist < want) term.scrollLines(-(want - dist));
+      // The grid can overhang #term by a few px (a fit from a taller moment: the
+      // tab strip / a banner arrived after it), clipping the LAST row — harmless
+      // when that row is claude's blank cursor line, ugly when the hold makes it
+      // the thinking line (2026-09-05). Lift the grid by the overhang; the top
+      // row loses those px instead. (Layout reads, but only while a hold is on.)
+      const termEl = document.getElementById('term'), tcs = getComputedStyle(termEl);
+      const avail = termEl.clientHeight - parseFloat(tcs.paddingTop) - parseFloat(tcs.paddingBottom);
+      const over = Math.ceil(screen.offsetHeight - avail);
+      const want2 = over > 0 ? 'translateY(-' + over + 'px)' : '';
+      if (screen.style.transform !== want2) screen.style.transform = want2;
+      return;
     }
+    if (screen.style.transform) screen.style.transform = '';
     return;
   }
   let last = -1;
