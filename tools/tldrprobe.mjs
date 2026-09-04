@@ -140,7 +140,7 @@ const sb2 = await page.evaluate(()=>{ const b=term.buffer.active; const rowsEl=t
 check('one-line summary in scrollback: viewport held (5 − rows needed) up, box sits on the footer right under the thinking line',
   sb2.dist===sb2.hold+sb2.trailing && sb2.hold>0 && sb2.hold<5 && !sb2.hidden && Math.abs(sb2.boxBottom-sb2.leftBottom)<=1 && sb2.thinkBottom!=null && Math.abs(sb2.boxTop-sb2.thinkBottom)<=0.6 && sb2.thinkTop>=sb2.termTop-0.5, JSON.stringify(sb2));
 const fit1 = await page.evaluate(()=>{ const rowsEl=term.element.querySelector('.xterm-rows'); const cell=rowsEl.children[0].offsetHeight;
-  const r=tldrEl.getBoundingClientRect(), t=tldrEl.firstElementChild.getBoundingClientRect();
+  const r=tldrEl.getBoundingClientRect(), t=tldrInner.getBoundingClientRect();
   const screen=term.element.querySelector('.xterm-screen'); let last=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) last=i;
   return {cell, boxH:r.height, textH:t.height, slackBelow:r.bottom-t.bottom, hold:tldrHold(), need:tldrRowsNeeded(), transform:screen.style.transform, last, baseY:term.buffer.active.baseY, screenTop:screen.getBoundingClientRect().top, boxTop:r.top, holdLast:tldrHoldLast}; });
 const needWant = Math.ceil((fit1.textH + 5) / fit1.cell);
@@ -195,14 +195,21 @@ await page.waitForTimeout(150);
 await page.evaluate((CID)=>{ handleJson({type:'tldr',cid:CID,text:'back with text',final:false}); }, CID);
 check('overlay back once there is text again', await page.evaluate(()=>!tldrEl.hidden));
 
-// 8b. tapping the summary marks it read: hides + sends the mark
+// 8b. the ✕ marks it read (blanks + sends the mark); tapping the TEXT leaves it (selectable, copyable)
 await page.evaluate((CID)=>{ handleJson({type:'tldr',cid:CID,text:'read me now',final:false}); window.__frames.length=0; }, CID);
-const txy = await page.evaluate(()=>{const r=tldrEl.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};});
+const txy = await page.evaluate(()=>{const r=tldrText.getBoundingClientRect();return {x:r.x+20,y:r.y+r.height/2};});
 await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:txy.x,y:txy.y}]});
 await page.waitForTimeout(80);
 await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
 await page.waitForTimeout(200);
-check('tap on the summary blanks it + sends mark', (await gone()) && await page.evaluate((CID)=>window.__frames.some(f=>f.type==='tldr'&&f.cid===CID&&f.mark===true), CID));
+check('tap on the text does NOT clear it (selectable)', await page.evaluate(()=>tldrText.textContent==='read me now' && getComputedStyle(tldrEl).userSelect==='text' && window.__frames.length===0));
+const xxy = await page.evaluate(()=>{const r=tldrX.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,visible:r.width>0};});
+check('✕ visible in the box', xxy.visible);
+await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:xxy.x,y:xxy.y}]});
+await page.waitForTimeout(80);
+await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+await page.waitForTimeout(200);
+check('✕ blanks it + sends mark', (await gone()) && await page.evaluate((CID)=>window.__frames.some(f=>f.type==='tldr'&&f.cid===CID&&f.mark===true), CID));
 
 // 8b2. the DONE layout has two blank rows above the rules: the box must still start right under the done line
 await page.evaluate(()=>new Promise(res=>{ let t=''; for (let i=0;i<80;i++) t+='line '+i+'\r\n'; t+='* Crunched for 20s · done\r\n\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n'; term.write(t, res); }));
