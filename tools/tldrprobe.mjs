@@ -56,6 +56,7 @@ await page.waitForTimeout(300);
 await page.evaluate(()=>{ location.hash = '#/p/' + encodeURIComponent(projectRows().find(p=>p.name==='alpha').id); });
 await page.waitForTimeout(400);
 const CID='cid-probe-1';
+const TLDR_HOLD_GAP_PROBE = 4;
 
 // stub hsend so the toggle/subscribe frames are observable; pretend we're viewing the session
 // open the session's tty view for real (the row that holds 🤖 + 🟦 only lays out there)
@@ -124,6 +125,10 @@ await page.evaluate(()=>new Promise(res=>{ let t=''; for (let i=0;i<80;i++) t+='
 await page.waitForTimeout(150);
 const sb = await page.evaluate(()=>{ ttyBottom(); const b=term.buffer.active; return {baseY:b.baseY, dist:b.baseY-b.viewportY, atBottom:ttyAtBottom(), hold:tldrHold(), trailing:tldrTrailing()}; });
 check('scrollback, no summary: viewport held 5 rows + the blank cursor line up, still counts as at-bottom', sb.baseY>0 && sb.trailing===1 && sb.dist===5+sb.trailing && sb.atBottom && sb.hold===5, JSON.stringify(sb));
+await page.waitForTimeout(100);
+const gap = await page.evaluate(()=>{ const rowsEl=term.element.querySelector('.xterm-rows'); let lastRow=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) lastRow=i;
+  const r=rowsEl.children[lastRow].getBoundingClientRect(), t=document.getElementById('term').getBoundingClientRect(); return {text:rowsEl.children[lastRow].textContent.trim().slice(0,20), gap:+(t.bottom-r.bottom).toFixed(1)}; });
+check('no summary: the thinking line is last, with a few px of air under it', gap.text.startsWith('* Thinking') && gap.gap>=TLDR_HOLD_GAP_PROBE && gap.gap<TLDR_HOLD_GAP_PROBE+20, JSON.stringify(gap));
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'summary back',final:false}), CID);
 await page.waitForTimeout(120);
 const sb2 = await page.evaluate(()=>{ const b=term.buffer.active; const rowsEl=term.element.querySelector('.xterm-rows');

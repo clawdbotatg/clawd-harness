@@ -1519,8 +1519,9 @@ function bottomJustifyTTY() {
       // row loses those px instead. (Layout reads, but only while a hold is on.)
       const termEl = document.getElementById('term'), tcs = getComputedStyle(termEl);
       const avail = termEl.clientHeight - parseFloat(tcs.paddingTop) - parseFloat(tcs.paddingBottom);
-      const over = Math.ceil(screen.getBoundingClientRect().height - avail);
-      const want2 = over > 0 ? 'translateY(-' + over + 'px)' : '';
+      // …plus a small breather so the last line doesn't sit hard on the footer
+      const over = Math.max(0, Math.ceil(screen.getBoundingClientRect().height - avail)) + TLDR_HOLD_GAP;
+      const want2 = 'translateY(-' + over + 'px)';
       if (screen.style.transform !== want2) screen.style.transform = want2;
       return;
     }
@@ -1622,6 +1623,7 @@ term.onRender(() => { bottomJustifyTTY(); positionTldr(); });
 // render would stutter touch scrolling, bottomJustifyTTY's trap). The element itself is
 // declared further down with the rest of the 🟦 code; this runs after load.
 const TTY_COVER_ROWS = 5;   // blank · ─── · ❯ input · ─── · status line
+const TLDR_HOLD_GAP = 4;    // px of air under the last visible line while holding
 let tldrPosKey = '';
 // Set at the very end of the script, right before connect(). positionTldr is reached
 // DURING boot (the 🟦 block's clearTldr(), xterm renders) and, with the mode persisted
