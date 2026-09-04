@@ -64,6 +64,11 @@ await page.evaluate((CID)=>{ window.__frames=[]; hsend=(f)=>{window.__frames.pus
 await page.waitForTimeout(600);
 await page.evaluate((CID)=>{ currentCid=CID; renderPilotUI(); }, CID);
 check('landed in the tty view', await page.evaluate(()=>currentView()==='tty'));
+// real fonts give fractional row heights (18.67px…); force one so index×cell drift would show
+await page.evaluate(()=>{ term.options.lineHeight = 1.1; fit.fit(); });
+await page.waitForTimeout(200);
+const cellFrac = await page.evaluate(()=>term.element.querySelector('.xterm-rows').children[0].getBoundingClientRect().height);
+check('probe runs on a fractional row height', Math.abs(cellFrac - Math.round(cellFrac)) > 0.05, String(cellFrac));
 
 // 1. off by default
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'should not show',final:false}), CID);
@@ -95,6 +100,7 @@ check('no summary: thinking line visible, input box + status pushed below the fo
 
 // 3. a frame paints the overlay, live
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass.',final:false}), CID);
+await page.waitForTimeout(100);
 let st = await page.evaluate(()=>{ const rowsEl=term.element.querySelector('.xterm-rows');
   let last=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) last=i;
   const r=tldrEl.getBoundingClientRect(); const left=document.getElementById('left').getBoundingClientRect();
@@ -104,11 +110,12 @@ let st = await page.evaluate(()=>{ const rowsEl=term.element.querySelector('.xte
   top:r.top, want:rowsEl.children[last-TTY_COVER_ROWS+1].getBoundingClientRect().top,
   thinking:rowsEl.children[0].getBoundingClientRect().bottom, bottom:r.bottom, leftBottom:left.bottom}; });
 check('frame paints the overlay, marked updating', !st.hidden && st.text==='Fixed the bug. Tests pass.' && st.live, JSON.stringify(st));
-check('overlay in #left, flush under the thinking line, down to the footer', st.pos==='absolute' && st.parent==='left' && Math.abs(st.top-st.want)<=2 && st.top>=st.thinking-1 && Math.abs(st.bottom-st.leftBottom)<=1, JSON.stringify(st));
+check('overlay in #left, flush under the thinking line, down to the footer', st.pos==='absolute' && st.parent==='left' && Math.abs(st.top-st.want)<=0.6 && Math.abs(st.top-st.thinking)<=0.6 && Math.abs(st.bottom-st.leftBottom)<=1, JSON.stringify(st));
 check('light-blue text on black', st.color==='rgb(74, 158, 255)' && st.bg==='rgb(0, 0, 0)', JSON.stringify(st));
 const h1 = await page.evaluate(()=>({h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, term:document.getElementById('term').getBoundingClientRect().height}));
 check('painting text changed neither the footer nor #term height', h1.footer===h0.footer && h1.term===h0.term, JSON.stringify({h0,h1}));
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:('Long line of summary text. ').repeat(40),final:false}), CID);
+await page.waitForTimeout(100);
 const h2 = await page.evaluate(()=>({h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, term:document.getElementById('term').getBoundingClientRect().height, scrolls:tldrEl.scrollHeight>tldrEl.clientHeight}));
 check('a long summary scrolls inside; footer and #term unchanged', h2.footer===h0.footer && h2.term===h0.term && h2.scrolls, JSON.stringify({h0,h2}));
 // scrollback regime: fill the buffer, then with no summary the viewport sits 5 rows up
@@ -124,9 +131,9 @@ const sb2 = await page.evaluate(()=>{ const b=term.buffer.active; const rowsEl=t
   // the line above the chrome ("* Thinking…") must be the last visible terminal row, right above the box
   let think=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.includes('Thinking')) think=i;
   const tr = think>=0 ? rowsEl.children[think].getBoundingClientRect() : null;
-  return {dist:b.baseY-b.viewportY, hidden:tldrEl.hidden, hold:tldrHold(), trailing:tldrTrailing(), boxTop:r.top, boxBottom:r.bottom, leftBottom:left.bottom, thinkBottom: tr&&tr.bottom}; });
+  return {dist:b.baseY-b.viewportY, hidden:tldrEl.hidden, hold:tldrHold(), trailing:tldrTrailing(), boxTop:r.top, boxBottom:r.bottom, leftBottom:left.bottom, thinkBottom: tr&&tr.bottom, thinkTop: tr&&tr.top, termTop:document.getElementById('term').getBoundingClientRect().top}; });
 check('one-line summary in scrollback: viewport held (5 − rows needed) up, box sits on the footer right under the thinking line',
-  sb2.dist===sb2.hold+sb2.trailing && sb2.hold>0 && sb2.hold<5 && !sb2.hidden && Math.abs(sb2.boxBottom-sb2.leftBottom)<=1 && sb2.thinkBottom!=null && Math.abs(sb2.boxTop-sb2.thinkBottom)<=2, JSON.stringify(sb2));
+  sb2.dist===sb2.hold+sb2.trailing && sb2.hold>0 && sb2.hold<5 && !sb2.hidden && Math.abs(sb2.boxBottom-sb2.leftBottom)<=1 && sb2.thinkBottom!=null && Math.abs(sb2.boxTop-sb2.thinkBottom)<=0.6 && sb2.thinkTop>=sb2.termTop-0.5, JSON.stringify(sb2));
 const fit1 = await page.evaluate(()=>{ const rowsEl=term.element.querySelector('.xterm-rows'); const cell=rowsEl.children[0].offsetHeight;
   const r=tldrEl.getBoundingClientRect(), t=tldrEl.firstElementChild.getBoundingClientRect();
   const screen=term.element.querySelector('.xterm-screen'); let last=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) last=i;

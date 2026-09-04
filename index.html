@@ -1519,7 +1519,7 @@ function bottomJustifyTTY() {
       // row loses those px instead. (Layout reads, but only while a hold is on.)
       const termEl = document.getElementById('term'), tcs = getComputedStyle(termEl);
       const avail = termEl.clientHeight - parseFloat(tcs.paddingTop) - parseFloat(tcs.paddingBottom);
-      const over = Math.ceil(screen.offsetHeight - avail);
+      const over = Math.ceil(screen.getBoundingClientRect().height - avail);
       const want2 = over > 0 ? 'translateY(-' + over + 'px)' : '';
       if (screen.style.transform !== want2) screen.style.transform = want2;
       return;
@@ -1535,7 +1535,7 @@ function bottomJustifyTTY() {
   // and an idle session emits no further render to recover, so the terminal
   // vanishes entirely. This is the "I can't see the tty at all" bug.
   if (last < 0) { screen.style.transform = ''; return; }
-  const cell = rowsEl.children[0].offsetHeight || 0;
+  const cell = rowsEl.children[0].getBoundingClientRect().height || 0;   // fractional: integer drifts a row over a screenful
   // Anchor the last content row a constant GAP px above #term's inner bottom edge.
   // Measure against the *container's* content height — NOT the rendered grid height
   // (screen.clientHeight) — so the gap stays consistent regardless of xterm's
@@ -1590,7 +1590,7 @@ function tldrRowsNeeded() {
   const el = document.getElementById('tldr'), inner = el.firstElementChild;
   if (!inner || !inner.textContent.replace(/^tldr/, '').trim()) return 0;
   const rowsEl = term.element && term.element.querySelector('.xterm-rows');
-  const cell = rowsEl && rowsEl.children.length ? rowsEl.children[0].offsetHeight : 0;
+  const cell = rowsEl && rowsEl.children.length ? rowsEl.children[0].getBoundingClientRect().height : 0;
   if (!cell) return TTY_COVER_ROWS;
   const wasHidden = el.hidden;
   if (wasHidden) el.hidden = false;                 // lay it out to measure (width is fixed by left/right)
@@ -1650,15 +1650,30 @@ function positionTldr() {
   const first = lastBuf - TTY_COVER_ROWS + 1 - b.viewportY;          // first covered row, as rendered
   if (first < 0 || first >= rowsEl.children.length) { el.hidden = true; tldrPosKey = ''; return; }
   const key = term.rows + '|' + term.cols + '|' + screen.style.transform + '|' + first + '|' + b.viewportY + '|' + document.getElementById('left').clientHeight;
-  if (key === tldrPosKey && !el.hidden) return;
-  tldrPosKey = key;
-  // arithmetic from the screen's box + cell height, not the row's own rect: right after
-  // a scrollLines() the rows repaint on the next frame, so a row rect can be stale
-  const leftTop = document.getElementById('left').getBoundingClientRect().top;
-  const cell = rowsEl.children[0].offsetHeight || 0;
-  const top = screen.getBoundingClientRect().top + first * cell - leftTop;
-  el.style.top = Math.max(0, Math.round(top)) + 'px';
   el.hidden = false;
+  if (key === tldrPosKey) return;
+  tldrPosKey = key;
+  tldrPlace(2);
+}
+// Place the box on the NEXT frame, from the first covered row's own rectangle — never
+// "index × cell": row heights are fractional (18.67px…) and an integer cell drifts a
+// whole row over a screenful (2026-09-05: box a row off, thinking line cut in half).
+// A frame later because scrollLines()/transforms paint on the next frame; then one
+// more frame to verify, correcting if the rows moved under us.
+function tldrPlace(tries) {
+  requestAnimationFrame(() => {
+    const el = document.getElementById('tldr');
+    if (el.hidden) return;
+    const rowsEl = term.element && term.element.querySelector('.xterm-rows');
+    const b = term.buffer && term.buffer.active, lastBuf = tldrLastBuf();
+    if (!rowsEl || !b || lastBuf < 0) return;
+    const first = lastBuf - TTY_COVER_ROWS + 1 - b.viewportY;
+    if (first < 0 || first >= rowsEl.children.length) { el.hidden = true; tldrPosKey = ''; return; }
+    const leftTop = document.getElementById('left').getBoundingClientRect().top;
+    const top = Math.max(0, rowsEl.children[first].getBoundingClientRect().top - leftTop);
+    if (Math.abs((parseFloat(el.style.top) || 0) - top) > 0.5) el.style.top = top + 'px';
+    if (tries > 1) tldrPlace(tries - 1);
+  });
 }
 
 // Repaint on scroll — the companion to the touch-scroll fix above. xterm's DOM
