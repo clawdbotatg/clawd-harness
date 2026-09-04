@@ -329,10 +329,11 @@ TLDR_SYS = (
     "decision. Keep the previous TLDR word for word where it is still true "
     "and add to the end; rewrite a sentence only if new text made it wrong. "
     "Never mention things the reply has not said yet. Drop process, praise, "
-    "hedging, restatement, headers, code. Keep outcomes, what changed, what "
-    "is broken, what is next, and any question asked of the person. Hard "
-    "cap: 120 words — when adding would run over, tighten the oldest "
-    "sentences instead. The reply may stop mid-sentence: cover only "
+    "hedging, restatement, headers, code, adjectives, examples, background. "
+    "Keep outcomes, what changed, what is broken, what is next, and any "
+    "question asked of the person. Terse like a text message. Obey the word "
+    "limit given with each request — when adding would run over, tighten the "
+    "oldest sentences instead. The reply may stop mid-sentence: cover only "
     "complete thoughts and never say it is incomplete or cut off. Output "
     "only the TLDR, plain text, no markdown.")
 TLDR_FINAL = (
@@ -416,6 +417,15 @@ class SseTextTap:
         return out
 
 
+def tldr_budget(text, final):
+    """Word cap for one pass, sized to the reply: a sixth of its words live, an
+    eighth once complete, clamped 15-60 (final 12-50). Haiku ignored a fixed
+    "120 words"; it follows a small explicit number (2026-09-04: "not short
+    enough — as few words as possible")."""
+    n = len((text or "").split())
+    return max(12, min(50, n // 8)) if final else max(15, min(60, n // 6))
+
+
 def _tldr_call(text, prev, final, config_dir=None):
     """One summarizer pass: `claude -p --model haiku`, own system prompt, no
     tools/MCP/settings/session file, thinking off, empty cwd. Auth = the
@@ -428,9 +438,11 @@ def _tldr_call(text, prev, final, config_dir=None):
     else:
         env.pop("CLAUDE_CONFIG_DIR", None)
     text = text[:TLDR_CTX]
+    budget = tldr_budget(text, final)
     user = (("COMPLETE REPLY:" if final else "REPLY SO FAR (still being written):")
             + "\n<<<\n" + text + "\n>>>\n\nPREVIOUS TLDR:\n<<<\n"
-            + (prev or "(none yet)") + "\n>>>\n\nUpdated TLDR:")
+            + (prev or "(none yet)") + f"\n>>>\n\nHARD LIMIT: under {budget} words. "
+            "Fewer is better. Updated TLDR:")
     with tempfile.TemporaryDirectory() as d:
         r = subprocess.run(
             [CLAUDE_BIN, "-p", "--model", TLDR_MODEL,
@@ -441,12 +453,22 @@ def _tldr_call(text, prev, final, config_dir=None):
             capture_output=True, text=True, timeout=TLDR_TIMEOUT)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout).strip()[-300:])
-    return tldr_tidy(r.stdout.strip(), final)
+    return tldr_tidy(r.stdout.strip(), final, budget)
 
 
-def tldr_tidy(out, final):
+def tldr_tidy(out, final, budget=0):
     """Non-final passes echo the reply's ragged edge ("Catches boomed t"):
-    drop a trailing unfinished sentence when a finished one precedes it."""
+    drop a trailing unfinished sentence when a finished one precedes it. A
+    budget (words) is a backstop for a model that ran long anyway: cut at the
+    last sentence end inside 1.4× the budget."""
+    if budget and len(out.split()) > budget * 1.4:
+        words = out.split()
+        clipped = " ".join(words[:int(budget * 1.4)])
+        m = None
+        for m in re.finditer(r'[.!?]["\')\]]*', clipped):
+            pass
+        if m and m.end() >= len(clipped) // 2:
+            out = clipped[:m.end()].rstrip()
     if final or not out or re.search(r'[.!?]["\')\]]*\s*$', out):
         return out
     m = None
@@ -2875,6 +2897,7 @@ class ClaudeSession:
         self.tldr_on = False                      # a viewer wants the blue block
         self.tldr_turn_text = ""                  # this turn's streamed assistant prose (API tee)
         self.tldr_text = ""                       # current summary (re-sent to late subscribers)
+        self.tldr_read_at = 0                     # chars of tldr_turn_text the viewer marked read (tap)
         self._tldr = None                         # RollingTldr for the turn in flight
         self._tldr_lock = threading.Lock()
         self.blocked_on = None                    # the open question if it ended asking the human (LLM)
@@ -3086,11 +3109,23 @@ class ClaudeSession:
             os.setsid()
             fcntl.ioctl(slave, termios.TIOCSCTTY, 0)  # slave becomes controlling tty
 
-        self.proc = subprocess.Popen(
-            cmd, cwd=self.workdir(), env=env,
-            stdin=slave, stdout=slave, stderr=slave,
-            preexec_fn=_preexec, close_fds=True,
-        )
+        try:
+            self.proc = subprocess.Popen(
+                cmd, cwd=self.workdir(), env=env,
+                stdin=slave, stdout=slave, stderr=slave,
+                preexec_fn=_preexec, close_fds=True,
+            )
+        except OSError as e:
+            # The engine binary is gone (2026-09-04: leftclaw's registry held a
+            # codex session and `codex` had vanished from launchd's PATH — the
+            # daemon died in MGR.load() on every boot, 89 relaunches, before
+            # its self-update thread could even start). One dead session must
+            # never take the box down: mark it and carry on.
+            os.close(slave); os.close(master)
+            self.proc, self.master_fd, self.alive = None, None, False
+            print(f"[session {self.cid[:8]}] ⚠ {self.engine} would not start: {e} "
+                  "— session marked dead, daemon continues", flush=True)
+            return
         os.close(slave)                          # parent only needs the master
         self.master_fd = master
         self.os_pid = self.proc.pid
@@ -4375,14 +4410,15 @@ class ClaudeSession:
     def _tldr_kick(self):
         """Feed the loop the whole reply so far (starting it on first use)."""
         with self._tldr_lock:
-            if len(self.tldr_turn_text) < TLDR_MIN:
+            unread = self.tldr_turn_text[self.tldr_read_at:]
+            if len(unread) < TLDR_MIN:
                 return
             if self._tldr is None:
                 cfg = self.config_dir
                 self._tldr = RollingTldr(
                     self._tldr_emit,
                     lambda t, p, f: _tldr_call(t, p, f, cfg))
-            self._tldr.feed(self.tldr_turn_text)
+            self._tldr.feed(unread)
 
     def _tldr_emit(self, summary, final):
         self.tldr_text = summary
@@ -4391,11 +4427,22 @@ class ClaudeSession:
     def tldr_turn_reset(self):
         """A new prompt: abandon the old loop, blank the block everywhere."""
         with self._tldr_lock:
-            self.tldr_turn_text, self.tldr_text = "", ""
+            self.tldr_turn_text, self.tldr_text, self.tldr_read_at = "", "", 0
             r, self._tldr = self._tldr, None
         if r:
             r.stop()
         self._to_subscribers_json(self._tldr_frame("", False))
+
+    def tldr_mark(self):
+        """The viewer tapped the summary: read up to here. Forget it, and
+        summarize only prose streamed after this point from now on."""
+        with self._tldr_lock:
+            self.tldr_read_at = len(self.tldr_turn_text)
+            self.tldr_text = ""
+            r, self._tldr = self._tldr, None
+        if r:
+            r.stop()                             # a pass over the read part is stale now
+        self._to_subscribers_json(self._tldr_frame("", not self.busy))
 
     def tldr_turn_done(self):
         """Stop: the loop's last pass (complete text) tightens; then it exits."""
@@ -6883,6 +6930,12 @@ class SessionManager:
         if s:
             s.set_tldr(on)
 
+    def tldr_mark(self, cid):
+        """🟦 the viewer tapped the summary: read this far."""
+        s = self.get(cid)
+        if s:
+            s.tldr_mark()
+
     def autopilot(self, cid, on):
         """🤖 engage/disengage autopilot on a session (the checkbox beside the
         state square). Engaging derives the goal and — if the session is idle —
@@ -7984,7 +8037,10 @@ class Handler(BaseHTTPRequestHandler):
         elif t == "autopilot":
             MGR.autopilot(frame.get("cid"), bool(frame.get("on", True)))
         elif t == "tldr":
-            MGR.tldr(frame.get("cid"), bool(frame.get("on", True)))
+            if frame.get("mark"):
+                MGR.tldr_mark(frame.get("cid"))
+            else:
+                MGR.tldr(frame.get("cid"), bool(frame.get("on", True)))
         elif t == "createProject":
             MGR.create_project(frame.get("name", ""))
         elif t == "addProject":

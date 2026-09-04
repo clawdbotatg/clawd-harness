@@ -529,7 +529,8 @@
      first cut was a blue box floating over the terminal; Austin wanted it down here).
      It sits in the footer flow, so the terminal shrinks as the summary grows — capped,
      scrolls inside. Blue on purpose — nothing else in this UI is that color, so the eye
-     finds it instantly. Clears when you SEND (typing keeps it readable). Tap = dismiss. */
+     finds it instantly. Clears when you SEND (typing keeps it readable). Tap = "read this
+     far": hides it and marks the prose so far as read; the next summary covers only new text. */
   #tldr { max-height:40vh; overflow-y:auto; color:#4a9eff; padding:6px 10px 4px;
           font-size:13px; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere;
           cursor:pointer; -webkit-overflow-scrolling:touch; }
@@ -7544,7 +7545,8 @@ function setTldr(on) {
   if (!on) hideTldr();
 }
 tldrBtn.onclick = () => setTldr(!tldrOn);
-tldrEl.onclick = hideTldr;                 // tap = dismiss (the terminal underneath has the real thing)
+// tap = "read this far": hide it, and tell the server so later passes summarize only NEW prose
+tldrEl.onclick = () => { hideTldr(); if (currentCid) hsend({ type: 'tldr', cid: currentCid, mark: true }); };
 tldrBtn.classList.toggle('on', tldrOn);
 
 // -- voice: read replies aloud (TTS) + dictate into the box (STT) -------------

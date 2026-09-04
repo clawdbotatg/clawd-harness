@@ -128,6 +128,15 @@ await page.evaluate((CID)=>{ window.__frames.length=0; subscribe(CID); }, CID);
 const sub = await page.evaluate(()=>window.__frames.map(f=>f.type));
 check('subscribe is followed by the tldr verb', sub[0]==='subscribe' && sub[1]==='tldr', JSON.stringify(sub));
 
+// 8b. tapping the summary marks it read: hides + sends the mark
+await page.evaluate((CID)=>{ handleJson({type:'tldr',cid:CID,text:'read me now',final:false}); window.__frames.length=0; }, CID);
+const txy = await page.evaluate(()=>{const r=tldrEl.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};});
+await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:txy.x,y:txy.y}]});
+await page.waitForTimeout(80);
+await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+await page.waitForTimeout(200);
+check('tap on the summary hides it + sends mark', await page.evaluate((CID)=>tldrEl.hidden && window.__frames.some(f=>f.type==='tldr'&&f.cid===CID&&f.mark===true), CID));
+
 // 9. off again hides + sends off
 await page.evaluate((CID)=>{handleJson({type:'tldr',cid:CID,text:'bye',final:true}); window.__frames.length=0; setTldr(false);}, CID);
 check('off hides + sends the verb', await page.evaluate(()=>tldrEl.hidden && !tldrOn && window.__frames.some(f=>f.type==='tldr'&&f.on===false)));

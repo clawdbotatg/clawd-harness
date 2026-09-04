@@ -74,6 +74,17 @@ for n in (1, 7, 33):
 tap = server.SseTextTap()
 check("garbage that never ends an event yields nothing", tap.feed(b"data: {not json") == [])
 
+print("tldr_budget:")
+check("short reply → floor", server.tldr_budget("a b c", False) == 15 and server.tldr_budget("a b c", True) == 12)
+check("600-word reply → 100 capped to 60 live / 50 final",
+      server.tldr_budget("w " * 600, False) == 60 and server.tldr_budget("w " * 600, True) == 50)
+check("180-word reply → 30 live, 22 final",
+      server.tldr_budget("w " * 180, False) == 30 and server.tldr_budget("w " * 180, True) == 22)
+long = "This is a sentence. " * 30                     # 120 words, sentence every 4
+check("tidy cuts a long-running summary at a sentence end inside 1.4× budget",
+      len(server.tldr_tidy(long, True, 20).split()) <= 28 and server.tldr_tidy(long, True, 20).endswith("."))
+check("tidy leaves a within-budget summary alone", server.tldr_tidy("Short. Done.", True, 20) == "Short. Done.")
+
 print("tldr_tidy:")
 check("finished sentence untouched", server.tldr_tidy("Fixed. Tests pass.", False) == "Fixed. Tests pass.")
 check("ragged tail dropped on a live pass", server.tldr_tidy("Fixed. Tests pass. Catches boomed t", False) == "Fixed. Tests pass.")
