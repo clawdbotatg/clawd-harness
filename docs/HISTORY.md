@@ -799,14 +799,21 @@ user-facing overview; this file orients an agent working **on** the code.
   (a sentence that came back unchanged from the previous pass — the
   annealing, drawn solid vs 70% on screen via the `tldr` frame's `sents`),
   the raw reply tail, and its own said-log for the turn, and decides per pass
-  whether to say something (`say` frames). No word caps — Austin's rules
-  instead (`VOICE_SYS`): the listener test (speak only if the listener would
-  act, decide, or think differently), length follows the thing that changed,
-  one idea per utterance, never repeat, outcomes not steps, ears-first
-  wording (first person, no paths/symbols/long identifiers, round numbers),
-  corrections start with "Correction,", waiting-on-you beats everything,
-  the finish says only what's new. It speaks in broken phrases as facts
-  settle, not all at once at the end. Client: lines are held while the mic
+  whether to say something (`say` frames). Rules in `VOICE_SYS`: speak as
+  information arrives (forming sentences included — the first cut waited for
+  settled ones and stayed silent through whole replies), one idea per line,
+  never repeat, outcomes not steps, ears-first wording (first person, no
+  paths/symbols/long identifiers, round numbers, never "the reply is
+  asking…" — ask the question directly), corrections start with
+  "Correction,", waiting-on-you beats everything, a finished reply ALWAYS
+  speaks (if the model returns empty the loop speaks the summary's opening).
+  **Word budget** (same day, after the voice spoke more words than the
+  reply had typed): the whole turn may total a tenth of the reply's words
+  (`voice_budget`, floor 10), the remainder rides in each prompt, and the
+  loop enforces it — clip a long line to its first sentence, drop
+  near-repeats (difflib > 0.6), drop what still doesn't fit; the finish
+  keeps its question. Measured: 43 words over a 400-word reply, five lines,
+  first at +9s. Client: lines are held while the mic
   is open and spoken on release; a new prompt cancels the queue; the voice
   flag rides the `tldr` verb (`voice:true/false`) with every subscribe and
   either toggle. Cost: one more haiku call per pass that settled something.
@@ -838,9 +845,18 @@ user-facing overview; this file orients an agent working **on** the code.
   terminal, and a refit = PTY resize + claude redraw + reset-and-replay on
   every other viewer. The first footer version grew with each pass and made
   "multiple sessions reload over and over" (same night). Never let this
-  row's height move during a turn.
-  With 🔊 on, the speaker reads the final
-  summary instead of the raw stream. Knobs: `API_TEE=0` (sessions go direct,
+  row's height move during a turn. Later the same day: the row became an
+  OVERLAY over claude's bottom chrome (the rules · ❯ · status line), flush
+  under the thinking line, box sized to its text, the terminal content
+  sliding down to meet it (a viewport hold with scrollback, a translate
+  without) so no black hole either way; the chrome height is MEASURED from
+  the buffer (5 rows running, 6 done — a fixed 5 left a blank row showing);
+  the box is placed from the real row rectangle on the frame after paint
+  (index × integer cell drifted a whole row on real fonts); and
+  `tldr_text` + the 🟦/🔊 flags are ctor params + registry fields, because
+  every daemon restart and account-handoff respawn used to wipe the summary
+  ("why is the tldr not showing up at all"). With 🔊 on, the 🔊 voice
+  entry above replaces reading the summary aloud. Knobs: `API_TEE=0` (sessions go direct,
   feature off), `API_TEE_PORT` (8791), `TLDR_MODEL`, `TLDR_MIN/CTX/TIMEOUT`.
   An operator-exported `ANTHROPIC_BASE_URL` (a gateway) wins and disables
   the tee. Guards: `test_tldr.py` (path routing, main-call gate, SSE tap
