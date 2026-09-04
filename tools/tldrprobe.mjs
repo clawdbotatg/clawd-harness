@@ -2,6 +2,8 @@
 // summary floating over the terminal while claude writes. Contract pinned:
 //   1. off by default: a tldr frame with the toggle off shows nothing;
 //   2. tapping 🟦 (real touch) turns it on, persists, and sends {type:'tldr',on:true};
+//   2b. the row is a FIXED-height footer slot whenever the mode is on — its height
+//       must not change between passes (a footer resize = PTY resize + replay storm);
 //   3. a tldr frame for the VIEWED session paints the block (live = "updating…");
 //   4. a later frame REPLACES the text (rolling summary), final drops "updating";
 //   5. a frame for another session is ignored;
@@ -66,6 +68,7 @@ check('landed in the tty view', await page.evaluate(()=>currentView()==='tty'));
 // 1. off by default
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'should not show',final:false}), CID);
 check('off by default: frame shows nothing', await page.evaluate(()=>tldrEl.hidden && !tldrOn));
+const gone = () => page.evaluate(()=>tldrTextEl.textContent==='' && tldrEl.classList.contains('empty'));
 
 // 2. tap 🟦 (real touch)
 const cdp = await page.context().newCDPSession(page);
@@ -78,6 +81,8 @@ await page.waitForTimeout(200);
 const on = await page.evaluate((CID)=>({on:tldrOn, cls:tldrBtn.classList.contains('on'), ls:localStorage.getItem('cc_tldr'),
   frame:window.__frames.find(f=>f.type==='tldr'&&f.cid===CID&&f.on===true)}), CID);
 check('tap turns it on + persists + sends the verb', on.on && on.cls && on.ls==='1' && !!on.frame, JSON.stringify(on));
+const h0 = await page.evaluate(()=>({hidden:tldrEl.hidden, h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height}));
+check('mode on: the empty slot is already in the footer', !h0.hidden && h0.h>40, JSON.stringify(h0));
 
 // 3. a frame paints the block, live
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass.',final:false}), CID);
@@ -86,6 +91,12 @@ let st = await page.evaluate(()=>({hidden:tldrEl.hidden, text:tldrText.textConte
   color:getComputedStyle(tldrEl).color, bg:getComputedStyle(tldrEl).backgroundColor,
   above: tldrEl.getBoundingClientRect().bottom <= descrow.getBoundingClientRect().top + 1}));
 check('frame paints the row, marked updating', !st.hidden && st.text==='Fixed the bug. Tests pass.' && st.live, JSON.stringify(st));
+const h1 = await page.evaluate(()=>({h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height}));
+check('painting text did not change the row or footer height', h1.h===h0.h && h1.footer===h0.footer, JSON.stringify({h0,h1}));
+await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:('Long line of summary text. ').repeat(40),final:false}), CID);
+const h2 = await page.evaluate(()=>({h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, scrolls:tldrEl.scrollHeight>tldrEl.clientHeight}));
+check('a long summary scrolls inside; footer height still unchanged', h2.h===h0.h && h2.footer===h0.footer && h2.scrolls, JSON.stringify({h0,h2}));
+await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'Fixed the bug. Tests pass.',final:false}), CID);
 check('sits in the footer right above the session-name row', st.pos==='static' && st.parent==='FOOTER' && st.next==='descrow' && st.above, JSON.stringify(st));
 check('light-blue text on the normal background', st.color==='rgb(74, 158, 255)' && st.bg==='rgba(0, 0, 0, 0)', JSON.stringify(st));
 
@@ -100,27 +111,27 @@ check('other session ignored', await page.evaluate(()=>tldrText.textContent==='F
 
 // 6. empty text = new turn → blank; UserPromptSubmit too
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'',final:false}), CID);
-check('empty frame blanks it', await page.evaluate(()=>tldrEl.hidden));
+check('empty frame blanks it', await gone());
 await page.evaluate((CID)=>{handleJson({type:'tldr',cid:CID,text:'again',final:false}); handleJson({type:'hook',cid:CID,event:'UserPromptSubmit',busy:true,waiting:false,tool:null,data:{prompt:'x'}});}, CID);
-check('UserPromptSubmit blanks it', await page.evaluate(()=>tldrEl.hidden));
+check('UserPromptSubmit blanks it', await gone());
 
 // 7. typing keeps it; sending clears it
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'read me',final:true}), CID);
-check('shown before typing', await page.evaluate(()=>!tldrEl.hidden));
+check('shown before typing', await page.evaluate(()=>tldrTextEl.textContent==='read me'));
 await page.evaluate(()=>{ box.focus(); });
 await page.keyboard.type('ok');
-check('typing keeps it on screen', await page.evaluate(()=>!tldrEl.hidden && box.value==='ok'));
+check('typing keeps it on screen', await page.evaluate(()=>tldrTextEl.textContent==='read me' && box.value==='ok'));
 await page.evaluate((CID)=>deliverSend(CID, 'ok', null, 'typed'), CID);
-check('sending clears it', await page.evaluate(()=>tldrEl.hidden));
+check('sending clears it', await gone());
 await page.evaluate(()=>{ box.value=''; });
 
 // 7b. switching to another session blanks it — the summary must not follow you
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'stay here',final:true}), CID);
-check('shown before the switch', await page.evaluate(()=>!tldrEl.hidden));
+check('shown before the switch', await page.evaluate(()=>tldrTextEl.textContent==='stay here'));
 await page.evaluate(()=>{ subscribe('cid-other'); });
-check('switching sessions blanks the summary', await page.evaluate(()=>tldrEl.hidden && currentCid==='cid-other'));
+check('switching sessions blanks the summary', (await gone()) && await page.evaluate(()=>currentCid==='cid-other'));
 await page.evaluate(()=>handleJson({type:'tldr',cid:'cid-probe-1',text:'late frame for the OLD session',final:true}));
-check("the old session's late frame doesn't paint", await page.evaluate(()=>tldrEl.hidden));
+check("the old session's late frame doesn't paint", await gone());
 await page.evaluate((CID)=>{ subscribe(CID); }, CID);
 
 // 8. subscribe re-asserts the preference
@@ -135,11 +146,11 @@ await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:txy
 await page.waitForTimeout(80);
 await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
 await page.waitForTimeout(200);
-check('tap on the summary hides it + sends mark', await page.evaluate((CID)=>tldrEl.hidden && window.__frames.some(f=>f.type==='tldr'&&f.cid===CID&&f.mark===true), CID));
+check('tap on the summary blanks it + sends mark', (await gone()) && await page.evaluate((CID)=>window.__frames.some(f=>f.type==='tldr'&&f.cid===CID&&f.mark===true), CID));
 
 // 9. off again hides + sends off
 await page.evaluate((CID)=>{handleJson({type:'tldr',cid:CID,text:'bye',final:true}); window.__frames.length=0; setTldr(false);}, CID);
-check('off hides + sends the verb', await page.evaluate(()=>tldrEl.hidden && !tldrOn && window.__frames.some(f=>f.type==='tldr'&&f.on===false)));
+check('off hides the slot + sends the verb', await page.evaluate(()=>tldrEl.hidden && !tldrOn && window.__frames.some(f=>f.type==='tldr'&&f.on===false)));
 
 check('no page errors', errors.length===0, errors.join(' | '));
 await browser.close();

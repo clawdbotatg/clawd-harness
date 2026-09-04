@@ -793,6 +793,12 @@ user-facing overview; this file orients an agent working **on** the code.
   otherwise). Shown as light-blue text in the footer right above the
   session-name row (the first cut was a blue box floating over the terminal;
   Austin wanted it down here) — the 🟦 toggle sits left of the 🤖 checkbox.
+  **The row is a FIXED-height slot**, present whenever the mode is on and
+  blank when empty: the footer is under a ResizeObserver that refits the
+  terminal, and a refit = PTY resize + claude redraw + reset-and-replay on
+  every other viewer. The first footer version grew with each pass and made
+  "multiple sessions reload over and over" (same night). Never let this
+  row's height move during a turn.
   With 🔊 on, the speaker reads the final
   summary instead of the raw stream. Knobs: `API_TEE=0` (sessions go direct,
   feature off), `API_TEE_PORT` (8791), `TLDR_MODEL`, `TLDR_MIN/CTX/TIMEOUT`.
