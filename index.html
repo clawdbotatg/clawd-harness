@@ -1503,7 +1503,10 @@ function bottomJustifyTTY() {
     // and real scrollback fills the top — no black hole either way. Only nudge when
     // the reader is at (our notion of) the bottom; a deliberate scroll-up stands.
     const hold = tldrHold(), b = term.buffer.active, dist = b.baseY - b.viewportY;
-    if (hold && dist < hold) term.scrollLines(-(Math.min(hold, b.baseY) - dist));
+    if (hold) {
+      const want = Math.min(hold + tldrTrailing(), b.baseY);
+      if (dist < want) term.scrollLines(-(want - dist));
+    }
     return;
   }
   let last = -1;
@@ -1548,6 +1551,22 @@ function tldrHold() {
   // to meet it — no black under the summary (2026-09-05, complaint #3).
   return TTY_COVER_ROWS - tldrRowsNeeded();
 }
+// the buffer line of the last content (claude's status line) — within the last screenful
+function tldrLastBuf() {
+  const b = term.buffer && term.buffer.active;
+  if (!b) return -1;
+  for (let i = b.length - 1; i >= Math.max(0, b.length - term.rows - TTY_COVER_ROWS); i--) {
+    const ln = b.getLine(i);
+    if (ln && ln.translateToString(true).trim()) return i;
+  }
+  return -1;
+}
+// blank buffer lines under the status line (claude parks the cursor there): with a
+// hold on they're hidden too, or they'd sit as black inside the summary box
+function tldrTrailing() {
+  const b = term.buffer && term.buffer.active, lb = tldrLastBuf();
+  return (!b || lb < 0 || b.baseY === 0) ? 0 : (b.length - 1 - lb);
+}
 // rows of the grid the summary box needs (1..TTY_COVER_ROWS); 0 with no summary
 function tldrRowsNeeded() {
   const el = document.getElementById('tldr'), inner = el.firstElementChild;
@@ -1565,7 +1584,7 @@ function tldrRowsNeeded() {
 function ttyBottom() {
   term.scrollToBottom();
   const hold = tldrHold(), b = term.buffer && term.buffer.active;
-  if (hold && b && b.baseY > 0) term.scrollLines(-Math.min(hold, b.baseY));
+  if (hold && b && b.baseY > 0) term.scrollLines(-Math.min(hold + tldrTrailing(), b.baseY));
 }
 let tldrHoldLast = 0;
 // the hold flipped (summary landed / cleared, mode toggled, waiting) → re-seat the view
@@ -1608,12 +1627,7 @@ function positionTldr() {
   // The chrome = the TTY_COVER_ROWS buffer lines ending at the last non-blank line.
   // Read the BUFFER, not the rendered rows: with a hold on, the last chrome rows are
   // below the viewport and a DOM scan would take the line above the chrome for it.
-  const b = term.buffer.active;
-  let lastBuf = -1;                          // content ends within the last screenful (+ held rows)
-  for (let i = b.length - 1; i >= Math.max(0, b.length - term.rows - TTY_COVER_ROWS); i--) {
-    const ln = b.getLine(i);
-    if (ln && ln.translateToString(true).trim()) { lastBuf = i; break; }
-  }
+  const b = term.buffer.active, lastBuf = tldrLastBuf();
   if (lastBuf < 0) { el.hidden = true; tldrPosKey = ''; return; }   // nothing painted yet
   const first = lastBuf - TTY_COVER_ROWS + 1 - b.viewportY;          // first covered row, as rendered
   if (first < 0 || first >= rowsEl.children.length) { el.hidden = true; tldrPosKey = ''; return; }
@@ -1676,7 +1690,8 @@ let ttyTouchHold = 0;   // Infinity while a finger is down; a timestamp grace af
 function ttyAtBottom() {
   if (Date.now() < ttyTouchHold) return false;
   const b = term.buffer && term.buffer.active;
-  return !b || (b.baseY - b.viewportY) <= 1 + tldrHold();   // 🟦 held rows still count as "at the bottom"
+  const hold = tldrHold();                                    // 🟦 held rows still count as "at the bottom"
+  return !b || (b.baseY - b.viewportY) <= 1 + (hold ? hold + tldrTrailing() : 0);
 }
 
 // Inserting/removing a header row (the session-tabs bar, the restart banner)

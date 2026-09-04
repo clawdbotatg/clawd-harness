@@ -115,8 +115,8 @@ check('a long summary scrolls inside; footer and #term unchanged', h2.footer===h
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'',final:false}), CID);
 await page.evaluate(()=>new Promise(res=>{ let t=''; for (let i=0;i<80;i++) t+='line '+i+'\r\n'; t+='* Thinking…\r\n\r\n────────\r\n❯ \r\n────────\r\n  bypass permissions on\r\n'; term.write(t, res); }));
 await page.waitForTimeout(150);
-const sb = await page.evaluate(()=>{ ttyBottom(); const b=term.buffer.active; return {baseY:b.baseY, dist:b.baseY-b.viewportY, atBottom:ttyAtBottom(), hold:tldrHold()}; });
-check('scrollback: viewport held 5 rows up, still counts as at-bottom', sb.baseY>0 && sb.dist===5 && sb.atBottom && sb.hold===5, JSON.stringify(sb));
+const sb = await page.evaluate(()=>{ ttyBottom(); const b=term.buffer.active; return {baseY:b.baseY, dist:b.baseY-b.viewportY, atBottom:ttyAtBottom(), hold:tldrHold(), trailing:tldrTrailing()}; });
+check('scrollback, no summary: viewport held 5 rows + the blank cursor line up, still counts as at-bottom', sb.baseY>0 && sb.trailing===1 && sb.dist===5+sb.trailing && sb.atBottom && sb.hold===5, JSON.stringify(sb));
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'summary back',final:false}), CID);
 await page.waitForTimeout(120);
 const sb2 = await page.evaluate(()=>{ const b=term.buffer.active; const rowsEl=term.element.querySelector('.xterm-rows');
@@ -124,9 +124,9 @@ const sb2 = await page.evaluate(()=>{ const b=term.buffer.active; const rowsEl=t
   // the line above the chrome ("* Thinking…") must be the last visible terminal row, right above the box
   let think=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.includes('Thinking')) think=i;
   const tr = think>=0 ? rowsEl.children[think].getBoundingClientRect() : null;
-  return {dist:b.baseY-b.viewportY, hidden:tldrEl.hidden, hold:tldrHold(), boxTop:r.top, boxBottom:r.bottom, leftBottom:left.bottom, thinkBottom: tr&&tr.bottom}; });
+  return {dist:b.baseY-b.viewportY, hidden:tldrEl.hidden, hold:tldrHold(), trailing:tldrTrailing(), boxTop:r.top, boxBottom:r.bottom, leftBottom:left.bottom, thinkBottom: tr&&tr.bottom}; });
 check('one-line summary in scrollback: viewport held (5 − rows needed) up, box sits on the footer right under the thinking line',
-  sb2.dist===sb2.hold && sb2.hold>0 && sb2.hold<5 && !sb2.hidden && Math.abs(sb2.boxBottom-sb2.leftBottom)<=1 && sb2.thinkBottom!=null && Math.abs(sb2.boxTop-sb2.thinkBottom)<=2, JSON.stringify(sb2));
+  sb2.dist===sb2.hold+sb2.trailing && sb2.hold>0 && sb2.hold<5 && !sb2.hidden && Math.abs(sb2.boxBottom-sb2.leftBottom)<=1 && sb2.thinkBottom!=null && Math.abs(sb2.boxTop-sb2.thinkBottom)<=2, JSON.stringify(sb2));
 const fit1 = await page.evaluate(()=>{ const rowsEl=term.element.querySelector('.xterm-rows'); const cell=rowsEl.children[0].offsetHeight;
   const r=tldrEl.getBoundingClientRect(), t=tldrEl.firstElementChild.getBoundingClientRect();
   const screen=term.element.querySelector('.xterm-screen'); let last=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) last=i;
