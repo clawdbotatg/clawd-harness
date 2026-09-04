@@ -359,6 +359,24 @@ def tee_is_ours(base_url):
     return bool(re.match(r"https?://127\.0\.0\.1:\d+/s/[^/]+/?$", base_url or ""))
 
 
+def tee_is_subagent(body):
+    """Subagent (Agent tool) calls ride the same base URL under the same cid,
+    and carry the full system prompt — but their billing header says so:
+    `cc_is_subagent=true` in the first system block. Their prose is not the
+    reply the human is reading (2026-09-04: a tool-only turn grew a TLDR of
+    its subagents' reports). Parse; fall back to a raw search."""
+    try:
+        d = json.loads(body)
+        sysm = d.get("system")
+        if isinstance(sysm, list) and sysm:
+            head = sysm[0].get("text", "") if isinstance(sysm[0], dict) else ""
+        else:
+            head = sysm if isinstance(sysm, str) else ""
+        return "cc_is_subagent=true" in head[:600]
+    except Exception:
+        return b"cc_is_subagent=true" in body
+
+
 def tee_is_main_call(body_len):
     """The main conversation carries claude's whole system prompt (+CLAUDE.md,
     tools) — tens of KB. Side calls (title, quick classifiers) are small.
@@ -7532,7 +7550,7 @@ class ApiTeeHandler(BaseHTTPRequestHandler):
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             tap = sess = None
-            if cid and tee_is_main_call(len(body)) and \
+            if cid and tee_is_main_call(len(body)) and not tee_is_subagent(body) and \
                     "text/event-stream" in (resp.getheader("Content-Type") or ""):
                 sess = MGR.get(cid)
                 tap = SseTextTap() if sess else None
@@ -7555,7 +7573,8 @@ class ApiTeeHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
             if tap is not None or (cid and tee_is_main_call(len(body))):
                 print(f"[tee {cid[:8]}] {resp.status} main call {len(body)}B → "
-                      f"{nchars} chars of prose" + ("" if tap is not None else " (no tap)"),
+                      f"{nchars} chars of prose" + ("" if tap is not None else
+                      (" (subagent, skipped)" if tee_is_subagent(body) else " (no tap)")),
                       flush=True)
         except Exception:
             pass                                     # client went away mid-stream
