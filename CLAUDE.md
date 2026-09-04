@@ -78,7 +78,12 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   `docs/fleet/ACCOUNTS-PANEL.md`, voice in `docs/CONTROLLER.md` + `docs/voice/`,
   `docs/fleet/SKILLS.md` (the private skill library on the relay: 📚 picker
   pastes a skill's text into a session; `skillput` publishes; no machine
-  installs).
+  installs). **🟦 Live TLDR** = the `API_TEE` block in `server.py`: every
+  claude session's `ANTHROPIC_BASE_URL` points at a local pass-through proxy
+  that tees the streamed reply to a rolling `claude -p haiku` summary (the
+  blue block over the terminal). Pure pass-through, never logs, must never
+  break a session; `claude -p` bills the subscription (the June-15 credit
+  pool was paused — don't "fix" that). `test_tldr.py` + `tldrprobe.mjs`.
   Wall-display boxes (clawd-sat): `tools/kiosk/README.md`.
 
 ## Landmines (don't regress; stories in HISTORY.md)

@@ -766,6 +766,33 @@ user-facing overview; this file orients an agent working **on** the code.
   last run 2026-06, next ≈2026-09.** The script reuses `server.NAME_SYS_PROMPT`
   and the `.clawd-harness.env` creds, so it never drifts from the app or hardcodes
   a key.
+- **🟦 Live TLDR** (2026-09-04): "every answer is too verbose and I always
+  hit the tldr button" → a rolling plain-English summary of the turn in
+  flight, in a Facebook-blue block floating over the top of the terminal,
+  updating every few seconds as claude writes, tightened once at Stop,
+  cleared the moment you type. The live text source was the whole problem:
+  the transcript JSONL lands each block whole (a 2k-char reply is one line,
+  written when it finishes) and the PTY is never parsed — so the harness now
+  runs an **API tee**: each claude session's `ANTHROPIC_BASE_URL` points at
+  a ~60-line pass-through proxy on 127.0.0.1 (`ApiTeeHandler`, per-session
+  path `/s/<cid>/…`, which the CLI preserves) that forwards everything
+  untouched, streams the reply back, and copies assistant `text_delta`s to
+  the session. Summarizer = `RollingTldr`: one `claude -p --model haiku` at a
+  time, fed the whole reply so far + its previous summary, told to keep what
+  is still true and extend; measured ~2-4s/call once thinking is OFF
+  (`MAX_THINKING_TOKENS=0` — haiku otherwise thinks 500-4000 hidden tokens
+  before a 50-word summary, 8-43s/call). On a 4.8k-char answer that streamed
+  for 25s: first blue text at 8s, 8 more updates, 1-2s behind the stream,
+  final 5s after the end. `claude -p` bills the subscription (the announced
+  June-15 metered pool was paused that day; the old header note said
+  otherwise). Overlay, not push: pushing the terminal down would SIGWINCH
+  claude on every added line. With 🔊 on, the speaker reads the final
+  summary instead of the raw stream. Knobs: `API_TEE=0` (sessions go direct,
+  feature off), `API_TEE_PORT` (8791), `TLDR_MODEL`, `TLDR_MIN/CTX/TIMEOUT`.
+  An operator-exported `ANTHROPIC_BASE_URL` (a gateway) wins and disables
+  the tee. Guards: `test_tldr.py` (path routing, main-call gate, SSE tap
+  under any chunking, the loop contract), `tools/tldrprobe.mjs` (block
+  shows/updates/blanks/clears-on-typing; toggle sends the verb).
 - **Auto-TLDR** (2026-08-16): come back to a wall of text and wish someone had
   tapped "tldr" while you were gone — so the harness does. On Stop, if the
   reply is long (`wants_auto_tldr`: ≥2 real paragraphs or one huge one) and

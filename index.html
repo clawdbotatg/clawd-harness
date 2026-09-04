@@ -524,6 +524,21 @@
   #voice button:disabled { opacity:.35; cursor:default; }
   #voice button.on { border-color:var(--accent); background:var(--accent-bg); }
   #ttsBtn.speaking { border-color:var(--accent); animation:vpulse 1.4s infinite; }
+  /* 🟦 live TLDR: a plain-English summary of what claude is saying, floating over the
+     TOP of the terminal. An overlay, not a push: pushing would resize the PTY on every
+     added line and make claude redraw its whole screen. Facebook blue on purpose — nothing
+     else in this UI is that color, so the eye finds it instantly. Grows as the summary
+     grows (capped, scrolls inside), clears the moment you type. Tap = dismiss. */
+  #tldr { position:absolute; top:0; left:0; right:0; z-index:15; max-height:46%; overflow-y:auto;
+          background:#1877f2; color:#fff; padding:9px 14px 12px;
+          font:15px/1.42 -apple-system, system-ui, "Segoe UI", sans-serif;
+          white-space:pre-wrap; overflow-wrap:anywhere; box-shadow:0 5px 16px rgba(0,0,0,.5);
+          cursor:pointer; -webkit-overflow-scrolling:touch; }
+  #tldr[hidden] { display:none; }
+  #tldr .tag { display:block; font-size:10px; letter-spacing:.14em; text-transform:uppercase;
+               opacity:.72; margin-bottom:4px; white-space:normal; }
+  #tldr.live .tag::after { content:" · updating…"; }
+  #tldrBtn.on { border-color:#1877f2; background:#0b2a55; }
   /* push-to-talk hold: the browser must never claim the gesture for a pan
      (pointercancel kills dictation mid-sentence) or pop a long-press callout */
   #micBtn { touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
@@ -1297,6 +1312,7 @@
     </section>
     <section class="col" id="left">
       <div id="term"></div>
+      <div id="tldr" hidden><span class="tag">tldr</span><span id="tldrText"></span></div>
       <div id="ttymeta"></div>
       <div id="splash" hidden></div>
       <div id="deadveil" hidden></div>
@@ -1387,6 +1403,7 @@
     <div id="pending"></div>
     <div class="inputrow">
       <div id="voice">
+        <button id="tldrBtn" title="Live TLDR — a plain-English summary of what claude is saying, in blue over the terminal, updating as it writes. Clears when you type. With 🔊 on, the speaker reads the summary instead of the whole reply.">🟦</button>
         <button id="ttsBtn" title="Read replies aloud (text-to-speech)">🔊</button>
         <button id="micBtn" title="Hold to dictate (speech-to-text)">🎤</button>
       </div>
@@ -3272,6 +3289,11 @@ function handleJson(m) {
         }, 900);
       }
     }
+  } else if (m.type === 'tldr') {
+    // 🟦 live summary of the viewed session's current turn (empty text = new turn, blank it)
+    if (m.cid !== currentCid) return;
+    showTldr(m.text, !!m.final);
+    if (m.final && m.text && ttsOn) speak(speakable(m.text));   // the speaker reads the summary
   } else if (m.type === 'transcript') {
     // A user prompt visible in the transcript IS delivery confirmation — including
     // the history replay after a reload, which is exactly when the UserPromptSubmit
@@ -5519,6 +5541,7 @@ function subscribe(cid, opts) {
     if (ds && ds.alive === false) showDeadVeil(cid, false); else hideDeadVeil(); }
   syncComposer();              // load this session's own draft (bring back text from before a reload)
   hsend({ type: 'subscribe', cid });
+  tldrHello(cid);              // 🟦 tell the server whether this viewer wants the live summary
   armHelloWatch(cid);          // hello = the subscribe ACK; re-send if it never lands
   if (!soft) armHardRepaint(); // soft path repaints in place — hardRepaint would scrollToBottom mid-read
   syncUrl();
@@ -6568,7 +6591,7 @@ function handleHook(m) {
   const tool = d.tool || m.tool;
   // A fresh user prompt means you're driving the TTY yourself — cancel any pending
   // auto-return (don't yank you back to where a question pulled you from).
-  if (ev === 'UserPromptSubmit') { setBusy(true, null); viewBeforeQuestion = null; deferredView = null; }
+  if (ev === 'UserPromptSubmit') { setBusy(true, null); viewBeforeQuestion = null; deferredView = null; hideTldr(); }
   else if (ev === 'PreToolUse')  {
     setBusy(true, tool);
     // these tools render an interactive prompt that only shows in the TUI
@@ -6738,7 +6761,7 @@ function renderEvent(ev, live) {
     bubble('sys', 'system', ev.text);
   } else if (ev.role === 'assistant') {
     if (ev.text) {
-      if (live) { typeBubble('assistant', 'claude', ev.text); speak(speakable(ev.text)); }
+      if (live) { typeBubble('assistant', 'claude', ev.text); if (!tldrOn) speak(speakable(ev.text)); }   // 🟦 on: the summary is what gets read
       else bubble('assistant', 'claude', ev.text, true);
     }
     (ev.tools || []).forEach(t => {
@@ -7263,7 +7286,7 @@ function autosizeBox() {
   box.style.height = 'auto';                       // let it shrink back when lines are removed
   box.style.height = box.scrollHeight + 'px';      // CSS min/max-height clamp the result
 }
-box.addEventListener('input', () => { saveDraft(); autosizeBox(); });
+box.addEventListener('input', () => { saveDraft(); autosizeBox(); if (box.value) hideTldr(); });   // 🟦 typing = done reading
 
 // -- don't yank the view while you're mid-message. Hook-driven auto-switches (a
 // question surfacing the TUI, then restoring) go through autoSetView, which parks
@@ -7482,6 +7505,36 @@ document.getElementById('keys').addEventListener('click', (e) => {
   const k = e.target.closest('button')?.dataset.k;
   if (k && KEY_SEQ[k] != null) { sendKeys(KEY_SEQ[k]); box.focus(); }
 });
+
+// -- 🟦 live TLDR: the blue block over the terminal ---------------------------
+// The server keeps a rolling haiku summary of the turn in flight (API tee →
+// RollingTldr, see server.py's API_TEE block) and streams it as `tldr` frames.
+// This side is deliberately dumb: show the latest text, blank it on a new turn,
+// hide it the moment the user types (they're done reading), and re-assert the
+// preference on every subscribe (server-side it's volatile). Per browser, like 🔊.
+const tldrEl = document.getElementById('tldr');
+const tldrTextEl = document.getElementById('tldrText');
+const tldrBtn = document.getElementById('tldrBtn');
+let tldrOn = false;
+try { tldrOn = localStorage.getItem('cc_tldr') === '1'; } catch {}
+function tldrHello(cid) { if (tldrOn && cid) hsend({ type: 'tldr', cid, on: true }); }
+function showTldr(text, final) {
+  if (!tldrOn || !text) { hideTldr(); return; }
+  tldrTextEl.textContent = text;
+  tldrEl.classList.toggle('live', !final);
+  tldrEl.hidden = false;
+}
+function hideTldr() { tldrEl.hidden = true; tldrTextEl.textContent = ''; tldrEl.classList.remove('live'); }
+function setTldr(on) {
+  tldrOn = on;
+  tldrBtn.classList.toggle('on', on);
+  try { localStorage.setItem('cc_tldr', on ? '1' : '0'); } catch {}
+  if (currentCid) hsend({ type: 'tldr', cid: currentCid, on });
+  if (!on) hideTldr();
+}
+tldrBtn.onclick = () => setTldr(!tldrOn);
+tldrEl.onclick = hideTldr;                 // tap = dismiss (the terminal underneath has the real thing)
+tldrBtn.classList.toggle('on', tldrOn);
 
 // -- voice: read replies aloud (TTS) + dictate into the box (STT) -------------
 // TTS prefers ElevenLabs (server-proxied via /tts when ELEVENLABS_API_KEY is set)

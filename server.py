@@ -3,10 +3,13 @@
 clawd-harness — a web terminal mirror for INTERACTIVE (subscription-billed)
 Claude Code sessions.
 
-Why interactive (no -p): on 2026-06-15 `claude -p`/headless usage moves to a
-separate metered Agent SDK credit pool. The interactive TUI keeps drawing on the
-Claude subscription. So we run real `claude` (no -p) inside a pseudo-terminal and
-mirror it to the browser.
+Why interactive (no -p): the harness mirrors the REAL interactive TUI so the
+human can drive it from a phone (menus, permission prompts, slash commands,
+the lot). Billing footnote: a 2026-05-14 announcement would have moved
+`claude -p`/Agent SDK usage to a separate metered credit pool on 2026-06-15;
+Anthropic paused that on the day and `-p` still draws on the subscription
+(verified 2026-09-04 — the 🟦 live-TLDR summarizer relies on it; `--bare`
+is the one -p mode that needs an API key, so never use it here).
 
 We never parse the "weird text" the TUI emits. Two decoupled channels per session:
   • WRITE  -> keystrokes injected into the PTY (raw passthrough + a "send" helper)
@@ -39,6 +42,7 @@ import json
 import os
 import pty
 import hmac
+import http.client
 import inspect
 import re
 import secrets
@@ -46,6 +50,7 @@ import select
 import signal
 import struct
 import subprocess
+import tempfile
 import termios
 import threading
 import time
@@ -283,6 +288,213 @@ AUTO_TLDR_TEXT  = os.environ.get("AUTO_TLDR_TEXT",
 AUTO_TLDR_MIN   = int(os.environ.get("AUTO_TLDR_MIN", "350"))   # shorter never fires
 AUTO_TLDR_LONG  = int(os.environ.get("AUTO_TLDR_LONG", "900"))  # one-paragraph wall
 AUTO_TLDR_DELAY = float(os.environ.get("AUTO_TLDR_DELAY", "3")) # grace before sending
+
+
+# ── 🟦 Live TLDR (2026-09-04): the blue block over the terminal ──────────────
+# "Every answer is too verbose and I always hit the tldr button." So the
+# harness keeps a rolling plain-English summary of what claude is saying,
+# WHILE it says it. The text has to come from somewhere live: the transcript
+# JSONL lands each block whole (a 2k-char reply is one line, written when it
+# finishes) and the PTY is never parsed — so the one clean live source is the
+# API stream itself. Claude Code honors ANTHROPIC_BASE_URL, we own the child
+# env: the API TEE is a tiny pass-through proxy on 127.0.0.1 (ApiTeeHandler)
+# that forwards every request to api.anthropic.com untouched, streams the
+# reply back, and copies the assistant text_deltas to the session as they
+# arrive. Per-session routing rides the URL path (`/s/<cid>/v1/messages`),
+# which the CLI preserves. The tee must never break a session: pure
+# pass-through, streamed, never buffered, never logged; on a tee-side error
+# the stream keeps flowing and only the summary stops.
+#
+# The summarizer (RollingTldr) is ONE `claude -p --model haiku` call at a
+# time, fed the whole reply so far + its previous summary, told to keep what
+# is still true and extend — so the blue text grows and settles instead of
+# flickering (measured ~2-4s/call with thinking OFF; haiku otherwise thinks
+# for 500-4000 hidden tokens before a 50-word summary, 8-43s). The last call
+# after Stop tightens. Runs under the session's own account dir (the
+# subscription — see the header), never through the tee itself.
+API_TEE          = os.environ.get("API_TEE", "1") != "0"
+API_TEE_PORT     = int(os.environ.get("API_TEE_PORT", "8791"))
+API_TEE_UPSTREAM = os.environ.get("API_TEE_UPSTREAM", "api.anthropic.com")
+API_TEE_TIMEOUT  = float(os.environ.get("API_TEE_TIMEOUT", "600"))
+API_TEE_MAIN_MIN = int(os.environ.get("API_TEE_MAIN_MIN", "15000"))  # request bytes: main-conversation call vs a small side call (title etc.)
+TLDR_MODEL       = os.environ.get("TLDR_MODEL", "") or "haiku"
+TLDR_MIN         = int(os.environ.get("TLDR_MIN", "160"))      # reply chars before the first pass
+TLDR_CTX         = int(os.environ.get("TLDR_CTX", "30000"))    # reply chars the summarizer reads (head)
+TLDR_TIMEOUT     = float(os.environ.get("TLDR_TIMEOUT", "90"))
+TLDR_SYS = (
+    "You keep a live TLDR of a coding assistant's reply for a busy person "
+    "while the reply is still being written. You get the reply so far and "
+    "your previous TLDR. Return the updated TLDR. Rules: plain English, as "
+    "few words as possible, short dense sentences, each carrying a fact or "
+    "decision. Keep the previous TLDR word for word where it is still true "
+    "and add to the end; rewrite a sentence only if new text made it wrong. "
+    "Never mention things the reply has not said yet. Drop process, praise, "
+    "hedging, restatement, headers, code. Keep outcomes, what changed, what "
+    "is broken, what is next, and any question asked of the person. Hard "
+    "cap: 120 words — when adding would run over, tighten the oldest "
+    "sentences instead. The reply may stop mid-sentence: cover only "
+    "complete thoughts and never say it is incomplete or cut off. Output "
+    "only the TLDR, plain text, no markdown.")
+TLDR_FINAL = (
+    "The reply is now COMPLETE. Produce the final TLDR from it and the "
+    "previous TLDR: keep the structure the reader has been watching, but "
+    "tighten hard — fewest words that still carry every fact, decision, "
+    "open problem, next step, and question asked of the person. Same rules "
+    "otherwise. Output only the TLDR, plain text, no markdown.")
+
+
+def tee_upstream_path(path):
+    """`/s/<cid>/v1/messages?beta=true` → (`<cid>`, `/v1/messages?beta=true`).
+    A path without our prefix routes as-is with cid None (nothing to tee)."""
+    if path.startswith("/s/"):
+        parts = path.split("/", 3)
+        if len(parts) == 4 and parts[2]:
+            return parts[2], "/" + parts[3]
+        return (parts[2] or None) if len(parts) > 2 else None, "/"
+    return None, path
+
+
+def tee_is_ours(base_url):
+    """Is this ANTHROPIC_BASE_URL a harness tee (any port, any cid)?"""
+    return bool(re.match(r"https?://127\.0\.0\.1:\d+/s/[^/]+/?$", base_url or ""))
+
+
+def tee_is_main_call(body_len):
+    """The main conversation carries claude's whole system prompt (+CLAUDE.md,
+    tools) — tens of KB. Side calls (title, quick classifiers) are small.
+    Only the main call's text is the reply worth summarizing."""
+    return body_len >= API_TEE_MAIN_MIN
+
+
+class SseTextTap:
+    """Pull assistant prose out of a Messages SSE stream, chunk by chunk.
+    feed(bytes) → [("block", ""), ("text", delta), …]: a "block" marks the
+    start of a new text block (paragraph break), "text" a text_delta.
+    Tool-use/thinking blocks are ignored. Tolerates any chunking."""
+    def __init__(self):
+        self.buf = b""
+
+    def feed(self, chunk):
+        out = []
+        self.buf += chunk
+        while b"\n\n" in self.buf:
+            ev, self.buf = self.buf.split(b"\n\n", 1)
+            for line in ev.split(b"\n"):
+                if not line.startswith(b"data:"):
+                    continue
+                try:
+                    d = json.loads(line[5:].strip())
+                except Exception:
+                    continue
+                t = d.get("type")
+                if t == "content_block_start" and \
+                        (d.get("content_block") or {}).get("type") == "text":
+                    out.append(("block", ""))
+                elif t == "content_block_delta" and \
+                        (d.get("delta") or {}).get("type") == "text_delta":
+                    out.append(("text", d["delta"].get("text", "")))
+        if len(self.buf) > 1 << 20:          # no event boundary in 1MB: not SSE we understand
+            self.buf = b""
+        return out
+
+
+def _tldr_call(text, prev, final, config_dir=None):
+    """One summarizer pass: `claude -p --model haiku`, own system prompt, no
+    tools/MCP/settings/session file, thinking off, empty cwd. Auth = the
+    session's account dir. Raises on a non-zero exit (caller keeps prev)."""
+    env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
+    env.pop("ANTHROPIC_BASE_URL", None)       # never through our own tee
+    env["MAX_THINKING_TOKENS"] = "0"
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    else:
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    text = text[:TLDR_CTX]
+    user = (("COMPLETE REPLY:" if final else "REPLY SO FAR (still being written):")
+            + "\n<<<\n" + text + "\n>>>\n\nPREVIOUS TLDR:\n<<<\n"
+            + (prev or "(none yet)") + "\n>>>\n\nUpdated TLDR:")
+    with tempfile.TemporaryDirectory() as d:
+        r = subprocess.run(
+            [CLAUDE_BIN, "-p", "--model", TLDR_MODEL,
+             "--system-prompt", TLDR_SYS + (" " + TLDR_FINAL if final else ""),
+             "--tools", "", "--no-session-persistence", "--setting-sources", "",
+             "--strict-mcp-config", "--output-format", "text", "--", user],
+            cwd=d, env=env, stdin=subprocess.DEVNULL,   # open stdin = -p hangs
+            capture_output=True, text=True, timeout=TLDR_TIMEOUT)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip()[-300:])
+    return tldr_tidy(r.stdout.strip(), final)
+
+
+def tldr_tidy(out, final):
+    """Non-final passes echo the reply's ragged edge ("Catches boomed t"):
+    drop a trailing unfinished sentence when a finished one precedes it."""
+    if final or not out or re.search(r'[.!?]["\')\]]*\s*$', out):
+        return out
+    m = None
+    for m in re.finditer(r'[.!?]["\')\]]*', out):
+        pass                                     # last finished sentence end
+    if m is None or m.end() < len(out) // 2:
+        return out
+    return out[:m.end()].rstrip()
+
+
+class RollingTldr:
+    """The live summary loop for one turn: feed(text_so_far) as the reply
+    streams, done() at Stop, stop() to abandon (a new prompt). One runner
+    call in flight at a time; each call sees ALL the text so far, newest
+    wins; the call that sees the finished, complete text is the tightening
+    pass and ends the loop. emit(summary, final) after every call.
+    `runner(text, prev, final)` is injectable (tests)."""
+    def __init__(self, emit, runner):
+        self.emit, self.runner = emit, runner
+        self.text, self.summary, self.seen = "", "", 0
+        self.finished = self.stopped = self.final_done = False
+        self.cv = threading.Condition()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def feed(self, text):
+        with self.cv:
+            self.text = text
+            self.cv.notify()
+
+    def done(self):
+        with self.cv:
+            self.finished = True
+            self.cv.notify()
+
+    def stop(self):
+        with self.cv:
+            self.stopped = True
+            self.cv.notify()
+
+    def _run(self):
+        while True:
+            with self.cv:
+                while not self.stopped:
+                    if len(self.text) != self.seen:
+                        break
+                    if self.finished and not self.final_done:
+                        break
+                    self.cv.wait()
+                if self.stopped:
+                    return
+                snap, fin = self.text, self.finished
+            try:
+                summary = self.runner(snap, self.summary, fin)
+            except Exception as e:
+                print(f"[tldr] pass failed: {e}", flush=True)
+                summary = self.summary
+            if self.stopped:                      # a new prompt raced the call: stale
+                return
+            self.seen, self.summary = len(snap), summary
+            if fin:
+                self.final_done = True
+            if summary:
+                self.emit(summary, fin)
+            if fin:
+                return
 
 
 def wants_auto_tldr(text):
@@ -2070,6 +2282,13 @@ class ClaudeEngine(Engine):
         # buffer and a phone's touch pan finds nothing to scroll. Pin inline
         # rendering — the seed/ring/scrollback contract depends on it.
         env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] = "1"
+        base = os.environ.get("ANTHROPIC_BASE_URL", "")
+        if API_TEE and (not base or tee_is_ours(base)):
+            # 🟦 the API tee: per-session path so one proxy routes them all.
+            # An operator-exported base URL (a gateway) wins and disables it —
+            # but a tee URL inherited from a harness session that launched
+            # this harness (a nested dev run) is ours, not an operator's.
+            env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{API_TEE_PORT}/s/{s.cid}"
         if RESUME_MODAL_SUPPRESS:
             # Suppress the resume modal at the source (see the knob's comment
             # block). setdefault so an operator export still wins.
@@ -2634,6 +2853,12 @@ class ClaudeSession:
         self.last_tool = None
         self.digest = ""                          # volatile "what it's doing now" (LLM, refreshed each Stop)
         self.auto_tldr_armed = False              # volatile: browser send seen, no Stop yet (AUTO_TLDR)
+        # 🟦 live TLDR (volatile; the viewer re-asserts its preference on subscribe)
+        self.tldr_on = False                      # a viewer wants the blue block
+        self.tldr_turn_text = ""                  # this turn's streamed assistant prose (API tee)
+        self.tldr_text = ""                       # current summary (re-sent to late subscribers)
+        self._tldr = None                         # RollingTldr for the turn in flight
+        self._tldr_lock = threading.Lock()
         self.blocked_on = None                    # the open question if it ended asking the human (LLM)
         self.last_answer = ""                     # last Stop's assistant message — durable (backfilled on resume)
         self.settings_path = None
@@ -2920,6 +3145,7 @@ class ClaudeSession:
         data = {}
         if ev == "UserPromptSubmit":
             self.busy = True
+            self.tldr_turn_reset()               # 🟦 new turn: blank the blue block
             prompt = obj.get("prompt", "")
             data = {"prompt": prompt}
             self.last_prompt = prompt
@@ -2955,6 +3181,7 @@ class ClaudeSession:
             data = {"last": obj.get("last_assistant_message", "")}
             if data["last"]:
                 self.last_answer = data["last"][:500]
+            self.tldr_turn_done()                # 🟦 the tightening pass
             # Turn complete → the transcript now has a real exchange. Name it if
             # it's still unnamed (so even a 1-prompt session gets a title), and
             # re-name at the 1/3/6/9/… milestones to sharpen as it grows.
@@ -3926,6 +4153,8 @@ class ClaudeSession:
         if snapshot:
             client.send_bytes(snapshot)
         self._replay_history(client)
+        if self.tldr_text:                        # 🟦 late joiner sees the current summary
+            client.send_json(self._tldr_frame(self.tldr_text, not self.busy))
 
     def _replay_history(self, client, limit=150):
         """Send recent transcript events so a fresh subscriber's structured view
@@ -4106,6 +4335,76 @@ class ClaudeSession:
             targets = list(self.clients)
         for c in targets:
             c.send_json(obj)
+
+    # -- 🟦 live TLDR (see the API_TEE block up top) ---------------------------
+    def _tldr_frame(self, text, final):
+        return {"type": "tldr", "cid": self.cid, "text": text,
+                "final": bool(final), "turn": self.prompt_count}
+
+    def tee_text(self, kind, text):
+        """API tee → this turn's streamed assistant prose. Called from the
+        proxy's stream loop for every text_delta, so it must be cheap: append,
+        and poke the summarizer only when a viewer asked for it."""
+        with self._tldr_lock:
+            if kind == "block":
+                if self.tldr_turn_text and not self.tldr_turn_text.endswith("\n\n"):
+                    self.tldr_turn_text += "\n\n"
+                return
+            self.tldr_turn_text += text
+        if self.tldr_on:
+            self._tldr_kick()
+
+    def _tldr_kick(self):
+        """Feed the loop the whole reply so far (starting it on first use)."""
+        with self._tldr_lock:
+            if len(self.tldr_turn_text) < TLDR_MIN:
+                return
+            if self._tldr is None:
+                cfg = self.config_dir
+                self._tldr = RollingTldr(
+                    self._tldr_emit,
+                    lambda t, p, f: _tldr_call(t, p, f, cfg))
+            self._tldr.feed(self.tldr_turn_text)
+
+    def _tldr_emit(self, summary, final):
+        self.tldr_text = summary
+        self._to_subscribers_json(self._tldr_frame(summary, final))
+
+    def tldr_turn_reset(self):
+        """A new prompt: abandon the old loop, blank the block everywhere."""
+        with self._tldr_lock:
+            self.tldr_turn_text, self.tldr_text = "", ""
+            r, self._tldr = self._tldr, None
+        if r:
+            r.stop()
+        self._to_subscribers_json(self._tldr_frame("", False))
+
+    def tldr_turn_done(self):
+        """Stop: the loop's last pass (complete text) tightens; then it exits."""
+        with self._tldr_lock:
+            r = self._tldr
+        if r is None and self.tldr_on:
+            self._tldr_kick()                    # short/late: one pass, straight to final
+            with self._tldr_lock:
+                r = self._tldr
+        if r:
+            r.done()
+
+    def set_tldr(self, on):
+        """The viewer's 🟦 toggle. Turning it on mid-turn catches up on the
+        text streamed so far; after a turn, one final pass over the reply."""
+        self.tldr_on = bool(on)
+        if not on:
+            return
+        if self.tldr_text:
+            self._to_subscribers_json(self._tldr_frame(self.tldr_text, not self.busy))
+            return
+        self._tldr_kick()
+        if not self.busy:
+            with self._tldr_lock:
+                r = self._tldr
+            if r:
+                r.done()
 
     def shutdown(self):
         try:
@@ -6560,6 +6859,12 @@ class SessionManager:
         self.save_registry()
         self.broadcast_sessions()
 
+    def tldr(self, cid, on):
+        """🟦 a viewer wants (or no longer wants) the live TLDR of a session."""
+        s = self.get(cid)
+        if s:
+            s.set_tldr(on)
+
     def autopilot(self, cid, on):
         """🤖 engage/disengage autopilot on a session (the checkbox beside the
         state square). Engaging derives the goal and — if the session is idle —
@@ -7158,6 +7463,128 @@ class _Client:
 
 
 # ── HTTP + WS handler ──────────────────────────────────────────────────────────
+class ApiTeeHandler(BaseHTTPRequestHandler):
+    """The 🟦 API tee (see API_TEE): a pass-through proxy for the sessions'
+    api.anthropic.com traffic. Forwards method/path/headers/body untouched
+    (one change: asks upstream for an uncompressed body so the SSE can be
+    read), streams the response back chunk by chunk, and copies assistant
+    text deltas of the main conversation call to the session. Never logs a
+    body or a header. Any tee-side failure leaves the stream flowing."""
+    protocol_version = "HTTP/1.1"
+    HOP = ("host", "accept-encoding", "transfer-encoding", "content-length",
+           "connection", "keep-alive", "content-encoding")
+
+    def log_message(self, *a):
+        pass
+
+    def handle(self):
+        # keep-alive sockets the CLI drops between calls reset mid-readline;
+        # socketserver would print a traceback per drop — that's not an error.
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError, TimeoutError):
+            pass
+
+    def _read_body(self):
+        te = (self.headers.get("transfer-encoding") or "").lower()
+        if "chunked" in te:
+            out = b""
+            while True:
+                line = self.rfile.readline().strip()
+                n = int((line.split(b";")[0] or b"0"), 16)
+                if n == 0:
+                    self.rfile.readline()
+                    return out
+                out += self.rfile.read(n)
+                self.rfile.readline()
+        n = int(self.headers.get("content-length") or 0)
+        return self.rfile.read(n) if n else b""
+
+    def _bounce(self, code, msg):
+        body = json.dumps({"type": "error",
+                           "error": {"type": "api_error", "message": msg}}).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _proxy(self):
+        cid, up_path = tee_upstream_path(self.path)
+        body = self._read_body()
+        hdrs = {k: v for k, v in self.headers.items() if k.lower() not in self.HOP}
+        hdrs["Host"] = API_TEE_UPSTREAM
+        hdrs["Accept-Encoding"] = "identity"
+        hdrs["Content-Length"] = str(len(body))
+        try:
+            conn = http.client.HTTPSConnection(API_TEE_UPSTREAM, timeout=API_TEE_TIMEOUT)
+            conn.request(self.command, up_path, body=body or None, headers=hdrs)
+            resp = conn.getresponse()
+        except Exception as e:
+            self._bounce(502, f"api tee: upstream unreachable: {e}")
+            return
+        try:
+            self.send_response(resp.status)
+            for k, v in resp.getheaders():
+                if k.lower() in self.HOP:
+                    continue
+                self.send_header(k, v)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            tap = sess = None
+            if cid and tee_is_main_call(len(body)) and \
+                    "text/event-stream" in (resp.getheader("Content-Type") or ""):
+                sess = MGR.get(cid)
+                tap = SseTextTap() if sess else None
+            nchars = 0
+            while True:
+                chunk = resp.read1(65536)
+                if not chunk:
+                    break
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+                self.wfile.flush()
+                if tap is not None:
+                    try:
+                        for kind, text in tap.feed(chunk):
+                            nchars += len(text)
+                            sess.tee_text(kind, text)
+                    except Exception as e:           # the tee must never break the stream
+                        print(f"[tee {cid[:8]}] tap error: {e}", flush=True)
+                        tap = None
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+            if tap is not None or (cid and tee_is_main_call(len(body))):
+                print(f"[tee {cid[:8]}] {resp.status} main call {len(body)}B → "
+                      f"{nchars} chars of prose" + ("" if tap is not None else " (no tap)"),
+                      flush=True)
+        except Exception:
+            pass                                     # client went away mid-stream
+        finally:
+            conn.close()
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = _proxy
+
+
+def start_api_tee():
+    """Bind the tee BEFORE sessions spawn (their first API call may come within
+    a second of the PTY). Returns True iff listening; on failure the engine
+    env must not point at it — API_TEE is flipped off."""
+    global API_TEE
+    if not API_TEE:
+        return False
+    try:
+        tee = ThreadingHTTPServer(("127.0.0.1", API_TEE_PORT), ApiTeeHandler)
+    except OSError as e:
+        API_TEE = False
+        print(f"[tee] ⚠ could not bind 127.0.0.1:{API_TEE_PORT} ({e}) — "
+              "🟦 live TLDR off; sessions go direct", flush=True)
+        return False
+    threading.Thread(target=tee.serve_forever, daemon=True).start()
+    print(f"[tee] api tee on 127.0.0.1:{API_TEE_PORT} → {API_TEE_UPSTREAM} "
+          f"(🟦 live TLDR, model {TLDR_MODEL})", flush=True)
+    return True
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -7537,6 +7964,8 @@ class Handler(BaseHTTPRequestHandler):
             MGR.pin(frame.get("cid"), bool(frame.get("on", True)))
         elif t == "autopilot":
             MGR.autopilot(frame.get("cid"), bool(frame.get("on", True)))
+        elif t == "tldr":
+            MGR.tldr(frame.get("cid"), bool(frame.get("on", True)))
         elif t == "createProject":
             MGR.create_project(frame.get("name", ""))
         elif t == "addProject":
@@ -7729,6 +8158,7 @@ def raise_fd_limit(target=10240):
 def main():
     raise_fd_limit()
     _sync_shared_kit()
+    start_api_tee()                  # before any session spawns (env points at it)
     MGR.load()
     threading.Thread(target=watch_ui, daemon=True).start()
     threading.Thread(target=MGR.poll_accounts_loop, daemon=True).start()
