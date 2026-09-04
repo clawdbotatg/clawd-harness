@@ -538,7 +538,12 @@
   #tldr .tag { display:block; font-size:10px; letter-spacing:.14em; text-transform:uppercase;
                opacity:.72; margin-bottom:4px; white-space:normal; }
   #tldr.live .tag::after { content:" · updating…"; }
-  #tldrBtn.on { border-color:#1877f2; background:#0b2a55; }
+  #tldrBtn { flex:0 0 auto; height:17px; padding:0 3px; margin:0; background:none;
+             border:1px solid var(--edge); color:var(--ink); font-size:11px; line-height:15px;
+             cursor:pointer; opacity:.55; }
+  #tldrBtn[hidden] { display:none; }
+  #tldrBtn:hover { border-color:#1877f2; opacity:1; }
+  #tldrBtn.on { border-color:#1877f2; background:#0b2a55; opacity:1; }
   /* push-to-talk hold: the browser must never claim the gesture for a pan
      (pointercancel kills dictation mid-sentence) or pop a long-press callout */
   #micBtn { touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
@@ -1380,6 +1385,9 @@
            on every turn end an LLM reads the goal + transcript and either types
            the next nudge or parks with a reason in the #pilotrow above the
            composer. Bounded (PILOT_MAX_ROUNDS); any send from you refills it. -->
+      <!-- 🟦 live TLDR toggle: a rolling plain-English summary of the turn in
+           flight, in a blue block over the terminal (see the #tldr rules) -->
+      <button id="tldrBtn" hidden title="Live TLDR — a plain-English summary of what claude is saying, in blue over the terminal, updating as it writes. Clears when you type. With 🔊 on, the speaker reads the summary instead of the whole reply.">🟦</button>
       <input type="checkbox" id="pilotchk" hidden
              title="🤖 autopilot — let the harness keep this session working on its goal, narrating progress in a status row. Bounded; your own messages steer it." />
       <div id="ttystat" hidden role="img"><span class="dot"></span></div>
@@ -1403,7 +1411,6 @@
     <div id="pending"></div>
     <div class="inputrow">
       <div id="voice">
-        <button id="tldrBtn" title="Live TLDR — a plain-English summary of what claude is saying, in blue over the terminal, updating as it writes. Clears when you type. With 🔊 on, the speaker reads the summary instead of the whole reply.">🟦</button>
         <button id="ttsBtn" title="Read replies aloud (text-to-speech)">🔊</button>
         <button id="micBtn" title="Hold to dictate (speech-to-text)">🎤</button>
       </div>
@@ -5628,6 +5635,7 @@ function renderPilotUI() {
   const s = currentCid && allSessions().find(x => x.cid === currentCid);
   const show = !!s && (v === 'tty' || v === 'transcript');
   pilotChk.hidden = !show;
+  tldrBtn.hidden = !show;                  // 🟦 lives beside it, same rule
   if (!show) { pilotRow.hidden = true; return; }
   if (s.cid !== pilotCidShown) { pilotCidShown = s.cid; pilotPendingAt = 0; }
   if (Date.now() - pilotPendingAt > 4000) pilotChk.checked = !!s.autopilot;

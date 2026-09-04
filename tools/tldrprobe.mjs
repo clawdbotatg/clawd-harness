@@ -56,10 +56,12 @@ await page.waitForTimeout(400);
 const CID='cid-probe-1';
 
 // stub hsend so the toggle/subscribe frames are observable; pretend we're viewing the session
-await page.evaluate((CID)=>{
-  window.__frames=[]; hsend=(f)=>{window.__frames.push(f);return true;};
-  currentCid=CID; currentView=()=>'tty';
-}, CID);
+// open the session's tty view for real (the row that holds 🤖 + 🟦 only lays out there)
+await page.evaluate((CID)=>{ window.__frames=[]; hsend=(f)=>{window.__frames.push(f);return true;};
+  location.hash = '#/m/clawd-atg/p/' + encodeURIComponent(projectRows().find(p=>p.name==='alpha').id) + '/s/' + CID + '/tty'; }, CID);
+await page.waitForTimeout(600);
+await page.evaluate((CID)=>{ currentCid=CID; renderPilotUI(); }, CID);
+check('landed in the tty view', await page.evaluate(()=>currentView()==='tty'));
 
 // 1. off by default
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'should not show',final:false}), CID);
@@ -68,7 +70,7 @@ check('off by default: frame shows nothing', await page.evaluate(()=>tldrEl.hidd
 // 2. tap 🟦 (real touch)
 const cdp = await page.context().newCDPSession(page);
 const xy = await page.evaluate(()=>{const r=tldrBtn.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,visible:r.width>0&&r.height>0};});
-check('🟦 toggle visible next to the speaker', xy.visible, JSON.stringify(xy));
+check('🟦 toggle visible, left of the 🤖 checkbox', xy.visible && await page.evaluate(()=>tldrBtn.nextElementSibling===pilotChk && !pilotChk.hidden), JSON.stringify(xy));
 await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:xy.x,y:xy.y}]});
 await page.waitForTimeout(80);
 await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
