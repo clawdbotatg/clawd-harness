@@ -11,6 +11,26 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-04 — credentials belong in library skills (the audit)
+
+Austin: "the skill picker is private, right? I want tokens in skills, but the
+add-skill skill says never — check it's safe first, then update it." Walked
+every hop a skill body crosses (table in `docs/fleet/SKILLS.md`, "Where a
+secret goes"): relay store gitignored; `/skills/*` behind the worker token
+with `hmac.compare_digest`; the phone socket refuses everything but `ping`
+until `_mobile_authed` (passkey, re-checked per frame, expires); TLS at the
+edge; the browser keeps bodies only in memory (🕘 history stores the sent
+text, which is now just the pointer line); the harness prompt log likewise;
+the target machine gets a gitignored upload file; the transcript gets the
+body once claude Reads it — the footprint of any secret a session reads.
+The same-day chip redesign made this strictly safer than the paste era, when
+the whole body went through the prompt log. Verdict: safe; `add-skill`
+republished to say credentials are fine plus three habits (one secret per
+line, don't echo, delete the working dir). Side findings: the dev Mac's
+`fleet/fleet.env` has no relay line, so `skillput`/direct-mode 📚 fail there
+— published by exporting the worker's plist env; the `vision` repo on GitHub
+is behind its skill (no `cast`), cast box found by LAN-scanning port 8790.
+
 ## 2026-09-04 — 📚 skills attach like a dropped .md instead of firing on tap
 
 "I go to the books, pick the vision skill, and it just spews it into the

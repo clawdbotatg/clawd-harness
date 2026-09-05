@@ -76,9 +76,11 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   (`controller/prompts/private.md`). Deep doc: `docs/CONTROLLER.md`.
 - Feature docs on demand: `docs/CODEX-ENGINE.md`, `docs/DEEPLINKS.md`,
   `docs/fleet/ACCOUNTS-PANEL.md`, voice in `docs/CONTROLLER.md` + `docs/voice/`,
-  `docs/fleet/SKILLS.md` (the private skill library on the relay: 📚 picker
-  pastes a skill's text into a session; `skillput` publishes; no machine
-  installs). **🟦 Live TLDR** = the `API_TEE` block in `server.py`: every
+  `docs/fleet/SKILLS.md` (the private skill library on the relay: a 📚 tap
+  ATTACHES the skill to your next message as a chip, like a dropped `.md`,
+  and Enter sends text + a one-line pointer claude Reads; `skillput`
+  publishes; no machine installs; credentials belong in skills — audited,
+  see the doc; it's the handoff doc for the whole feature). **🟦 Live TLDR** = the `API_TEE` block in `server.py`: every
   claude session's `ANTHROPIC_BASE_URL` points at a local pass-through proxy
   that tees the streamed reply to a rolling `claude -p haiku` summary (the
   blue block over the terminal). Pure pass-through, never logs, must never
