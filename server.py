@@ -116,6 +116,10 @@ WORKDIR    = os.path.abspath(os.environ.get("WORKDIR", os.getcwd()))
 COLS       = int(os.environ.get("COLS", "120"))
 ROWS       = int(os.environ.get("ROWS", "34"))
 RING_MAX   = int(os.environ.get("RING_MAX", str(256 * 1024)))  # replay buffer cap
+# 🗃️ closed-session history: every close() files a row (persisted in the
+# registry) so a closed tab can be scrolled back to and reopened by its
+# engine session id. Newest first, capped.
+CLOSED_MAX = int(os.environ.get("CLOSED_MAX", "200"))
 # A subscribe whose ring replay is this shallow gets the transcript rendered in
 # as seed scrollback first (see _history_seed_bytes) — the ring goes shallow
 # exactly when it can't carry history: a width-change fence (_apply_size) or a
@@ -4655,6 +4659,7 @@ class SessionManager:
         self.clients_lock = threading.Lock()
         self._projects_sig = None                # last broadcast projects payload (see broadcast_projects)
         self.irons = {}                          # iid -> iron dict (named group of projects; see iron_create)
+        self.closed = []                         # 🗃️ closed-session rows, newest first (see _record_closed)
         # Graceful self-restart: when a boot-time file (server.py / .env) changes,
         # we flag a pending restart, surface it in every browser, and wait until
         # nothing is MID-TURN before tearing down — so no in-flight turn dies.
@@ -4821,6 +4826,8 @@ class SessionManager:
         # a pid the project loop dropped must not linger in an iron. An iron
         # whose pids all vanished is still kept — the grouping (title/desc)
         # outlives any one repo.
+        self.closed = [r for r in reg.get("closed", [])
+                       if isinstance(r, dict) and r.get("cid") and r.get("pid")][:CLOSED_MAX]
         for e in reg.get("irons", []):
             if not isinstance(e, dict) or not e.get("id") or not str(e.get("title", "")).strip():
                 continue
@@ -5107,7 +5114,7 @@ class SessionManager:
                     else "folder gone from disk")
             print(f"[project {p.name}] {what} → dropped", flush=True)
             for cid in cids:
-                self.close(cid, _broadcast=False)
+                self.close(cid, _broadcast=False, reason="project gone")
             changed = True
         if self._reconcile_locals():
             changed = True
@@ -5245,7 +5252,8 @@ class SessionManager:
                     "accounts": [a.to_registry() for a in self._ordered_accounts()],
                     "active_account": self.active_account,
                     "last_switch_at": self.last_switch_at,
-                    "irons": [dict(i) for i in self.irons.values()]}
+                    "irons": [dict(i) for i in self.irons.values()],
+                    "closed": [dict(r) for r in self.closed]}
         # Atomic write: a crash/power-cut mid-write must never leave a
         # truncated registry — _read_registry would fall back to {} and the
         # very next save would pave the wreckage over with an empty state
@@ -7208,7 +7216,7 @@ class SessionManager:
         self.save_registry()
         self.broadcast_sessions()
 
-    def close(self, cid, _broadcast=True):
+    def close(self, cid, _broadcast=True, reason="closed"):
         with self.lock:
             s = self.sessions.pop(cid, None)
         if not s:
@@ -7220,9 +7228,78 @@ class SessionManager:
             s.clients.clear()
         for c in viewers:
             c.cid = None
+        self._record_closed(s, reason)
         self.save_registry()
         if _broadcast:
             self.broadcast_sessions()
+            self.broadcast_closed()
+
+    # -- 🗃️ closed-session history -------------------------------------------
+    # The tab ✕ has no confirm, and until 2026-09-05 a closed session was
+    # simply gone (three lost mid-panic that day). Every close files a row
+    # here — newest first, persisted with the registry — and `reopen` spawns
+    # the engine's own resume from it (create_session(resume=…)).
+    def _closed_row(self, s, reason="closed"):
+        p = self.projects.get(s.pid)
+        return {"cid": s.cid, "engine": s.engine, "pid": s.pid,
+                "project": p.name if p else "", "session_id": s.session_id,
+                "title": s.title or s._fallback_title(), "desc": s.desc or "",
+                "account": s.account, "prompt_count": s.prompt_count,
+                "first_prompt": (s.first_prompt or "")[:200],
+                "created": s.created, "last_active": s.last_active,
+                "closed_at": time.time(), "reason": reason,
+                "resumable": bool(s.session_id and s.prompt_count)}
+
+    def _record_closed(self, s, reason="closed"):
+        if s.ceremony:                          # a sign-in screen isn't history
+            return
+        row = self._closed_row(s, reason)
+        with self.lock:
+            self.closed = [r for r in self.closed if r.get("cid") != s.cid]
+            self.closed.insert(0, row)
+            del self.closed[CLOSED_MAX:]
+
+    def closed_meta(self):
+        with self.lock:
+            return {"type": "closed", "closed": [dict(r) for r in self.closed]}
+
+    def broadcast_closed(self):
+        self.broadcast_all(self.closed_meta())
+
+    def reopen(self, cid):
+        """Bring a closed session back: a NEW cid in the same project, running
+        the engine's resume of the old conversation. None if the row is
+        unknown or its project is gone (the row stays so the id isn't lost)."""
+        with self.lock:
+            row = next((r for r in self.closed if r.get("cid") == cid), None)
+        if not row:
+            return None
+        s = self.create_session(row["pid"], engine=row.get("engine") or "claude",
+                                resume=row.get("session_id") or "",
+                                title=row.get("title") or "")
+        if not s:
+            print(f"[closed {cid[:8]}] reopen failed — project "
+                  f"{row.get('project')!r} is gone", flush=True)
+            return None
+        with self.lock:
+            self.closed = [r for r in self.closed if r.get("cid") != cid]
+        print(f"[closed {cid[:8]}] reopened as {s.cid[:8]} "
+              f"({'resume' if s.resuming else 'fresh'})", flush=True)
+        self.save_registry()
+        self.broadcast_closed()
+        return s
+
+    def closed_forget(self, cid=None):
+        """Drop one row (or every row when cid is None)."""
+        with self.lock:
+            before = len(self.closed)
+            self.closed = [] if cid is None else \
+                [r for r in self.closed if r.get("cid") != cid]
+            changed = len(self.closed) != before
+        if changed:
+            self.save_registry()
+            self.broadcast_closed()
+        return changed
 
     def _ordered(self):
         """Most-recently-active first — the menu order."""
@@ -8294,6 +8371,16 @@ class Handler(BaseHTTPRequestHandler):
                               "sessions": MGR.sessions_meta(),
                               "current": MGR.default_cid()})
             client.send_json(MGR.irons_meta())
+            client.send_json(MGR.closed_meta())
+        elif t == "reopen":
+            s = MGR.reopen(str(frame.get("cid") or ""))
+            if s:
+                client.send_json({"type": "focus", "cid": s.cid})
+            else:
+                client.send_json({"type": "error", "cid": frame.get("cid"),
+                                  "error": "can't reopen: its project is gone"})
+        elif t == "closedForget":
+            MGR.closed_forget(frame.get("cid") or None)
         elif t in ("skillsLib", "skillsRm"):
             # 📚 skill library (direct mode): proxied to the relay store —
             # threaded, it's network I/O (see serve_skills_lib).

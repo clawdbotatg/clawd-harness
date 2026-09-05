@@ -834,17 +834,17 @@
   .iprojchip.iadd:hover { color:var(--accent); border-color:var(--accent-dim); }
   .pinnednote:hover { color:var(--accent); border-color:var(--accent-dim); }
   /* 🕘 sent history — same centered-modal deal as the iron pickers */
-  #sentlog { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:66;
+  #sentlog, #closedlog { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:66;
              display:flex; align-items:center; justify-content:center; padding:20px; }
-  #sentlog[hidden] { display:none; }
-  #sentlogcard { background:var(--panel); border:1px solid var(--edge); border-radius:10px;
+  #sentlog[hidden], #closedlog[hidden] { display:none; }
+  #sentlogcard, #closedlogcard { background:var(--panel); border:1px solid var(--edge); border-radius:10px;
                  padding:14px; width:min(560px, 94vw); max-height:82vh; overflow:hidden;
                  display:flex; flex-direction:column; gap:8px; font-family:var(--mono); }
-  #sentlogcard .sl-hdr { display:flex; align-items:center; gap:8px; }
-  #sentlogcard .sl-hdr .ip-t { flex:1; color:var(--ink); font-size:13px; }
-  #sentlogcard .sl-hdr button { background:transparent; border:1px solid var(--edge); border-radius:5px;
+  #sentlogcard .sl-hdr, #closedlogcard .sl-hdr { display:flex; align-items:center; gap:8px; }
+  #sentlogcard .sl-hdr .ip-t, #closedlogcard .sl-hdr .ip-t { flex:1; color:var(--ink); font-size:13px; }
+  #sentlogcard .sl-hdr button, #closedlogcard .sl-hdr button { background:transparent; border:1px solid var(--edge); border-radius:5px;
                  color:var(--dim); font-family:var(--mono); font-size:12px; cursor:pointer; padding:6px 10px; }
-  #sentloglist { overflow-y:auto; -webkit-overflow-scrolling:touch; min-height:0;
+  #sentloglist, #closedloglist { overflow-y:auto; -webkit-overflow-scrolling:touch; min-height:0;
                  display:flex; flex-direction:column; gap:10px; }
   .sl-item { border:1px solid var(--edge); border-radius:8px; padding:8px; display:flex;
              flex-direction:column; gap:6px; }
@@ -857,6 +857,12 @@
   .sl-text { color:var(--ink); font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere;
              max-height:180px; overflow-y:auto; user-select:text; -webkit-user-select:text; }
   @media (pointer: coarse) { .sl-meta button { padding:9px 12px; font-size:13px; } }
+  /* 🗃️ closed sessions — the 🕘 skeleton; rows are sessions, ↩ brings one back */
+  #closedfilter { width:120px; background:var(--raised); border:1px solid var(--edge); border-radius:5px;
+                  color:var(--ink); font-family:var(--mono); font-size:12px; padding:5px 8px; }
+  .cl-title { color:var(--ink); font-size:12px; font-weight:600; }
+  .cl-desc { color:var(--dim); font-size:11px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .cl-item.gone { opacity:.55; }
   /* 📚 skill book — the fleet skills picker, same modal skeleton as 🕘 */
   #skillbook { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:66;
                display:flex; align-items:center; justify-content:center; padding:20px; }
@@ -1263,6 +1269,21 @@
       <div id="sentloglist"></div>
     </div>
   </div>
+  <!-- 🗃️ closed sessions: every session closed on this harness (every machine, in
+       the fleet), newest first, straight from the registry — the ✕ has no confirm,
+       and on 2026-09-05 three sessions were lost to it with no way back. ↩ asks
+       the owning machine to reopen: a new tab in the same project running the
+       engine's resume of the old conversation. -->
+  <div id="closedlog" hidden>
+    <div id="closedlogcard">
+      <div class="sl-hdr">
+        <div class="ip-t">🗃️ closed sessions</div>
+        <input id="closedfilter" placeholder="filter" autocomplete="off">
+        <button id="closedlogclose">✕</button>
+      </div>
+      <div id="closedloglist"></div>
+    </div>
+  </div>
   <!-- 📚 skill book: the fleet skill LIBRARY — user-written skill files
        stored on the relay, one list everywhere; deliberately nothing to do
        with any machine's installed skills. Tap = attach the skill to your
@@ -1418,7 +1439,7 @@
              title="🤖 autopilot — let the harness keep this session working on its goal, narrating progress in a status row. Bounded; your own messages steer it." />
       <div id="ttystat" hidden role="img"><span class="dot"></span></div>
       <div id="sessiondesc" title="AI-generated name for this session"></div>
-      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — your skill library (same list everywhere). Tap one to attach it to your next message; Enter sends your text with a one-line pointer claude reads.">📚</button></div>
+      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — your skill library (same list everywhere). Tap one to attach it to your next message; Enter sends your text with a one-line pointer claude reads.">📚</button><button id="closedBtn" title="Closed sessions — every session closed on any machine, newest first. ↩ brings one back as a new tab resuming the old conversation.">🗃️</button></div>
     </div>
     <!-- 🤖 the autopilot's narration row — same slot style as the upload chips:
          where the work stands / what the supervisor is doing, live per round -->
@@ -3178,6 +3199,10 @@ function handleMachineJson(machine, m) {
     onIronDesc(m);
     return;
   }
+  if (m.type === 'closed') {
+    onClosedFrame(machine, m.closed || []);   // 🗃️ every machine's history, whichever one we're viewing
+    return;
+  }
   if (m.type === 'error' && /harness link closed|no local harness/i.test(m.error || '')) {
     // The worker's local harness connection died — the deploy/graceful-restart
     // signature: the worker↔relay socket stays up so nothing else flaps. Re-list
@@ -3410,6 +3435,8 @@ function handleJson(m) {
     // direct mode: the harness registry is the irons truth. In fleet the RELAY
     // is (prefs frame) — a machine's own broadcast must not overwrite it.
     if (!FLEET) applyIrons(m.irons);
+  } else if (m.type === 'closed') {
+    onClosedFrame(null, m.closed || []);   // 🗃️ direct mode (fleet frames are caught per machine upstream)
   } else if (m.type === 'ironDesc') {
     onIronDesc(m);                        // haiku's take on an iron — store + repaint
   } else if (m.type === 'skillsLib') {
@@ -7376,6 +7403,143 @@ function showSentLog() {
 document.getElementById('sentBtn').onclick = showSentLog;
 document.getElementById('sentlogclose').onclick = () => { sentlogEl.hidden = true; };
 sentlogEl.addEventListener('pointerdown', (e) => { if (e.target === sentlogEl) sentlogEl.hidden = true; });
+
+// ── 🗃️ closed sessions ───────────────────────────────────────────────────────
+// The server-side sibling of 🕘: the harness files a row for every close()
+// (persisted in its registry, `closed` frames on change + list) and `reopen`
+// spawns the engine's resume of that conversation as a new tab in the same
+// project. In the fleet each machine's frame is kept under perMachine and the
+// modal shows them merged, newest first, tagged with the machine.
+let closedRows = [];                                   // direct mode
+const closedlogEl = document.getElementById('closedlog');
+const closedListEl = document.getElementById('closedloglist');
+const closedFilterEl = document.getElementById('closedfilter');
+function onClosedFrame(machine, rows) {
+  if (FLEET && machine) (perMachine[machine] || (perMachine[machine] = {})).closed = rows;
+  else closedRows = rows;
+  if (!closedlogEl.hidden) renderClosedLog();
+}
+function allClosed() {
+  let out;
+  if (!FLEET) out = closedRows.map(r => Object.assign({ machine: null }, r));
+  else {
+    out = [];
+    for (const mid of Object.keys(perMachine))
+      for (const r of ((perMachine[mid] || {}).closed || [])) out.push(Object.assign({ machine: mid }, r));
+  }
+  return out.sort((a, b) => (b.closed_at || 0) - (a.closed_at || 0));
+}
+function closedKey(r) { return (r.machine || '') + '/' + r.cid; }
+function closedMachineTag(mid) {
+  if (!mid) return '';
+  const mm = machineList.find(x => x.id === mid);
+  return mm ? (mm.emoji || mm.name || mid) : mid;
+}
+function closedMatches(r, q) {
+  if (!q) return true;
+  return [r.title, r.desc, r.project, r.first_prompt, closedMachineTag(r.machine)]
+    .some(v => (v || '').toLowerCase().includes(q));
+}
+// Repaint, don't rebuild: `closed` frames land whenever any machine closes a
+// session, so the list reconciles by machine+cid — rows keep their nodes (and
+// the finger mid-tap keeps its button); only order and membership move.
+function renderClosedLog() {
+  const q = closedFilterEl.value.trim().toLowerCase();
+  const rows = allClosed();
+  const want = new Map(rows.map(r => [closedKey(r), r]));
+  for (const node of [...closedListEl.children]) {
+    if (node.dataset.key && !want.has(node.dataset.key)) node.remove();
+  }
+  const have = new Map([...closedListEl.children].map(n => [n.dataset.key, n]));
+  let empty = closedListEl.querySelector('.cl-empty');
+  if (!rows.length) {
+    if (!empty) {
+      empty = document.createElement('div'); empty.className = 'sl-meta cl-empty';
+      empty.textContent = 'nothing closed yet — closed sessions land here from now on';
+      closedListEl.appendChild(empty);
+    }
+    return;
+  }
+  if (empty) empty.remove();
+  let shown = 0;
+  for (const r of rows) {
+    const key = closedKey(r);
+    let node = have.get(key);
+    if (!node) node = closedRowNode(r, key);
+    else closedRowFill(node, r);
+    node.hidden = !closedMatches(r, q);
+    if (!node.hidden) shown++;
+    closedListEl.appendChild(node);                    // append = move into sorted order (no rebuild)
+  }
+  let none = closedListEl.querySelector('.cl-nomatch');
+  if (!shown) {
+    if (!none) { none = document.createElement('div'); none.className = 'sl-meta cl-nomatch'; }
+    none.textContent = 'no closed session matches “' + q + '”';
+    closedListEl.appendChild(none);
+  } else if (none) none.remove();
+}
+function closedRowNode(r, key) {
+  const it = document.createElement('div'); it.className = 'sl-item cl-item'; it.dataset.key = key;
+  const meta = document.createElement('div'); meta.className = 'sl-meta';
+  const when = document.createElement('span'); when.className = 'cl-when';
+  const proj = document.createElement('span'); proj.className = 'sl-sess cl-proj';
+  const back = document.createElement('button'); back.className = 'cl-back'; back.textContent = '↩ bring back';
+  back.onclick = (ev) => { ev.stopPropagation(); reopenClosed(it._row); };
+  const drop = document.createElement('button'); drop.className = 'cl-drop'; drop.textContent = '✕';
+  drop.title = 'forget this row';
+  drop.onclick = (ev) => {
+    ev.stopPropagation();
+    const row = it._row;
+    if (row.machine) hsendTo(row.machine, { type: 'closedForget', cid: row.cid });
+    else hsend({ type: 'closedForget', cid: row.cid });
+  };
+  meta.append(when, proj, back, drop);
+  const title = document.createElement('div'); title.className = 'cl-title';
+  const desc = document.createElement('div'); desc.className = 'cl-desc';
+  it.append(meta, title, desc);
+  closedRowFill(it, r);
+  return it;
+}
+function closedRowFill(it, r) {
+  it._row = r;
+  const bits = [fmtAge(r.closed_at) + ' ago'];
+  if (r.prompt_count) bits.push(r.prompt_count + ' prompt' + (r.prompt_count === 1 ? '' : 's'));
+  if (r.engine && r.engine !== 'claude') bits.push(r.engine);
+  if (r.reason && r.reason !== 'closed') bits.push(r.reason);
+  it.querySelector('.cl-when').textContent = bits.join(' · ');
+  it.querySelector('.cl-proj').textContent = (r.machine ? closedMachineTag(r.machine) + ' ' : '') + (r.project || '');
+  it.querySelector('.cl-title').textContent = r.title || r.cid.slice(0, 8);
+  it.querySelector('.cl-desc').textContent = r.desc || r.first_prompt || '';
+  const gone = r.reason === 'project gone';
+  it.classList.toggle('gone', gone);
+  it.querySelector('.cl-back').textContent = r.resumable === false ? '↩ new tab here' : '↩ bring back';
+}
+// ↩: the newSession dance (blank the shared terminal, wait for the focus that
+// names the spawned cid) — the server answers `reopen` with a `focus`, exactly
+// like `new`, so the same watch/veil path takes it from there.
+function reopenClosed(r) {
+  if (!r) return;
+  if (FLEET) {
+    if (!r.machine || !isMachineOnline(r.machine)) { meta.textContent = 'that machine is offline'; return; }
+    attachMachine(r.machine);
+  }
+  currentPid = r.pid;
+  pendingNewFocus = true;
+  currentCid = null;
+  term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
+  if (activeType) { activeType.finish(); activeType = null; }
+  const sent = r.machine ? hsendTo(r.machine, { type: 'reopen', cid: r.cid })
+                         : hsend({ type: 'reopen', cid: r.cid });
+  if (!sent) { pendingNewFocus = false; meta.textContent = 'not connected — try again in a moment'; return; }
+  closedlogEl.hidden = true;
+  armNewFocusWatch();
+  setView(DEEP_VIEW);
+}
+function showClosedLog() { renderClosedLog(); closedlogEl.hidden = false; }
+document.getElementById('closedBtn').onclick = showClosedLog;
+document.getElementById('closedlogclose').onclick = () => { closedlogEl.hidden = true; };
+closedFilterEl.addEventListener('input', renderClosedLog);
+closedlogEl.addEventListener('pointerdown', (e) => { if (e.target === closedlogEl) closedlogEl.hidden = true; });
 
 // ── 📚 skill book ────────────────────────────────────────────────────────────
 // The fleet skills picker: skills live in a private library on the relay box
