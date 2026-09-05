@@ -102,9 +102,10 @@ CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 CODEX_BIN   = os.environ.get("CODEX_BIN", "codex")
 CODEX_STORE = os.path.abspath(os.path.expanduser(
     os.environ.get("CODEX_HOME", "~/.codex")))
-# Approval posture for codex sessions. Claude sessions inherit the user's
-# bypass-permissions settings; codex needs it stated explicitly or every tool
-# call blocks the turn on an approval prompt no browser client can answer.
+# Approval posture. Both engines have it stated explicitly in argv (claude:
+# --permission-mode bypassPermissions in ClaudeEngine.argv; codex: -a/-s
+# below) or every tool call blocks the turn on an approval prompt no browser
+# client can answer.
 CODEX_SANDBOX  = os.environ.get("CODEX_SANDBOX", "danger-full-access")
 CODEX_APPROVAL = os.environ.get("CODEX_APPROVAL", "never")
 # Run our own generated hooks without codex's per-handler trust ceremony —
@@ -2388,7 +2389,15 @@ class ClaudeEngine(Engine):
     def argv(self, s):
         argv = [self.bin,
                 ("--resume" if s.resuming else "--session-id"), s.session_id,
-                "--settings", s.settings_path]
+                "--settings", s.settings_path,
+                # Stated explicitly, like codex's -a/-s. The comment up top
+                # used to say claude "inherits the user's bypass-permissions
+                # settings" — it never did: ~/.claude/settings.json only
+                # allowed Bash, so every Edit/Write blocked the turn on a
+                # prompt (Austin 2026-09-05: "why in the fuck do you keep
+                # asking me for permission"). settings.json now carries
+                # defaultMode=bypassPermissions too; this is the belt.
+                "--permission-mode", "bypassPermissions"]
         rule = s.standing_rule()
         if rule:
             # External project: the branch-and-PR rule rides as an appended
