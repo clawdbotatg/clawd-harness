@@ -89,6 +89,18 @@ waits for the pull to settle (~90s) and for no viewer to be attached (forced aft
 passkey. This closed the gap where worker fixes shipped in git but every box kept
 running stale code until someone bounced the daemon (the 2026-07 passkey storms
 outlived their own fix that way). Opt out per box with `FLEET_SELF_RESTART=0`.
+
+**Harness watchdog (worker.py, 2026-09-05).** The harness's own graceful restart
+exits 0 and trusts launchd/systemd KeepAlive to respawn it. clawd-heart's launchd
+once didn't: the box sat with no harness for 40 min and every viewer's terminal
+was blank until a manual `launchctl kickstart`. The worker's standing stats link
+is the one thing on the box that sees the harness gone, so after 90s of
+continuous failure it plain-starts the service (`launchctl kickstart` without
+`-k` on macOS, `systemctl --user start clawd-harness` on Linux), retrying every
+5 min while still down. Start only — a no-op on a live harness, never a kill.
+Knobs: `FLEET_HARNESS_KICK=0` (off), `FLEET_HARNESS_KICK_AFTER`,
+`FLEET_HARNESS_KICK_EVERY`, `FLEET_HARNESS_SERVICE` (label/unit override).
+`fleet/test_harness_watchdog.py` guards it.
 **A box whose worker predates this feature needs one last manual restart** to get
 onto self-restarting code: `launchctl kickstart -k gui/$UID/com.clawd.fleet-worker`
 (Mac) or `sudo systemctl restart clawd-fleet-worker` (the hub box).

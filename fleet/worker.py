@@ -83,6 +83,34 @@ RESTART_WATCH = ("worker.py", "e2e.py", "fleet_ws.py", "webauthn.py",
                  "webpush.py", "sysstats.py")
 SELF_RESTART = os.environ.get("FLEET_SELF_RESTART", "1") != "0"
 
+# Harness watchdog. The harness's graceful self-restart exits 0 and trusts
+# launchd/systemd KeepAlive to respawn it. On 2026-09-05 clawd-heart's launchd
+# didn't: the box sat with no harness for 40 min, every viewer's terminal
+# blank, until a manual `launchctl kickstart`. The worker keeps a standing
+# stats link to the harness, so it is the one process on the box that KNOWS
+# the harness is gone. After HARNESS_KICK_AFTER seconds of continuous failure
+# it issues the platform's plain START (kickstart without -k / systemctl
+# start): a no-op when the harness is actually running, never a kill — a kill
+# mid-keystroke is the 08-09 incident. Re-tries every HARNESS_KICK_EVERY while
+# still down. FLEET_HARNESS_KICK=0 opts a box out; FLEET_HARNESS_SERVICE
+# overrides the launchd label / systemd unit.
+HARNESS_KICK = os.environ.get("FLEET_HARNESS_KICK", "1") != "0"
+HARNESS_KICK_AFTER = float(os.environ.get("FLEET_HARNESS_KICK_AFTER", "90"))
+HARNESS_KICK_EVERY = float(os.environ.get("FLEET_HARNESS_KICK_EVERY", "300"))
+HARNESS_SERVICE = os.environ.get("FLEET_HARNESS_SERVICE", "")
+
+
+def harness_start_cmd(service="", platform=None):
+    """The platform's plain-start command for the harness service, or None on a
+    platform we don't know how to start it on. Start, never restart/kill."""
+    platform = platform or sys.platform
+    if platform == "darwin":
+        return ["launchctl", "kickstart",
+                f"gui/{os.getuid()}/{service or 'com.clawd.harness'}"]
+    if platform.startswith("linux"):
+        return ["systemctl", "--user", "start", service or "clawd-harness.service"]
+    return None
+
 
 def _load_env_file():
     """Load KEY=VALUE lines from fleet.env (gitignored) into the env *before* the
@@ -400,6 +428,8 @@ class Worker:
         self.wlock = threading.Lock()
         self.links = {}            # mobile_id -> HarnessLink
         self.links_lock = threading.Lock()
+        self._harness_down_since = None   # monotonic; set by the first failed stats poll
+        self._harness_kicked_at = 0.0
         # Latest plaintext aggregate counts {projects,sessions,active} read from
         # the local harness and reported to the relay for the roster. None until
         # the first poll succeeds. Just three integers — never titles or content.
@@ -995,12 +1025,46 @@ class Worker:
                 backoff = 1.0
             except Exception as e:
                 print(f"{ts()} [worker {self.machine}] stats link error: {e}", flush=True)
+                self._harness_watchdog(e)
             time.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
+
+    def _harness_watchdog(self, err, now=None, run=subprocess.run):
+        """One failed stats poll. Starts the down-clock on the first failure;
+        once the harness has been unreachable for HARNESS_KICK_AFTER, plain-start
+        its service (see HARNESS_KICK). Returns True iff a start was issued."""
+        if not HARNESS_KICK or self.kind == "relay":
+            return False
+        now = time.monotonic() if now is None else now
+        if self._harness_down_since is None:
+            self._harness_down_since = now
+            return False
+        down = now - self._harness_down_since
+        if down < HARNESS_KICK_AFTER or now - self._harness_kicked_at < HARNESS_KICK_EVERY:
+            return False
+        cmd = harness_start_cmd(HARNESS_SERVICE)
+        if not cmd:
+            return False
+        self._harness_kicked_at = now
+        print(f"{ts()} [worker {self.machine}] harness unreachable for {int(down)}s "
+              f"({err}) — starting its service: {' '.join(cmd)}", flush=True)
+        try:
+            r = run(cmd, capture_output=True, text=True, timeout=20)
+            if r.returncode:
+                print(f"{ts()} [worker {self.machine}] harness start rc={r.returncode}: "
+                      f"{(r.stderr or r.stdout or '').strip()[:200]}", flush=True)
+        except Exception as e:
+            print(f"{ts()} [worker {self.machine}] harness start failed: {e}", flush=True)
+        return True
+
+    def _harness_watchdog_ok(self):
+        """The harness answered: stop the down-clock."""
+        self._harness_down_since = None
 
     def _poll_stats_once(self):
         url = f"{self.harness_ws}/ws?t={quote(self.harness_token)}"
         sock, rfile, wfile = fleet_ws.client_connect(url)
+        self._harness_watchdog_ok()
         lock = threading.Lock()
         nproj = nsess = None
         nactive = 0
