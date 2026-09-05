@@ -7002,7 +7002,12 @@ class SessionManager:
 
     # -- session crud ----------------------------------------------------------
     def create_session(self, pid, account=None, ceremony=False,
-                       engine="claude"):
+                       engine="claude", resume="", title=""):
+        """`resume`: an engine session id to reopen (`claude --resume <id>` /
+        codex's rollout) — the way back for a session whose tab got closed
+        (the ✕ has no confirm; 2026-09-05 three were lost to it mid-panic).
+        Falls back to a fresh session, with a log line, when the transcript
+        is gone. `title` seeds the tab name until the namer runs."""
         if pid not in self.projects:
             return None
         proj = self.projects[pid]
@@ -7020,9 +7025,18 @@ class SessionManager:
             # one login per machine, no account, no config dir, no headroom
             # math. Everything below this block is Anthropic-specific.
             cid = str(uuid.uuid4())
-            s = ClaudeSession(self, cid=cid, pid=pid, session_id="",
-                              resuming=False, created=time.time(),
-                              engine=engine)
+            resuming = False
+            if resume:
+                probe = ClaudeSession(self, cid=cid, pid=pid, session_id=resume,
+                                      resuming=False, engine=engine)
+                resuming = bool(probe._find_transcript())
+                if not resuming:
+                    print(f"[session {cid[:8]}] no {engine} transcript for "
+                          f"{resume[:8]} — starting fresh instead", flush=True)
+            s = ClaudeSession(self, cid=cid, pid=pid,
+                              session_id=resume if resuming else "",
+                              resuming=resuming, created=time.time(),
+                              engine=engine, title=title)
             if not _codex_signed_in():
                 s.desc = ("codex is not signed in on this machine — run "
                           "`codex login` in a terminal once, then start a "
@@ -7106,10 +7120,15 @@ class SessionManager:
                       "once (or sign in via the \U0001f9e0 page)", flush=True)
             self.broadcast_accounts()
         cid = str(uuid.uuid4())
-        s = ClaudeSession(self, cid=cid, pid=pid, session_id=str(uuid.uuid4()),
-                          resuming=False, created=time.time(),
-                          account=name,
-                          config_dir=acct.config_dir if acct else "",
+        cfg = acct.config_dir if acct else ""
+        resuming = bool(resume and _transcript_exists(resume, cfg))
+        if resume and not resuming:
+            print(f"[session {cid[:8]}] no transcript for {resume[:8]} under "
+                  f"{name} — starting fresh instead", flush=True)
+        s = ClaudeSession(self, cid=cid, pid=pid,
+                          session_id=resume if resuming else str(uuid.uuid4()),
+                          resuming=resuming, created=time.time(),
+                          account=name, config_dir=cfg, title=title,
                           ceremony=ceremony or no_creds_anywhere)
         if no_creds_anywhere:
             s.desc = ("no plan is signed in on this machine yet — complete "
@@ -8283,7 +8302,9 @@ class Handler(BaseHTTPRequestHandler):
         elif t == "new":
             s = MGR.create_session(frame.get("pid"),
                                    account=frame.get("account"),
-                                   engine=frame.get("engine") or "claude")
+                                   engine=frame.get("engine") or "claude",
+                                   resume=str(frame.get("resume") or ""),
+                                   title=str(frame.get("title") or "")[:80])
             if s:
                 client.send_json({"type": "focus", "cid": s.cid})
         elif t == "accountAdd":
