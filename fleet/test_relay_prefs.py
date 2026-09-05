@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Integration test: the relay's shared "active machines" prefs.
 
-A machine costs one passkey per 24h, so a fleet of N boxes costs N ceremonies
-at dawn even when you only wanted one of them. The UI lets you switch a machine
+A machine costs one passkey per 7 days, so a fleet of N boxes costs N ceremonies
+a week even when you only wanted one of them. The UI lets you switch a machine
 off; this is the server half — the set lives on the relay so unchecking on the
 phone also unchecks on the desktop.
 

@@ -120,7 +120,7 @@ onto self-restarting code: `launchctl kickstart -k gui/$UID/com.clawd.fleet-work
    passkeys file, and all traffic is AES-GCM end-to-end. The relay only routes
    ciphertext, so a compromised relay is reduced to denial-of-service. The worker
    session slides on activity (`FLEET_E2E_IDLE_TTL`, 10 min) with a hard ceiling
-   (`FLEET_E2E_MAX_TTL`, 1 h).
+   (`FLEET_E2E_MAX_TTL`, 7 days).
 
 One trust story: **the laptop is the authority.** It accepts only the passkey in
 its own local file (it never trusts the relay for the pubkey). Box access alone

@@ -88,7 +88,7 @@ screen; the QR re-appends it for pairing.
 ✅ **Passkey second factor (WebAuthn).** Beyond the mobile token (factor 1), the
 relay gates the roster behind a hardware-backed **passkey** assertion (Touch ID /
 Face ID / a security key) — verified server-side in pure stdlib (`webauthn.py`:
-P-256 ECDSA + COSE/CBOR + all spec checks). A successful assertion mints a 24h
+P-256 ECDSA + COSE/CBOR + all spec checks). A successful assertion mints a 7-day
 session so reconnects don't re-prompt. Enrollment is gated by the token **and**
 `FLEET_ALLOW_ENROLL` (off by default), so a leaked token alone can't register a
 rogue credential. The private key never leaves the device's secure enclave; we

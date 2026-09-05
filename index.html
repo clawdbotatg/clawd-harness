@@ -1874,8 +1874,8 @@ let ws = null, decoder = new TextDecoder();
 let currentMachine = null;      // fleet machine the viewed project resolved to (null = none yet)
 let machineList = [];           // latest roster from the relay
 // -- active machines (the passkey budget) ------------------------------------
-// Talking to a machine costs ONE passkey per 24h (its E2E channel is bound to a
-// human-verified assertion), so a fleet of N boxes costs N ceremonies at dawn
+// Talking to a machine costs ONE passkey per 7 days (its E2E channel is bound to a
+// human-verified assertion), so a fleet of N boxes costs N ceremonies a week
 // even when you only wanted one of them. A machine can be switched OFF from the
 // machines tab: the page then never opens its channel, never lists it, and
 // never prompts for it — so unchecking five boxes turns six prompts into two.
@@ -1913,7 +1913,7 @@ function saveInactive() {
 }
 // Switch a machine on or off. Off tears the channel down and drops its cached
 // lists so nothing stale lingers in the rungs — but deliberately KEEPS the e2e
-// resume material, so switching it back on inside the 24h window re-attaches
+// resume material, so switching it back on inside the 7-day window re-attaches
 // silently instead of charging another passkey. Toggling is cheap on purpose.
 function setMachineActive(id, on) {
   if (on) fleetInactive.delete(id); else fleetInactive.add(id);
@@ -2742,11 +2742,11 @@ function e2eSetPin(m, b) { try { localStorage.setItem('cc_e2e_pin_' + m, b); } c
 // Resumption material (per machine): lets a reload re-attach with NO passkey,
 // within the worker's hard TTL. The master is key material on disk for ≤ this
 // window — the convenience/secrecy trade (a malicious relay still can't read it).
-// Keep in sync with FLEET_E2E_MAX_TTL on the worker (default 86400 in e2e.py,
+// Keep in sync with FLEET_E2E_MAX_TTL on the worker (default 604800 in e2e.py,
 // overridable in fleet/fleet.env): the shorter of the two wins, so a mismatch
-// silently forces an early re-passkey. 24h everywhere = one passkey per machine
-// per day.
-const RESUME_TTL_MS = 24 * 60 * 60 * 1000;
+// silently forces an early re-passkey. 7 days everywhere = one passkey per
+// machine per week (was 24h until 2026-09-05; fleet/test_passkey_ttl.py pins it).
+const RESUME_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 function e2eLoadResume(m) { try { const s = JSON.parse(localStorage.getItem('cc_e2e_rs_' + m) || 'null'); return (s && s.exp > Date.now()) ? s : null; } catch { return null; } }
 function e2eSaveResume(m, id, master) { try { localStorage.setItem('cc_e2e_rs_' + m, JSON.stringify({ id, master, exp: Date.now() + RESUME_TTL_MS })); } catch {} }
 function e2eClearResume(m) { try { localStorage.removeItem('cc_e2e_rs_' + m); } catch {} }
@@ -3199,7 +3199,7 @@ function setPmCookie(tok) {
   try {
     const sec = location.protocol === 'https:' ? '; Secure' : '';
     document.cookie = tok
-      ? `pmt=${tok}; path=/pm; max-age=86400; SameSite=Strict${sec}`
+      ? `pmt=${tok}; path=/pm; max-age=604800; SameSite=Strict${sec}`
       : `pmt=; path=/pm; max-age=0; SameSite=Strict${sec}`;
   } catch {}
 }

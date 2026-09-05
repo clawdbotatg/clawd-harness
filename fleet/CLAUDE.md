@@ -24,12 +24,13 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     worker independently verifies a channel-bound passkey (require-UV) over its
 >     pinned long-term identity, and **all** harness traffic is AES-GCM end-to-end.
 >     The relay routes only ciphertext → a compromised relay is reduced to DoS.
->     Worker session slides 10 min idle / **24 h hard** (`FLEET_E2E_MAX_TTL`
->     default 86400 — the per-machine passkey cadence; silent resume covers
+>     Worker session slides 10 min idle / **7 days hard** (`FLEET_E2E_MAX_TTL`
+>     default 604800 since 2026-09-05, was 86400 — the per-machine passkey
+>     cadence; silent resume covers
 >     everything inside it, and the worker persists resume material to
 >     `.fleet.e2e_resume.json` so restarts don't force re-auth. The relay likewise
 >     persists edge-session tokens to `.clawd-fleet.sessions.json`). Target: **one
->     passkey per machine per day**, no storms. Spec: **`../docs/fleet/E2E-PROTOCOL.md`**.
+>     passkey per machine per week**, no storms. Spec: **`../docs/fleet/E2E-PROTOCOL.md`**.
 >     The relay needs **no** crypto for this (blind passthrough); `cryptography`
 >     is a **worker-only** dep. Tests: `test_e2e.py`, `test_e2e_mitm.py`,
 >     `test_e2e_interop.py` (Python↔browser byte-for-byte via `node`).
@@ -45,8 +46,8 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     its replacement. The client half of the blank-tty story is
 >     `armNewFocusWatch` (root `CLAUDE.md`, `tools/spawnprobe.mjs`).
 >   - ***Active machines* — the passkey budget** (2026-08-08). "One per machine
->     per day" MULTIPLIES: N boxes on the roster = **N+1 ceremonies** every
->     morning (the edge gate plus one E2E handshake each), even when you only
+>     per week" MULTIPLIES: N boxes on the roster = **N+1 ceremonies** every
+>     cycle (the edge gate plus one E2E handshake each), even when you only
 >     wanted one box. So a machine can be **switched off** from the machines tab:
 >     the page then opens no channel to it, sends it nothing, merges none of its
 >     projects/sessions, and never prompts for it. The set is a **deny-list stored
@@ -58,7 +59,7 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     handshakes off the roster, so a roster that arrived first would unlock the
 >     very boxes you switched off. Unknown machine = ON, so a new box needs no
 >     config. Switching one off KEEPS its e2e resume material, so switching it
->     back on inside the 24h window is silent. A deep link that NAMES an off
+>     back on inside the 7-day window is silent. A deep link that NAMES an off
 >     machine (a notification tap) switches it back on — explicit navigation beats
 >     the checkbox. Tests: `test_relay_prefs.py` (server),
 >     `../tools/fleetprobe.mjs` (client).

@@ -139,7 +139,11 @@ WORKER_ALLOW = {m.strip() for m in os.environ.get("FLEET_WORKER_ALLOW", "").spli
 RP_ID = os.environ.get("FLEET_RP_ID", "h.atg.link")
 ORIGIN = os.environ.get("FLEET_ORIGIN", "https://" + RP_ID)
 REQUIRE_PASSKEY = (os.environ.get("FLEET_REQUIRE_PASSKEY", "1").lower() not in ("0", "false", "no")) or PASSKEY_ONLY
-SESSION_TTL = int(os.environ.get("FLEET_SESSION_TTL", "86400"))  # passkey session validity (24h)
+SESSION_TTL = int(os.environ.get("FLEET_SESSION_TTL", "604800"))  # passkey session validity (7 days)
+# 7 days everywhere (this, FLEET_E2E_MAX_TTL, RESUME_TTL_MS + the pmt cookie in
+# index.html): one passkey per machine per WEEK. Was 24h until 2026-09-05 — a
+# daily ceremony per box was where the time went. fleet/test_passkey_ttl.py
+# pins the four defaults together (the shortest one silently wins).
 # The AI controller (PM brain) runs co-located on this box; we reverse-proxy
 # /pm/* to it so the brain lives on the one public origin. It's a fleet-driving
 # surface, so /pm is gated by the SAME passkey session token (a `pmt` cookie the
@@ -829,7 +833,7 @@ class Relay:
         # ── passkey second factor ─────────────────────────────────────────────
         if t == "auth":
             # Fast path: a still-valid session from a prior passkey auth — skips
-            # Face ID on reconnects within the 24h window.
+            # Face ID on reconnects within the 7-day window.
             sess = frame.get("session")
             if sess:
                 exp = session_valid(sess)

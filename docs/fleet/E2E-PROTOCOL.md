@@ -242,9 +242,9 @@ The relay logic is unchanged except for routing the new control types — see
   and the keys never leave the endpoints.
 - **TTL:** slide-on-activity. `idle_deadline = now + IDLE_TTL` (default 10 min),
   refreshed on each *successfully authenticated* inbound record. A hard ceiling
-  `hard_deadline = established + MAX_TTL` (default 24 h — the passkey cadence:
-  one fresh assertion per machine per day, matching the relay edge session and
-  the browser's resume-material window) is never extended.
+  `hard_deadline = established + MAX_TTL` (default 7 days — the passkey cadence:
+  one fresh assertion per machine per week, matching the relay edge session and
+  the browser's resume-material window; 24 h until 2026-09-05) is never extended.
 - On expiry the worker zeroizes the keys and refuses further records; the mobile
   must run a fresh handshake (one new Face ID). The harness link for that viewer
   is torn down.
@@ -314,7 +314,7 @@ without a second passkey; the mobile id is routing, never a security property:
 | Name | Default | Meaning |
 |------|---------|---------|
 | `FLEET_E2E_IDLE_TTL` | 600 s | idle timeout (slide) |
-| `FLEET_E2E_MAX_TTL` | 86400 s | hard session ceiling (= per-machine passkey cadence) |
+| `FLEET_E2E_MAX_TTL` | 604800 s | hard session ceiling (= per-machine passkey cadence, 7 days) |
 | `FLEET_E2E_REQUIRE` | 1 | refuse un-E2E'd traffic (set 0 only for the stdlib smokes) |
 | `FLEET_RP_ID` | h.atg.link | WebAuthn rpId checked by relay + worker |
 | `FLEET_ORIGIN` | https://h.atg.link | WebAuthn origin checked by relay + worker |

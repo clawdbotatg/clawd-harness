@@ -22,11 +22,12 @@ CURVE = ec.SECP256R1()
 
 IDLE_TTL = int(os.environ.get("FLEET_E2E_IDLE_TTL", "600"))   # slide-on-activity
 # Hard ceiling = the passkey cadence: resume (silent, no passkey) works until this
-# lapses, then the next open needs a fresh assertion. 24h matches the relay edge
+# lapses, then the next open needs a fresh assertion. 7 days matches the relay edge
 # session (FLEET_SESSION_TTL) and the browser's resume-material window
-# (RESUME_TTL_MS in index.html) — one passkey per machine per day, by design.
-# The old 3600 default made every box that didn't override it re-prompt hourly.
-MAX_TTL  = int(os.environ.get("FLEET_E2E_MAX_TTL",  "86400"))  # hard ceiling
+# (RESUME_TTL_MS in index.html) — one passkey per machine per week, by design.
+# History: 3600 made every box re-prompt hourly; 86400 (until 2026-09-05) was
+# still a ceremony per box per day. fleet/test_passkey_ttl.py pins all four.
+MAX_TTL  = int(os.environ.get("FLEET_E2E_MAX_TTL",  "604800"))  # hard ceiling
 
 DIR_M2W = 0x4D  # 'M' — mobile→worker
 DIR_W2M = 0x57  # 'W' — worker→mobile

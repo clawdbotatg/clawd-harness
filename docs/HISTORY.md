@@ -11,6 +11,24 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-05 — passkey cadence: 24h → 7 days
+
+Austin: "I spent too much of my time doing passkey auths." One Face ID per
+machine per day, times N boxes, plus the edge gate, is a lot of thumbs. The
+cadence is one number spelled in four places, and the SHORTEST silently wins:
+`SESSION_TTL` (relay edge session, `FLEET_SESSION_TTL`), `MAX_TTL` (worker E2E
+hard ceiling, `FLEET_E2E_MAX_TTL`), `RESUME_TTL_MS` and the `pmt` cookie
+max-age (index.html). All four moved from 86400 to 604800 together, and
+`fleet/test_passkey_ttl.py` now pins them to each other so the next drift fails
+the gate instead of quietly re-prompting. Also moved: this box's gitignored
+`fleet/fleet.env`, which had `FLEET_E2E_MAX_TTL=86400` pinned explicitly — an
+old env override beats a new default, so when a box re-prompts early, grep its
+`fleet.env` for `TTL` first (ADD-MACHINE.md says so now). The relay box sets no
+TTL in its env, so it takes the new default on the self-pull restart.
+Threat-model cost: resume material (the AES-GCM master) sits on disk for up to
+7 days instead of 1; the passkey-bound channel and the laptop-local passkeys
+file are unchanged, and a malicious relay still sees only ciphertext.
+
 ## 2026-09-04 — credentials belong in library skills (the audit)
 
 Austin: "the skill picker is private, right? I want tokens in skills, but the

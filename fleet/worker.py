@@ -210,7 +210,7 @@ WORKER_ID_FILE = HERE / ".fleet.worker_id.json"
 # E2E resume material (resume_id -> {master, hard}) persisted to disk so a worker
 # RESTART/crash doesn't wipe it — otherwise every reconnect after a restart forces a
 # fresh full passkey, and when that churns the channel dies (can't render/send/close).
-# Same on-disk-secret posture as WORKER_ID_FILE above; bounded by each entry's 24h hard
+# Same on-disk-secret posture as WORKER_ID_FILE above; bounded by each entry's 7-day hard
 # deadline. Gitignored.
 RESUME_FILE = HERE / ".fleet.e2e_resume.json"
 # Shared fleet VAPID keypair for Web Push notifications (same file the relay
@@ -688,7 +688,7 @@ class Worker:
 
     # ── E2E channel (per remote viewer) ──────────────────────────────────────
     def _load_e2e_resume(self):
-        """Load persisted resume material on boot, dropping anything past its 24h hard
+        """Load persisted resume material on boot, dropping anything past its 7-day hard
         deadline. Lets a worker restart/crash resume silently instead of re-prompting."""
         try:
             raw = json.loads(RESUME_FILE.read_text())
