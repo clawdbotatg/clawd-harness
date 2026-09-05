@@ -405,29 +405,51 @@ def tee_is_ours(base_url):
     return bool(re.match(r"https?://127\.0\.0\.1:\d+/s/[^/]+/?$", base_url or ""))
 
 
+def tee_call_kind(body):
+    """What is this request? "main" = the conversation itself (the reply the
+    human is reading — the ONLY stream worth summarizing), "subagent" = an
+    Agent-tool subagent (rides the same base URL under the same cid, full
+    system prompt, `cc_is_subagent=true` in the first system block — a
+    tool-only turn once grew a TLDR of its subagents' reports, 2026-09-04),
+    "side" = everything else: title/classifier calls, and the WebFetch tool's
+    own summarizer, whose request is a whole web page (big!) and whose answer
+    once became a TLDR of an audit report nobody had asked about
+    (2026-09-05). The tell is the TOOLS list: the conversation always carries
+    one; side calls never do. Size alone is not a discriminator."""
+    if len(body) < API_TEE_MAIN_MIN:
+        return "side"                          # cheap pre-check: the conversation is tens of KB
+    try:
+        d = json.loads(body)
+    except Exception:
+        return "subagent" if b"cc_is_subagent=true" in body else "side"
+    sysm = d.get("system")
+    if isinstance(sysm, list) and sysm:
+        head = sysm[0].get("text", "") if isinstance(sysm[0], dict) else ""
+    else:
+        head = sysm if isinstance(sysm, str) else ""
+    if "cc_is_subagent=true" in head[:600]:
+        return "subagent"
+    return "main" if d.get("tools") else "side"
+
+
 def tee_is_subagent(body):
-    """Subagent (Agent tool) calls ride the same base URL under the same cid,
-    and carry the full system prompt — but their billing header says so:
-    `cc_is_subagent=true` in the first system block. Their prose is not the
-    reply the human is reading (2026-09-04: a tool-only turn grew a TLDR of
-    its subagents' reports). Parse; fall back to a raw search."""
+    """The subagent marker, size-independent (tee_call_kind's size pre-check
+    would call a small subagent body a side call, which is fine for the tee
+    but not for this question)."""
     try:
         d = json.loads(body)
         sysm = d.get("system")
-        if isinstance(sysm, list) and sysm:
-            head = sysm[0].get("text", "") if isinstance(sysm[0], dict) else ""
-        else:
-            head = sysm if isinstance(sysm, str) else ""
+        head = (sysm[0].get("text", "") if isinstance(sysm, list) and sysm and isinstance(sysm[0], dict)
+                else (sysm if isinstance(sysm, str) else ""))
         return "cc_is_subagent=true" in head[:600]
     except Exception:
         return b"cc_is_subagent=true" in body
 
 
-def tee_is_main_call(body_len):
-    """The main conversation carries claude's whole system prompt (+CLAUDE.md,
-    tools) — tens of KB. Side calls (title, quick classifiers) are small.
-    Only the main call's text is the reply worth summarizing."""
-    return body_len >= API_TEE_MAIN_MIN
+def tee_is_main_call(body):
+    """The conversation call — see tee_call_kind. (Takes the body, not its
+    length: a 40 KB WebFetch page is not the conversation.)"""
+    return tee_call_kind(body) == "main"
 
 
 class SseTextTap:
@@ -7835,8 +7857,8 @@ class ApiTeeHandler(BaseHTTPRequestHandler):
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             tap = sess = None
-            if cid and tee_is_main_call(len(body)) and not tee_is_subagent(body) and \
-                    "text/event-stream" in (resp.getheader("Content-Type") or ""):
+            kind = tee_call_kind(body) if cid else "side"
+            if kind == "main" and "text/event-stream" in (resp.getheader("Content-Type") or ""):
                 sess = MGR.get(cid)
                 tap = SseTextTap() if sess else None
             nchars = 0
@@ -7856,10 +7878,9 @@ class ApiTeeHandler(BaseHTTPRequestHandler):
                         tap = None
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
-            if tap is not None or (cid and tee_is_main_call(len(body))):
-                print(f"[tee {cid[:8]}] {resp.status} main call {len(body)}B → "
-                      f"{nchars} chars of prose" + ("" if tap is not None else
-                      (" (subagent, skipped)" if tee_is_subagent(body) else " (no tap)")),
+            if tap is not None or (cid and len(body) >= API_TEE_MAIN_MIN):
+                print(f"[tee {cid[:8]}] {resp.status} {kind} call {len(body)}B → "
+                      f"{nchars} chars of prose" + ("" if tap is not None else " (skipped)"),
                       flush=True)
         except Exception:
             pass                                     # client went away mid-stream

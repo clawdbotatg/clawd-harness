@@ -47,9 +47,17 @@ check("Agent-tool call is a subagent", server.tee_is_subagent(sub))
 check("marker quoted in a message doesn't count", not server.tee_is_subagent(quoted))
 check("unparseable body: raw search", server.tee_is_subagent(b"garbage cc_is_subagent=true"))
 
-print("tee_is_main_call:")
-check("small side call is not the conversation", not server.tee_is_main_call(4000))
-check("big body is the conversation", server.tee_is_main_call(server.API_TEE_MAIN_MIN))
+print("tee_call_kind:")
+big_pad = "x" * server.API_TEE_MAIN_MIN
+conv = json.dumps({"system": [{"type": "text", "text": "x-anthropic-billing-header: cc_entrypoint=cli;"}], "tools": [{"name": "Bash"}], "messages": [{"role": "user", "content": big_pad}]}).encode()
+fetch = json.dumps({"system": "You summarize web pages", "messages": [{"role": "user", "content": "\nWeb page content:\n---\n" + big_pad}]}).encode()
+small = json.dumps({"tools": [{"name": "Bash"}], "messages": [{"role": "user", "content": "hi"}]}).encode()
+subb = json.dumps({"system": [{"type": "text", "text": "x-anthropic-billing-header: cc_entrypoint=cli; cc_is_subagent=true;"}], "tools": [{"name": "Bash"}], "messages": [{"role": "user", "content": big_pad}]}).encode()
+check("the conversation (big, has tools) is main", server.tee_call_kind(conv) == "main")
+check("WebFetch's page summarizer (big, NO tools) is a side call", server.tee_call_kind(fetch) == "side")
+check("a small call is a side call even with tools", server.tee_call_kind(small) == "side")
+check("an Agent subagent is a subagent", server.tee_call_kind(subb) == "subagent")
+check("tee_is_main_call takes the body", server.tee_is_main_call(conv) and not server.tee_is_main_call(fetch))
 
 print("SseTextTap:")
 def sse(*events):

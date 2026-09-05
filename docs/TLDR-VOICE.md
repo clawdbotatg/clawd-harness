@@ -37,10 +37,13 @@ claude (PTY)  ──ANTHROPIC_BASE_URL──▶  ApiTeeHandler :8791  ──HTTP
   The path prefix is how one proxy routes N sessions (the CLI preserves it).
   It forwards method/path/headers/body untouched except `Accept-Encoding:
   identity` (so the SSE is readable), streams chunked, and tees `text_delta`
-  events of the **main conversation call** — body ≥ `API_TEE_MAIN_MIN`
-  (15 KB; side calls like titling are ~4 KB) and **not** a subagent
-  (`cc_is_subagent=true` in the billing header inside `system[0]`; subagents
-  ride the same URL and once got summarized as if they were the reply). Any
+  events of the **main conversation call** only (`tee_call_kind`): body ≥
+  `API_TEE_MAIN_MIN` (15 KB) **and carrying a `tools` list** **and not** a
+  subagent (`cc_is_subagent=true` in the billing header inside `system[0]`).
+  Subagents ride the same URL and once got summarized as if they were the
+  reply; the WebFetch tool's own page summarizer (no tools, 40 KB of page in
+  the request) once produced a TLDR of an audit report during a tool-only
+  turn. Size alone is not a discriminator. Any
   tee-side exception leaves the stream flowing. Bind failure → `API_TEE`
   flips off and sessions go direct. An operator-exported `ANTHROPIC_BASE_URL`
   wins and disables it — unless it is itself a tee URL (`tee_is_ours`), which
