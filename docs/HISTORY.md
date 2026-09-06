@@ -11,6 +11,45 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-06 — 🟦 TLDR only the reply, never the tool-call chatter (`55823df`)
+
+**Handoff (session wrapped).** Shipped, pushed, gate green, shipcheck passed —
+already an ancestor of HEAD; every box picks it up on its own graceful restart.
+
+Austin reported this four times: during tool-heavy turns the blue Live TLDR was
+summarizing Claude's *interstitial narration* ("Let me look at the config
+first.", "Now I'll run the tests…") instead of only the real prose reply at the
+end. His words: two kinds of text come back — tool-call chatter and actual
+words meant to communicate; TLDR only the words meant for him.
+
+Root cause (from `~/Library/Logs/clawd-harness.log`): the tee sees only the
+assistant SSE stream, so tool *results* never entered it — the leak was the
+short prose fragments Claude writes *between* tool calls. Nothing reset the
+rolling buffer at a tool boundary, so those fragments accumulated and got
+summarized.
+
+Fix, two parts in `server.py`:
+1. **Structural reset on tool_use.** `SseTextTap.feed` now emits `("tool","")`
+   on a `content_block_start` whose type is `tool_use`. `tee_text(kind,text)`
+   on that event clears `tldr_turn_text`/`tldr_text`, resets read cursor +
+   sentences, stops any in-flight `RollingTldr`, clears `_voice_said`, and
+   pushes a blank frame. So only prose *after the last tool* (the block with no
+   tool after it — the actual reply) survives to the summarizer. This is what
+   makes it correct: a summarizer pass takes 2–4 s, a tool lands ~100 ms after
+   narration, so the reset cancels the doomed pass before it matters.
+2. **0.8 s debounce** (`TLDR_DEBOUNCE`, threading.Timer) so we don't even spawn
+   a summarizer for a fragment a tool is about to cancel. Efficiency/race
+   backstop, not load-bearing for correctness.
+
+Known trade: prose split by a tool mid-thought loses the earlier half — but
+that half was narration, which is exactly what Austin didn't want.
+
+Guards: `test_tldr.py` (SseTap emits the tool boundary; `tee_text` drops
+narration, blanks the summary, resets voice, keeps post-last-tool prose, arms
++ cancels the debounce). Proven end-to-end through the *real* `SseTextTap` +
+real `tee_text`, byte-chunked tool-heavy turn — summarizer only ever saw the
+final reply. Feature doc `docs/TLDR-VOICE.md` updated.
+
 ## 2026-09-06 — measured-dead ≠ no login: blind fallback + stranded-login reclaim (`95de082`)
 
 **Handoff (session wrapped 12:35).** Shipped, pushed, in production; head
