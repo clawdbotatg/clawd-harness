@@ -164,6 +164,27 @@ close"). Volatile on purpose — a restart disarms. Guards: `test_wrap.py`
 `tools/wrapprobe.mjs` (real taps on emulated touch). Plan doc:
 `docs/DOC-AND-CLOSE-PLAN.md`.
 
+**Handoff (session wrapped 2026-09-06).** Shipped: `1956e37`, in production
+(shipcheck green). Open threads / next steps, none blocking:
+- Sessions spawned BEFORE a box's daemon picked up `1956e37` have no
+  `harness-close` on PATH and no `HARNESS_CLOSE_URL` — a 📑 on them types
+  the prompt, claude reports "command not found", the tab stays (safe
+  direction). Each box's graceful self-restart resumes every session with
+  the new env; nothing to do but wait for it.
+- Only probe-level fleet coverage: `wrap`/`wrapCancel` ride the relay
+  verbatim (worker forwards everything), but nobody has tapped 📑 from the
+  phone through h.atg.link yet. First real use should be watched once.
+- ↩ on the toast is the 🗃️ reopen: a NEW cid resuming the old conversation
+  (the plan wanted the same cid; the shipped history didn't). Pins/deep links
+  to the old cid don't follow. Acceptable, noted here so nobody "fixes" it
+  twice.
+- The dirty-tree gate counts untracked files; a stray scratch file in the
+  project refuses the close with the porcelain lines. That's intended —
+  claude commits or removes it — but if it ever feels wrong, the knob is
+  `_worktree_dirty` (one function).
+- `docs/SESSION-HISTORY-PLAN.md` is superseded by the shipped 🗃️ (`024ea83`);
+  it's kept as design record only.
+
 ## 2026-09-05 — passkey cadence: 24h → 7 days
 
 Austin: "I spent too much of my time doing passkey auths." One Face ID per
