@@ -4890,6 +4890,13 @@ function renderAccountsPanel(container, info, mid) {
     else {
       sub.push(a.email || (a.status === 'pending' ? 'not signed in yet' : ''));
       sub.push(tierShort(a.tier));
+      // the refresh-token family's horizon (~30 d after the ceremony; the
+      // store reports it): inside 3 days it's a heads-up, the poller retires
+      // the login SUB_LOGIN_HORIZON before it so no session is parked there
+      // when claude wipes the grant (2026-09-06)
+      const left = a.loginExpiresAt ? a.loginExpiresAt - Date.now() / 1000 : 0;
+      if (a.loginExpiresAt && left < 3 * 86400)
+        sub.push('🔑 login expires in ' + fmtAge(Date.now() / 1000 - Math.max(0, left)));
     }
     mail.textContent = sub.filter(Boolean).join(' · ');
     if (a.status === 'needs-login') mail.style.color = 'var(--err)';
@@ -4993,7 +5000,8 @@ function renderAccountsPanel(container, info, mid) {
     if (a.status !== 'ready') {
       const hint = document.createElement('div'); hint.className = 'ahint2';
       hint.textContent = a.status === 'needs-login'
-        ? 'this login stopped working (revoked or expired beyond refresh) — it is EXCLUDED from routing until you sign in again'
+        ? (a.error ? a.error + ' — it is EXCLUDED from routing until you sign in again'
+           : 'this login stopped working (revoked or expired beyond refresh) — it is EXCLUDED from routing until you sign in again')
         : 'sign-in not finished — open the sign-in terminal and complete the claude.ai login there';
       card.appendChild(hint);
       const open = document.createElement('button');

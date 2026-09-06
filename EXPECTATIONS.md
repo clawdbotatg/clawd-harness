@@ -22,6 +22,10 @@ The contract when that happens:
   plus a one-tap `sign in again` button in the machine's section.
 You should never *discover* a dead login by watching a session fail on it.
 
+*(2026-09-06 correction: "sticks" has a ~30-day horizon — see the 2026-09-06
+entry below. The store reports it (`refreshTokenExpiresAt`); the 🧠 card
+shows it inside 3 days; the poller retires the login 30 min before it.)*
+
 **2026-07-08 addendum — why logins kept dying, and why the next sign-in
 should be the last (see "Root cause" below).** Before this date, promise 1
 was structurally broken by the harness itself: idle logins died over and
@@ -273,6 +277,12 @@ account — the manual re-sign-in):
 | commit | what |
 |---|---|
 | (this) | **a confirmed wall now quarantines the pool.** `ef` painted “You've hit your session limit · resets 11:10pm” and its API call returned 429, but the retained `/usage` snapshot still said **47%**. The tripwire fired correctly; then `_best_account()` trusted 47%, selected `ef` again, and rescue refused the same-pool move while fresh `sub4` sat at 59%. A restart forgot the terminal evidence, so new sessions also landed on `ef` and died. Fix: terminal wall + endpoint corroboration persists `walled_until`/`wall_kind` across every alias of the organization, excludes that pool from spawn, prompt, sweep, and rescue routing until the cached matching reset (+ grace), and visibly marks its card. Rescue selects the other pool before respawning and redelivers the eaten prompt exactly once; a zero-turn first prompt gets a fresh replacement instead of an invalid `--resume`. Test: `test_wall_quarantine.py` recreates the incident numbers and replay. |
+
+**2026-09-06** (head — promise 1 AND promise 3 breached at once, silently, for four hours):
+
+| commit | what |
+|---|---|
+| (this) | **the login horizon.** `slop`'s refresh-token family expired at 03:56 (`refreshTokenExpiresAt` in the blob — signed in 08-08, ~29 days), claude's next refresh was rejected, it **wiped the grant** (blob present, both tokens empty), and the picowallet session answered "please bring the front end back up" with **`Login expired · Please run /login`** at 07:50 and again at 08:55. Three defenses missed it together: (1) the poller polls ONE login per org and **copies** its numbers onto the siblings — `clawd` (same org, healthy) fronted the poll, so slop read `50% · checked 1 min ago` with an empty store; (2) the CLI's reply is a `<synthetic>` assistant line, a 50 ms turn with ORDINARY hooks — no limit banner for the PTY tripwire, no hook silence for the send watchdog; (3) every router path (`_route_decision`, `maybe_handoff`, `rescue_bounced_prompt`) refused the one sane move, slop → clawd, on the one-limit rule ("best pool shares this org — a move buys nothing") — true of a limit, false of a dead LOGIN. And the on-Stop check would have re-admitted it anyway: the cached access token still answered 200, and a 200 cleared `broken`. Fix: `_login_state` reads the store's OWN verdict (wiped / horizon); the poller retires a login `SUB_LOGIN_HORIZON` (30 min) before its horizon and on a wipe, *before* grouping, so a sibling's numbers are never copied onto a dead login; `login_gone` keeps it out (a usage 200 sets `broken = bool(login_gone)`); a dead login moves to a same-org sibling in all three paths; the transcript tailer trips on the synthetic reply → `rescue_login_expired` confirms the wipe in the store, retires, hands off, redelivers; the card shows `🔑 login expires in Nd` inside 3 days and the poller's reason on the needs-sign-in hint. **Promise 1 corrected:** a login does NOT stick indefinitely — the family has a ~30-day horizon the client's rotations do not reliably extend (slop rotated daily and died on schedule; clawd's horizon did move, 08-07 → 09-22 — why is unknown). The contract is now: you re-sign-in about monthly, the 🧠 page tells you days ahead, and no session is ever parked on the login when it dies. Test: `test_login_expired.py` (the incident blob verbatim + the same-org move + the quote no-op). Debugging rule: **"Login expired" in a session = read that dir's blob (`_login_state`), not the usage numbers — they may be a sibling's copy.** |
 
 **End-state verified 2026-07-09 afternoon:** all four pools (austingriffith
 20x · Ethereum Foundation 5x · clawd 20x · slop 5x) live with real numbers
@@ -610,6 +620,15 @@ is.
    it — everything faster missed; that's a bug, bring the pty tail). A
    banner with NONE of these lines within ~30 s = the wall wasn't detected
    at all — breach, point here.
+3d. **The session says `Login expired · Please run /login`:** that login's
+   refresh family died (or claude wiped the blob for another reason). Read
+   the store, not the card: `python3 -c "import server;print(server._login_state('<config_dir>'))"`
+   → `wiped: True` = sign in again (the card should already say so with the
+   reason; the session should already be on a sibling login with the prompt
+   redelivered — log: `'Login expired' in the transcript on …` then
+   `[handoff …] login expired on … — rescuing now and redelivering`). If the
+   card still shows a healthy percentage for that dir, its numbers are a
+   same-org sibling's copy — the 2026-09-06 class; point here.
 4. Note which machine the stuck session was on and which pools that machine
    held at the time (promise 3 is per-machine — "there was headroom on
    another box" is the known limit, not a breach).

@@ -827,6 +827,19 @@ BUSY_STUCK = float(os.environ.get("BUSY_STUCK", "600"))
 # prompt on the fresh pool. COOLDOWN stops a retype storm from churning respawns.
 BOUNCE_SETTLE   = float(os.environ.get("BOUNCE_SETTLE", "3"))
 BOUNCE_COOLDOWN = float(os.environ.get("BOUNCE_COOLDOWN", "60"))
+# Login horizon (2026-09-06): a refresh-token FAMILY has a hard expiry the
+# store reports (`refreshTokenExpiresAt`, ~30 days after the ceremony; the
+# client's rotations do not reliably move it). When it passes, claude's next
+# refresh is rejected, it WIPES the grant, and every prompt gets "Login
+# expired · Please run /login" — an ordinary-looking 50 ms turn with normal
+# hooks, no banner, no hook silence. The poller retires a login this many
+# seconds BEFORE that horizon (idle sessions evacuate to a working login of
+# the same pool) so nothing is parked there when the grant dies.
+SUB_LOGIN_HORIZON = float(os.environ.get("SUB_LOGIN_HORIZON", "1800"))
+# The CLI's reply once its grant is gone. Matched only on <synthetic>
+# assistant transcript lines (CLI-generated text, not a model) and
+# confirm-gated on the credential store, so quoting it is harmless.
+_LOGIN_EXPIRED_RE = re.compile(r"login expired|please run /login", re.I)
 # Send watchdog: every delivered message must produce a UserPromptSubmit hook
 # within seconds. A hard-walled CLI answers with its limit line and fires NO
 # hook at all (proven live 2026-07-12 03:2x: send → hook-silent 881s → only
@@ -1177,6 +1190,51 @@ def _creds_state(config_dir):
     if oauth.get("accessToken"):
         return "present"
     return "absent" if definitive else "unknown"
+
+
+def _login_state(config_dir):
+    """The store's own verdict on a login, straight from its blob:
+    {"wiped", "refresh_expires", "has_access"}.
+
+    `wiped` = the store POSITIVELY holds a blob whose access AND refresh
+    tokens are both empty. Only claude does that — its refresh was rejected
+    (the family's `refreshTokenExpiresAt` passed), so it blanked the grant
+    and now answers every prompt with "Login expired · Please run /login".
+    It is the one true sign-out signal a live-session login can give: the
+    usage poller never sees it (a same-org sibling fronts the poll and its
+    numbers are COPIED onto this login), and the CLI's reply fires ordinary
+    hooks, so no tripwire fires either (2026-09-06, slop on head). A blob we
+    could not read is never wiped (root cause v3). `refresh_expires` is the
+    family horizon in epoch seconds (None when the store doesn't say)."""
+    blob, definitive = _read_oauth_creds_ex(config_dir)
+    oauth = (blob or {}).get("claudeAiOauth")
+    exp = (oauth or {}).get("refreshTokenExpiresAt")
+    return {
+        "wiped": bool(definitive and isinstance(oauth, dict)
+                      and not (oauth.get("accessToken")
+                               or oauth.get("refreshToken"))),
+        "refresh_expires": (exp / 1000.0
+                            if isinstance(exp, (int, float)) and exp > 0
+                            else None),
+        "has_access": bool((oauth or {}).get("accessToken")),
+    }
+
+
+def _login_verdict(config_dir, now=None):
+    """(reason, refresh_expires) — why this login must leave routing NOW, or
+    (None, horizon) when it is fine. Two reasons: the client already wiped
+    the grant, or its horizon is inside SUB_LOGIN_HORIZON."""
+    now = time.time() if now is None else now
+    st = _login_state(config_dir)
+    exp = st["refresh_expires"]
+    if st["wiped"]:
+        return ("login expired — the client wiped its credential blob "
+                "(the refresh grant reached its horizon)", exp)
+    if exp is not None and exp - now < SUB_LOGIN_HORIZON:
+        left = max(0, int((exp - now) // 60))
+        return (f"login expires in {left} min — retiring it before claude "
+                "wipes the grant", exp)
+    return (None, exp)
 
 
 def _claude_config_file(config_dir):
@@ -2030,6 +2088,9 @@ class Account:
                                                  # excluded from routing until re-sign-in
         self.refused_sig = ""                    # _cred_sig of the blob that was refused —
                                                  # re-admit only when it changes
+        self.login_gone = ""                     # the STORE's verdict (wiped / horizon) —
+                                                 # a usage 200 on a cached token never clears it
+        self.login_expires = 0.0                 # refreshTokenExpiresAt (epoch s), per poll
         self.tok = {}                            # in-memory refreshed-access-token cache
         self.last_pending_check = 0.0            # backoff anchor while awaiting sign-in
 
@@ -2091,6 +2152,7 @@ class Account:
                 "walledUntil": self.walled_until if self.walled_until > time.time() else 0,
                 "wallKind": self.wall_kind if self.walled_until > time.time() else "",
                 "error": self.error,
+                "loginExpiresAt": self.login_expires or None,
                 "configDir": self.config_dir}
 
 
@@ -2981,6 +3043,7 @@ class ClaudeSession:
         self.hooks_at_prompt = 0                  # hook_count when it landed — "did that turn ever progress?"
         self._limit_raw = b""                     # rolling RAW PTY bytes, for the limit banner/modal scan
         self._limit_seen_at = 0.0                 # cooldown anchor for banner-triggered rescues
+        self._login_gone_seen = 0.0               # cooldown anchor for the login-expired rescue
         self._onboard_tail = ""                   # rolling de-ANSI'd PTY text, for the onboarding-screen scan
         self._onboard_deadline = 0.0              # scan window end; start() arms it, a match disarms it
         self._onboard_rescues = 0                 # respawns burned on this cid (carried across; caps the loop)
@@ -4085,6 +4148,29 @@ class ClaudeSession:
                     if ev:
                         self._to_subscribers_json(
                             {"type": "transcript", "cid": self.cid, "event": ev})
+                    # Login-expired tripwire: the CLI's own reply once its
+                    # grant is gone is a <synthetic> assistant line — a
+                    # normal-looking turn to every other detector. Live
+                    # lines only (not subscribe replays); the rescue
+                    # confirms against the store, so a quote is a no-op.
+                    if '"<synthetic>"' in raw and _LOGIN_EXPIRED_RE.search(raw):
+                        self._on_login_expired()
+
+    def _on_login_expired(self):
+        """The transcript just showed the CLI's 'Login expired · Please run
+        /login' reply. Hand it to rescue_login_expired, which confirms the
+        wipe in the credential store before moving anything."""
+        if self.ceremony:
+            return                               # a sign-in ceremony: the login screen is the point
+        now = time.time()
+        if now - self._login_gone_seen < BOUNCE_COOLDOWN:
+            return
+        self._login_gone_seen = now
+        print(f"[session {self.cid[:8]}] 'Login expired' in the transcript on "
+              f"{self.account} — confirming against the credential store",
+              flush=True)
+        threading.Thread(target=self.manager.rescue_login_expired,
+                         args=(self, self.last_prompt), daemon=True).start()
 
     def _slim_event(self, line: str):
         """Reduce a raw transcript line to the bits a controller cares about.
@@ -5613,14 +5699,17 @@ class SessionManager:
         cur_dead = (cur is None or cur.broken
                     or now < getattr(cur, "walled_until", 0.0)
                     or (cur_fresh and cur_pct >= SUB_EXHAUSTED))
-        if cur and cur.org and best.org and cur.org == best.org:
+        login_dead = cur is not None and cur.broken
+        if cur and cur.org and best.org and cur.org == best.org and not login_dead:
             return ("stay", None, "best pool shares this org — one limit, a move buys nothing")
         if best.name == s.account:
             return ("stay", None, "already on the best pool")
         best_pct = (best.usage or {}).get("pct", 100.0)
         if cur_dead:
             if best_pct < SUB_EXHAUSTED:
-                return ("move", best, "current plan drained or refused")
+                return ("move", best,
+                        "current login is dead — moving to a working login"
+                        if login_dead else "current plan drained or refused")
             return ("stay", None, "current plan drained but nowhere usable to go")
         if cur and not cur.routable() and best.routable():
             return ("move", best, "current plan can't run the fleet's model")
@@ -5810,6 +5899,9 @@ class SessionManager:
                         and _cred_sig(a.config_dir) == a.refused_sig:
                     continue                     # same refused login still there —
                                                  # wait for an actual re-sign-in
+                if a.broken and _login_verdict(a.config_dir, now)[0]:
+                    continue                     # the store still says wiped / about to
+                                                 # expire — a rotated token is not a sign-in
                 email, org, oname = _account_identity(a.config_dir)
                 if not a.ready and a.config_dir:
                     _merge_mcp(a.config_dir)
@@ -5817,6 +5909,7 @@ class SessionManager:
                     was_broken = a.broken
                     a.ready, a.broken = True, False
                     a.refused_sig = ""
+                    a.login_gone = ""
                     a.email = email or a.email
                     a.org = org or a.org
                     a.org_name = oname or a.org_name
@@ -5838,6 +5931,21 @@ class SessionManager:
             due = [a for a in accts if a.ready and not a.broken and
                    (forced or (now - (a.usage or {}).get("checkedAt", 0) > _ttl(a)
                                and now >= a.tok.get("no_poll_until", 0)))]
+            # The store's own verdict first (2026-09-06): a login whose blob
+            # the client WIPED, or whose refresh family expires inside
+            # SUB_LOGIN_HORIZON, leaves routing now — before it is polled,
+            # and before a same-org sibling's healthy numbers get copied
+            # onto it below. That copy is how slop sat "50%" for four hours
+            # after its grant died while its session bounced every prompt.
+            for a in list(due):
+                why, horizon = _login_verdict(a.config_dir, now)
+                with self.lock:
+                    a.login_expires = horizon or 0.0
+                if not why:
+                    continue
+                self._retire_login(a, why)
+                due.remove(a)
+                changed = True
             if due:
                 # An account with live claude sessions: those processes hold
                 # (and renew) the very same refresh grant — the poller must
@@ -6148,7 +6256,8 @@ class SessionManager:
                 with self.lock:
                     now2 = time.time()
                     acct.record_usage(pct, windows, now2)
-                    acct.broken = False
+                    acct.broken = bool(acct.login_gone)
+            dead = dead or bool(acct and acct.login_gone)
         elif got is None and acct:
             # Endpoint unreachable with the stored token — fall back to the
             # poll snapshot that flagged this plan (only if it's fresh).
@@ -6163,7 +6272,8 @@ class SessionManager:
         self._mark_pool_walled(acct, "session")
         best = self.accounts.get(self._best_account() or "")
         if (not best or best.name == s.account
-                or (acct and acct.org and best.org and acct.org == best.org)
+                or (acct and acct.org and best.org and acct.org == best.org
+                    and not acct.broken)      # a dead LOGIN moves to its sibling
                 or (best.usage or {}).get("pct", 100.0) >= SUB_EXHAUSTED):
             self._stay_put_log(s, best, "prompt bounced off a dead plan")
             self.broadcast_accounts()
@@ -6178,6 +6288,11 @@ class SessionManager:
         self._handoff(s, best,
                       why="prompt bounced off the dead plan; resuming under the fresh one",
                       fresh_if_empty=True)
+        self._redeliver(s, prompt)
+
+    def _redeliver(self, s, prompt):
+        """After a rescue handoff of `s`, retype the prompt the dead plan ate
+        under the fresh claude. No-op when the handoff declined or failed."""
         fresh = self.sessions.get(s.cid)
         if fresh is s or not fresh or not fresh.alive or not prompt.strip():
             return                               # handoff declined/failed — nothing to redeliver
@@ -6190,6 +6305,66 @@ class SessionManager:
             print(f"[handoff {s.cid[:8]}] redelivering the bounced prompt "
                   f"({len(prompt)} chars) under {fresh.account}", flush=True)
             fresh.send_message(prompt)
+
+    def _retire_login(self, acct, why):
+        """Take one LOGIN out of routing on the credential store's verdict
+        (wiped blob / horizon inside SUB_LOGIN_HORIZON). `login_gone` is what
+        keeps it out: the rescue paths clear `broken` on any usage 200, and a
+        cached access token keeps answering 200 for hours after the family
+        died — without this, a Stop would silently re-admit the dead login.
+        The card reads needs-sign-in; a real re-sign-in (new blob, verdict
+        clear) re-admits it through the pending/broken watch."""
+        with self.lock:
+            acct.broken = True
+            acct.login_gone = why
+            acct.refused_sig = _cred_sig(acct.config_dir)
+            acct.error = why + "; sign in again"
+        print(f"[account {acct.name}] {why}; excluded from routing until "
+              "re-sign-in", flush=True)
+
+    def rescue_login_expired(self, s, prompt):
+        """The CLI answered a prompt with "Login expired · Please run /login".
+        Its refresh was rejected, it wiped the grant, and the turn ended in
+        ~50 ms as a <synthetic> assistant line with ORDINARY hooks — no limit
+        banner, no hook silence — so the PTY tripwire and the send watchdog
+        both see a healthy turn, and the poller had been copying a same-org
+        sibling's good numbers onto this login (2026-09-06: slop on head sat
+        "50%" while its session bounced twice, an hour apart). Confirm the
+        wipe in the store, retire the LOGIN (the pool is fine — a same-org
+        sibling is the natural target, which is exactly the move the
+        one-limit rule normally refuses), hand off, redeliver the prompt."""
+        if not SUB_AUTOSWITCH or s.ceremony or not s.eng.routes_accounts:
+            return
+        acct = self.accounts.get(s.account)
+        if not acct:
+            return
+        if not _login_state(acct.config_dir)["wiped"]:
+            print(f"[session {s.cid[:8]}] 'Login expired' seen on {s.account} "
+                  "but its credential store is intact — a quote, not a "
+                  "sign-out; no-op", flush=True)
+            return
+        now = time.time()
+        if now - s.last_bounce_rescue < BOUNCE_COOLDOWN:
+            return
+        if not acct.login_gone:
+            self._retire_login(acct, "login expired — the client wiped its "
+                                     "credential blob (confirmed by the "
+                                     "session's own bounce)")
+        best = self.accounts.get(self._best_account() or "")
+        if (not best or best.name == s.account or best.broken
+                or (best.usage or {}).get("pct", 100.0) >= SUB_EXHAUSTED):
+            self._stay_put_log(s, best, "login expired")
+            self.broadcast_accounts()
+            return
+        s.last_bounce_rescue = now
+        self.broadcast_accounts()
+        s.busy = False
+        print(f"[handoff {s.cid[:8]}] login expired on {s.account} — rescuing "
+              "now and redelivering", flush=True)
+        self._handoff(s, best,
+                      why="login expired; resuming under a working login",
+                      fresh_if_empty=True)
+        self._redeliver(s, prompt)
 
     def _stay_put_log(self, s, best, what):
         """A rescue that found nowhere to go must say so — on 2026-08-22 the
@@ -6369,7 +6544,7 @@ class SessionManager:
                 with self.lock:
                     now2 = time.time()
                     acct.record_usage(pct, windows, now2)
-                    acct.broken = False
+                    acct.broken = bool(acct.login_gone)
         elif (backed_off or got == RATE_LIMITED) and acct:
             u = acct.usage or {}
             if time.time() - (u.get("checkedAt") or 0) < 3 * USAGE_TTL:
@@ -6380,12 +6555,15 @@ class SessionManager:
             with self.lock:
                 acct.broken = True
                 acct.refused_sig = sig
+        if acct and acct.login_gone:
+            drained = hot = True                 # the store's verdict outranks a cached-token 200
         if not hot:
             return
         best = self.accounts.get(self._best_account() or "")
         bar = SUB_EXHAUSTED if drained else SUB_HOT
         if (not best or best.name == s.account
-                or (acct and acct.org and best.org and acct.org == best.org)
+                or (acct and acct.org and best.org and acct.org == best.org
+                    and not acct.broken)      # a dead LOGIN moves to its sibling
                 or (best.usage or {}).get("pct", 100.0) >= bar):
             self.broadcast_accounts()
             return                               # nowhere better to go — stay put

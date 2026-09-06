@@ -316,8 +316,14 @@ no-op that would leave the previous session's stream flowing (that's how
   "usagePct":<float|null>, "headroom":<float|null>,
   "windows":[{ "key", "label", "used":float, "resets":<iso|null> }...],
   "checkedAt":<float|null>, "walledUntil":<float>,
-  "wallKind":"session|weekly|", "error":str, "configDir":str }
+  "wallKind":"session|weekly|", "error":str,
+  "loginExpiresAt":<float|null>, "configDir":str }
 ```
+- `loginExpiresAt` = the login's refresh-token family horizon (epoch seconds,
+  from the credential store's `refreshTokenExpiresAt`; `null` when unknown).
+  Past it claude wipes the grant and answers every prompt "Login expired".
+  The harness retires the login `SUB_LOGIN_HORIZON` (30 min) before it and
+  flips `status` to `needs-login`; the UI shows it inside 3 days.
 - `status:"pending"` = the account dir exists but no credentials yet (the
   sign-in ceremony hasn't been completed). It flips to `ready` on its own once
   the harness observes credentials (~15s poll).
