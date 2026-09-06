@@ -1510,24 +1510,73 @@ def _norm_config_dir(config_dir):
 # wrangler's bounce path put sub5 in exactly this blind spot).
 VM_CUSTODY_DIR = os.environ.get(
     "VM_CUSTODY_DIR", os.path.expanduser("~/.config/cont/vm-accounts"))
+# A record whose VM has halted is reclaimed via `cont reclaim <vm>` (boots the
+# guest briefly to harvest its blob) — at most once per VM per cooldown.
+CUSTODY_RECLAIM_COOLDOWN = float(os.environ.get("CUSTODY_RECLAIM_COOLDOWN", "1800"))
+CUSTODY_RECLAIM_TIMEOUT = float(os.environ.get("CUSTODY_RECLAIM_TIMEOUT", "420"))
 
 
-def _vm_custody_dirs():
-    """Normalized config dirs of every login a VM custody record names.
-    Empty set when the ledger doesn't exist (no cont on this box) or can't
-    be read — the flock and live-process guards still stand behind this."""
-    dirs = set()
+def _vm_custody_records():
+    """[(vm_name, normalized config dir)] for every custody record in the
+    ledger. Empty when the ledger doesn't exist (no cont on this box) or
+    can't be read — the flock and live-process guards still stand behind
+    this."""
+    recs = []
     try:
         for f in os.listdir(VM_CUSTODY_DIR):
             try:
                 with open(os.path.join(VM_CUSTODY_DIR, f)) as fh:
                     rec = fh.read().strip()
-                dirs.add(_norm_config_dir(rec))
+                recs.append((f, _norm_config_dir(rec)))
             except OSError:
                 continue
     except OSError:
         pass
-    return dirs
+    return recs
+
+
+def _running_vms():
+    """Names of tart VMs currently RUNNING, or None when tart can't answer
+    (not installed, timed out) — None means 'unknown', and callers must
+    treat every custody record as live rather than guess."""
+    try:
+        out = subprocess.run(["tart", "list"], capture_output=True, text=True,
+                             timeout=15).stdout
+    except Exception:
+        return None
+    running = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[0] == "local" and parts[-1] == "running":
+            running.add(parts[1])
+    return running
+
+
+def _vm_custody_dirs():
+    """Normalized config dirs of every login a VM custody record names —
+    ALL records, running VM or not. A record for a STOPPED VM still means
+    the host must not refresh that login: the guest may have rotated the
+    refresh token before it halted, and a host-side refresh of the stale
+    sibling trips OAuth reuse detection and revokes the whole family (how
+    ef and sub2 died 2026-08-06, per cont). The stopped case is cont's
+    `reclaim` — see _vm_custody_stale / SessionManager._reclaim_custody,
+    which is what keeps such a login from being frozen out of routing
+    forever (sub2 sat 32 h on a dead reading behind a stopped VM's record,
+    2026-09-06, while the box's sessions walled with 'nowhere to go')."""
+    return {d for _, d in _vm_custody_records()}
+
+
+def _vm_custody_stale():
+    """[(vm_name, config dir)] custody records whose VM is NOT running —
+    logins stranded behind a halted guest. Empty when tart can't answer
+    (unknown ≠ stopped)."""
+    recs = _vm_custody_records()
+    if not recs:
+        return []
+    running = _running_vms()
+    if running is None:
+        return []
+    return [(vm, d) for vm, d in recs if vm not in running]
 
 
 def _ping_rotate(config_dir):
@@ -4913,6 +4962,7 @@ class SessionManager:
         self.acct_last_exit = {}                 # account -> ts of last claude exit
         self._stranded_warned = False            # one-shot: fable gate emptied the roster
         self._stale_route_noted = ""             # last pool routed to on a stale reading (log once)
+        self._custody_reclaims = {}              # vm name -> last `cont reclaim` attempt
         self._route_locks = {}                   # cid -> Lock: serializes prompt preflight,
                                                  # so two sends can't race one handoff
         self.last_switch_at = 0.0                # debounce anchor for auto-switch
@@ -5705,6 +5755,107 @@ class SessionManager:
                   "SUB_FABLE_OK=<name> to trust one)", flush=True)
         return list(accounts)
 
+    def _reclaim_custody(self, accts, live):
+        """A custody record whose VM has HALTED strands its login: the poller
+        can't refresh it (the guest may hold the rotated tip), so the
+        reading ages past USAGE_STALE_TRUST and the pool silently leaves
+        routing — sub2 (austingriffith 20x, 4% used) vanished this way for
+        32 h on 2026-09-06 while every other pool on head walled. cont's
+        answer is `cont reclaim <vm>`: boot the VM just long enough to
+        harvest its blob, adopt, release the record. Run it here, in the
+        background, once per VM per CUSTODY_RECLAIM_COOLDOWN, and say so on
+        the card meanwhile — a stranded login must never be a silent one.
+        A login with live sessions on THIS host is renewed by them anyway
+        (polled access-token-only), so it isn't stranded; skip the boot."""
+        stale = _vm_custody_stale()
+        if not stale:
+            return
+        now = time.time()
+        by_dir = {_norm_config_dir(a.config_dir): a for a in accts}
+        for vm, d in stale:
+            a = by_dir.get(d)
+            if a is None or a.name in live:
+                continue
+            if not a.error:
+                with self.lock:
+                    a.error = (f"login held by stopped VM {vm} — reclaiming "
+                               f"(cont reclaim {vm}); usage frozen until then")
+            last = self._custody_reclaims.get(vm, 0.0)
+            if now - last < CUSTODY_RECLAIM_COOLDOWN:
+                continue
+            self._custody_reclaims[vm] = now
+            print(f"[accounts] {a.name} is held by STOPPED VM {vm} — its reading "
+                  f"can't refresh; running cont reclaim {vm}", flush=True)
+            threading.Thread(target=self._run_reclaim, args=(vm, a.name),
+                             daemon=True, name=f"reclaim-{vm}").start()
+
+    def _run_reclaim(self, vm, name):
+        try:
+            r = subprocess.run(["cont", "reclaim", vm], capture_output=True,
+                               text=True, timeout=CUSTODY_RECLAIM_TIMEOUT)
+            tail = (r.stdout + r.stderr).strip().splitlines()
+            print(f"[accounts] cont reclaim {vm} for {name}: rc={r.returncode} "
+                  f"{tail[-1] if tail else ''}", flush=True)
+            ok = r.returncode == 0
+        except Exception as e:
+            print(f"[accounts] cont reclaim {vm} for {name} failed: {e}", flush=True)
+            ok = False
+        a = self.accounts.get(name)
+        if a is None:
+            return
+        with self.lock:
+            if ok:
+                a.error = ""
+                a.tok.clear()                    # the store may hold an adopted token
+            else:
+                a.error = (f"login STRANDED in stopped VM {vm} — reclaim failed; "
+                           f"fix: cont reclaim {vm}")
+        if ok:
+            self._poll_now.set()                 # refresh it now, not next TTL
+        self.broadcast_accounts()
+
+    def _blind_alternative(self, exclude_org=None, exclude_name=None):
+        """The best READY login to bet on when every MEASURED pool is dead:
+        signed in, not broken, not quarantined, and not carrying a fresh
+        reading that already says hot/exhausted. An unmeasured or long-stale
+        login is a bet whose worst case is one bounce the tripwires already
+        handle; a fresh 100% is certain failure. This is the fallback under
+        `_best_account` for spawn, the on-Stop check, both bounce rescues,
+        and the sweep — on 2026-09-06 a ＋ session on head spawned onto the
+        one measured pool (fresh, 100%) and its wall rescue found 'nowhere
+        to go' while two healthy logins sat unmeasured (their tokens had
+        expired behind the single-consumer rule). None when nothing
+        qualifies — then the box really has nowhere to go."""
+        now = time.time()
+        with self.lock:
+            alts = []
+            for a in self.accounts.values():
+                if not (a.ready and not a.broken
+                        and now >= getattr(a, "walled_until", 0.0)):
+                    continue
+                if exclude_name and a.name == exclude_name:
+                    continue
+                if exclude_org and a.org and a.org == exclude_org:
+                    continue
+                u = a.usage or {}
+                fresh = (u.get("pct") is not None
+                         and now - (u.get("checkedAt") or 0) < 3 * USAGE_TTL)
+                if fresh and u["pct"] >= SUB_HOT:
+                    continue                     # measured hot = certain failure
+                alts.append(a)
+        if not alts:
+            return None
+        return min(self._routable_first(alts), key=self._route_key)
+
+    def _blind_log(self, s, alt, what):
+        u = alt.usage or {}
+        age = ((time.time() - u["checkedAt"]) / 3600
+               if u.get("checkedAt") else None)
+        print(f"[session {s.cid[:8] if s else '-'}] {what} — every measured pool "
+              f"is dead; routing blind to {alt.name} "
+              f"({'no reading' if age is None else f'reading {age:.0f}h old'}); "
+              "its first turn refreshes it", flush=True)
+
     def _candidates(self):
         """(fresh, stale_cool): the ready, non-broken accounts that hold a
         usage reading, split by age. `fresh` (< 3×USAGE_TTL) is what every
@@ -6146,6 +6297,7 @@ class SessionManager:
                 # wrangler's bounce path (2026-08-07) ran guests on the
                 # fleet login with no host-visible process at all.
                 custody_dirs = _vm_custody_dirs()
+                self._reclaim_custody(accts, live)
                 def _grant_free(a):
                     return (a.name not in live
                             and _norm_config_dir(a.config_dir) not in proc_dirs
@@ -6278,8 +6430,16 @@ class SessionManager:
                     incapable.add(a.name)        # plan can't do fable — wrong pool at 0%
             sessions = list(self.sessions.values())
         best = self.accounts.get(self._best_account() or "")
+        blind = False
         if not best or best.name in drained:
-            return
+            # Every measured pool is dead. A blind healthy login may still
+            # rescue the sessions stuck on drained plans — that's all it is
+            # used for below; optional moves (evacuation, rebalance) never
+            # target an unmeasured pool.
+            best = self._blind_alternative()
+            if not best:
+                return
+            blind = True
         cap_moved = cap_left = 0                 # capability evacuation, this sweep
         moved = deferred = 0                     # shared per-sweep handoff budget
 
@@ -6315,13 +6475,19 @@ class SessionManager:
                           f"{int(now - s.last_active)}s on dead plan {s.account} — "
                           "treating as stuck", flush=True)
                     s.busy = False
+                if blind:
+                    cur = self.accounts.get(s.account)
+                    if cur and cur.org and cur.org == best.org and not cur.broken:
+                        continue                 # same org: a blind sibling buys nothing
                 if not take_slot():
                     deferred += 1
                     continue
+                if blind:
+                    self._blind_log(s, best, "stuck on a drained plan")
                 self._handoff(s, best)
                 continue
-            if s.busy:
-                continue
+            if s.busy or blind:
+                continue                         # blind best: rescues only, no optional moves
             if s.bg or s.eng.bg_probe(s):
                 # Idle-looking but background shells/agents are still running —
                 # a respawn would kill them. Preemptive moves (evacuation,
@@ -6452,9 +6618,15 @@ class SessionManager:
                 or (acct and acct.org and best.org and acct.org == best.org
                     and not acct.broken)      # a dead LOGIN moves to its sibling
                 or (best.usage or {}).get("pct", 100.0) >= SUB_EXHAUSTED):
-            self._stay_put_log(s, best, "prompt bounced off a dead plan")
-            self.broadcast_accounts()
-            return                               # nowhere better to go — stay put
+            alt = self._blind_alternative(
+                exclude_org=None if (acct and acct.broken) else (acct.org if acct else None),
+                exclude_name=s.account)
+            if not alt:
+                self._stay_put_log(s, best, "prompt bounced off a dead plan")
+                self.broadcast_accounts()
+                return                           # nowhere better to go — stay put
+            self._blind_log(s, alt, "prompt bounced off a dead plan")
+            best = alt
         s.last_bounce_rescue = time.time()
         self.broadcast_accounts()
         # The eaten turn never emits Stop, so `busy` is a lie here — the same
@@ -6602,9 +6774,14 @@ class SessionManager:
         if (not best or best.name == s.account
                 or (acct and acct.org and best.org and acct.org == best.org)
                 or (best.usage or {}).get("pct", 100.0) >= SUB_EXHAUSTED):
-            self._stay_put_log(s, best, "limit banner confirmed")
-            self.broadcast_accounts()
-            return                               # nowhere better to go — stay put
+            alt = self._blind_alternative(exclude_org=acct.org if acct else None,
+                                          exclude_name=s.account)
+            if not alt:
+                self._stay_put_log(s, best, "limit banner confirmed")
+                self.broadcast_accounts()
+                return                           # nowhere better to go — stay put
+            self._blind_log(s, alt, "limit banner confirmed")
+            best = alt
         bounced = s.hook_count == s.hooks_at_prompt and s.last_prompt.strip()
         cut_midturn = s.busy and not bounced
         self.broadcast_accounts()
@@ -6742,8 +6919,17 @@ class SessionManager:
                 or (acct and acct.org and best.org and acct.org == best.org
                     and not acct.broken)      # a dead LOGIN moves to its sibling
                 or (best.usage or {}).get("pct", 100.0) >= bar):
-            self.broadcast_accounts()
-            return                               # nowhere better to go — stay put
+            # A DRAINED plan can't run the next turn at all — bet on an
+            # unmeasured healthy login rather than park here. Merely hot
+            # stays put (a hot-move is optional; blind is for rescues).
+            alt = self._blind_alternative(
+                exclude_org=None if (acct and acct.broken) else (acct.org if acct else None),
+                exclude_name=s.account) if drained else None
+            if not alt:
+                self.broadcast_accounts()
+                return                           # nowhere better to go — stay put
+            self._blind_log(s, alt, "plan drained at Stop")
+            best = alt
         self.broadcast_accounts()
         if not drained and (s.bg or s.eng.bg_probe(s)):
             return                               # hot-move is optional; don't kill live background work
@@ -7422,18 +7608,23 @@ class SessionManager:
                    or self.active_account
         acct = self.accounts.get(name)
         # `_best_account` needs a usage reading. If every measured pool is
-        # quarantined but an unmeasured ready login exists, its None result
-        # must not fall back to the ACTIVE (known-walled) pool. A blind healthy
-        # login is a better bet than a CLI-proven wall; its first session will
-        # refresh the reading and the normal router takes over from there.
-        if not account and acct and time.time() < getattr(acct, "walled_until", 0.0):
-            with self.lock:
-                alts = [a for a in self.accounts.values()
-                        if a.ready and not a.broken
-                        and time.time() >= getattr(a, "walled_until", 0.0)]
-            if alts:
-                acct = min(self._routable_first(alts), key=self._route_key)
-                name = acct.name
+        # quarantined — or its pick is a FRESH reading at/over the hot bar,
+        # which is certain failure (2026-09-06: a ＋ session spawned onto
+        # clawd at a 0-min-old 100% and painted the limit banner) — but an
+        # unmeasured ready login exists, a blind healthy login is the better
+        # bet; its first session refreshes the reading and the normal router
+        # takes over from there.
+        if not account and acct:
+            u = acct.usage or {}
+            now0 = time.time()
+            fresh_hot = (u.get("pct") is not None
+                         and now0 - (u.get("checkedAt") or 0) < 3 * USAGE_TTL
+                         and u["pct"] >= SUB_HOT)
+            if now0 < getattr(acct, "walled_until", 0.0) or fresh_hot:
+                alt = self._blind_alternative(exclude_name=acct.name)
+                if alt:
+                    self._blind_log(None, alt, "new session")
+                    acct, name = alt, alt.name
         if acct is None:
             if account:                          # explicit ask for a missing account
                 print(f"[accounts] unknown account {account!r} requested — "
