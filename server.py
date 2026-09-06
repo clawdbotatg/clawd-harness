@@ -329,6 +329,9 @@ TLDR_MIN         = int(os.environ.get("TLDR_MIN", "40"))       # reply chars bef
                                                                # read it raw, URL and all — 2026-09-05)
 TLDR_CTX         = int(os.environ.get("TLDR_CTX", "30000"))    # reply chars the summarizer reads (head)
 TLDR_TIMEOUT     = float(os.environ.get("TLDR_TIMEOUT", "90"))
+TLDR_DEBOUNCE    = float(os.environ.get("TLDR_DEBOUNCE", "0.8"))  # quiet secs before a pass fires: a tool_use
+                                                               # lands ~100ms after narration, so it cancels the
+                                                               # timer first and we never spawn a doomed summarizer
 TLDR_SYS = (
     "You keep a live TLDR of a coding assistant's reply for a busy person "
     "while the reply is still being written. You get the reply so far and "
@@ -459,9 +462,12 @@ def tee_is_main_call(body):
 
 class SseTextTap:
     """Pull assistant prose out of a Messages SSE stream, chunk by chunk.
-    feed(bytes) → [("block", ""), ("text", delta), …]: a "block" marks the
-    start of a new text block (paragraph break), "text" a text_delta.
-    Tool-use/thinking blocks are ignored. Tolerates any chunking."""
+    feed(bytes) → [("block", ""), ("text", delta), ("tool", ""), …]: a "block"
+    marks the start of a new text block (paragraph break), "text" a text_delta,
+    "tool" the start of a tool_use block — the signal that everything written
+    before it was narration around a tool call, not the reply meant for the
+    human (only the prose with NO tool after it is the real reply). Thinking
+    blocks are ignored (never a paragraph boundary for us). Any chunking."""
     def __init__(self):
         self.buf = b""
 
@@ -478,9 +484,12 @@ class SseTextTap:
                 except Exception:
                     continue
                 t = d.get("type")
-                if t == "content_block_start" and \
-                        (d.get("content_block") or {}).get("type") == "text":
-                    out.append(("block", ""))
+                if t == "content_block_start":
+                    ct = (d.get("content_block") or {}).get("type")
+                    if ct == "text":
+                        out.append(("block", ""))
+                    elif ct == "tool_use":
+                        out.append(("tool", ""))
                 elif t == "content_block_delta" and \
                         (d.get("delta") or {}).get("type") == "text_delta":
                     out.append(("text", d["delta"].get("text", "")))
@@ -3066,6 +3075,8 @@ class ClaudeSession:
         self._voice_said = []                     # summary sentences read aloud this turn
         self._tldr = None                         # RollingTldr for the turn in flight
         self._tldr_lock = threading.Lock()
+        self._tldr_timer = None                   # debounce: hold the summarizer a beat so a
+        self._tldr_deadline = 0.0                 # tool landing right after narration cancels first
         self.blocked_on = None                    # the open question if it ended asking the human (LLM)
         self.last_answer = ""                     # last Stop's assistant message — durable (backfilled on resume)
         self.settings_path = None
@@ -4602,16 +4613,64 @@ class ClaudeSession:
 
     def tee_text(self, kind, text):
         """API tee → this turn's streamed assistant prose. Called from the
-        proxy's stream loop for every text_delta, so it must be cheap: append,
-        and poke the summarizer only when a viewer asked for it."""
+        proxy's stream loop for every text_delta, so it must be cheap.
+
+        The turn is prose blocks split by tool calls; only the LAST block (the
+        prose with no tool after it) is the reply meant for the human. A "tool"
+        event means everything so far was narration around a tool call — drop
+        it, blank the block, kill the pass in flight. Real text arms a debounce
+        so a tool arriving right behind narration cancels it before a summarizer
+        ever spawns (2026-09-06: don't TLDR the tool-call chatter)."""
+        stop_r = None
+        blank = False
         with self._tldr_lock:
-            if kind == "block":
+            if kind == "tool":
+                self._tldr_cancel_timer()
+                if self.tldr_turn_text or self.tldr_text or self._tldr:
+                    self.tldr_turn_text = self.tldr_text = ""
+                    self.tldr_read_at = 0
+                    self.tldr_sents = []
+                    stop_r, self._tldr = self._tldr, None
+                    self._voice_said = []
+                    blank = True
+            elif kind == "block":
                 if self.tldr_turn_text and not self.tldr_turn_text.endswith("\n\n"):
                     self.tldr_turn_text += "\n\n"
+            else:                                    # text
+                self.tldr_turn_text += text
+                if self.tldr_on:
+                    self._tldr_deadline = time.monotonic() + TLDR_DEBOUNCE
+                    if self._tldr_timer is None:
+                        self._tldr_arm_timer_locked(TLDR_DEBOUNCE)
+        if stop_r:
+            stop_r.stop()
+        if blank:                                    # the blue block clears: it was tool narration
+            self._to_subscribers_json(self._tldr_frame("", False))
+
+    def _tldr_arm_timer_locked(self, delay):
+        """Start the debounce timer (caller holds _tldr_lock)."""
+        self._tldr_timer = threading.Timer(delay, self._tldr_debounced)
+        self._tldr_timer.daemon = True
+        self._tldr_timer.start()
+
+    def _tldr_cancel_timer(self):
+        """Cancel a pending debounce timer (caller holds _tldr_lock)."""
+        if self._tldr_timer is not None:
+            self._tldr_timer.cancel()
+            self._tldr_timer = None
+
+    def _tldr_debounced(self):
+        """Debounce fired: kick the summarizer only after TLDR_DEBOUNCE of prose
+        quiet. If more text arrived meanwhile, wait out the remainder instead."""
+        with self._tldr_lock:
+            self._tldr_timer = None
+            remaining = self._tldr_deadline - time.monotonic()
+            if remaining > 0.01:
+                self._tldr_arm_timer_locked(remaining)
                 return
-            self.tldr_turn_text += text
-        if self.tldr_on:
-            self._tldr_kick()
+            if not self.tldr_on:
+                return
+        self._tldr_kick()
 
     def _tldr_kick(self):
         """Feed the loop the whole reply so far (starting it on first use)."""
@@ -4658,6 +4717,7 @@ class ClaudeSession:
     def tldr_turn_reset(self):
         """A new prompt: abandon the old loop, blank the block everywhere."""
         with self._tldr_lock:
+            self._tldr_cancel_timer()
             self.tldr_turn_text, self.tldr_text, self.tldr_read_at = "", "", 0
             self.tldr_sents = []
             r, self._tldr = self._tldr, None
@@ -4670,6 +4730,7 @@ class ClaudeSession:
         """The viewer tapped the summary: read up to here. Forget it, and
         summarize only prose streamed after this point from now on."""
         with self._tldr_lock:
+            self._tldr_cancel_timer()
             self.tldr_read_at = len(self.tldr_turn_text)
             self.tldr_text = ""
             r, self._tldr = self._tldr, None
@@ -4680,6 +4741,7 @@ class ClaudeSession:
     def tldr_turn_done(self):
         """Stop: the loop's last pass (complete text) tightens; then it exits."""
         with self._tldr_lock:
+            self._tldr_cancel_timer()            # the final pass ignores the debounce
             r = self._tldr
         if r is None and self.tldr_on:
             self._tldr_kick()                    # short/late: one pass, straight to final
@@ -8153,9 +8215,9 @@ class ApiTeeHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 if tap is not None:
                     try:
-                        for kind, text in tap.feed(chunk):
+                        for evk, text in tap.feed(chunk):   # not `kind`: that holds the call-kind for the log
                             nchars += len(text)
-                            sess.tee_text(kind, text)
+                            sess.tee_text(evk, text)
                     except Exception as e:           # the tee must never break the stream
                         print(f"[tee {cid[:8]}] tap error: {e}", flush=True)
                         tap = None

@@ -71,9 +71,10 @@ stream = sse({"type": "message_start"},
              {"type": "content_block_start", "index": 2, "content_block": {"type": "tool_use", "name": "Bash"}},
              {"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
              {"type": "message_stop"})
-want = [("block", ""), ("text", "Hello, "), ("text", "world.")]
+want = [("block", ""), ("text", "Hello, "), ("text", "world."), ("tool", "")]
 tap = server.SseTextTap()
 check("whole stream at once", tap.feed(stream) == want)
+check("a tool_use block start emits ('tool','') so the tee can drop narration", ("tool", "") in want)
 for n in (1, 7, 33):
     tap = server.SseTextTap(); got = []
     for i in range(0, len(stream), n):
@@ -81,6 +82,54 @@ for n in (1, 7, 33):
     check(f"same result chunked every {n} bytes", got == want)
 tap = server.SseTextTap()
 check("garbage that never ends an event yields nothing", tap.feed(b"data: {not json") == [])
+
+print("tee_text drops tool-call narration:")
+# tee_text is a Session method, but it only touches TLDR state. Bind it to a
+# stand-in with those fields — no PTY, no port, no summarizer spawned. The
+# rule under test: only prose with NO tool after it (the real reply) is kept.
+class _FakeSess: pass
+def _fake(on):
+    f = _FakeSess()
+    f._tldr_lock = threading.Lock()
+    f.tldr_turn_text = f.tldr_text = ""
+    f.tldr_read_at = 0
+    f.tldr_sents = []
+    f._tldr = None
+    f._voice_said = ["stale"]
+    f.tldr_on = on
+    f._tldr_timer = None
+    f._tldr_deadline = 0.0
+    f.frames = []
+    f._to_subscribers_json = lambda d: f.frames.append(d)
+    f._tldr_frame = lambda summary, final, sents=None: {"type": "tldr", "text": summary}
+    for m in ("tee_text", "_tldr_arm_timer_locked", "_tldr_cancel_timer", "_tldr_debounced"):
+        setattr(f, m, getattr(server.ClaudeSession, m).__get__(f, _FakeSess))
+    return f
+
+f = _fake(False)                                   # tldr off: isolate the reset, no timer/summarizer
+f.tee_text("text", "Let me check the file real quick.")
+f.tee_text("tool", "")
+check("a tool event drops the narration buffer", f.tldr_turn_text == "")
+check("a tool event blanks the summary", f.tldr_text == "")
+check("a tool event resets the voice said-log", f._voice_said == [])
+check("a tool event pushes a blank blue frame",
+      any(fr.get("type") == "tldr" and fr.get("text") == "" for fr in f.frames))
+
+f = _fake(False)
+f.tee_text("text", "narration"); f.tee_text("tool", "")
+f.tee_text("text", "The real answer is 42.")
+check("prose after the last tool is kept", f.tldr_turn_text == "The real answer is 42.")
+
+f = _fake(False)
+f.tee_text("text", "Just a normal reply, no tools.")
+check("a tool-free reply is untouched", f.tldr_turn_text == "Just a normal reply, no tools.")
+
+f = _fake(True)                                    # tldr on: text arms the debounce, tool cancels it
+f.tee_text("text", "x" * 50)
+armed = f._tldr_timer is not None
+f.tee_text("tool", "")
+check("text arms the debounce and a following tool cancels it (no summarizer spawned)",
+      armed and f._tldr_timer is None)
 
 print("tldr_budget:")
 check("short reply → floor", server.tldr_budget("a b c", False) == 15 and server.tldr_budget("a b c", True) == 12)

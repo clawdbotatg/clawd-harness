@@ -16,9 +16,10 @@ by sentence as each sentence stops changing. What you see is what you hear.
 ```
 claude (PTY)  ──ANTHROPIC_BASE_URL──▶  ApiTeeHandler :8791  ──HTTPS──▶  api.anthropic.com
                                           │ pass-through, streamed, never logged
-                                          │ SseTextTap: text_delta of the MAIN call only
+                                          │ SseTextTap: text_delta of the MAIN call only; a
+                                          │ tool_use block start → ("tool","") boundary event
                                           ▼
-                              ClaudeSession.tee_text()  → tldr_turn_text (this turn's prose)
+                              ClaudeSession.tee_text()  → tldr_turn_text (prose AFTER the last tool)
                                           │ (only if tldr_on)
                                           ▼
                               RollingTldr  (one `claude -p --model haiku` in flight, newest wins)
@@ -48,6 +49,23 @@ claude (PTY)  ──ANTHROPIC_BASE_URL──▶  ApiTeeHandler :8791  ──HTTP
   flips off and sessions go direct. An operator-exported `ANTHROPIC_BASE_URL`
   wins and disables it — unless it is itself a tee URL (`tee_is_ours`), which
   happens when a harness is launched from inside a harness session.
+* **Only the reply, never the tool-call chatter** (2026-09-06, reported four
+  times): a tool-heavy turn is prose blocks split by tool calls, and Claude
+  narrates around each one ("Let me check the file…", "Now I'll…") — real
+  `text_delta`, 76–336 chars, that is *not* the message meant for the human.
+  Only the **last block — the prose with no tool after it — is the reply.** So
+  `SseTextTap` emits `("tool","")` when a `content_block_start` of type
+  `tool_use` arrives, and `tee_text` on that event **drops `tldr_turn_text`,
+  blanks the summary, stops the in-flight `RollingTldr`, clears `_voice_said`,
+  and pushes a blank blue frame.** Whatever streams after the last tool is what
+  gets summarized. A short **debounce** (`TLDR_DEBOUNCE`, 0.8 s) sits in front
+  of every pass: text arms it, a tool cancels it — so narration that a tool is
+  about to invalidate never even spawns a `claude -p`. (Reset is what makes it
+  *correct* — a pass takes 2–4 s and a tool lands ~100 ms behind narration, so
+  `stop()` discards it anyway; the debounce is the efficiency/race backstop.)
+  Known trade: prose written *before* a trailing tool is thrown away, which is
+  exactly "wait until it actually talks." Guarded by `test_tldr.py`
+  ("tee_text drops tool-call narration").
 * **Why the tee at all**: the transcript JSONL lands each text block *whole*
   (a 2 k-char reply is one line written when it finishes) and the PTY is
   never parsed. The API stream is the only clean live source.
