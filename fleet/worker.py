@@ -219,6 +219,7 @@ RESUME_FILE = HERE / ".fleet.e2e_resume.json"
 # cryptography → no push, worker otherwise unaffected.
 VAPID_FILE = Path(os.environ.get("FLEET_VAPID_FILE") or (HERE / ".clawd-fleet.vapid.json"))
 NOTIFY_THROTTLE = 8.0   # seconds; collapse a session's notification bursts
+LOGIN_WARN_SECS = 3 * 86400   # ring once a day while a login's refresh horizon is this close
 try:
     import webpush as webpushmod
     HAVE_WEBPUSH = webpushmod.HAVE_CRYPTO
@@ -438,6 +439,7 @@ class Worker:
         # and per-session notify state for "needs you" detection + throttling.
         self.push_subs = []
         self._notify = {}          # cid -> {"last": ts, "waiting": bool}
+        self._acct_notify = {}     # account name -> {"status": last seen, "warned": ts}
         self._sessions_meta = {}   # cid -> {"pid":..,"title":..} for deep-link payloads
         self._projects_meta = {}   # pid -> {"name":..,"repoUrl":..} → unified projectKey
         self.vapid = webpushmod.VapidKeys.load(str(VAPID_FILE)) if HAVE_WEBPUSH else None
@@ -520,6 +522,55 @@ class Worker:
         st["last"] = now
         payload = self._push_payload(cid)
         threading.Thread(target=self._send_push_all, args=(payload,), daemon=True).start()
+
+    def maybe_notify_accounts(self, frame):
+        """Ring the phone when a subscription LOGIN needs a hand (2026-09-06:
+        a refresh-token family dies ~30 days after each sign-in; the harness
+        moves the sessions off it by itself, but the login stays dead until
+        a human signs in again — and nobody reads the 🧠 page in time).
+        Two pings, both from the harness's own `accounts` broadcast:
+          * the moment a login flips ready → needs-login (once per flip;
+            a login already dead when this worker boots is NOT re-pinged —
+            the daily warning below covers the run-up, and a worker restart
+            must never re-fire every old alert);
+          * once a day while a ready login's refresh horizon
+            (`loginExpiresAt`) is inside LOGIN_WARN_SECS."""
+        if not self.push_subs or not (self.vapid and self.vapid.can_send):
+            return
+        now = time.time()
+        for a in frame.get("accounts") or []:
+            name = a.get("name")
+            if not name:
+                continue
+            st = self._acct_notify.setdefault(name, {"status": None, "warned": 0.0})
+            status = a.get("status")
+            prev, st["status"] = st["status"], status
+            who = a.get("orgName") or a.get("email") or name
+            title = body = None
+            if status == "needs-login":
+                if prev is not None and prev != "needs-login":
+                    title = f"sign in again: {who}"
+                    body = ((a.get("error") or "this login stopped working")
+                            + " — its sessions were moved; open 🧠 to sign in")
+            elif status == "ready":
+                exp = a.get("loginExpiresAt")
+                left = (exp - now) if isinstance(exp, (int, float)) else None
+                if left is not None and 0 < left < LOGIN_WARN_SECS \
+                        and now - st["warned"] > 86400:
+                    st["warned"] = now
+                    days = int(left // 86400)
+                    when = f"{days} day{'s' if days != 1 else ''}" if days \
+                        else f"{int(left // 3600)} h"
+                    title = f"login expires in {when}: {who}"
+                    body = "sign in again from the 🧠 page before it dies"
+            if not title:
+                continue
+            m = quote(self.machine, safe="")
+            payload = json.dumps({"title": f"{self.machine} · {title}", "body": body,
+                                  "url": f"/#/m/{m}",
+                                  "tag": f"{self.machine}:login:{name}"}).encode("utf-8")
+            threading.Thread(target=self._send_push_all, args=(payload,),
+                             daemon=True).start()
 
     @staticmethod
     def _norm_repo(url):
@@ -1091,6 +1142,9 @@ class Worker:
                     # link sees Stop/Notification for ALL sessions even with no
                     # viewer attached, which is exactly when the phone needs a ping.
                     self.maybe_notify(frame)
+                    continue
+                if t == "accounts":
+                    self.maybe_notify_accounts(frame)
                     continue
                 if t == "projects":
                     projs = frame.get("projects") or []

@@ -90,6 +90,15 @@ passkey. This closed the gap where worker fixes shipped in git but every box kep
 running stale code until someone bounced the daemon (the 2026-07 passkey storms
 outlived their own fix that way). Opt out per box with `FLEET_SELF_RESTART=0`.
 
+**Login pushes (worker.py, 2026-09-06).** Besides ringing when a session blocks
+on you, the worker rings for a subscription LOGIN: the moment an account flips
+`ready → needs-login` in the harness's `accounts` broadcast (a wiped/expired
+refresh grant — the harness has already moved its sessions), and once a day
+while a ready login's `loginExpiresAt` horizon is inside 3 days. Logins die
+~30 days after each sign-in ceremony and only a human can redo one; the push
+deep-links to the machine, sign in from the 🧠 page. A login already dead when
+the worker boots is not re-pinged (a restart must never re-fire old alerts).
+
 **Harness watchdog (worker.py, 2026-09-05).** The harness's own graceful restart
 exits 0 and trusts launchd/systemd KeepAlive to respawn it. clawd-heart's launchd
 once didn't: the box sat with no harness for 40 min and every viewer's terminal
