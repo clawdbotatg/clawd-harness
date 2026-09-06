@@ -63,6 +63,11 @@ Shared across both:
   the chip armed it (two turns, cancel above the composer), and it refuses to
   close on a dirty worktree — so a wrap that doesn't end is the session
   telling you something.
+- **⑂ fork** — the last button on the composer strip. A new tab in the same
+  project that continues the current conversation (everything claude knows so
+  far) under its own id, while the original keeps running. One context, two
+  directions. Claude only (codex can't), and there must be a conversation to
+  fork.
 - **Message box** — type or dictate; Enter sends. Mobile dictation/paste/image
   handling is native because it's a real `<textarea>`.
 - **Image paste/drop** — uploads to the workdir; the path is folded into your

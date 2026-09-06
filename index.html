@@ -1461,7 +1461,7 @@
              title="🤖 autopilot — let the harness keep this session working on its goal, narrating progress in a status row. Bounded; your own messages steer it." />
       <div id="ttystat" hidden role="img"><span class="dot"></span></div>
       <div id="sessiondesc" title="AI-generated name for this session"></div>
-      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — your skill library (same list everywhere). Tap one to attach it to your next message; Enter sends your text with a one-line pointer claude reads.">📚</button><button id="closedBtn" title="Closed sessions — every session closed on any machine, newest first. ↩ brings one back as a new tab resuming the old conversation.">🗃️</button></div>
+      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — your skill library (same list everywhere). Tap one to attach it to your next message; Enter sends your text with a one-line pointer claude reads.">📚</button><button id="closedBtn" title="Closed sessions — every session closed on any machine, newest first. ↩ brings one back as a new tab resuming the old conversation.">🗃️</button><button id="forkBtn" title="Fork — a new tab in this project that continues this conversation (everything claude knows so far), while this session keeps going on its own. One context, two directions.">⑂</button></div>
     </div>
     <!-- 🤖 the autopilot's narration row — same slot style as the upload chips:
          where the work stands / what the supervisor is doing, live per round -->
@@ -3589,6 +3589,14 @@ function handleJson(m) {
     // with create:true (direct mode; the fleet path rides handleMachineJson).
     confirmCreateLocal(null, m.path);
   } else if (m.type === 'error') {
+    if (m.fork && pendingNewFocus && m.fork === forkSrcCid) {
+      // ⑂ refused (nothing to fork yet / codex / ceremony): back to the source
+      pendingNewFocus = false; forkSrcCid = null;
+      clearNewFocusWatch(); hideDeadVeil();
+      openSession(m.fork);
+      meta.textContent = m.error || "couldn't fork";
+      return;
+    }
     // e.g. a subscribe for a cid this box doesn't know (subscribe_client): the
     // server detached us rather than leaking the previous stream — surface it.
     meta.textContent = m.error || 'error';
@@ -7580,6 +7588,30 @@ function reopenClosed(r) {
 }
 function showClosedLog() { renderClosedLog(); closedlogEl.hidden = false; }
 document.getElementById('closedBtn').onclick = showClosedLog;
+
+// ── ⑂ fork ───────────────────────────────────────────────────────────────────
+// A new tab in the same project continuing THIS session's conversation under
+// its own id (`claude --resume <id> --fork-session`), the source untouched and
+// still running. Same dance as ↩/new: blank the shared terminal, wait for the
+// `focus` naming the spawned cid. A refusal comes back as an `error` carrying
+// `fork: <source cid>` — we land back on the source instead of the void.
+let forkSrcCid = null;
+function forkSession() {
+  const src = currentCid;
+  if (!src || !inSessionView()) { meta.textContent = 'open a session to fork it'; return; }
+  const mid = FLEET ? machineForCid(src) : null;
+  if (FLEET && (!mid || !isMachineOnline(mid))) { meta.textContent = 'that machine is offline'; return; }
+  forkSrcCid = src;
+  pendingNewFocus = true;
+  currentCid = null;
+  term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
+  if (activeType) { activeType.finish(); activeType = null; }
+  const f = { type: 'fork', cid: src };
+  if (!(mid ? hsendTo(mid, f) : hsend(f))) { pendingNewFocus = false; currentCid = src; forkSrcCid = null; meta.textContent = 'not connected — try again in a moment'; return; }
+  armNewFocusWatch(mid);
+  meta.textContent = 'forking…';
+}
+document.getElementById('forkBtn').onclick = forkSession;
 document.getElementById('closedlogclose').onclick = () => { closedlogEl.hidden = true; };
 closedFilterEl.addEventListener('input', renderClosedLog);
 closedlogEl.addEventListener('pointerdown', (e) => { if (e.target === closedlogEl) closedlogEl.hidden = true; });

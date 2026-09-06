@@ -102,7 +102,11 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   the handoff doc is **`docs/TLDR-VOICE.md`** (data flow, every knob, the
   client landmines, `tools/tldr_e2e.py` for a real isolated run,
   `tools/tldrgeom.mjs` to measure a live session's overlay).
-  Wall-display boxes (clawd-sat): `tools/kiosk/README.md`.
+  Wall-display boxes (clawd-sat): `tools/kiosk/README.md`. **⑂ fork** =
+  `SessionManager.fork` → `create_session(resume=<source id>, fork=True)` →
+  claude's own `--resume <id> --fork-session` (new id + transcript, source
+  untouched); the `fork` flag is a ctor param + registry field that clears on
+  the first id rotation. `test_fork.py`; WS verb `fork` in `docs/WS-PROTOCOL.md`.
 
 ## Landmines (don't regress; stories in HISTORY.md)
 

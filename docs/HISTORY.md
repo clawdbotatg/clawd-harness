@@ -11,6 +11,42 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-06 — ⑂ fork: one context, two directions
+
+**Ask.** Austin: the composer strip has 🕘 📚 🗃️; add a fork button. "I work
+in a session for a little while and I have some context built up and I want
+to go two different directions with that same context" — a second session
+with everything the first one knows, the first one free to keep going.
+
+**Mechanism.** No handoff file, no summary: claude's own `--fork-session`.
+Verified before writing a line (isolated `-p` run under sub2, haiku, a
+SessionStart hook logging its payload): `claude --resume <A> --fork-session`
+starts a NEW session id with a NEW transcript file, leaves A's file untouched,
+fires SessionStart with `source: "fork"` + the new id, and the fork answered
+from A's context ("pineapple"). Transcripts are shared across every account
+dir (`_share_projects`), so a fork routes like any new session — no
+per-account symlink needed.
+
+**What shipped.** `SessionManager.fork(cid)` → `create_session(resume=<source
+id>, fork=True, title="⑂ <source title>")`; `ClaudeEngine.argv` appends
+`--fork-session` when `resuming and fork`; `fork` is a ctor param + registry
+field (the clone-for-respawn rule) that `_follow_session` clears on the first
+rotation — a restart in the window before claude's first hook re-forks, after
+it resumes the fork's own id plainly (a plain `--resume <A>` in that window
+would have silently reopened the SOURCE as if it were the fork). The external
+project pre-spawn sync is skipped for forks (the source is live in that tree).
+WS verb `fork` replies `focus` like `new`; a refusal (codex, ceremony, no
+conversation yet, unknown cid) is an `error` carrying `fork: <source cid>` so
+the client lands back on the source instead of the 30 s "couldn't start"
+void. Client: `forkSession()` mirrors `reopenClosed` (blank the shared
+terminal, `pendingNewFocus`, `armNewFocusWatch`). `test_fork.py` guards all of
+it on a sandboxed copy. Not wired to the PM (no verb/persona) — do that if
+the PM ever needs to branch a thread.
+
+**Caveat.** Forking mid-turn forks the transcript as it sits on disk (a
+partial turn); nothing refuses it. If that ever bites, the guard belongs in
+`SessionManager.fork` (`src.busy`).
+
 ## 2026-09-06 — "it bricked itself again": restart + handoff churn, not a dead box
 
 **Handoff.** Austin, 12:32, screenshot of a black terminal 14 s after opening a

@@ -2511,6 +2511,7 @@ class Engine:
     bin = CLAUDE_BIN
     routes_accounts = True      # participates in the subscription router
     scrub_extra = ()            # env names to strip beyond SCRUB_ENV
+    forks = False               # ⑂ can resume a transcript under a NEW id
 
     def argv(self, s):          raise NotImplementedError
     def env(self, s, env):      pass          # mutated in place
@@ -2554,6 +2555,7 @@ class Engine:
 
 class ClaudeEngine(Engine):
     name, bin, routes_accounts = "claude", CLAUDE_BIN, True
+    forks = True                             # verified: --resume <id> --fork-session (2026-09-06)
     resume_gate_key = b"\r"                  # verified: CR → "❯ /compact" → Compacting…
     bracketed_paste = True                   # verified: A/B on 2.1.247 (see Engine)
 
@@ -2569,6 +2571,13 @@ class ClaudeEngine(Engine):
                 # asking me for permission"). settings.json now carries
                 # defaultMode=bypassPermissions too; this is the belt.
                 "--permission-mode", "bypassPermissions"]
+        if s.resuming and s.fork:
+            # ⑂ fork: continue the source session's conversation under a NEW
+            # session id + transcript, the source untouched (verified 2026-09-06:
+            # SessionStart fires with source="fork" and the new id, which
+            # _follow_session records; the flag clears there, so a restart
+            # before that first hook re-forks and after it resumes plainly).
+            argv += ["--fork-session"]
         rule = s.standing_rule()
         if rule:
             # External project: the branch-and-PR rule rides as an appended
@@ -3047,8 +3056,14 @@ class ClaudeSession:
                  pinned=0.0, test_hint="", model="", ctx_tokens=0,
                  engine="claude", autopilot=0.0, pilot_goal="",
                  pilot_status="", pilot_rounds=0,
-                 tldr_text="", tldr_on=False, voice_on=False):
+                 tldr_text="", tldr_on=False, voice_on=False, fork=False):
         self.manager = manager
+        # ⑂ this session was forked from another: its first launch is
+        # `--resume <source id> --fork-session`. Persisted (ctor param +
+        # registry) only until claude hands us the fork's own id — see
+        # _follow_session — so a restart in that window re-forks instead of
+        # resuming the SOURCE's transcript as if it were ours.
+        self.fork = bool(fork)
         # Which agent CLI drives this session ("claude" | "codex"). Chosen at
         # spawn and durable: a --resume must reach for the same binary, and an
         # unknown/legacy value falls back to claude so an old registry (written
@@ -3205,7 +3220,8 @@ class ClaudeSession:
                 "pilot_rounds": self.pilot_rounds,
                 "model": self.model, "ctx_tokens": self.ctx_tokens,
                 "tldr_text": (self.tldr_text or "")[:3000],
-                "tldr_on": self.tldr_on, "voice_on": self.voice_on}
+                "tldr_on": self.tldr_on, "voice_on": self.voice_on,
+                "fork": self.fork}
 
     def clone_for_respawn(self, **overrides):
         """A fresh session object for an in-place respawn under the SAME cid
@@ -4300,6 +4316,8 @@ class ClaudeSession:
                   f"{'learned id' if not self.session_id else 'rotated'} "
                   f"{self.session_id or '(none)'} -> {sid}", flush=True)
             self.session_id = sid
+            if self.fork:
+                self.fork = False                # ⑂ has its own id now: resume it plainly from here
             self.manager.save_registry()         # so the next restart resumes this one
 
     def _tail_transcript(self):
@@ -5285,7 +5303,7 @@ class SessionManager:
                     pilot_rounds=e.get("pilot_rounds", 0),
                     model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0),
                     tldr_text=e.get("tldr_text", ""), tldr_on=bool(e.get("tldr_on")),
-                    voice_on=bool(e.get("voice_on")))
+                    voice_on=bool(e.get("voice_on")), fork=bool(e.get("fork")))
                 self.sessions[s.cid] = s
                 self._park_for_boot(s)
                 continue
@@ -5363,7 +5381,7 @@ class SessionManager:
                 pilot_rounds=e.get("pilot_rounds", 0),
                 model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0),
                 tldr_text=e.get("tldr_text", ""), tldr_on=bool(e.get("tldr_on")),
-                voice_on=bool(e.get("voice_on")))
+                voice_on=bool(e.get("voice_on")), fork=bool(e.get("fork")))
             self.sessions[s.cid] = s
             self._park_for_boot(s)
         threading.Thread(target=self._boot_stagger, daemon=True).start()
@@ -7603,19 +7621,21 @@ class SessionManager:
 
     # -- session crud ----------------------------------------------------------
     def create_session(self, pid, account=None, ceremony=False,
-                       engine="claude", resume="", title=""):
+                       engine="claude", resume="", title="", fork=False):
         """`resume`: an engine session id to reopen (`claude --resume <id>` /
         codex's rollout) — the way back for a session whose tab got closed
         (the ✕ has no confirm; 2026-09-05 three were lost to it mid-panic).
         Falls back to a fresh session, with a log line, when the transcript
-        is gone. `title` seeds the tab name until the namer runs."""
+        is gone. `title` seeds the tab name until the namer runs. `fork`
+        (with `resume`): continue under a NEW id, the source untouched —
+        the ⑂ button; see SessionManager.fork."""
         if pid not in self.projects:
             return None
         proj = self.projects[pid]
         if proj.kind == "local" and proj.status == "error":
             return None                          # folder missing — Popen on a dead cwd would fail
         if proj.kind == "external" and proj.status == "ready" and EXTERNAL_SYNC \
-                and not ceremony:
+                and not ceremony and not fork:  # ⑂ the source is live in that tree; leave it be
             # Never start stale: bring the default branch up to upstream
             # BEFORE the session exists. Synchronous by design (bounded by
             # EXTERNAL_SYNC_TIMEOUT) — see the knob's comment.
@@ -7637,7 +7657,8 @@ class SessionManager:
             s = ClaudeSession(self, cid=cid, pid=pid,
                               session_id=resume if resuming else "",
                               resuming=resuming, created=time.time(),
-                              engine=engine, title=title)
+                              engine=engine, title=title,
+                              fork=bool(fork and resuming))
             if not _codex_signed_in():
                 s.desc = ("codex is not signed in on this machine — run "
                           "`codex login` in a terminal once, then start a "
@@ -7735,7 +7756,8 @@ class SessionManager:
                           session_id=resume if resuming else str(uuid.uuid4()),
                           resuming=resuming, created=time.time(),
                           account=name, config_dir=cfg, title=title,
-                          ceremony=ceremony or no_creds_anywhere)
+                          ceremony=ceremony or no_creds_anywhere,
+                          fork=bool(fork and resuming))
         if no_creds_anywhere:
             s.desc = ("no plan is signed in on this machine yet — complete "
                       "the login in this terminal (once per machine)")
@@ -7919,6 +7941,43 @@ class SessionManager:
         self.save_registry()
         self.broadcast_closed()
         return s
+
+    def fork(self, cid):
+        """⑂ Fork a LIVE session: a NEW tab in the same project that continues
+        this one's conversation under its own id (`--resume <id>
+        --fork-session`), while the source keeps running untouched — one
+        context, two directions. Returns (session, "") or (None, reason).
+        Transcripts are shared across every account dir (_share_projects),
+        so the fork routes like any new session. Refused for engines that
+        can't fork (codex), sign-in ceremonies, and a session with no
+        conversation yet (nothing to fork; the resume would die)."""
+        src = self.get(cid)
+        if not src:
+            return None, "no such session"
+        if not ENGINES[src.engine].forks:
+            return None, f"{src.engine} sessions can't be forked"
+        if src.ceremony:
+            return None, "a sign-in session can't be forked"
+        if not src._has_conversation():
+            return None, "nothing to fork yet — send a message first"
+        title = (src.title or src._fallback_title() or "").strip()
+        s = self.create_session(src.pid, engine=src.engine,
+                                resume=src.session_id, fork=True,
+                                title=("⑂ " + title)[:80] if title else "")
+        if not s:
+            return None, "couldn't start a session in that project"
+        if not s.resuming:
+            # create_session fell back to a fresh spawn (transcript vanished
+            # between the check and the spawn). Say so rather than hand back
+            # an empty tab that claims to be a fork.
+            s.desc = "fork failed — the source transcript was not found; this is a fresh session"
+        else:
+            s.desc = f"forked from {title}" if title else "forked"
+        print(f"[session {cid[:8]}] ⑂ forked as {s.cid[:8]} "
+              f"({'fork' if s.resuming else 'FRESH — transcript missing'})",
+              flush=True)
+        self.broadcast_sessions()
+        return s, ""
 
     def closed_forget(self, cid=None):
         """Drop one row (or every row when cid is None)."""
@@ -9034,6 +9093,17 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 client.send_json({"type": "error", "cid": frame.get("cid"),
                                   "error": "can't reopen: its project is gone"})
+        elif t == "fork":
+            # ⑂ the fork button (docs/WS-PROTOCOL.md). Replies focus like
+            # `new`; a refusal carries the source cid so the client can land
+            # back on it instead of the "couldn't start" void.
+            src_cid = str(frame.get("cid") or "")
+            s, why = MGR.fork(src_cid)
+            if s:
+                client.send_json({"type": "focus", "cid": s.cid})
+            else:
+                client.send_json({"type": "error", "cid": src_cid,
+                                  "fork": src_cid, "error": f"can't fork: {why}"})
         elif t == "closedForget":
             MGR.closed_forget(frame.get("cid") or None)
         elif t in ("skillsLib", "skillsRm"):
