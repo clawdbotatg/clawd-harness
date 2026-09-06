@@ -200,6 +200,11 @@ class HarnessClient:
     def close_session(self, cid):
         return self.send({"type": "close", "cid": cid})
 
+    def wrap_session(self, cid, text=""):
+        """📑 arm the session to close itself + deliver the wrap prompt (the
+        harness's default text when `text` is empty)."""
+        return self.send({"type": "wrap", "cid": cid, "text": text or ""})
+
     def pin_session(self, cid, on=True):
         return self.send({"type": "pin", "cid": cid, "on": bool(on)})
 

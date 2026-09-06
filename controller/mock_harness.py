@@ -257,7 +257,7 @@ def _make_handler(state):
                 j({"type": "hello", "cid": cid, "pid": "p1", "sessionId": f"s{cid}",
                    "title": "demo", "workdir": "/x", "busy": False, "waiting": False,
                    "tool": None, "cols": 80, "rows": 24})
-            elif t == "send":
+            elif t in ("send", "wrap"):      # 📑 wrap = arm + a send (the arm is server-internal)
                 cid = f.get("cid")
                 text = f.get("text", "")
                 state.set_session(cid, busy=True, status="working", promptCount=1)

@@ -150,6 +150,12 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
 10. **Search this repo with `rg`.** If any grep comes back suspiciously
     empty, suspect a raw control byte in the file before concluding the code
     isn't there.
+11. **Self-close is armed-only.** `POST /self/close` (what `bin/harness-close`
+    hits) refuses unless the 📑 chip / PM `wrap` verb armed the session within
+    `WRAP_TURNS`/`WRAP_TTL_S`, and refuses on a dirty worktree. Never widen
+    that gate, never force-close from the harness side (no call → the arm
+    lapses, the tab stays), and keep the close deferred to the Stop so the
+    TLDR reaches the 🗃️ row. `test_wrap.py` + `tools/wrapprobe.mjs`.
 
 ## Periodic
 

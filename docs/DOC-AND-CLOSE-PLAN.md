@@ -1,9 +1,12 @@
 # Plan 2 — 📑 wrap: document the handoff, then close yourself
 
-Status: **planned 2026-09-03, not started.** Depends on
-`SESSION-HISTORY-PLAN.md` (part 1): the archive is the net, the undo toast
-is the escape hatch, and the archive row's summary is where the handoff's
-TLDR ends up.
+Status: **shipped 2026-09-06** (see `docs/HISTORY.md`). Built on the 🗃️
+closed-session history that shipped 2026-09-05 (`024ea83`), which differs
+from `SESSION-HISTORY-PLAN.md` in two ways: reopen spawns a NEW cid via
+`create_session(resume=…)`, and rows live in the registry (`closed` key,
+`CLOSED_MAX`), not a separate file. Deltas from the plan below: the env var
+is `HARNESS_CLOSE_URL` (one URL, cid-bound); the history reason is
+`"wrapped"`; the toast's ↩ is the 🗃️ reopen (new cid).
 
 ## What the button does
 

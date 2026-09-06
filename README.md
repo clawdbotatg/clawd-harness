@@ -57,6 +57,12 @@ Two views, switched with the header button (one at a time):
 
 Shared across both:
 
+- **📑 doc = wrap up** — the last quick-chip on the composer. The session
+  writes its handoff, commits it, and then **closes itself**, landing in 🗃️
+  closed sessions with its TLDR (↩ brings it back). It can only do that while
+  the chip armed it (two turns, cancel above the composer), and it refuses to
+  close on a dirty worktree — so a wrap that doesn't end is the session
+  telling you something.
 - **Message box** — type or dictate; Enter sends. Mobile dictation/paste/image
   handling is native because it's a real `<textarea>`.
 - **Image paste/drop** — uploads to the workdir; the path is folded into your

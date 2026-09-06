@@ -35,6 +35,36 @@ with dozens of tabs the strip can take most of the screen — that IS the ask
 (all visible, no scrolling, no filtering), and the filter is still there for
 whoever wants the strip short.
 
+## 2026-09-06 — 📑 wrap: the doc chip closes the tab itself (armed-only)
+
+Austin: "when I'm mostly done I hit the document button — I'd like it to
+document everything and then close the session so it disappears." And in
+the same breath: "we don't want them closing themselves left and right."
+So the feature is one rule: **a session can only close itself while a human
+armed it.** The 📑 chip sends a `wrap` frame — the harness arms the session
+(`WRAP_TURNS`=2 Stops, `WRAP_TTL_S`=30 min) and types the wrap prompt (write
+the handoff, commit/push, run `harness-close`, end with a 3-line TLDR, and
+do NOT close if anything is open). `bin/harness-close` is on the child's
+PATH; its URL (`HARNESS_CLOSE_URL`, cid-bound) hits `POST /self/close`,
+which refuses unless armed (403 — the sentence claude reads says to tell the
+human instead), refuses a sign-in/autopilot session, and refuses a **dirty
+git worktree** (409 with the porcelain lines — a dirty tree also blocks that
+box's auto-pull, so "wrap" must leave it clean). Accepting defers the close
+to the next Stop so the reply's TLDR lands in `last_answer` first; a 20 s
+grace timer covers a Stop that never comes. The tab then vanishes into 🗃️
+closed sessions as `reason:"wrapped"` with the TLDR as its row line. The
+harness never force-closes: no call → the arm lapses, the tab stays, and
+the PM/human sees why in the transcript. Client: 📑 on the tab + an
+accent row above the composer ("wrapping up — closes itself…" / "closing
+when this turn ends", cancel = `wrapCancel`); when the closing cid drops
+out of a `sessions` frame the viewer lands on the rail neighbour (no dead
+veil, no black tty) with a 15 s toast "📑 <tab> wrapped up · ↩ bring back"
+(the 🗃️ reopen). PM: `wrap` verb/MCP/persona ("done means wrap, not
+close"). Volatile on purpose — a restart disarms. Guards: `test_wrap.py`
+(gates, deferral, grace, lapse, the real HTTP endpoint + the script),
+`tools/wrapprobe.mjs` (real taps on emulated touch). Plan doc:
+`docs/DOC-AND-CLOSE-PLAN.md`.
+
 ## 2026-09-05 — passkey cadence: 24h → 7 days
 
 Austin: "I spent too much of my time doing passkey auths." One Face ID per

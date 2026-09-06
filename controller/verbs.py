@@ -18,7 +18,7 @@ import time
 import urllib.parse
 
 WRITE_VERBS = {"assign", "ask", "answer_prompt", "interrupt",
-               "create_project", "clone_project", "spawn", "close",
+               "create_project", "clone_project", "spawn", "close", "wrap",
                "start_pipeline", "pin", "add_local_project", "remove_project",
                "external_project"}
 
@@ -991,6 +991,22 @@ class Verbs:
             return {"ok": c.close_session(cid), "machine": machine, "cid": cid}
         return self._gate("close", {"machine": machine, "cid": cid,
                                     "confirm": confirm}, do)
+
+    def wrap(self, machine, cid, text="", confirm=False):
+        """📑 Wrap a FINISHED session up: it writes its handoff (committed +
+        pushed when the project has a remote) and then closes ITSELF, landing
+        in the 🗃️ closed history with its TLDR. Prefer this over `close` when
+        the work is done. The harness arms the session for 2 turns / 30 min —
+        only an armed session can self-close, and it refuses on a dirty
+        worktree, so a wrap that doesn't end means it has something to say:
+        read its transcript_tail. Never wrap a blocked session."""
+        def do():
+            c = self.clients.get(machine)
+            if not c:
+                return {"ok": False, "error": f"no such machine: {machine}"}
+            return {"ok": c.wrap_session(cid, text), "machine": machine, "cid": cid}
+        return self._gate("wrap", {"machine": machine, "cid": cid, "text": text,
+                                   "confirm": confirm}, do)
 
     def pin(self, machine, cid, on=True, confirm=False):
         """📌 Park a finished session on the pin board (`on=true`) or bring it

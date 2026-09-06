@@ -181,6 +181,14 @@ TOOLS = [
     ("close", "Close/kill a session: its claude is terminated and dropped from the "
         "harness (the project stays). Irreversible — check session_digest first. WRITE.",
         _S({"machine": _STR, "cid": _STR, "confirm": _BOOL}, ["machine", "cid"])),
+    ("wrap", "📑 Wrap a FINISHED session up: it writes its handoff (committed and "
+        "pushed when the project has a remote), then closes ITSELF into the 🗃️ "
+        "closed history with its TLDR. Prefer this over close when the work is "
+        "done; never wrap a blocked session. Only an armed session can self-close "
+        "(2 turns / 30 min) and it refuses on a dirty worktree — a wrap that "
+        "doesn't end has something to say: read transcript_tail. Optional `text` "
+        "replaces the harness's wrap prompt. WRITE.",
+        _S({"machine": _STR, "cid": _STR, "text": _STR, "confirm": _BOOL}, ["machine", "cid"])),
     ("pin", "📌 Park a finished session on the pin board (on=true, default) or "
         "restore it to the tab strip (on=false). The move for \"the work is "
         "done but a human still has to verify it\": the session stays alive and "
@@ -302,6 +310,9 @@ class MCPServer:
                            engine=a.get("engine", "claude"))
         if name == "close":
             return v.close(a["machine"], a["cid"], a.get("confirm", False))
+        if name == "wrap":
+            return v.wrap(a["machine"], a["cid"], a.get("text", ""),
+                          a.get("confirm", False))
         if name == "pin":
             return v.pin(a["machine"], a["cid"], a.get("on", True),
                          a.get("confirm", False))

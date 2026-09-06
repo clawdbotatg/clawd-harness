@@ -482,6 +482,26 @@
               font-size:13px; white-space:pre-wrap; word-break:break-word; }
   #pilotrow[hidden] { display:none; }
   #pilotrow .tag { flex:0 0 auto; padding-top:1px; }
+  /* 📑 wrap — the session is armed to close itself once its handoff is written;
+     same slot as the 🤖 row, accent-edged, with the one way out: cancel */
+  #wraprow { display:flex; gap:8px; align-items:center; background:var(--raised);
+             border:1px solid var(--accent); color:var(--ink); padding:6px 10px; font-size:13px; }
+  #wraprow[hidden] { display:none; }
+  #wraprow .tag { flex:0 0 auto; }
+  #wraprow #wraptext { flex:1 1 auto; min-width:0; }
+  #wraprow button { flex:0 0 auto; background:transparent; border:1px solid var(--edge); color:var(--dim);
+                    border-radius:6px; padding:3px 9px; font-size:12px; cursor:pointer; }
+  #wraprow button:hover { border-color:var(--accent); color:var(--accent); }
+  /* 📑 wrapped-up toast: the tab just vanished on purpose — say so, offer ↩ */
+  #wraptoast { position:fixed; left:50%; bottom:84px; transform:translateX(-50%); z-index:60;
+               display:flex; gap:10px; align-items:center; background:var(--raised); color:var(--ink);
+               border:1px solid var(--accent); border-radius:10px; padding:8px 12px; font-size:13px;
+               box-shadow:0 4px 18px rgba(0,0,0,.35); max-width:92vw; }
+  #wraptoast[hidden] { display:none; }
+  #wraptoast span { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:60vw; }
+  #wraptoast button { background:transparent; border:1px solid var(--edge); color:var(--accent);
+                      border-radius:6px; padding:4px 10px; font-size:13px; cursor:pointer; }
+  @media (pointer: coarse) { #wraptoast button { padding:7px 12px; } }
   /* queued messages: acked locally (amber), removed once they land in the transcript */
   #pending { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
   #pending:empty { display:none; }
@@ -1446,6 +1466,8 @@
     <!-- 🤖 the autopilot's narration row — same slot style as the upload chips:
          where the work stands / what the supervisor is doing, live per round -->
     <div id="pilotrow" hidden><span class="tag">🤖</span><span id="pilottext"></span></div>
+    <!-- 📑 wrap: armed to close itself once the handoff is written (cancel = keep the tab) -->
+    <div id="wraprow" hidden><span class="tag">📑</span><span id="wraptext"></span><button id="wrapCancel">cancel</button></div>
     <div id="attachments"></div>
     <div id="keys" title="Send keys to the session (works even when the terminal is read-only) — for navigating TUI menus like /model">
       <button data-k="esc">esc</button>
@@ -3158,8 +3180,10 @@ function handleMachineJson(machine, m) {
   }
   if (m.type === 'sessions') {
     const pm = perMachine[machine] || (perMachine[machine] = {});
+    const prevList = pm.sessionList;
     pm.sessionList = m.sessions || [];
     pm.gotSessions = true;
+    noteWrapVanished(prevList, pm.sessionList, machine);   // 📑 a wrapping tab vanished on purpose → land + ↩ toast
     pm.sessionsAt = Date.now();          // freshness stamp for wake()'s stale sweep
     relistSatisfied(machine);            // a pending re-list chain got its answer
     saveFleetCacheSoon();                // tabs survive the next reload
@@ -3427,8 +3451,10 @@ function handleJson(m) {
     renderIronLive();                     // 🔥 member names/counts follow the list
     resolvePendingNav();                  // a URL we restored from may name a project
   } else if (m.type === 'sessions') {
+    const prevList = sessionList;
     sessionList = m.sessions || [];
     gotSessions = true;
+    noteWrapVanished(prevList, sessionList, null);   // 📑 a wrapping tab vanished on purpose → land + ↩ toast
     renderSessions();
     refreshBreadcrumb();                  // a renamed session updates the crumb live
     refreshSessionTag();                  // account may have just landed for the open session
@@ -3991,6 +4017,7 @@ function renderSessionBar(view) {
                     (sessionIsLocal(s) ? ' local' : '') + (mOff ? ' moff' : '');
     tab.title = (s.title || 'new session') +
                 (s.pinned ? ' — 📌 pinned (parked on the board)' : '') +
+                (s.wrapClosing ? ' — 📑 closing when its turn ends' : s.wrapArmed ? ' — 📑 wrapping up (will close itself)' : '') +
                 (mOff ? ` — ${s._machine} is offline (cached tab; opens when it returns)` : '');
     tab.onclick = () => { clearTabFilter(); focusSession(s); };   // may cross project/machine; cancels any queued new-session send; picking a tab is the filter's endpoint, so it clears
     const dot = document.createElement('span');
@@ -4006,7 +4033,7 @@ function renderSessionBar(view) {
     }
     const lbl = document.createElement('span');
     // the AI's 1-2 word tab handle when it exists; full title until then
-    lbl.className = 'lbl'; lbl.textContent = (s.pinned ? '📌 ' : '') + (s.tab || s.title || 'new session');
+    lbl.className = 'lbl'; lbl.textContent = (s.pinned ? '📌 ' : '') + ((s.wrapArmed || s.wrapClosing) ? '📑 ' : '') + (s.tab || s.title || 'new session');
     tab.appendChild(lbl);
     const eb = engineBadge(s);           // only renders for non-claude engines
     if (eb) tab.appendChild(eb);
@@ -5902,6 +5929,7 @@ function renderPilotUI() {
   pilotChk.hidden = !show;
   tldrBtn.hidden = !show;                  // 🟦 lives beside it, same rule
   applyTldrHold();                         // 🟦 hold + overlay: on with the mode; waiting-on-you lifts both; leaving the view drops them
+  renderWrapRow(s, show);                  // 📑 armed-to-close row, same visibility rule
   if (!show) { pilotRow.hidden = true; return; }
   if (s.cid !== pilotCidShown) { pilotCidShown = s.cid; pilotPendingAt = 0; }
   if (Date.now() - pilotPendingAt > 4000) pilotChk.checked = !!s.autopilot;
@@ -7519,11 +7547,12 @@ function closedRowFill(it, r) {
   const bits = [fmtAge(r.closed_at) + ' ago'];
   if (r.prompt_count) bits.push(r.prompt_count + ' prompt' + (r.prompt_count === 1 ? '' : 's'));
   if (r.engine && r.engine !== 'claude') bits.push(r.engine);
-  if (r.reason && r.reason !== 'closed') bits.push(r.reason);
+  if (r.reason === 'wrapped') bits.push('📑 wrapped itself up');
+  else if (r.reason && r.reason !== 'closed') bits.push(r.reason);
   it.querySelector('.cl-when').textContent = bits.join(' · ');
   it.querySelector('.cl-proj').textContent = (r.machine ? closedMachineTag(r.machine) + ' ' : '') + (r.project || '');
   it.querySelector('.cl-title').textContent = r.title || r.cid.slice(0, 8);
-  it.querySelector('.cl-desc').textContent = r.desc || r.first_prompt || '';
+  it.querySelector('.cl-desc').textContent = (r.reason === 'wrapped' && r.last_answer) || r.desc || r.first_prompt || '';
   const gone = r.reason === 'project gone';
   it.classList.toggle('gone', gone);
   it.querySelector('.cl-back').textContent = r.resumable === false ? '↩ new tab here' : '↩ bring back';
@@ -7843,7 +7872,12 @@ const QUICK_PROMPTS = [
   { e: '✅', label: 'go',        text: 'yes, go' },
   { e: '🔁', label: 'keep going', text: 'keep going' },
   { e: '📦', label: 'ship',      text: 'commit and push, and deploy if applicable' },
-  { e: '📑', label: 'doc',       text: 'document everything as if you are handing this knowledge off to another agent or a future you' },
+  // 📑 wrap — not just a prompt: the harness ARMS the session to close itself
+  // once the handoff is written (`harness-close`, refused unless armed). The
+  // tab then vanishes into 🗃️ closed sessions with the reply's TLDR as its row.
+  { e: '📑', label: 'doc', wrap: true,
+    tip: 'wrap up: write the handoff, commit it, then close this tab (armed for 2 turns; cancel above the composer; ↩ from 🗃️)',
+    text: "We're wrapping this session up. Write the handoff for another agent or a future you: what changed, what's shipped vs. still local, open threads, gotchas, and the exact next steps. Put it where this project keeps such notes (an existing HANDOFF / HISTORY / docs file; else HANDOFF.md at the repo root). If this is a git repo with a remote, commit and push it. Then run `harness-close` (on your PATH) — it closes this session once the turn ends. If something is unresolved or you need a decision from me, do NOT close: say what's open and stop. End your last message with a 3-line TLDR." },
 ];
 // Custom hover hint (a fixed-position singleton, so the strip's overflow-x
 // clipping can't eat it — a ::after inside the scroll container would be cut
@@ -7868,18 +7902,83 @@ function hideChipTip() { chipTip.style.display = 'none'; }
   for (const q of QUICK_PROMPTS) {
     const b = document.createElement('button');
     b.textContent = q.e + ' ' + q.label;
-    b.onclick = () => { hideChipTip(); sendQuick(q.text); };
-    b.onmouseenter = () => showChipTip(b, q.text);
+    b.onclick = () => { hideChipTip(); sendQuick(q.text, q); };
+    b.onmouseenter = () => showChipTip(b, q.tip || q.text);
     b.onmouseleave = hideChipTip;
     chipsEl.insertBefore(b, sentEnd);
   }
 }
-function sendQuick(text) {
+function sendQuick(text, q) {
   const v = currentView();
   if (v === 'pm') { pmSend(text); return; }   // chips drive the PM chat too (pmSend guards busy)
   if (!currentCid || (v !== 'tty' && v !== 'transcript')) return;
+  if (q && q.wrap) {
+    // 📑 the arm rides WITH the prompt: one frame, the owning machine arms the
+    // session and types the text (the server logs it via:"quick" like any chip)
+    const f = { type: 'wrap', cid: currentCid, text, via: 'quick' };
+    const mid = FLEET ? machineForCid(currentCid) : null;
+    if (!(mid ? hsendTo(mid, f) : hsend(f))) return;
+    addPending(text, text);
+    return;
+  }
   deliverSend(currentCid, text, text, 'quick');   // 'quick' tags the server's prompt log
   addPending(text, text);
+}
+
+// ── 📑 wrap: the armed row, the vanish landing, the undo toast ───────────────
+// A wrapping session's tab disappears ON PURPOSE. Without these, the viewer
+// gets the dead veil's "gone" tombstone and a black tty — the one thing the
+// feature must never feel like. `sessions` frames carry wrapArmed/wrapClosing;
+// when a cid that was closing stops appearing, land on the rail neighbour and
+// offer ↩ (the 🗃️ reopen, same cid).
+const wrapRow = document.getElementById('wraprow'), wrapText = document.getElementById('wraptext');
+function renderWrapRow(s, show) {
+  const on = !!(show && s && (s.wrapArmed || s.wrapClosing));
+  wrapRow.hidden = !on;
+  if (!on) return;
+  wrapText.textContent = s.wrapClosing
+    ? 'closing when this turn ends — it lands in 🗃️ closed sessions (↩ brings it back)'
+    : 'wrapping up — closes itself once the handoff is written and committed';
+}
+document.getElementById('wrapCancel').onclick = () => {
+  if (!currentCid) return;
+  const f = { type: 'wrapCancel', cid: currentCid };
+  const mid = FLEET ? machineForCid(currentCid) : null;
+  if (mid) hsendTo(mid, f); else hsend(f);
+  wrapRow.hidden = true;                       // optimistic; the next sessions frame confirms
+};
+function noteWrapVanished(prev, next, machine) {
+  if (!prev || !prev.length) return;
+  for (const p of prev) {
+    if (!p.wrapClosing || next.some(n => n.cid === p.cid)) continue;
+    showWrapToast(p, machine);
+    if (p.cid === currentCid && inSessionView()) {
+      deadVeilDismissed = p.cid; hideDeadVeil();
+      landAfterVanish();
+    }
+  }
+}
+function landAfterVanish() {
+  const rest = railSessions().filter(s => s.cid !== currentCid);
+  if (!rest.length) { setView('projects'); return; }
+  focusSession(rest[0]);
+}
+const wrapToast = document.createElement('div'); wrapToast.id = 'wraptoast'; wrapToast.hidden = true;
+document.body.appendChild(wrapToast);
+let wrapToastTimer = null;
+function hideWrapToast() { wrapToast.hidden = true; clearTimeout(wrapToastTimer); wrapToastTimer = null; }
+function showWrapToast(s, machine) {
+  wrapToast.innerHTML = '';
+  const t = document.createElement('span');
+  t.textContent = '📑 ' + (s.tab || s.title || 'session') + ' wrapped up';
+  const u = document.createElement('button'); u.className = 'wt-undo'; u.textContent = '↩ bring back';
+  u.onclick = () => { hideWrapToast(); reopenClosed({ cid: s.cid, pid: s.pid, machine: machine || null }); };
+  const h = document.createElement('button'); h.className = 'wt-log'; h.textContent = '🗃️'; h.title = 'closed sessions';
+  h.onclick = () => { hideWrapToast(); showClosedLog(); };
+  wrapToast.append(t, u, h);
+  wrapToast.hidden = false;
+  clearTimeout(wrapToastTimer);
+  wrapToastTimer = setTimeout(hideWrapToast, 15000);
 }
 
 box.addEventListener('paste', (e) => {

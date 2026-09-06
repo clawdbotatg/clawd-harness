@@ -56,6 +56,7 @@ import termios
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -120,6 +121,23 @@ RING_MAX   = int(os.environ.get("RING_MAX", str(256 * 1024)))  # replay buffer c
 # registry) so a closed tab can be scrolled back to and reopened by its
 # engine session id. Newest first, capped.
 CLOSED_MAX = int(os.environ.get("CLOSED_MAX", "200"))
+# 📑 wrap: the doc chip arms a session to close ITSELF once its handoff is
+# written. A session can only self-close while armed — the arm comes from a
+# human's chip tap (or the PM's `wrap` verb), lasts WRAP_TTL_S seconds and
+# WRAP_TURNS turns, and nothing the session does can arm it. The harness
+# never force-closes: no `harness-close` call → the arm lapses, the tab stays.
+WRAP_TTL_S = int(os.environ.get("WRAP_TTL_S", "1800"))
+WRAP_TURNS = int(os.environ.get("WRAP_TURNS", "2"))         # the doc turn + one follow-up
+WRAP_GRACE_S = int(os.environ.get("WRAP_GRACE_S", "20"))    # close anyway if no Stop follows the call
+WRAP_PROMPT = (
+    "We're wrapping this session up. Write the handoff for another agent or a "
+    "future you: what changed, what's shipped vs. still local, open threads, "
+    "gotchas, and the exact next steps. Put it where this project keeps such "
+    "notes (an existing HANDOFF / HISTORY / docs file; else HANDOFF.md at the "
+    "repo root). If this is a git repo with a remote, commit and push it. Then "
+    "run `harness-close` (on your PATH) — it closes this session once the turn "
+    "ends. If something is unresolved or you need a decision from me, do NOT "
+    "close: say what's open and stop. End your last message with a 3-line TLDR.")
 # A subscribe whose ring replay is this shallow gets the transcript rendered in
 # as seed scrollback first (see _history_seed_bytes) — the ring goes shallow
 # exactly when it can't carry history: a width-change fence (_apply_size) or a
@@ -1121,6 +1139,24 @@ def lan_ip():
         return "127.0.0.1"
     finally:
         sk.close()
+
+
+def _worktree_dirty(path):
+    """The first lines of `git status --porcelain` for a git checkout at
+    `path` ("" = clean, not a repo, or git unavailable). The 📑 self-close
+    gate: a dirty tree also blocks that box's auto-pull, so "wrap" must
+    leave it clean. Untracked files count — they're exactly what gets lost."""
+    if not path or not os.path.isdir(os.path.join(path, ".git")):
+        return ""
+    try:
+        r = subprocess.run(["git", "status", "--porcelain"], cwd=path,
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return ""
+    lines = [l for l in (r.stdout or "").splitlines() if l.strip()]
+    if not lines:
+        return ""
+    return "\n".join(lines[:5]) + (f"\n… +{len(lines) - 5} more" if len(lines) > 5 else "")
 
 
 def _transcript_exists(session_id, config_dir=""):
@@ -3064,6 +3100,11 @@ class ClaudeSession:
         self.last_tool = None
         self.digest = ""                          # volatile "what it's doing now" (LLM, refreshed each Stop)
         self.auto_tldr_armed = False              # volatile: browser send seen, no Stop yet (AUTO_TLDR)
+        # 📑 wrap (volatile on purpose: a restart disarms, the safe direction)
+        self.wrap_armed_at = 0.0                  # epoch of the human's arm; 0 = not armed
+        self.wrap_turns_left = 0                  # Stops the arm survives (WRAP_TURNS)
+        self.wrap_closing = False                 # harness-close accepted: close on the next Stop
+        self._wrap_timer = None                   # the WRAP_GRACE_S fallback
         # 🟦 live TLDR (volatile; the viewer re-asserts its preference on subscribe)
         self.tldr_on = bool(tldr_on)              # a viewer wants the blue block (ctor param: survives respawn/restart)
         self.tldr_turn_text = ""                  # this turn's streamed assistant prose (API tee)
@@ -3191,7 +3232,76 @@ class ClaudeSession:
                 "pilotStatus": self.pilot_status or "",  # the 🤖 row above the composer
                 "pilotRounds": self.pilot_rounds,
                 "model": self.model,
-                "ctxTokens": self.ctx_tokens}
+                "ctxTokens": self.ctx_tokens,
+                "wrapArmed": self.wrap_armed(),     # 📑 may close itself (badge + cancel line)
+                "wrapClosing": self.wrap_closing}   # 📑 harness-close accepted; closes at turn end
+
+    # -- 📑 wrap: arm, cancel, the self-close request, the turn-end close ------
+    def wrap_armed(self):
+        return bool(self.wrap_armed_at
+                    and time.time() - self.wrap_armed_at < WRAP_TTL_S
+                    and self.wrap_turns_left > 0)
+
+    def wrap_arm(self):
+        self.wrap_armed_at = time.time()
+        self.wrap_turns_left = WRAP_TURNS
+        self.wrap_closing = False
+
+    def wrap_cancel(self):
+        self.wrap_armed_at, self.wrap_turns_left, self.wrap_closing = 0.0, 0, False
+        t, self._wrap_timer = self._wrap_timer, None
+        if t:
+            t.cancel()
+
+    def self_close_request(self, reason=""):
+        """`harness-close` from inside the session → (http status, one plain
+        sentence claude reads in its tool output). Every gate is here; the
+        handler only parses. Accepting defers the close to the next Stop so
+        the reply's TLDR lands in last_answer (the history row) first."""
+        if self.wrap_closing:
+            return 200, "already closing when this turn ends."
+        if not self.wrap_armed():
+            return 403, ("self-close is not armed. Only the human's \U0001f4d1 wrap "
+                         "button (or the PM's wrap verb) can arm it — tell the "
+                         "human you're done and stop.")
+        if self.ceremony:
+            return 409, "a sign-in session can't close itself."
+        if self.autopilot:
+            return 409, "autopilot owns this session — it can't close itself."
+        dirty = _worktree_dirty(self.workdir())
+        if dirty:
+            return 409, ("worktree has uncommitted changes — commit (or stash) "
+                         "first, then run harness-close again:\n" + dirty)
+        self.wrap_closing = True
+        print(f"[wrap {self.cid[:8]}] self-close accepted"
+              + (f" ({reason[:80]!r})" if reason else "") + " — closing at turn end", flush=True)
+        t = threading.Timer(WRAP_GRACE_S, self._wrap_close, args=("grace",))
+        t.daemon = True
+        self._wrap_timer = t
+        t.start()
+        return 200, "closing when this turn ends — finish with a 3-line TLDR."
+
+    def _wrap_close(self, how):
+        """Perform the accepted self-close (from the Stop hook, or the grace
+        timer if no Stop ever came). Idempotent: the manager pop makes the
+        second caller a no-op."""
+        if not self.wrap_closing or self.manager.sessions.get(self.cid) is not self:
+            return
+        t, self._wrap_timer = self._wrap_timer, None
+        if t:
+            t.cancel()
+        print(f"[wrap {self.cid[:8]}] closed itself ({how})", flush=True)
+        self.manager.close(self.cid, reason="wrapped")
+
+    def _wrap_on_stop(self):
+        if self.wrap_closing:
+            threading.Thread(target=self._wrap_close, args=("stop",), daemon=True).start()
+        elif self.wrap_armed_at:
+            self.wrap_turns_left -= 1
+            if self.wrap_turns_left <= 0:
+                print(f"[wrap {self.cid[:8]}] arm lapsed — turn budget spent, "
+                      "tab stays open", flush=True)
+                self.wrap_cancel()
 
     def _bg_probe_claude(self):
         """One read-only look at claude's status file → "shell" | "agent" | "".
@@ -3245,6 +3355,10 @@ class ClaudeSession:
         env["COLORTERM"] = "truecolor"          # xterm.js renders 24-bit; let claude emit it
         env["COLUMNS"] = str(COLS)
         env["LINES"] = str(ROWS)
+        # 📑 wrap: `harness-close` (bin/) asks the harness to close THIS
+        # session; the URL carries the cid, the endpoint carries the gates.
+        env["HARNESS_CLOSE_URL"] = f"http://127.0.0.1:{PORT}/self/close?t={TOKEN}&cid={self.cid}"
+        env["PATH"] = f"{HERE / 'bin'}:{env.get('PATH', '')}"
         for k in SCRUB_ENV:                      # pristine top-level + subscription auth
             env.pop(k, None)
         for k in self.eng.scrub_extra:           # engine's own metered-API trap
@@ -3414,6 +3528,7 @@ class ClaudeSession:
             if data["last"]:
                 self.last_answer = data["last"][:500]
             self.tldr_turn_done()                # 🟦 the tightening pass
+            self._wrap_on_stop()                 # 📑 an accepted self-close lands here
             # Turn complete → the transcript now has a real exchange. Name it if
             # it's still unnamed (so even a 1-prompt session gets a title), and
             # re-name at the 1/3/6/9/… milestones to sharpen as it grows.
@@ -7474,6 +7589,38 @@ class SessionManager:
             self.broadcast_sessions()
             self.broadcast_closed()
 
+    # -- 📑 wrap: the doc chip that closes the tab when the handoff is written --
+    def wrap(self, cid, text="", via="wrap"):
+        """Arm `cid` to close itself and deliver the wrap prompt. "" on
+        success, else the reason it can't be armed (never arms a sign-in or
+        an autopilot session — the supervisor owns that one)."""
+        s = self.sessions.get(cid)
+        if not s:
+            return "no such session"
+        if s.ceremony:
+            return "a sign-in session can't wrap"
+        if s.autopilot:
+            return "autopilot is on — turn it off first"
+        s.wrap_arm()
+        txt = (text or "").strip() or WRAP_PROMPT
+        log_prompt(s, txt, via)
+        s.auto_tldr_armed = False                 # the reply ends with its own TLDR
+        print(f"[wrap {cid[:8]}] armed ({WRAP_TURNS} turns, {WRAP_TTL_S}s)", flush=True)
+        if SUB_ROUTE_ON_PROMPT:
+            threading.Thread(target=self.send_prompt, args=(cid, txt),
+                             kwargs={"via": via}, daemon=True).start()
+        else:
+            self.send_prompt(cid, txt, via=via)
+        self.broadcast_sessions()                 # wrapArmed → badge + cancel line
+        return ""
+
+    def wrap_cancel(self, cid):
+        s = self.sessions.get(cid)
+        if s and (s.wrap_armed_at or s.wrap_closing):
+            s.wrap_cancel()
+            print(f"[wrap {cid[:8]}] cancelled by a human", flush=True)
+            self.broadcast_sessions()
+
     # -- 🗃️ closed-session history -------------------------------------------
     # The tab ✕ has no confirm, and until 2026-09-05 a closed session was
     # simply gone (three lost mid-panic that day). Every close files a row
@@ -7488,6 +7635,7 @@ class SessionManager:
                 "first_prompt": (s.first_prompt or "")[:200],
                 "created": s.created, "last_active": s.last_active,
                 "closed_at": time.time(), "reason": reason,
+                "last_answer": (getattr(s, "last_answer", "") or "")[:280],   # 📑 a wrapped session's TLDR
                 "resumable": bool(s.session_id and s.prompt_count)}
 
     def _record_closed(self, s, reason="closed"):
@@ -8326,6 +8474,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/hook":
             return self._handle_hook()
+        if path == "/self/close":
+            return self._handle_self_close()
         if path == "/upload":
             return self._handle_upload()
         if path == "/tts":
@@ -8434,6 +8584,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def _handle_self_close(self):
+        """📑 `harness-close` from inside a session (bin/harness-close, URL
+        from HARNESS_CLOSE_URL). Plain-text reply, one sentence claude reads
+        in its tool output; the gates live in self_close_request."""
+        if not self._token_ok():
+            return self.send_error(403, "bad token")
+        cid = self._query().get("cid", [""])[0]
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        except Exception:
+            body = ""
+        reason = urllib.parse.parse_qs(body).get("reason", [""])[0][:200]
+        s = MGR.get(cid)
+        code, msg = (404, "no such session.") if not s else s.self_close_request(reason)
+        out = msg.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
 
     def _handle_upload(self):
         """Save a pasted/dropped file (image or text-ish doc) to the workdir and
@@ -8646,6 +8818,14 @@ class Handler(BaseHTTPRequestHandler):
             MGR.refresh_accounts()
         elif t == "close":
             MGR.close(frame.get("cid"))
+        elif t == "wrap":
+            err = MGR.wrap(str(frame.get("cid") or ""), frame.get("text", ""),
+                           via=frame.get("via") or "wrap")
+            if err:
+                client.send_json({"type": "error", "cid": frame.get("cid"),
+                                  "error": "wrap: " + err})
+        elif t == "wrapCancel":
+            MGR.wrap_cancel(str(frame.get("cid") or ""))
         elif t == "pin":
             MGR.pin(frame.get("cid"), bool(frame.get("on", True)))
         elif t == "autopilot":

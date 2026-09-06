@@ -133,8 +133,15 @@ assign(task_id, {spawn_in: pid} | {existing: cid}, engine)  # → new + send
 ask(cid, text)                                       # → send
 answer_prompt(cid, choice)                           # → input (raw keys) — the hard one
 interrupt(cid) / pause(cid)
+wrap(cid, text?)                                     # 📑 → wrap frame: handoff, commit, then it closes ITSELF
 session_digest(cid)                                  # deep-read one session on demand
 ```
+
+`wrap` is the finish verb: the session is armed (2 turns / 30 min) to close
+itself once its handoff is written and committed; it lands in the 🗃️ closed
+history with a TLDR, reopenable. Only an armed session can self-close and it
+refuses on a dirty worktree, so a wrap that doesn't end is the session saying
+something — `transcript_tail`. `close` stays for the broken or abandoned.
 
 **`answer_prompt` is the one that's genuinely harder than the rest.** A
 `waiting` session is parked on a TUI menu; answering means raw arrow-keys+enter
