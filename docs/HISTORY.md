@@ -11,6 +11,30 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-06 — the tab strip wraps: every session one tap away
+
+Austin: "right now there's just a single line of all the tabs and it basically
+goes forever… I want it to wrap around so if there's three rows' worth of tabs,
+three rows are visible… push down the rest of the stuff as much as it needs
+to." So `#sessionbar` is `flex-wrap:wrap` and no longer a horizontal
+scrollport: with N rows' worth of tabs the strip is N rows tall and the
+terminal gives up that height. Two things moved with it. The 🔎 filter box
+(2026-08-09 entry below) was `position:sticky; right:0` plus a left-fading
+gradient *because* the strip scrolled and tabs passed under it; nothing scrolls
+now, so it's a plain `margin-left:auto` flex item that lands at the right edge
+of the LAST row. And the terminal's fit only re-ran when the bar flipped
+hidden/shown, which was enough while its height was constant — now a spawned or
+closed session, a filter, or a rotation can change the row count, so a
+`ResizeObserver` on the bar calls `refitTTY()` (same pattern as the footer's).
+PM threads ride the same strip and wrap too. `tools/tabfilterprobe.mjs` no
+longer asserts sticky-while-scrolling; it asserts the strip never overflows
+its own box, that tabs wider than the bar occupy >1 row (checked again at a
+420px viewport, which forces the wrap with any three tabs), and fails if the
+filter comes back `sticky`. Known trade-off, chosen deliberately: on a phone
+with dozens of tabs the strip can take most of the screen — that IS the ask
+(all visible, no scrolling, no filtering), and the filter is still there for
+whoever wants the strip short.
+
 ## 2026-09-05 — passkey cadence: 24h → 7 days
 
 Austin: "I spent too much of my time doing passkey auths." One Face ID per

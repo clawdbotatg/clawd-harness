@@ -85,11 +85,14 @@
                     padding:2px 7px; cursor:pointer; }
   #ironrow button:hover { color:var(--ink); border-color:var(--edge-hi); }
   #ironrow button.danger:hover, #ironrow button.armed { color:var(--err); border-color:var(--err); }
-  /* second header row: session tabs for the current project, busy→idle→dead, left to right */
-  #sessionbar { display:flex; align-items:center; gap:6px; padding:5px 12px;
-                border-bottom:1px solid var(--edge); background:var(--panel);
-                overflow-x:auto; white-space:nowrap; scrollbar-width:none; }
-  #sessionbar::-webkit-scrollbar { display:none; }
+  /* second header row: session tabs for the current project, busy→idle→dead, left to right.
+     WRAPS (2026-09-06): every tab is on screen at once, however many rows that
+     takes — the strip grows and pushes the terminal down. It used to be a single
+     scrolling row, which meant the tab you wanted was usually off-screen and you
+     had to scroll or filter to reach it. The ResizeObserver on the bar (see
+     refitTTY) refits the terminal whenever the row count changes. */
+  #sessionbar { display:flex; flex-wrap:wrap; align-items:center; gap:4px 6px; padding:5px 12px;
+                border-bottom:1px solid var(--edge); background:var(--panel); }
   #sessionbar[hidden] { display:none; }
   /* "needs you" bar: any session blocked on the user, across ALL machines — the
      reliable way to reach a blocked session when iOS won't deep-link a notif tap
@@ -128,14 +131,13 @@
   #sessionbar .stab.active .age { color:inherit; opacity:.75; }
   #sessionbar .stab.moff { opacity:.5; }   /* host machine off the roster — cached tab, kept visible */
   #sessionbar .stab.fhide { display:none; }   /* filtered out — hidden, not removed (nodes survive the repaint) */
-  /* 🔎 tab filter: parks at the far right of the strip and HOVERS over it —
-     position:sticky (not absolute) so it rides the scrollport's right edge while
-     the tabs scroll underneath, and the gradient hides them as they pass behind.
-     margin-left:auto keeps it right-aligned when the tabs don't fill the row. */
-  #sessionbar .tfilter { position:sticky; right:0; z-index:3; flex:0 0 auto; margin-left:auto;
+  /* 🔎 tab filter: parks at the far right of the strip's LAST row —
+     margin-left:auto pushes it to the right edge of whatever row it wraps onto.
+     (It was position:sticky + a fade gradient while the strip scrolled; the
+     strip wraps now, so nothing passes under it.) */
+  #sessionbar .tfilter { flex:0 0 auto; margin-left:auto;
                          display:inline-flex; align-items:center; gap:5px;
-                         padding-left:26px; padding-right:0;
-                         background:linear-gradient(to right, transparent 0, var(--panel) 24px); }
+                         padding-left:12px; padding-right:0; }
   #sessionbar .tfilter .ficon { flex:0 0 auto; font-size:11px; color:var(--dim); cursor:pointer;
                                 user-select:none; }
   #sessionbar .tfilter input { width:92px; background:var(--raised); color:var(--ink);
@@ -152,7 +154,7 @@
   /* Touch: the strip is the whole screen width, so an always-open box would eat a
      fifth of it. Collapse to the 🔎 alone until you tap it (or a filter is live). */
   @media (pointer: coarse) {
-    #sessionbar .tfilter { padding-left:18px; }
+    #sessionbar .tfilter { padding-left:10px; }
     #sessionbar .tfilter .ficon { font-size:13px; padding:0 2px; }
     #sessionbar .tfilter input { font-size:16px; width:0; padding:0; border-width:0; }
     #sessionbar .tfilter.open input, #sessionbar .tfilter.on input {
@@ -1870,6 +1872,10 @@ function onE2EChannelOpen(machine) {
 // the textarea" bug). Watch the footer's box and refit the TTY on any size
 // change so the grid always matches the space actually left for it.
 new ResizeObserver(() => refitTTY()).observe(document.querySelector('footer'));
+// The tab strip wraps, so its height moves with the tab count and the window
+// width (a new session, a closed one, a rotation) — the terminal must give up /
+// take back rows to match, or the grid claude sees no longer fits the screen.
+new ResizeObserver(() => refitTTY()).observe(document.getElementById('sessionbar'));
 
 const dot = document.getElementById('dot');
 const meta = document.getElementById('meta');
