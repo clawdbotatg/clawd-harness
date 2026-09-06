@@ -17,7 +17,13 @@ because the story isn't inline here).
    `h.atg.link` serving HEAD's `index.html` byte-for-byte.
 
 **Push to main IS the deploy.** Every box self-updates (~5 min; the relay box
-~3 min). The standing "only commit when asked" default does not apply here.
+~3 min). A `server.py` change restarts a box only once it is **committed and
+compiles** (`_RestartGate`, `test_restart_gate.py`): an uncommitted edit in the
+live tree waits for its commit, so a session working on the harness no longer
+restarts the box (and kills every session on it) on every save. Boot resumes
+are staggered most-recent-first; a viewer's subscribe starts its session at
+once (`test_boot_stagger.py`). Every restart is still a kill + `--resume` of
+every session — don't add restart triggers. The standing "only commit when asked" default does not apply here.
 The trap: saving `index.html` hot-reloads browsers on *this* box in ~1s and
 `uiprobe` screenshots the working tree — every local signal says "shipped"
 while production still serves the last push. Never call a UI change live on

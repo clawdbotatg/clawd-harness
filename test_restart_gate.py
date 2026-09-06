@@ -1,139 +1,96 @@
 #!/usr/bin/env python3
-"""The graceful-restart gate: what may hold a restart back, and for how long.
+"""A changed server.py restarts the box only once it is COMMITTED and compiles.
 
-Why this exists: on 2026-08-09 a subscription-routing fix sat unapplied on
-clawd-head for 30+ minutes. The box had the commit; the RUNNING process was
-stale, because `busy_count()` counted a session that was merely **blocked on
-an interactive permission prompt** as mid-turn. That session was parked on a
-human and could have sat there all day — meanwhile the harness kept spawning
-new sessions onto the exact plan the pending fix existed to avoid.
+Why this exists: the watcher used to arm a full-box self-restart on any mtime
+change to server.py — every save by a session working on the harness, half
+edits included. Every restart kills and `--resume`s every session on the box.
+head's log held 152 boots in three weeks; 08-27 13:01 booted five times in one
+minute on a broken edit; 09-06 had four restarts by lunch. The user reads that
+churn as "it bricked itself again" (docs/HISTORY.md, 2026-09-06).
 
-The lesson isn't "restart more aggressively", it's that the wait had no floor
-and no ceiling. So:
+Pins (`_RestartGate`):
+  * unchanged / reverted-to-running content never arms
+  * an uncommitted edit defers (logged once) and is re-checked without an
+    mtime move, so the commit itself arms the restart
+  * a file that doesn't compile defers, whatever git says
+  * once armed for a digest, the same digest never re-arms (cancel is honored)
+  * a second commit arms again
 
-  * `waiting` (parked on a human) must NOT hold a restart,
-  * genuinely mid-turn work and background shells still must,
-  * and the wait expires, because code that can never land is its own outage.
-
-Pure state logic — constructs no SessionManager, spawns nothing, and never
-touches the live registry (see the scratch-registry trap).
+Runs against a sandbox copy in a throwaway git repo — never the live tree.
+SERVER_PY=/path/to/server.py tests a candidate copy.
 
     python3 test_restart_gate.py
 """
+import importlib.util
+import os
+import shutil
+import subprocess
 import sys
-import threading
-import time
-import types
+import tempfile
+from pathlib import Path
 
-import server
-
-
-def sess(cid, busy=False, waiting=False, bg="", alive=True, title=""):
-    s = types.SimpleNamespace(cid=cid, busy=busy, waiting=waiting, bg=bg,
-                              alive=alive, title=title)
-    return s
+REPO = Path(__file__).resolve().parent
+SRC = Path(os.environ.get("SERVER_PY") or REPO / "server.py")
+fails = 0
 
 
-def mgr(*sessions, pending=True, since=None):
-    m = types.SimpleNamespace(
-        sessions={s.cid: s for s in sessions},
-        lock=threading.RLock(),
-        _restart_lock=threading.Lock(),
-        _restarting=False,
-        restart_pending=pending,
-        restart_reason="test",
-        restart_since=time.time() if since is None else since)
-    for meth in ("restart_blockers", "restart_state"):
-        setattr(m, meth, getattr(server.SessionManager, meth).__get__(m))
-    return m
+def check(name, ok, detail=""):
+    global fails
+    print(("  ok   " if ok else "  FAIL ") + name + (f"  ({detail})" if detail and not ok else ""))
+    if not ok:
+        fails += 1
 
 
-CASES = []
+def git(tmp, *args):
+    return subprocess.run(["git", "-C", str(tmp), *args], capture_output=True, text=True)
 
 
-def case(fn):
-    CASES.append(fn)
-    return fn
+def main():
+    tmp = Path(tempfile.mkdtemp(prefix="restart-gate-"))
+    try:
+        shutil.copy(SRC, tmp / "server.py")
+        git(tmp, "init", "-q")
+        git(tmp, "config", "user.email", "t@t"); git(tmp, "config", "user.name", "t")
+        git(tmp, "add", "server.py"); git(tmp, "commit", "--no-verify", "-qm", "boot")
+        spec = importlib.util.spec_from_file_location("server_gate_sandbox", tmp / "server.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["server_gate_sandbox"] = mod
+        spec.loader.exec_module(mod)
+        path = tmp / "server.py"
+        boot = path.read_bytes()
+        gate = mod._RestartGate(path)
 
+        check("no change → no restart", gate.check(False) is None and gate.check(True) is None)
 
-@case
-def test_a_prompt_blocked_session_does_not_hold_the_restart():
-    """THE regression. `waiting` sessions still carry busy=True — that is what
-    turned a pending restart into a permanent one."""
-    m = mgr(sess("blocked1", busy=True, waiting=True))
-    assert m.restart_blockers() == [], \
-        "a session parked on a human must not count as mid-turn"
+        path.write_bytes(boot + b"\n# a live edit\n")
+        check("uncommitted edit → deferred, not armed", gate.check(True) is None and gate.deferred)
+        quiet = [gate.check(False) for _ in range(6)]
+        check("stays deferred while dirty (re-checked on the tick)", all(r is None for r in quiet) and gate.deferred)
 
+        git(tmp, "commit", "--no-verify", "-qam", "the edit")
+        got = [gate.check(False) for _ in range(6)]
+        check("the commit arms it — with no mtime move", "server.py changed" in got, str(got))
+        check("armed once, then quiet", got.count("server.py changed") == 1 and not gate.deferred)
+        check("same content never re-arms (cancel honored)", gate.check(True) is None)
 
-@case
-def test_a_real_mid_turn_session_still_holds_it():
-    """The protection that matters is unchanged: SIGTERM during a turn drops a
-    partial reply and cancels an in-flight tool call."""
-    m = mgr(sess("working", busy=True))
-    assert [s.cid for s in m.restart_blockers()] == ["working"]
+        committed = path.read_bytes()
+        path.write_bytes(committed + b"\ndef (broken\n")
+        check("syntax error → deferred, never armed", gate.check(True) is None and gate.deferred)
+        git(tmp, "add", "server.py"); git(tmp, "commit", "--no-verify", "-qm", "broken commit")
+        got = [gate.check(False) for _ in range(6)]
+        check("a committed file that doesn't compile still never arms", all(r is None for r in got))
 
+        path.write_bytes(boot)
+        check("reverted to the running content → nothing to restart into", gate.check(True) is None and not gate.deferred)
 
-@case
-def test_background_work_still_holds_it():
-    """A turn resumes; a background shell does not — nothing restarts it."""
-    m = mgr(sess("bgshell", busy=False, bg="shell"))
-    assert [s.cid for s in m.restart_blockers()] == ["bgshell"]
-
-
-@case
-def test_dead_sessions_never_hold_it():
-    m = mgr(sess("zombie", busy=True, alive=False))
-    assert m.restart_blockers() == []
-
-
-@case
-def test_the_clawd_head_mix_reduces_to_the_real_workers():
-    """The actual 08-09 shape: 4 'busy' sessions, only some genuinely working."""
-    m = mgr(sess("working", busy=True),
-            sess("prompted", busy=True, waiting=True),
-            sess("idle"),
-            sess("bg", bg="agent"))
-    assert sorted(s.cid for s in m.restart_blockers()) == ["bg", "working"]
-
-
-@case
-def test_state_frame_reports_blockers_not_raw_busy():
-    """The banner's count and its 'restart now' button must agree about what
-    is being waited on — so the frame carries blockers, not busy_count."""
-    m = mgr(sess("working", busy=True, title="Fix the thing"),
-            sess("prompted", busy=True, waiting=True))
-    st = m.restart_state()
-    assert st["busy"] == 1, "the prompted session must not inflate the count"
-    assert [b["title"] for b in st["blockers"]] == ["Fix the thing"]
-    assert st["maxWait"] == server.RESTART_MAX_WAIT
-
-
-@case
-def test_no_pending_restart_reports_no_blockers():
-    """Don't walk the session list to describe a restart nobody asked for."""
-    st = mgr(sess("working", busy=True), pending=False).restart_state()
-    assert st["pending"] is False and st["busy"] == 0 and st["blockers"] == []
-
-
-@case
-def test_the_wait_has_a_ceiling():
-    """A machine somebody actually uses can be never-quiet. The ceiling is the
-    difference between 'deferred' and 'never applied'."""
-    assert server.RESTART_MAX_WAIT > 0, "a wait with no ceiling can never land"
-    fresh, stale = mgr(sess("w", busy=True)), mgr(
-        sess("w", busy=True), since=time.time() - server.RESTART_MAX_WAIT - 1)
-    assert fresh.restart_state()["waitedFor"] < 5
-    assert stale.restart_state()["waitedFor"] >= server.RESTART_MAX_WAIT
+        path.write_bytes(committed + b"\n# second change\n")
+        git(tmp, "commit", "--no-verify", "-qam", "second")
+        check("a later commit arms again", gate.check(True) == "server.py changed")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("[restart-gate] " + ("ALL GREEN" if not fails else f"{fails} FAILED"))
+    sys.exit(1 if fails else 0)
 
 
 if __name__ == "__main__":
-    failed = 0
-    for fn in CASES:
-        try:
-            fn()
-            print(f"  ok   {fn.__name__}")
-        except Exception as e:
-            failed += 1
-            print(f"  FAIL {fn.__name__}: {type(e).__name__}: {e}")
-    print(f"\n{len(CASES) - failed}/{len(CASES)} passed")
-    sys.exit(1 if failed else 0)
+    main()

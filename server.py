@@ -881,7 +881,11 @@ SEND_WATCHDOG = float(os.environ.get("SEND_WATCHDOG", "10"))
 # while the soonest-resetting pool forfeits capacity. Same handoff mechanics
 # and per-session cooldown as the drain rescue; the margin keeps near-ties
 # (incl. same-day resets) from churning respawns.
-SUB_REBALANCE = os.environ.get("SUB_REBALANCE", "1") != "0"
+# Off by default since 2026-09-06: every rebalance is a kill + `--resume` of a
+# healthy session (16 of the day's 30 handoffs on head were "weekly resets
+# sooner"), and the user reads that churn as the box bricking itself. Forfeited
+# headroom is cheaper than a respawned session. Set SUB_REBALANCE=1 to re-enable.
+SUB_REBALANCE = os.environ.get("SUB_REBALANCE", "0") == "1"
 SUB_REBALANCE_MARGIN = float(os.environ.get("SUB_REBALANCE_MARGIN", "21600"))  # s
 # ── on-demand routing (2026-08-19) ───────────────────────────────────────────
 # Rollout stages 1–2 of docs/fleet/ON-DEMAND-SUB-ROUTING-PLAN.md: pick the
@@ -994,6 +998,13 @@ SUB_HANDOFF_BATCH = int(os.environ.get("SUB_HANDOFF_BATCH", "2"))
 # waited on a session that was itself parked on a human. Code that can't land is
 # not a safe default; 20 min is long enough that a normal turn finishes first.
 RESTART_MAX_WAIT = float(os.environ.get("RESTART_MAX_WAIT", "1200"))
+# Boot resume stagger (s). A restart used to `--resume` every session at once —
+# 15 claudes re-ingesting context on one box (load 4-5), so the tab you opened
+# next sat black for 15s+ while its claude cold-started behind them. Now load()
+# parks every session and a background thread starts them most-recently-active
+# first, this far apart; a subscribe or a send starts its session immediately
+# (ensure_started), so the one you're looking at never waits its turn.
+BOOT_STAGGER_S = float(os.environ.get("BOOT_STAGGER_S", "1.5"))
 # The CLI's limit banner, as painted in the PTY ("You've hit your session
 # limit · resets …", or the blocking "Stop and wait for limit to reset" menu).
 # Needles are deliberately narrow, and the rescue re-confirms against the live
@@ -3111,6 +3122,8 @@ class ClaudeSession:
         self.os_pid = None                       # claude's process pid (not the project pid)
         self.proc = None
         self.alive = False
+        self.starting = False                    # parked by load(): starts on demand / in the stagger
+        self._start_lock = threading.Lock()
 
         self.ring = bytearray()                  # recent PTY output for late joiners
         self.ring_lock = threading.Lock()
@@ -3273,7 +3286,7 @@ class ClaudeSession:
                 "lastActive": self.last_active,
                 "promptedAt": self.prompted_at,
                 "created": self.created,
-                "alive": self.alive,
+                "alive": self.alive or self.starting,   # parked-for-boot ≠ dead (no veil)
                 "account": self.account,
                 "pinned": self.pinned,
                 "testHint": self.test_hint or "",   # 📌 board: the human's verification step
@@ -3390,6 +3403,17 @@ class ClaudeSession:
         return False
 
     # -- lifecycle -------------------------------------------------------------
+    def ensure_started(self):
+        """Boot stagger: a session parked by load() spawns on first demand
+        (a subscribe, a send) or when the stagger thread reaches it — whichever
+        comes first, exactly once. True if this call did the spawn."""
+        with self._start_lock:
+            if not self.starting:
+                return False
+            self.starting = False
+        self.start()
+        return True
+
     def start(self):
         master, slave = pty.openpty()
         # Open at the geometry this session already has — an in-place respawn
@@ -3896,6 +3920,7 @@ class ClaudeSession:
         healthy delivery as a walled plan and go hunting for a rescue — and
         they aren't prompts, so they must not touch `prompted_at` (the "when
         did a human last say something" clock behind tab ages)."""
+        self.ensure_started()                    # a send jumps the boot stagger
         if not control:
             self.prompted_at = time.time()   # belt-and-braces: a bounced prompt fires no hook
         pre_hooks = self.hook_count
@@ -4561,6 +4586,7 @@ class ClaudeSession:
         goes FIRST so the client knows which cid the bytes that follow belong
         to — it gates painting on that, which is what keeps a stale/mis-routed
         subscription from leaking another session's output into its terminal."""
+        self.ensure_started()                    # a viewer jumps the boot stagger
         with self.clients_lock:
             self.clients.add(client)
         client.send_json({"type": "hello",
@@ -4981,7 +5007,8 @@ class SessionManager:
         # busy is how a pending restart becomes a permanent one.
         self.restart_pending = False
         self.restart_reason = ""
-        self.restart_since = 0.0                 # when the wait started (for the ceiling)
+        self.restart_since = 0.0
+        self._boot_queue = []                    # sessions parked by load(), see _boot_stagger                 # when the wait started (for the ceiling)
         self._restarting = False
         self._restart_lock = threading.Lock()
 
@@ -5094,6 +5121,30 @@ class SessionManager:
         self.broadcast_all(self.restart_state())
 
     # -- startup / persistence -------------------------------------------------
+    def _park_for_boot(self, s):
+        """load(): register the session live-looking but unspawned; the
+        stagger thread (or the first subscribe/send) starts it."""
+        s.starting = True
+        self._boot_queue.append(s)
+
+    def _boot_stagger(self):
+        """Start the parked sessions most-recently-active first, BOOT_STAGGER_S
+        apart, so a restart doesn't launch every claude on the box at once.
+        ensure_started is idempotent, so a session a viewer already started
+        is simply skipped."""
+        q = sorted(self._boot_queue,
+                   key=lambda s: -(s.last_active or s.created or 0.0))
+        self._boot_queue = []
+        for i, s in enumerate(q):
+            if i and BOOT_STAGGER_S > 0:
+                time.sleep(BOOT_STAGGER_S)
+            try:
+                if s.ensure_started():
+                    self.broadcast_sessions()
+            except Exception as e:               # one bad spawn must not strand the rest
+                print(f"[boot] {s.cid[:8]} failed to start: {type(e).__name__}: {e}",
+                      flush=True)
+
     def load(self):
         PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
         reg = self._read_registry()
@@ -5236,7 +5287,7 @@ class SessionManager:
                     tldr_text=e.get("tldr_text", ""), tldr_on=bool(e.get("tldr_on")),
                     voice_on=bool(e.get("voice_on")))
                 self.sessions[s.cid] = s
-                s.start()
+                self._park_for_boot(s)
                 continue
             cfg = e.get("config_dir", "")
             name = e.get("account", "default")
@@ -5314,7 +5365,8 @@ class SessionManager:
                 tldr_text=e.get("tldr_text", ""), tldr_on=bool(e.get("tldr_on")),
                 voice_on=bool(e.get("voice_on")))
             self.sessions[s.cid] = s
-            s.start()
+            self._park_for_boot(s)
+        threading.Thread(target=self._boot_stagger, daemon=True).start()
         # Backfill the 📌 board's blue line for pins that predate the field (or
         # whose generation lost a race with a restart). One-shot at boot: a
         # session already parked and already verified-looking still needs to
@@ -9167,8 +9219,85 @@ def auto_update_loop():
             print(f"[autoupdate] {e}", flush=True)
 
 
+class _RestartGate:
+    """When does a changed server.py restart the box?
+
+    It used to be "whenever the file's mtime moved" — every save by a session
+    working on the harness armed a full-box restart (all 15 sessions killed
+    and `--resume`d), half-typed edits included. 152 boots in three weeks of
+    head's log; 08-27 13:01 booted five times in one minute on a broken edit.
+    That churn is what the user reads as "it bricked itself again".
+
+    Now the file must be (a) different from what this process booted from,
+    (b) a valid module, and (c) identical to HEAD — i.e. committed (or pulled
+    by the auto-updater). A dirty edit waits for its commit; the restart-now
+    button still forces one for a live test. A deferred change is re-checked
+    every few ticks because a commit moves no mtime."""
+
+    RECHECK_TICKS = 5
+
+    def __init__(self, path):
+        self.path = path
+        self.running = self._digest()            # what this process is executing
+        self.armed = self.running                # last digest we restarted for
+        self.noted = None                        # digest we last explained a deferral for
+        self.deferred = False
+        self._tick = 0
+
+    def _digest(self):
+        try:
+            return hashlib.sha1(self.path.read_bytes()).hexdigest()
+        except OSError:
+            return ""
+
+    def _compiles(self):
+        try:
+            compile(self.path.read_bytes(), str(self.path), "exec")
+            return True
+        except (SyntaxError, ValueError, OSError):
+            return False
+
+    def _clean_vs_head(self):
+        """True when the file matches HEAD. Anything but a definite 'dirty'
+        (no git, not a repo, timeout) keeps the old any-change behavior."""
+        try:
+            r = subprocess.run(["git", "-C", str(self.path.parent), "diff", "--quiet",
+                                "HEAD", "--", self.path.name],
+                               capture_output=True, timeout=10)
+        except Exception:
+            return True
+        return r.returncode != 1
+
+    def check(self, changed):
+        """Tick. `changed` = the mtime moved. Returns a restart reason or None."""
+        self._tick += 1
+        if not (changed or (self.deferred and self._tick % self.RECHECK_TICKS == 0)):
+            return None
+        d = self._digest()
+        if not d or d in (self.running, self.armed):
+            self.deferred = False                # reverted, or already handled
+            return None
+        if not self._compiles():
+            self.deferred = True
+            if self.noted != d:
+                self.noted = d
+                print(f"[watch] {self.path.name} changed but does not compile — "
+                      "restart waits for a fix", flush=True)
+            return None
+        if not self._clean_vs_head():
+            self.deferred = True
+            if self.noted != d:
+                self.noted = d
+                print(f"[watch] {self.path.name} edited but not committed — restart "
+                      "waits for the commit (restart-now still forces one)", flush=True)
+            return None
+        self.armed, self.deferred = d, False
+        return f"{self.path.name} changed"
+
+
 def watch_ui():
     last = {}
+    gate = _RestartGate(RESTART_FILES[0])        # server.py: committed + compiles, or wait
     for f in WATCH_FILES + RESTART_FILES:
         try: last[f] = f.stat().st_mtime
         except OSError: last[f] = 0
@@ -9191,8 +9320,13 @@ def watch_ui():
         for f in RESTART_FILES:
             try: m = f.stat().st_mtime
             except OSError: continue
-            if m != last[f]:
-                last[f] = m
+            moved = m != last[f]
+            last[f] = m
+            if f == gate.path:
+                why = gate.check(moved)
+                if why:
+                    MGR.request_restart(why)
+            elif moved:
                 MGR.request_restart(f"{f.name} changed")
         # Re-check a pending restart on the tick, not only when session state
         # moves: the RESTART_MAX_WAIT ceiling is a clock, and a box quiet enough

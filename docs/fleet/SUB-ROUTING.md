@@ -211,7 +211,9 @@ handed off (same mechanics) when the router's best pool's weekly window
 resets ≥ `SUB_REBALANCE_MARGIN` (6 h) sooner (`_rebalance_win`). Cross-pool
 only (same-org logins share the limit), both weekly clocks must be known
 (pct headroom alone never justifies a respawn), idle only, cooldown applies.
-`SUB_REBALANCE=0` disables. Without this, a session spawned on the right
+**Off by default since 2026-09-06** (`SUB_REBALANCE=1` enables): every
+rebalance is a respawn of a healthy session — 16 of head's 30 handoffs that
+day — and that churn read as the box bricking itself. Without this, a session spawned on the right
 pool *yesterday* kept burning it long after another pool became the
 use-it-or-lose-it priority.
 

@@ -96,7 +96,9 @@ but 100% it should be burning austingriffith — it resets the soonest").
 Now the poller sweep also **rebalances**: an IDLE session on a healthy pool
 moves — same seamless `--resume` handoff, same cid — whenever the router's
 best pool's weekly window resets ≥ 6 h sooner (`SUB_REBALANCE_MARGIN`;
-`SUB_REBALANCE=0` turns it off). Guard rails: never mid-turn (idle only),
+**off by default since 2026-09-06** — `SUB_REBALANCE=1` turns it on; every
+rebalance is a kill + `--resume` of a healthy session, and that churn read as
+the box bricking itself). Guard rails: never mid-turn (idle only),
 never between logins of the SAME pool (one org, several config dirs — moving
 buys nothing), only when both reset clocks are actually known (a blind/stale
 poll is not a routing signal), and the per-session `HANDOFF_COOLDOWN` (10 min)

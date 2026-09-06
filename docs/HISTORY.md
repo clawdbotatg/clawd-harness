@@ -11,6 +11,52 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-06 — "it bricked itself again": restart + handoff churn, not a dead box
+
+**Handoff.** Austin, 12:32, screenshot of a black terminal 14 s after opening a
+new tab: "I am so tired of having to come here and do this… it bricked itself
+again… please dig in and understand why". The harness was healthy the whole
+time. What he saw was churn.
+
+The 12:22–12:32 chain on head: a sibling session (4ca416fd, the login-horizon
+fix) edited `server.py` in the live tree → the watcher armed a full-box
+restart on the mtime alone → 12:27 all 15 sessions killed and `--resume`d in
+the same second (load 4-5) → the two harness sessions then closed their own
+tabs via 📑 wrap → the new tab's claude cold-started behind 14 re-ingesting
+siblings and painted nothing for 15 s+. Since that morning's 09:19 boot:
+4 restarts, 30 handoffs (14 "plan drained", **16 "rebalance: weekly resets
+sooner"**), 88 PTY kills for ~15 sessions — every session killed 5-6 times
+before lunch. 152 boots in three weeks of log; 08-27 13:01 booted five times
+in one minute on a broken edit. Three logins (austinmax, sub3, slop) also hit
+the 30-day horizon that day, shrinking the pool and feeding the handoffs.
+
+Fixes (this commit):
+* **`_RestartGate`** — `server.py` arms a restart only when it differs from
+  what's running, compiles, and is identical to HEAD (committed or pulled).
+  A dirty edit is logged once and re-checked on the tick (a commit moves no
+  mtime); restart-now still forces one for a live test. Crash loops from a
+  half-typed file are gone with it. `.clawd-harness.env` keeps mtime rules.
+  `test_restart_gate.py` (sandbox git repo; commits use `--no-verify`
+  because the global gitleaks hook flags 4 strings when server.py is
+  committed whole into a fresh repo — allowlist noise, not secrets).
+* **`SUB_REBALANCE` default off.** Forfeited weekly headroom is cheaper than
+  a respawned session. `_rebalance_win` returns None unless `SUB_REBALANCE=1`.
+  New-session *routing* by reset clock (`use_account`) is untouched.
+* **Boot stagger** (`BOOT_STAGGER_S`, 1.5 s). `load()` parks every session
+  (`starting=True`, reports alive so no dead veil) and `_boot_stagger` starts
+  them most-recently-active first; `ensure_started()` fires on the first
+  subscribe or send, so the tab you look at spawns immediately.
+  `test_boot_stagger.py`.
+
+Still open: `tools/checkall.sh` probes that don't stub `WebSocket` (about 25
+of them) open real sockets to the live harness and subscribe to a real
+session — the log showed ~45 connect/disconnect pairs and the session's
+🔊/🟦 flags flipping on/off from the probes' subscribe frames. Fix = every
+probe stubs the socket (the splashprobe pattern) or the page goes inert under
+`navigator.webdriver` unless `live=1`. The real long-term fix for restarts is
+one that keeps PTYs alive across a re-exec (inherit the master fds + pids,
+re-adopt from the registry) — multi-hour, plan it separately.
+
 ## 2026-09-06 — 🟦 TLDR only the reply, never the tool-call chatter (`55823df`)
 
 **Handoff (session wrapped).** Shipped, pushed, gate green, shipcheck passed —
