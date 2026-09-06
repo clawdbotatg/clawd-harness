@@ -11,6 +11,66 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-06 — measured-dead ≠ no login: blind fallback + stranded-login reclaim (`95de082`)
+
+**Handoff (session wrapped 12:35).** Shipped, pushed, in production; head
+already self-restarted onto it and its first `cont reclaim auditor` ran clean.
+
+**What broke (12:12, head).** A ＋ picowallet session spawned onto `clawd`,
+the ONLY pool with a fresh reading, and that reading was 100%. It painted
+"You've hit your session limit · resets 2pm". The tripwire fired, confirmed,
+and logged `nowhere better to go (router's best: none; fresh: -;
+stale-cool: -)`. Two healthy logins sat on the box: sub2 (austingriffith
+20x, 35%) and sub4 (28%). Both readings were frozen: their access tokens
+had expired and the poller would not refresh them because cont custody
+records (`~/.config/cont/vm-accounts/<vm>`) named both, for VMs stopped a
+day (`auditor`) and a week (`research`) ago. cont's own
+`account_in_custody` honors only RUNNING VMs and reclaims the rest; the
+harness honored every record forever. sub2 was out of routing 32 h, card
+looking healthy. The 10-min stuck sweep moved the session at 12:22; the
+"Max button" prompt was eaten and NOT redelivered (the sweep path doesn't).
+
+**What changed (`server.py`).**
+- `_vm_custody_records` / `_running_vms` (parses `tart list`) /
+  `_vm_custody_stale`. `_vm_custody_dirs` still returns every record — the
+  refresh gate stays conservative on purpose (a halted guest may hold the
+  rotated refresh token; refreshing past it revokes the family, per cont).
+- `SessionManager._reclaim_custody` (called each poll) runs
+  `cont reclaim <vm>` in a daemon thread for stopped-VM records, once per VM
+  per `CUSTODY_RECLAIM_COOLDOWN` (30 min, timeout 420 s). Card shows
+  `login held by stopped VM X — reclaiming`; success clears it, drops the
+  cached token, forces a poll. Skipped when the login has live sessions here.
+- `_blind_alternative(exclude_org, exclude_name)`: ready, not broken, not
+  walled, no FRESH reading ≥ `SUB_HOT`; ranked by `_route_key`. Used by
+  `create_session` (when the pick is walled OR fresh-hot),
+  `rescue_limit_wall`, `rescue_bounced_prompt`, `maybe_handoff` (drained
+  only), and `_handoff_sweep` (rescues only — `blind` flag skips
+  evacuation/rebalance). Log: `… every measured pool is dead; routing blind
+  to sub4 (reading 14h old); its first turn refreshes it`.
+- `test_blind_route.py` (incident numbers, exclusions, ledger vs tart).
+  EXPECTATIONS.md: new 12:12 entry + "when it breaks" 3e.
+
+**Open threads / next steps.**
+1. The stuck-sweep path (`busy but hook-silent … treating as stuck`) still
+   does not redeliver an eaten prompt. Rescues do (`_redeliver`). Worth
+   adding: if `hook_count == hooks_at_prompt` and `last_prompt`, redeliver
+   after the sweep's `_handoff`.
+2. Watch head's log for `cont reclaim research for sub4` — the `research`
+   VM record dates from Aug 31; reclaim should release it (guest likely
+   wiped or never rotated). If it logs `STRANDED`, run `cont reclaim
+   research` by hand.
+3. Other boxes (heart, leftclaw, gut…) self-pull within ~5 min; any with
+   cont custody records will start reclaiming on their own. First
+   `[accounts] … held by STOPPED VM` lines there are expected, not alarms.
+4. Gotcha: `cont reclaim` BOOTS the VM briefly (respects cont's 2-VM cap).
+   If the wrangler is mid-job on that box, reclaim skips with rc=1 and
+   retries after the cooldown.
+5. Gotcha: I refreshed sub2 by hand through `_fetch_usage(allow_refresh=
+   True)` at 12:18 to prove the login was alive (it was). That is the exact
+   thing the custody rule forbids when a guest may hold the rotated tip —
+   safe here only because the VM was stopped and the host copy was newer.
+   Don't make a habit of it; let reclaim run.
+
 ## 2026-09-06 — the tab strip wraps: every session one tap away
 
 Austin: "right now there's just a single line of all the tabs and it basically
