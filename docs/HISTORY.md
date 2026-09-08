@@ -11,6 +11,81 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-08 — Council planning handoff (Codex)
+
+**What changed.** Austin wants to automate the manual Claude/Codex loop:
+independent answers, peer reviews, revisions, and a judge's final synthesis.
+The discussion is in `docs/COUNCIL-PLAN.md`. Codex initially proposed a large
+controller extension; Claude challenged the scope and interactive execution.
+Codex accepted the smaller, separate headless CLI approach. Claude's final
+"Green" comment accepts all six corrections in Codex's response.
+
+**Shipped versus local.** At handoff start, the working tree was clean and HEAD
+matched `origin/main` at `2f1f1b6`. That commit already contains the plan,
+reviews, response, and Claude's closing approval. This handoff is the only
+new edit in this wrap turn. Council has no implementation from this session;
+no runtime, UI, engine, or fleet code was changed or deployed. The intended
+new repo has not been created by this session.
+
+**Current agreement.** Use the final "Settled MVP" section and Claude's closing
+approval as the current direction. Earlier controller-first sections are
+superseded proposals, still present as discussion history. Build a
+`clawd-council` CLI with Claude, Codex, and fake adapters. Draft independently;
+each worker reviews all peers in one turn; revise rejected drafts; stop on
+all green or three review passes. The judge synthesizes, workers audit the
+candidate, and the judge may repair. Start with text and one tweet pilot.
+Defer code builds, worktrees, dashboards, and controller integration.
+
+**Open thread.** Codex's latest user-facing review identified one remaining
+gap: repairing the judge's answer changes the artifact after its audit.
+Review the repaired version again within a stated limit, or mark it unreviewed.
+Never transfer the previous version's green votes to the repair. Claude's
+closing approval accepts the earlier response but does not explicitly address
+this later point. The document also needs one concise authoritative plan so
+an implementer does not follow the obsolete first proposal.
+
+**Gotchas for the next agent.**
+
+- Every vote must identify the exact artifact version it reviewed.
+- A failed or malformed reply is a failed attempt, not a fabricated red vote.
+  Preserve raw output and allow one schema-repair attempt.
+- Process JSON does not guarantee valid Council JSON inside the answer.
+- Inherited `CLAUDE_CONFIG_DIR` can pin every worker to one account. Design
+  account selection explicitly; inspect `claude-p-agent` before reusing it.
+- Keep a small attempt/phase manifest and atomic result writes. File existence
+  alone cannot prove a turn completed. Recover uncertain in-flight attempts
+  before retrying; do not promise exactly-once execution without that mechanism.
+- Reserve time/turn capacity for synthesis and audit. Limit exhaustion and
+  dissent must be visible in the final result.
+- Read-only prompts alone do not enforce read-only access. Verify the text
+  runner's actual tool permissions before using a valuable project checkout.
+- Claude and Codex edited this plan concurrently. Re-read it before editing;
+  preserve new contributions. Do not repeat the earlier claim that Claude has
+  not signed off: its closing approval is now in the file.
+
+**Exact next steps.**
+
+1. Read the final Codex response and Claude closing comment in
+   `docs/COUNCIL-PLAN.md`.
+2. Consolidate the accepted CLI MVP into one short authoritative specification;
+   retain older discussion in an explicitly superseded section or archive.
+3. State the final-repair audit rule above, the three-review-pass limit, and
+   failure/resume behavior. Obtain reviews of that exact revised specification
+   from both participants; do not claim approval for text they have not seen.
+4. After planning approval and authorization to build, create `clawd-council`.
+   Inspect the existing `projects/claude-p-agent` runner for the Claude adapter,
+   then implement the small run store, prompts, Codex adapter, and fake adapter.
+5. Test red-to-fix-to-green, stale votes, rejected findings, review-cap dissent,
+   malformed replies, interrupted writes/resume, and the final-repair audit.
+6. Run the Ethereum-fork tweet pilot using a specific fork/date and sources.
+   Inspect the full receipt before proposing a dashboard or code mode.
+
+**Wrap status.** Documentation-only verification: `git diff --check`. Commit
+and push this handoff with the required clawdbotatg identity. Do not call
+`harness-close` in this wrap: Austin explicitly required leaving the session
+open when something remains unresolved, and the consolidated plan/final-repair
+review is still open. Keep user-facing updates extremely short and plain.
+
 ## 2026-09-06 — ⑂ fork: one context, two directions
 
 **Ask.** Austin: the composer strip has 🕘 📚 🗃️; add a fork button. "I work
