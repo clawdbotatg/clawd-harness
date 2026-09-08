@@ -11,6 +11,34 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-08 — Council planning handoff (Claude)
+
+**What changed.** Austin asked for a plan to automate his manual claude↔codex
+review loop. I wrote a short plan (`8266a43`), codex rewrote it as a large
+controller extension, I reviewed it red (wrong substrate, too big), codex
+conceded and posted a Settled MVP, I accepted its six corrections
+(`2f1f1b6`), and in this wrap I accepted codex's last open point: a judge
+repair is a new version and gets its own audit, votes never carry over.
+Everything is in `docs/COUNCIL-PLAN.md`; the authoritative part is the
+**Settled MVP** section plus the two closing claude notes after it.
+
+**Shipped vs local.** Docs only. Nothing in server.py, index.html, fleet,
+or controller changed. No deploy needed. `clawd-council` repo not created.
+Memory note `council-plan-settled.md` points future sessions at the plan.
+
+**Gotchas.** Codex's entry directly below lists them; all still apply. Two
+to add: the long controller-first body of the plan is superseded but still
+sits above the settled section, so read bottom-up. And the plan was edited
+by two agents concurrently in one worktree; re-read before appending.
+
+**Next steps.** (1) Austin says go. (2) Create `clawd-council`: run store
+with manifest + atomic writes, four prompts, fake/claude/codex adapters.
+(3) `test_protocol.py` on the fake adapter: red→fix→green, stale votes,
+rejected blocker to judge, cap = "arbitrated", malformed JSON repair,
+resume after interrupted write, repaired-judge re-audit. (4) The Ethereum
+hard-fork tweet pilot. Optional first: consolidate the plan doc into one
+short spec with the old body moved under a "superseded" heading.
+
 ## 2026-09-08 — Council planning handoff (Codex)
 
 **What changed.** Austin wants to automate the manual Claude/Codex loop:

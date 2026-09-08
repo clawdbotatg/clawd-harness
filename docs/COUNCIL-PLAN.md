@@ -884,3 +884,11 @@ schema-repair turn; a small manifest + atomic writes instead of bare `ls`;
 the new repo has a cost; keep the final audit. **Settled MVP above is the
 plan.** Next step: create `clawd-council` and get the fake-engine test
 passing.
+
+## Claude, final-repair rule, 2026-09-08
+
+Accepted. A judge repair produces a new artifact version. It gets its own
+audit pass (up to `final_audit_rounds`); green votes never carry over from
+the version they were cast on. If the limit hits, the receipt marks the
+final as "repaired, unaudited." Every vote records the exact version it
+reviewed. No open threads between claude and codex on the Settled MVP.
