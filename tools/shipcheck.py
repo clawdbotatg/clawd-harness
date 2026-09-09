@@ -12,15 +12,26 @@ screenshot while every phone on h.atg.link still renders the old page.
 
 Exit 0 only when production serves byte-for-byte what HEAD says it should.
 
+The FLEET leg (2026-09-09): every worker reports what its PROCESS runs — a hash
+of its code files (fleet/buildinfo.py) and the E2E TTLs it resolved — in its
+stats frame; the relay dumps the roster to disk; this reads it over ssh and
+refuses "IN PRODUCTION" until every ONLINE box reports HEAD's hash and the
+intended passkey cadence. Born of the 09-05 cadence change that sat dead on one
+box for four days while every file-level check here was green.
+
 What it does NOT check (say so out loud rather than imply coverage):
-  * server.py / fleet/*.py on each individual harness box. Those boxes self-pull
-    on their own ~5min timer and expose no version endpoint, so "the relay is
-    current" is not proof that a given laptop is. A dirty worktree on any box
+  * server.py on each individual harness box (no version report yet). Those
+    boxes self-pull on their own ~5min timer; a dirty worktree on any box
     silently opts it out of pulling at all (server.py auto_update_loop).
+  * OFFLINE boxes — listed, not failed. They come back running whatever they
+    had and self-restart within 30 min of the pull.
   * anything behind the passkey gate — this only reads the public UI bytes.
 """
 import argparse
 import hashlib
+import importlib.util
+import json
+import os
 import subprocess
 import sys
 import time
@@ -33,6 +44,70 @@ PROD = "https://h.atg.link/"
 INJECT = (b"<head><script>window.__FLEET__=true;</script>", b"<head>")
 
 OK, BAD, WARN = "\033[32m✓\033[0m", "\033[31m✗\033[0m", "\033[33m!\033[0m"
+
+RELAY_SSH = os.environ.get("FLEET_RELAY_SSH", "zkllmapi")
+ROSTER_PATH = "~/clawd-harness/fleet/.clawd-fleet.roster.json"
+ROSTER_MAX_AGE = 120   # the relay rewrites it on every stats tick (~10s per box)
+
+
+def _buildinfo():
+    """fleet/buildinfo.py by path — never `import worker` (env side effects)."""
+    root = git("rev-parse", "--show-toplevel").stdout.strip()
+    spec = importlib.util.spec_from_file_location("buildinfo", f"{root}/fleet/buildinfo.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def head_code_hash(bi):
+    return bi.code_hash(lambda n: git("show", f"HEAD:fleet/{n}").stdout.encode())
+
+
+def fetch_roster():
+    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12", RELAY_SSH,
+                        f"cat {ROSTER_PATH}"], capture_output=True, text=True, timeout=40)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr.strip() or "ssh failed").splitlines()[-1])
+    return json.loads(r.stdout)
+
+
+def fleet_check(lines):
+    """Append per-box lines; return True iff every ONLINE worker runs HEAD's code
+    at the intended cadence. Unreachable relay/roster = not verified = False."""
+    bi = _buildinfo()
+    want = head_code_hash(bi)
+    try:
+        roster = fetch_roster()
+    except Exception as e:
+        lines.append(f"{BAD} fleet: cannot read the relay's roster ({RELAY_SSH}): {e} — "
+                     f"the boxes are NOT verified")
+        return False
+    age = time.time() - roster.get("ts", 0)
+    if age > ROSTER_MAX_AGE:
+        lines.append(f"{BAD} fleet: roster on the relay is {int(age)}s stale — is the relay "
+                     f"running post-09-09 code? (systemctl status clawd-fleet-relay)")
+        return False
+    good = True
+    for m in sorted(roster.get("machines", []), key=lambda m: m["id"]):
+        if not m.get("online"):
+            lines.append(f"{WARN} fleet: {m['id']:<14} offline (last seen "
+                         f"{int((time.time() - m.get('lastSeen', 0)) / 60)} min ago) — not verified")
+            continue
+        b = (m.get("stats") or {}).get("build")
+        if not b:
+            good = False
+            lines.append(f"{BAD} fleet: {m['id']:<14} online but reports no build — worker "
+                         f"predates 09-09 (never restarted for real?)")
+            continue
+        code_ok = b.get("code") == want
+        ttl = b.get("ttl")
+        ttl_ok = ttl is None and m.get("kind") == "relay" or ttl == bi.CADENCE
+        good &= code_ok and ttl_ok
+        lines.append(f"{OK if code_ok and ttl_ok else BAD} fleet: {m['id']:<14} "
+                     f"code {b.get('code')} {'= HEAD' if code_ok else '≠ HEAD ' + want}"
+                     f"{'' if ttl is None else f' · ttl {ttl}s' + ('' if ttl_ok else f' (want {bi.CADENCE})')}"
+                     f" · up since {time.strftime('%m-%d %H:%M', time.localtime(b.get('started') or 0))}")
+    return good
 
 
 def git(*a):
@@ -89,6 +164,10 @@ def check(verbose=True):
                      f"The relay pulls on a ~3min timer — retry with --wait, and if it "
                      f"never converges the relay's own checkout is stuck "
                      f"(journalctl -u clawd-fleet-pull on the box).")
+    if not fleet_check(lines):
+        good = False
+        lines.append(f"      fleet: a worker restarts at its next lull after the pull, "
+                     f"30 min at most with a viewer attached — --wait 2100 covers it.")
     return good, lines
 
 
@@ -107,12 +186,14 @@ def main():
         # poll, because the dirt is often another session mid-edit in this shared
         # worktree while the commit I care about is already on its way to prod.
         unpushed = any("NOT pushed" in l for l in lines)
-        prod_behind = any("serving DIFFERENT" in l for l in lines)
+        prod_behind = any("serving DIFFERENT" in l for l in lines) or \
+            any(l.startswith(BAD) and "fleet:" in l for l in lines)
         if good or not args.wait or unpushed or not prod_behind or time.time() > deadline:
             print("\n".join(lines))
             if good:
-                print("\nIN PRODUCTION. (Not checked: server.py on individual "
-                      "harness boxes — they self-pull on their own timer.)")
+                print("\nIN PRODUCTION — UI bytes on h.atg.link and the worker code + "
+                      "passkey TTL on every ONLINE box match HEAD. (Not checked: "
+                      "server.py on the boxes; offline boxes.)")
             elif unpushed:
                 print("\nNOT SHIPPED — and waiting will not fix it. Push. See above.")
             elif prod_behind:

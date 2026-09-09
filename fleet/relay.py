@@ -17,6 +17,9 @@ Protocol (all JSON text frames):
     {type:"reply",  to:<mobileId>, msg:{...}}   # route a result to one mobile
     {type:"status", msg:{...}}                  # broadcast (e.g. busy/idle)
     {type:"stats", projects:N, sessions:N, active:N, sys:{cpu,ram,disk,gpu}?}
+        # build:{code,ttl,idle,started}? — what the worker PROCESS runs (hash of
+        # its code files + its resolved E2E TTLs); passed through to the roster
+        # and dumped to ROSTER_FILE so tools/shipcheck.py can compare to HEAD
         # plaintext aggregate counts (no titles/content) + best-effort system
         # stats (CPU/RAM/disk/GPU) — for the at-a-glance roster load
   mobile→relay:
@@ -223,6 +226,10 @@ def save_push_subs(subs):
 # usable, and an empty/missing file means "everything on" — exactly the
 # behaviour that predates this feature.
 PREFS_FILE = Path(os.environ.get("FLEET_PREFS_FILE") or (HERE / ".clawd-fleet.prefs.json"))
+# The live roster, dumped on every change (0600, atomic) so an operator on the
+# relay box — tools/shipcheck.py over ssh — can see what each worker PROCESS is
+# running without a passkey. Aggregate counts + build info only, never content.
+ROSTER_FILE = Path(os.environ.get("FLEET_ROSTER_FILE") or (HERE / ".clawd-fleet.roster.json"))
 _prefs_lock = threading.Lock()
 MAX_INACTIVE = 128       # a fleet is tens of boxes; this is a disk-abuse bound
 MAX_MACHINE_ID = 64
@@ -738,10 +745,21 @@ class Relay:
 
     def broadcast_roster(self):
         msg = {"type": "machines", "machines": self.roster()}
+        self._dump_roster(msg["machines"])
         with self.lock:
             mobiles = list(self.mobiles.values())
         for m in mobiles:
             m.send_json(msg)
+
+    def _dump_roster(self, machines):
+        """Best-effort write of the roster for shipcheck (see ROSTER_FILE)."""
+        try:
+            tmp = ROSTER_FILE.with_name(ROSTER_FILE.name + f".tmp{os.getpid()}")
+            tmp.write_text(json.dumps({"ts": int(time.time()), "machines": machines}))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, ROSTER_FILE)
+        except OSError:
+            pass
 
     # ── worker lifecycle ────────────────────────────────────────────────────
     def add_worker(self, conn):
@@ -1020,6 +1038,9 @@ class Relay:
             sys = frame.get("sys")   # {cpu,ram,disk,gpu} — best-effort, may be absent
             if isinstance(sys, dict):
                 st["sys"] = sys
+            build = frame.get("build")   # {code,ttl,idle,started} — see header
+            if isinstance(build, dict):
+                st["build"] = {k: build.get(k) for k in ("code", "ttl", "idle", "started")}
             worker.stats = st
             self.broadcast_roster()
             return

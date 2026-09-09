@@ -46,6 +46,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import quote
 
+import buildinfo
 import fleet_ws
 import sysstats
 
@@ -79,8 +80,7 @@ RELAY_READ_TIMEOUT = float(os.environ.get("FLEET_RELAY_READ_TIMEOUT", "70"))
 RESTART_POLL = 60.0
 RESTART_SETTLE = 90.0     # change must sit still this long first (mid-pull guard)
 RESTART_MAX_WAIT = 1800.0  # viewer-attached ceiling: restart anyway after 30 min
-RESTART_WATCH = ("worker.py", "e2e.py", "fleet_ws.py", "webauthn.py",
-                 "webpush.py", "sysstats.py")
+RESTART_WATCH = buildinfo.WATCH   # + buildinfo.py itself; one list, shared with shipcheck
 SELF_RESTART = os.environ.get("FLEET_SELF_RESTART", "1") != "0"
 
 # Harness watchdog. The harness's graceful self-restart exits 0 and trusts
@@ -143,6 +143,24 @@ def _load_env_file():
 # up new code" twice and kept FLEET_E2E_MAX_TTL=86400 both times (HISTORY 09-09).
 _BOOT_ENV = dict(os.environ)
 _load_env_file()
+
+
+def _build_info():
+    """What THIS process runs: hash of the watched code files as loaded from disk
+    now, plus the E2E TTLs as resolved by this process (env + fleet.env + default).
+    Reported to the relay in every stats frame; tools/shipcheck.py compares it to
+    HEAD. Computed once — it describes the running process, not the disk later."""
+    info = {"code": buildinfo.code_hash(lambda n: (HERE / n).read_bytes()),
+            "started": int(time.time())}
+    try:
+        import e2e as _e2e
+        info["ttl"], info["idle"] = _e2e.MAX_TTL, _e2e.IDLE_TTL
+    except Exception:
+        info["ttl"] = info["idle"] = None   # no cryptography → no E2E on this box
+    return info
+
+
+BUILD = _build_info()
 
 # The `exec` shell handler is a diagnostic, not part of the product (the harness
 # proxy is). It's the most direct RCE primitive, so it's OFF unless explicitly
@@ -674,6 +692,7 @@ class Worker:
                        type="stats")
         if self.sys is not None:
             payload["sys"] = self.sys
+        payload["build"] = BUILD   # what this process actually runs (shipcheck reads it)
         self.send_relay(payload)
 
     def sysstats_loop(self):

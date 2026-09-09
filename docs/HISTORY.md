@@ -39,6 +39,19 @@ old-code exec has already baked the stale value into the child's `_BOOT_ENV`.
 Lesson (same family as "local preview is not a deploy"): a config change isn't
 live until the *process* shows it — check the running process's env / the
 artifacts it writes, not the file on disk.
+Austin's follow-up: "how do we avoid this in the future / do I have to ask
+every time whether you're sure it's fixed?" No — the tool has to refuse the
+claim. Same day: every worker now reports `build:{code,ttl,idle,started}` (a
+`buildinfo.py` content hash of its watched code files — not a git sha, since a
+docs-only push leaves every box "behind" forever — plus the E2E TTLs *this
+process* resolved) in its stats frame; the relay passes it into the roster and
+dumps the roster to `.clawd-fleet.roster.json`; `tools/shipcheck.py` grew a
+fleet leg that reads that file over ssh and will not print IN PRODUCTION until
+every ONLINE box reports HEAD's hash at the 7-day cadence (offline boxes are
+listed, not failed; an unreachable relay is "not verified", which fails). Root
+`CLAUDE.md` definition-of-done now says it: never tell Austin "fixed/live"
+before shipcheck exits 0, and a config change is verified on the running
+process, not the file.
 
 ## 2026-09-08 — Council planning handoff (Claude)
 

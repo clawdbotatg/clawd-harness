@@ -40,6 +40,11 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     before the load) is handed to `execve`; `test_worker_env_reload.py`
 >     guards it. A box still re-prompting daily after a cadence change needs ONE
 >     real `launchctl kickstart -k` / `systemctl restart` of its worker.
+>     Since the same day every worker reports `build:{code,ttl,idle,started}`
+>     (`buildinfo.py` hash of its code files + the TTLs it resolved) in its stats
+>     frame, the relay dumps the roster to `.clawd-fleet.roster.json`, and
+>     `tools/shipcheck.py` fails until every online box matches HEAD
+>     (`test_buildinfo.py`). That table is the answer to "is it actually running".
 >     The relay needs **no** crypto for this (blind passthrough); `cryptography`
 >     is a **worker-only** dep. Tests: `test_e2e.py`, `test_e2e_mitm.py`,
 >     `test_e2e_interop.py` (Python↔browser byte-for-byte via `node`).

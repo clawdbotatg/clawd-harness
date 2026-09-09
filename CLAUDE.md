@@ -14,7 +14,17 @@ because the story isn't inline here).
    touches `index.html`, `server.py`, or `fleet/`. When you add a feature,
    add/extend a guard; the gate picks it up automatically.
 2. **`python3 tools/shipcheck.py --wait` exits 0** — tree clean, HEAD pushed,
-   `h.atg.link` serving HEAD's `index.html` byte-for-byte.
+   `h.atg.link` serving HEAD's `index.html` byte-for-byte, **and every ONLINE
+   fleet box reporting HEAD's worker code hash + the 7-day passkey TTL from its
+   running process** (the fleet leg, via the relay's roster dump; `fleet/`
+   changes take up to 30 min to converge — `--wait 2100`). Never say "fixed",
+   "live" or "shipped" to Austin before this exits 0; if it can't be run, say
+   *unverified*, not done.
+3. **A config/env/default change is verified on the running process**, not the
+   file: the process's env (`ps eww <pid>`), its build report in shipcheck's
+   fleet table, or the artifacts it writes. The 09-05 passkey cadence change
+   was green on every file-level check for four days while the worker still
+   enforced 24h (HISTORY 2026-09-09).
 
 **Push to main IS the deploy.** Every box self-updates (~5 min; the relay box
 ~3 min). A `server.py` change restarts a box only once it is **committed and
