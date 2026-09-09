@@ -1138,6 +1138,48 @@ TOKEN = _load_or_make_token()
 # non-loopback bind (BIND=0.0.0.0) and the token is enforced again as the LAN guard.
 AUTH_REQUIRED = BIND not in ("127.0.0.1", "localhost", "::1")
 
+# Browser-side guard for the no-token loopback posture above. "Only local
+# processes can reach us" is true of the *network*, not of the browser: any web
+# page the user has open — https included, 127.0.0.1 counts as a trustworthy
+# origin — can open ws://127.0.0.1:8787/ws and drive a bypass-permissions
+# claude (cross-site WebSocket hijack; 2026-09-09 review). Browsers always send
+# `Origin` on a WS upgrade and on a POST, and non-browser clients (the fleet
+# worker, bin/, curl) never do, so: a present Origin must be same-origin with
+# the request's Host, and on a loopback bind the Host itself must be a loopback
+# name (kills DNS rebinding: evil.example → 127.0.0.1 arrives with Host
+# evil.example). Nothing about the token changes.
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+MAX_WS_MESSAGE = 8 * 1024 * 1024   # one reassembled browser→harness message
+
+
+def origin_allowed(origin, host, bind=None):
+    """True if a request with these `Origin` / `Host` header values (either may
+    be None/'') may reach a browser-facing route (/ws upgrade, any POST)."""
+    from urllib.parse import urlsplit
+    bind = BIND if bind is None else bind
+    host = (host or "").strip().lower()
+    if not host:
+        return False
+    hostname = host.rsplit(":", 1)[0] if host.count(":") == 1 or host.startswith("[") else host
+    if host.startswith("["):                       # [::1]:8787 → [::1]
+        hostname = host.split("]")[0] + "]"
+    if bind in ("127.0.0.1", "localhost", "::1") and hostname not in _LOOPBACK_HOSTS:
+        return False
+    origin = (origin or "").strip()
+    if not origin:
+        return True                                # non-browser client
+    if origin.lower() == "null":
+        return False                               # sandboxed/opaque origin
+    try:
+        u = urlsplit(origin)
+    except ValueError:
+        return False
+    if u.scheme not in ("http", "https") or not u.netloc:
+        return False
+    # Same-origin: Origin's host[:port] must equal Host verbatim (a browser
+    # writes both from the same URL, default ports omitted in both).
+    return u.netloc.lower() == host
+
 
 def lan_ip():
     """Best-effort primary LAN IP (no traffic actually sent)."""
@@ -8481,7 +8523,12 @@ def ws_send(wfile, lock, data, opcode=0x1):
         wfile.flush()
 
 
-def ws_read_message(rfile):
+def ws_read_message(rfile, max_len=None):
+    """One reassembled WS message from a browser. A frame (or the fragments
+    so far) past `max_len` (MAX_WS_MESSAGE) returns None — the client is
+    dropped rather than read into memory on its own say-so."""
+    if max_len is None:
+        max_len = MAX_WS_MESSAGE
     payload = b""
     msg_opcode = None
     while True:
@@ -8503,6 +8550,8 @@ def ws_read_message(rfile):
             if len(ext) < 8:
                 return None
             length = struct.unpack(">Q", ext)[0]
+        if length > max_len or len(payload) + length > max_len:
+            return None
         mask = rfile.read(4) if masked else b""
         chunk = rfile.read(length) if length else b""
         if masked and chunk:
@@ -8719,9 +8768,14 @@ class Handler(BaseHTTPRequestHandler):
         from urllib.parse import urlparse, parse_qs
         return parse_qs(urlparse(self.path).query)
 
+    def _origin_ok(self):
+        """Browser-facing routes: see origin_allowed()."""
+        return origin_allowed(self.headers.get("Origin"), self.headers.get("Host"))
+
     def _token_ok(self):
         # Loopback bind ⇒ no auth (see AUTH_REQUIRED): only local processes can
-        # reach us, so the token is moot — every request passes.
+        # reach us, so the token is moot — every request passes. (The browser
+        # side of "local" is _origin_ok, checked by the routes that matter.)
         if not AUTH_REQUIRED:
             return True
         # Constant-time: avoid a byte-by-byte timing oracle on the token. (== on
@@ -8735,6 +8789,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/ws" and self._is_ws_upgrade():
+            if not self._origin_ok():
+                self.close_connection = True
+                return self.send_error(403, "bad origin")
             if not self._token_ok():
                 return self.send_error(403, "bad token")
             return self.handle_ws()
@@ -8774,6 +8831,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        if not self._origin_ok():
+            # a cross-site page can't read the reply, but it CAN fire a POST
+            # (simple-request Content-Types skip the preflight) — refuse it
+            self.close_connection = True
+            return self.send_error(403, "bad origin")
         if path == "/hook":
             return self._handle_hook()
         if path == "/self/close":
