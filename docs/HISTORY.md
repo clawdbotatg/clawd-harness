@@ -11,6 +11,55 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-09 — security review: the public edge had four holes, the local port one
+
+An external review (`/tmp/harness-security-review-2026-09-09.md`, probed
+against production without mutating anything) found, and the code confirmed:
+
+1. **Any unknown `?role=` was a pre-authed mobile.** `Conn()` set
+   `mfa_ok = True` for every role except literal `mobile`; `do_GET` passed any
+   string through. `wss://h.atg.link/ws?role=whatever` got prefs + the roster
+   with no passkey, and could delete skills, flip prefs, and `pushSubscribe`
+   its own endpoint + keys — workers then push session titles / blocked-on
+   digests to it. Fix: closed role set at the upgrade (403), `mfa_ok` true only
+   for `worker`/`controller`.
+2. **`POST /upload` on the relay was credential-free in PASSKEY_ONLY mode** —
+   anyone with a machine id (see 3) could push 25 MiB bodies into that box's
+   uploads dir while its owner was connected. Fix: the POST carries `?s=` (the
+   passkey session token the page already holds); `session_valid` or 403; a
+   per-session byte quota (`FLEET_UPLOAD_QUOTA`/`_WINDOW`, 429). Moving the
+   bytes inside the E2E channel is still the proper fix (needs chunking).
+3. **Roster + worker `status` fan-outs went to every mobile, parked-at-the-gate
+   ones included** (`broadcast_prefs` already filtered; the other two didn't).
+   Fix: `Conn.authed()` (mfa + not lapsed) gates all three.
+4. **No WS message cap anywhere** — a peer declares its own frame length
+   (2^63) and both readers would try. Fix: `fleet_ws.MAX_MESSAGE` 64 MiB
+   (relay→worker `upload` frames are ~34 MiB base64), 1 MiB for frames FROM a
+   mobile (`FLEET_MOBILE_MAX_MESSAGE`), 8 MiB in `server.py`; oversize → the
+   socket drops. Plus a global cap on sockets parked at the passkey gate
+   (`FLEET_MAX_UNAUTH`, 64) — global, not per-IP, because the whole fleet and
+   every phone share one home IP behind nginx.
+5. **The no-token loopback harness had no Origin/Host check.** A page in the
+   user's browser — https too, 127.0.0.1 is a trustworthy origin — could open
+   `ws://127.0.0.1:8787/ws` and drive a bypass-permissions claude. Fix:
+   `origin_allowed()` on the `/ws` upgrade and every POST — a present
+   `Origin` must equal `Host`, and `Host` must be loopback on a loopback bind
+   (DNS rebinding). No-Origin clients (worker, bin/, curl) unaffected; the
+   token posture is unchanged — bringing the token back on localhost was the
+   review's suggestion and was declined on purpose.
+
+Declined from the review: per-IP connection limits in the relay or nginx (one
+house IP), a pre-auth socket deadline (the gate page auto-fires Face ID on a
+fresh challenge — a forced disconnect cadence is a prompt-storm risk; needs a
+real iPhone check first), CSP (the app is one inline script + the relay's
+injected `__FLEET__` script → `unsafe-inline` → no value). Done instead: SRI
+`integrity=` on the four jsdelivr tags. Also corrected the docs' "relay
+compromise = DoS only" claim — true of the channel, not the product (the relay
+serves the UI and hosts the PM's `__ctl__` control path).
+
+Guards: `fleet/test_relay_gate.py` (real sockets, production posture, all
+seven properties), `test_origin_gate.py` (sandboxed `server.py`).
+
 ## 2026-09-09 — the 7-day cadence was a no-op on clawd-heart: self-restart kept the old env
 
 Austin, four days after the 09-05 change: still doing passkeys all the time.

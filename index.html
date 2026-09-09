@@ -17,7 +17,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="clawd" />
 <link rel="apple-touch-icon" href="icon-180.png" />
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous" />
 <style>
   /* ── terminal brutalist · amber phosphor ───────────────────────────────
      thesis: this is a terminal harness, so it should look like one. one
@@ -1495,9 +1495,9 @@
   </footer>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js" integrity="sha384-/nfmYPUzWMS6v2atn8hbljz7NE0EI1iGx34lJaNzyVjWGDzMv+ciUZUeJpKA3Glc" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js" integrity="sha384-AQLWHRKAgdTxkolJcLOELg4E9rE89CPE2xMy3tIRFn08NcGKPTsELdvKomqji+DL" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js" integrity="sha384-U4fBROT3kCM582gaYiNaOSQiJbXPzd9SfR1598Y7yeGSYVBzikXrNg0XyuU+mOnl" crossorigin="anonymous"></script>
 <script>
 // Kill all zoom on mobile. The viewport meta (user-scalable=no, min=max=scale)
 // handles Android/Chrome, but iOS Safari deliberately *ignores* user-scalable=no
@@ -7228,7 +7228,9 @@ async function uploadFile(file, opts = {}) {
     // POSTs to that machine's local harness /upload and returns a path local to
     // it. Direct mode talks straight to the local /upload (no machine param —
     // currentMachine is fleet-only state and stays null here).
-    const mq = FLEET ? `&machine=${encodeURIComponent(currentMachine)}` : '';
+    // Fleet also carries the passkey session token (`s=`): the relay refuses
+    // uploads without a live one (the POST used to be credential-free).
+    const mq = FLEET ? `&machine=${encodeURIComponent(currentMachine)}&s=${encodeURIComponent(loadSession())}` : '';
     const res = await fetch(`/upload?t=${encodeURIComponent(token)}${mq}`, {
       method: 'POST', headers: { 'Content-Type': hdr }, body: file });
     if (!res.ok) throw new Error(`upload failed (${res.status})`);

@@ -23,7 +23,13 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     machine's **worker** (`e2e.py` + the `[e2e-core]` block in `index.html`): the
 >     worker independently verifies a channel-bound passkey (require-UV) over its
 >     pinned long-term identity, and **all** harness traffic is AES-GCM end-to-end.
->     The relay routes only ciphertext → a compromised relay is reduced to DoS.
+>     The relay routes only ciphertext → a compromised relay cannot read or
+>     drive a *session*. It is NOT "DoS only" for the deployed product, and
+>     don't write that: the relay box also serves `index.html` (a hostile UI
+>     origin sees plaintext once a user unlocks) and is the trusted PM
+>     controller's home (`__ctl__` plaintext control to `FLEET_CTL_ALLOW=1`
+>     workers). The relay host is trusted for UI + PM control; the E2E channel
+>     is what keeps a *network* attacker, or a passive relay tap, out.
 >     Worker session slides 10 min idle / **7 days hard** (`FLEET_E2E_MAX_TTL`
 >     default 604800 since 2026-09-05, was 86400 — the per-machine passkey
 >     cadence; silent resume covers
@@ -171,7 +177,9 @@ Corollary directions baked into the design:
   localized (search `hsend`, `currentMachine`, `renderMachines`). Known gaps vs.
   direct mode: server-side TTS hits harness-only endpoints (`/tts`, `/config`)
   that the relay doesn't proxy — degrades gracefully (browser TTS still works).
-  Image upload IS bridged (relay `do_POST` → worker → local harness `/upload`),
+  Image upload IS bridged (relay `do_POST` → worker → local harness `/upload`;
+  the POST carries `?s=<passkey session token>` and is refused/quota'd without
+  a live one — it was credential-free until 2026-09-09),
   but note the nginx vhost in front of the relay needs `client_max_body_size`
   raised past its 1MB default or big phone photos 413 at the edge (the UI also
   downscales >900KB images before POSTing, so this mostly can't trigger).

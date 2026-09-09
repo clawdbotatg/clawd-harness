@@ -18,7 +18,12 @@ between the **mobile** (a browser holding a WebAuthn passkey) and the **worker**
   channel with a hardware passkey.
 - **No session hijack:** a malicious relay that observes/reorders/drops/injects
   frames cannot read traffic, forge authorization, or ride an established
-  session. Relay compromise degrades to **denial of service only**.
+  session. Relay compromise degrades to **denial of service only** *for the
+  channel*. The deployed product trusts the relay host for more than routing —
+  it serves the UI (`index.html`, so a hostile relay could ship a hostile
+  page) and hosts the PM controller (`__ctl__` plaintext control to opted-in
+  workers). See `fleet/CLAUDE.md` for the honest boundary; this document is
+  about the channel.
 - **Forward secrecy:** compromise of long-term keys later does not decrypt past
   sessions.
 - **Replay/reorder resistance** within and across sessions.

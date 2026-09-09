@@ -87,9 +87,20 @@ def _read_exact(rfile, n):
     return buf
 
 
-def ws_read_message(rfile):
+# Ceiling on one reassembled message. A peer declares its own frame length in
+# the header (up to 2**63); without a cap an unauthenticated socket could make
+# the reader allocate and accumulate without bound. Sized for the largest
+# legitimate message on any link: a relay→worker `upload` frame carrying a
+# MAX_UPLOAD (25 MiB) body as base64 (~34 MiB). Callers on links that only
+# ever carry small JSON (relay reading a mobile) pass a much lower `max_len`.
+MAX_MESSAGE = 64 * 1024 * 1024
+
+
+def ws_read_message(rfile, max_len=MAX_MESSAGE):
     """Read one full message (reassembling fragments). Returns (kind, bytes) where
-    kind is a text/binary opcode int, or "close"/"ping"/"pong"; None on EOF."""
+    kind is a text/binary opcode int, or "close"/"ping"/"pong"; None on EOF —
+    or when a frame (or the fragments so far) would exceed `max_len`: the
+    link is treated as gone rather than read further."""
     payload = b""
     msg_opcode = None
     while True:
@@ -111,6 +122,8 @@ def ws_read_message(rfile):
             if ext is None:
                 return None
             length = struct.unpack(">Q", ext)[0]
+        if length > max_len or len(payload) + length > max_len:
+            return None   # oversize: refuse to read it in (see MAX_MESSAGE)
         mask = _read_exact(rfile, 4) if masked else b""
         chunk = _read_exact(rfile, length)
         if mask is None or chunk is None:

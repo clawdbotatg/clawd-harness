@@ -22,6 +22,23 @@ GET ws://<host>:8787/ws?t=<TOKEN>      (HTTP/1.1 WebSocket upgrade)
 - **Token required** — `?t=` must equal the server token (`.clawd-harness.token`
   file, or `CONSOLE_TOKEN` env). A bad/missing token → HTTP 403, no upgrade.
 - The page at `/` loads without a token; it just can't open `/ws` without one.
+- **Loopback bind = no token, but same-origin only.** On the default
+  `127.0.0.1` bind the token is skipped (only local processes can reach the
+  port), so the browser-facing routes — the `/ws` upgrade and every `POST` —
+  instead require that a present `Origin` header match the request's `Host`,
+  and that `Host` be a loopback name. A cross-site page (any origin, including
+  https) trying to open `ws://127.0.0.1:8787/ws` gets 403; DNS-rebinding hosts
+  get 403. Non-browser clients (the fleet worker, `bin/`, curl) send no
+  `Origin` and are unaffected. `server.py` `origin_allowed()`,
+  `test_origin_gate.py`.
+- **Fleet relay (`fleet/relay.py`) roles:** `?role=` is a closed set —
+  `mobile` (default; passkey-gated after connect), `worker` (`?t=` worker
+  token + `?machine=`), `controller` (`?t=` controller token). Any other value
+  → 403 before the upgrade. Frames from a mobile are capped at
+  `FLEET_MOBILE_MAX_MESSAGE` (1 MiB); the roster / worker status fan-outs go
+  to *authenticated* mobiles only; `POST /upload` needs `?s=<passkey session
+  token>` (the one `authOk` returned) and is quota'd per session
+  (`FLEET_UPLOAD_QUOTA` per `FLEET_UPLOAD_QUOTA_WINDOW`). `fleet/test_relay_gate.py`.
 
 ## Two frame types
 

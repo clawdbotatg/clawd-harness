@@ -120,6 +120,16 @@ MOBILE_TOKEN, WORKER_TOKEN = _load_tokens()
 # Cap upload bodies so an authed (or token-stolen) client can't OOM the shared
 # box with one giant POST. Images are small; 25 MB is generous headroom.
 MAX_UPLOAD = int(os.environ.get("FLEET_MAX_UPLOAD", str(25 * 1024 * 1024)))
+# Upload bytes one passkey session may push per window (all machines). Generous
+# for a human pasting screenshots; a hard stop for a leaked/abused session.
+UPLOAD_QUOTA = int(os.environ.get("FLEET_UPLOAD_QUOTA", str(200 * 1024 * 1024)))
+UPLOAD_QUOTA_WINDOW = float(os.environ.get("FLEET_UPLOAD_QUOTA_WINDOW", "600"))
+# Largest WS message accepted FROM a mobile. Mobiles send small JSON only
+# (E2E records of keystrokes/control frames, prefs, a push subscription);
+# uploads go over HTTP POST. Workers/controller keep fleet_ws.MAX_MESSAGE.
+MOBILE_MAX_MESSAGE = int(os.environ.get("FLEET_MOBILE_MAX_MESSAGE", str(1024 * 1024)))
+# Sockets allowed to sit at the passkey gate at once (see add_mobile).
+MAX_UNAUTH = int(os.environ.get("FLEET_MAX_UNAUTH", "64"))
 
 
 def _token_ok(provided, expected):
@@ -613,13 +623,18 @@ class Conn:
         # frame is routed. mfa_ok flips true after a valid `auth` frame; auth_until
         # is when the passkey session lapses (epoch seconds); challenge is the
         # single-use WebAuthn challenge we issued for this connection.
-        self.mfa_ok = not REQUIRE_PASSKEY if role == "mobile" else True
+        self.mfa_ok = True if role in ("worker", "controller") else not REQUIRE_PASSKEY
         self.auth_until = float("inf")
         self.challenge = ""
         # Plaintext aggregate counts a proxy worker reports for its harness
         # ({projects,sessions,active}) — three integers, no titles/content; shown
         # on the roster for an at-a-glance per-machine load. None until reported.
         self.stats = None
+
+    def authed(self):
+        """Passkey factor satisfied and not lapsed — the side-effect-free test
+        for fan-outs (the per-frame check that re-challenges is _mobile_authed)."""
+        return self.mfa_ok and time.time() < self.auth_until
 
     @classmethod
     def next_mobile_id(cls):
@@ -687,11 +702,31 @@ class Relay:
         self.mobiles = {}   # mobile_id  -> Conn
         self.lock = threading.Lock()
         self.uploads = {}   # upload_id -> {"event":Event, "result":dict|None}
+        self._upload_quota = {}   # session token -> (window_start, bytes) — upload_quota_ok
         self.upload_seq = 0
         self.push_subs = load_push_subs()   # phone Web Push subscriptions (opaque)
         self.prefs = load_prefs()           # {"inactive":[machineId,…]} — see load_prefs
 
     # ── image upload bridge (HTTP POST → worker over WS → harness → back) ─────
+    def upload_quota_ok(self, key, nbytes):
+        """Account `nbytes` against `key`'s rolling window; False once the
+        window's total would pass UPLOAD_QUOTA (the bytes are not counted)."""
+        now = time.time()
+        with self.lock:
+            start, used = self._upload_quota.get(key, (now, 0))
+            if now - start > UPLOAD_QUOTA_WINDOW:
+                start, used = now, 0
+            if used + nbytes > UPLOAD_QUOTA:
+                self._upload_quota[key] = (start, used)
+                return False
+            self._upload_quota[key] = (start, used + nbytes)
+            # keep the table from growing with dead sessions
+            if len(self._upload_quota) > 256:
+                for k in [k for k, (st, _) in self._upload_quota.items()
+                          if now - st > UPLOAD_QUOTA_WINDOW]:
+                    self._upload_quota.pop(k, None)
+        return True
+
     def new_upload(self):
         with self.lock:
             self.upload_seq += 1
@@ -740,16 +775,20 @@ class Relay:
         with self.lock:
             mobiles = list(self.mobiles.values())
         for m in mobiles:
-            if m.mfa_ok:
+            if m.authed():
                 m.send_json(msg)
 
     def broadcast_roster(self):
+        # Authed mobiles only: a socket parked at the passkey gate must not see
+        # machine ids/hosts/stats (it used to — the roster leaked pre-auth).
+        # After authOk the roster is sent to that connection explicitly.
         msg = {"type": "machines", "machines": self.roster()}
         self._dump_roster(msg["machines"])
         with self.lock:
             mobiles = list(self.mobiles.values())
         for m in mobiles:
-            m.send_json(msg)
+            if m.authed():
+                m.send_json(msg)
 
     def _dump_roster(self, machines):
         """Best-effort write of the roster for shipcheck (see ROSTER_FILE)."""
@@ -785,6 +824,20 @@ class Relay:
 
     # ── mobile lifecycle ────────────────────────────────────────────────────
     def add_mobile(self, conn):
+        # Cap sockets parked at the passkey gate. Real phones auth within a
+        # second (stored session token) or after one Face ID; a pile of
+        # never-authing sockets is abuse. Global, not per-IP: the whole fleet
+        # and every phone share one home IP behind nginx.
+        if not conn.mfa_ok:
+            with self.lock:
+                parked = sum(1 for m in self.mobiles.values()
+                             if not m.dead and not m.mfa_ok)
+            if parked >= MAX_UNAUTH:
+                print(f"[relay] refusing mobile [{conn.peer}]: {parked} unauthenticated "
+                      f"sockets already parked (FLEET_MAX_UNAUTH={MAX_UNAUTH})", flush=True)
+                conn.send_json({"type": "error", "error": "too many unauthenticated connections"})
+                conn.close()
+                return
         with self.lock:
             old = self.mobiles.get(conn.ident)
             if old and old is not conn:
@@ -1029,7 +1082,8 @@ class Relay:
             with self.lock:
                 mobiles = list(self.mobiles.values())
             for m in mobiles:
-                m.send_json(out)
+                if m.authed():
+                    m.send_json(out)
             return
         if t == "stats":             # plaintext aggregate counts + sys stats for the roster
             st = {"projects": int(frame.get("projects") or 0),
@@ -1256,6 +1310,13 @@ class Handler(BaseHTTPRequestHandler):
         if not up:
             return self.send_error(400, "expected websocket")
         role = q.get("role", ["mobile"])[0]
+        # Closed set. Conn() treats every non-mobile role as pre-authed (workers
+        # and the controller are token-gated above/below), so an arbitrary role
+        # string used to land in the mobile path with the passkey gate already
+        # satisfied (2026-09-09 review). Anything else is refused before upgrade.
+        if role not in ("mobile", "worker", "controller"):
+            self.close_connection = True
+            return self.send_error(403, "bad role")
         # The trusted PM controller (box-resident): a strong shared token, then it
         # joins as a pre-authed mobile under the reserved ident so the existing
         # toMachine/machineMsg routing carries its (plaintext, trusted) control.
@@ -1321,13 +1382,31 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 return self._send_json({"error": err}, 400)
             return self._send_json({"ok": True, "skills": skills_manifest()})
-        if path != "/upload" or (not PASSKEY_ONLY and not _token_ok(q.get("t", [""])[0], MOBILE_TOKEN)):
+        if path != "/upload":
             self.close_connection = True
-            return self.send_error(403 if path == "/upload" else 404, "denied")
+            return self.send_error(404, "denied")
+        # Credential: the passkey session token (`s=`, what authOk handed the
+        # page and it keeps for 7 days) in PASSKEY_ONLY mode, else the mobile
+        # token. Until 2026-09-09 PASSKEY_ONLY checked nothing here — anyone
+        # who knew a machine id could push bytes into its uploads dir.
+        if PASSKEY_ONLY:
+            sess = q.get("s", [""])[0]
+            if not (sess and session_valid(sess)):
+                self.close_connection = True
+                return self.send_error(403, "denied")
+            quota_key = sess
+        else:
+            if not _token_ok(q.get("t", [""])[0], MOBILE_TOKEN):
+                self.close_connection = True
+                return self.send_error(403, "denied")
+            quota_key = "token"
         try:
             n = int(self.headers.get("Content-Length", "0") or 0)
         except ValueError:
             n = 0
+        if not RELAY.upload_quota_ok(quota_key, n):
+            self.close_connection = True
+            return self.send_error(429, "upload quota exceeded")
         if n > MAX_UPLOAD:
             # Refuse oversized bodies up front; don't read them into memory.
             self.close_connection = True
@@ -1370,6 +1449,9 @@ class Handler(BaseHTTPRequestHandler):
 
         conn = Conn(self.wfile, role, ident, host, kind,
                     peer="%s:%s" % self.client_address[:2], sock=self.connection)
+        # Mobiles only ever send small JSON; an oversize frame from one is
+        # abuse and drops the socket (ws_read_message → None).
+        max_len = fleet_ws.MAX_MESSAGE if role != "mobile" else MOBILE_MAX_MESSAGE
         if role == "worker":
             RELAY.add_worker(conn)
         else:
@@ -1377,7 +1459,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             while True:
                 try:
-                    msg = fleet_ws.ws_read_message(self.rfile)
+                    msg = fleet_ws.ws_read_message(self.rfile, max_len=max_len)
                 except Exception:
                     break
                 if msg is None:
