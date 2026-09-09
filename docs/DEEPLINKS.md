@@ -55,7 +55,10 @@ resolves the same way in both modes.
 
 The query is consumed and stripped from the address bar the moment the hash is
 parsed (`parseHash` → `history.replaceState`), so a reload never spawns a second
-session. Guarded by `tools/composelinkprobe.mjs`.
+session. If the page reloads between the spawn and the delivery (the one-time
+service-worker reload right after a deploy is the known case), the text lands in
+the composer via the normal `cc_pendingsend` recovery and the fresh session waits
+empty — hit Enter. Guarded by `tools/composelinkprobe.mjs`.
 
 ## Fleet mode (through the relay — `h.atg.link`)
 
