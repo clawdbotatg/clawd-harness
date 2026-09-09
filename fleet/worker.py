@@ -112,26 +112,61 @@ def harness_start_cmd(service="", platform=None):
     return None
 
 
-def _load_env_file():
-    """Load KEY=VALUE lines from fleet.env (gitignored) into the env *before* the
-    config below reads it — the same pattern as the harness's .clawd-harness.env.
-    A launchd/systemd daemon doesn't inherit your shell env, so this is how the
-    secret (FLEET_WORKER_TOKEN) plus FLEET_RELAY / HARNESS_WS / FLEET_MACHINE
-    reach both a manual run and the daemon, keeping the token out of the plist.
-    Real environment vars always win (setdefault)."""
+def _read_env_file():
+    """KEY=VALUE lines from fleet.env (gitignored) as a dict; {} if absent."""
     try:
         text = (HERE / "fleet.env").read_text()
     except OSError:
-        return
+        return {}
+    out = {}
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, val = line.partition("=")
         key = key.strip()
-        val = val.strip().strip('"').strip("'")
         if key:
-            os.environ.setdefault(key, val)
+            out[key] = val.strip().strip('"').strip("'")
+    return out
+
+
+def _load_env_file():
+    """Load fleet.env into the env *before* the config below reads it — the same
+    pattern as the harness's .clawd-harness.env. A launchd/systemd daemon doesn't
+    inherit your shell env, so this is how the secret (FLEET_WORKER_TOKEN) plus
+    FLEET_RELAY / HARNESS_WS / FLEET_MACHINE reach both a manual run and the
+    daemon, keeping the token out of the plist. Real environment vars always win
+    (setdefault) — see _reexec_if_stale_env for the one case where "real" wasn't."""
+    for key, val in _read_env_file().items():
+        os.environ.setdefault(key, val)
+
+
+_CLEAN_MARK = "FLEET_CLEAN_REEXEC"
+
+
+def _reexec_if_stale_env():
+    """Heal the stale-exec bake-in ONCE, without an operator. A pre-2026-09-09
+    worker's self-restart exec'd its child with its own os.environ — i.e. the
+    fleet.env values of ITS first boot arrived here as real environment vars,
+    which setdefault would let beat the file the operator has since edited
+    (clawd-head and clawd-leftclaw were on the new code and still enforcing
+    FLEET_E2E_MAX_TTL=86400 from a Sep-2 env). If any key fleet.env defines is
+    already in our env with a DIFFERENT value, re-exec with those keys stripped so
+    the file wins. A unit that EnvironmentFile=s the same fleet.env has equal
+    values and is untouched; a deliberate shell override of a key the file does
+    not define is untouched. One hop, ever (_CLEAN_MARK)."""
+    if os.environ.get(_CLEAN_MARK) or os.environ.get("FLEET_SELF_RESTART", "1") == "0":
+        return
+    stale = {k: v for k, v in _read_env_file().items()
+             if k in os.environ and os.environ[k] != v}
+    if not stale:
+        return
+    print(f"{time.strftime('%m-%d %H:%M:%S')} [worker] env disagrees with fleet.env for "
+          f"{', '.join(sorted(stale))} — stale exec bake-in; re-exec'ing clean so the file wins",
+          flush=True)
+    env = {k: v for k, v in os.environ.items() if k not in stale}
+    env[_CLEAN_MARK] = "1"
+    os.execve(sys.executable, [sys.executable] + sys.argv, env)
 
 
 # Snapshot the REAL environment (what launchd/systemd handed us) BEFORE fleet.env is
@@ -141,7 +176,8 @@ def _load_env_file():
 # execv forever: the 2026-09-05 24h→7d passkey cadence change (fleet.env + e2e.py)
 # was a silent no-op on clawd-heart for four days — the worker "restarted to pick
 # up new code" twice and kept FLEET_E2E_MAX_TTL=86400 both times (HISTORY 09-09).
-_BOOT_ENV = dict(os.environ)
+_reexec_if_stale_env()
+_BOOT_ENV = {k: v for k, v in os.environ.items() if k != _CLEAN_MARK}
 _load_env_file()
 
 

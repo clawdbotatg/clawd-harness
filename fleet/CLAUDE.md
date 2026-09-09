@@ -38,8 +38,13 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     code" forever — clawd-heart kept `FLEET_E2E_MAX_TTL=86400` for four days
 >     after the 7-day commit and prompted daily. Now `_BOOT_ENV` (snapshotted
 >     before the load) is handed to `execve`; `test_worker_env_reload.py`
->     guards it. A box still re-prompting daily after a cadence change needs ONE
->     real `launchctl kickstart -k` / `systemctl restart` of its worker.
+>     guards it. Boxes that already carried the bake-in when that shipped
+>     (clawd-head, clawd-leftclaw: new code, still `ttl 86400` in the roster)
+>     heal themselves: `_reexec_if_stale_env` re-execs ONCE with any env key
+>     that disagrees with `fleet.env` stripped, so the file wins (equal values,
+>     e.g. a systemd `EnvironmentFile=`, are untouched; `FLEET_SELF_RESTART=0`
+>     opts out). So a cadence change converges by push alone; if a box still
+>     shows the wrong `ttl` in shipcheck's fleet table, THEN restart its worker.
 >     Since the same day every worker reports `build:{code,ttl,idle,started}`
 >     (`buildinfo.py` hash of its code files + the TTLs it resolved) in its stats
 >     frame, the relay dumps the roster to `.clawd-fleet.roster.json`, and

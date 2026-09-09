@@ -52,6 +52,14 @@ listed, not failed; an unreachable relay is "not verified", which fails). Root
 `CLAUDE.md` definition-of-done now says it: never tell Austin "fixed/live"
 before shipcheck exits 0, and a config change is verified on the running
 process, not the file.
+The fleet leg paid for itself within the hour: clawd-head and clawd-leftclaw
+came up on the new code still reporting `ttl 86400` — the old-code exec had
+already baked the stale env into their `_BOOT_ENV`, exactly the case the
+execve fix can't reach (predicted above). No ssh to either box, so the worker
+heals it: `_reexec_if_stale_env` runs before the env load and, if any key
+`fleet.env` defines is already in the env with a *different* value, re-execs
+once with those keys stripped (`FLEET_CLEAN_REEXEC` caps it at one hop; equal
+values and `FLEET_SELF_RESTART=0` are left alone). Converges by push.
 
 ## 2026-09-08 — Council planning handoff (Claude)
 
