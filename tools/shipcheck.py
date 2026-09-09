@@ -25,6 +25,9 @@ What it does NOT check (say so out loud rather than imply coverage):
     silently opts it out of pulling at all (server.py auto_update_loop).
   * OFFLINE boxes — listed, not failed. They come back running whatever they
     had and self-restart within 30 min of the pull.
+  * SWITCHED-OFF boxes (the relay's inactive list) — shown with their mismatch
+    but not failed: the page opens no channel to them and they prompt for
+    nothing, so their worker code cannot reach the user.
   * anything behind the passkey gate — this only reads the public UI bytes.
 """
 import argparse
@@ -47,6 +50,7 @@ OK, BAD, WARN = "\033[32m✓\033[0m", "\033[31m✗\033[0m", "\033[33m!\033[0m"
 
 RELAY_SSH = os.environ.get("FLEET_RELAY_SSH", "zkllmapi")
 ROSTER_PATH = "~/clawd-harness/fleet/.clawd-fleet.roster.json"
+PREFS_PATH = "~/clawd-harness/fleet/.clawd-fleet.prefs.json"   # {"inactive":[…]} — switched-off boxes
 ROSTER_MAX_AGE = 120   # the relay rewrites it on every stats tick (~10s per box)
 
 
@@ -64,11 +68,19 @@ def head_code_hash(bi):
 
 
 def fetch_roster():
+    """The relay's roster dump + its switched-off list, one ssh round trip."""
     r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12", RELAY_SSH,
-                        f"cat {ROSTER_PATH}"], capture_output=True, text=True, timeout=40)
+                        f"cat {ROSTER_PATH}; echo; cat {PREFS_PATH} 2>/dev/null || echo '{{}}'"],
+                       capture_output=True, text=True, timeout=40)
     if r.returncode != 0:
         raise RuntimeError((r.stderr.strip() or "ssh failed").splitlines()[-1])
-    return json.loads(r.stdout)
+    roster_txt, _, prefs_txt = r.stdout.partition("\n")
+    roster = json.loads(roster_txt)
+    try:
+        roster["inactive"] = set(json.loads(prefs_txt or "{}").get("inactive") or [])
+    except Exception:
+        roster["inactive"] = set()
+    return roster
 
 
 def fleet_check(lines):
@@ -88,7 +100,11 @@ def fleet_check(lines):
                      f"running post-09-09 code? (systemctl status clawd-fleet-relay)")
         return False
     good = True
+    inactive = roster.get("inactive", set())
     for m in sorted(roster.get("machines", []), key=lambda m: m["id"]):
+        # A box switched OFF from the machines tab opens no channel and prompts
+        # for nothing, so its worker code can't reach the user: shown, not failed.
+        off = m["id"] in inactive
         if not m.get("online"):
             lines.append(f"{WARN} fleet: {m['id']:<14} offline (last seen "
                          f"{int((time.time() - m.get('lastSeen', 0)) / 60)} min ago) — not verified")
@@ -102,8 +118,10 @@ def fleet_check(lines):
         code_ok = b.get("code") == want
         ttl = b.get("ttl")
         ttl_ok = ttl is None and m.get("kind") == "relay" or ttl == bi.CADENCE
-        good &= code_ok and ttl_ok
-        lines.append(f"{OK if code_ok and ttl_ok else BAD} fleet: {m['id']:<14} "
+        ok = code_ok and ttl_ok
+        good &= ok or off
+        mark = OK if ok else (WARN if off else BAD)
+        lines.append(f"{mark} fleet: {m['id']:<14} " + ("(switched off) " if off else "") +
                      f"code {b.get('code')} {'= HEAD' if code_ok else '≠ HEAD ' + want}"
                      f"{'' if ttl is None else f' · ttl {ttl}s' + ('' if ttl_ok else f' (want {bi.CADENCE})')}"
                      f" · up since {time.strftime('%m-%d %H:%M', time.localtime(b.get('started') or 0))}")

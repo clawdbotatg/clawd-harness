@@ -129,6 +129,11 @@ different boxes, and each one was invisible until the fleet table existed.
 (Also: the relay box's own `--kind relay` worker skips the stats loop, so it
 never reported a build; it now sends one zeroed stats frame with its build on
 connect — the UI draws no stats line for a relay card.)
+Converged 17:56: every active box on HEAD at 604800. The holdout is
+clawd-antenna — stuck on a hash matching no commit since 17:24 (a dirty
+checkout disables its auto-pull; no ssh to confirm) — and it is on the relay's
+switched-off list, so it opens no channel and costs no passkeys; shipcheck now
+shows a switched-off box's mismatch as a warning rather than failing on it.
 
 ## 2026-09-08 — Council planning handoff (Claude)
 
