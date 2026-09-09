@@ -34,6 +34,29 @@ console session id (NOT claude's rotating `session_id`).
 
 ---
 
+## Compose link — open a project with a message ready (or already sent)
+
+```
+#/p/<key>/new?q=<urlencoded text>            → the text waits in the project's new-session box
+#/p/<key>/new?q=<urlencoded text>&send=1     → a session is spawned and the text delivered to it
+#/m/<machine>/p/<key>/new?q=…&send=1         → same, on a specific machine (fleet)
+```
+
+Built for the browser extension's "open a session about this tab" button, but
+generic: anything that can open a URL (a notification, a share sheet, the PM)
+can start a conversation with it. `send=1` rides the sessions rung's own send
+path (`dispatchSend` → `newSession` → `flushPendingSend`), so every recovery net
+a typed message gets applies. Without `send`, the text joins the project's
+`cc_draft:new:<pid>` draft (appended, never replacing what you'd typed).
+
+**In direct mode `<key>` may be the pid, the fleet projectKey, or the project
+name** — a link built off-box (the extension knows a repo, never a local pid)
+resolves the same way in both modes.
+
+The query is consumed and stripped from the address bar the moment the hash is
+parsed (`parseHash` → `history.replaceState`), so a reload never spawns a second
+session. Guarded by `tools/composelinkprobe.mjs`.
+
 ## Fleet mode (through the relay — `h.atg.link`)
 
 The fleet unifies the *same project across machines* under one **projectKey**, so

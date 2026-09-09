@@ -9537,8 +9537,17 @@ function currentView() {
 // `#/i/<id>` (its page, or a dive into its warmest session) ·
 // `#/i/<id>/s/<cid>[/tty]` (a session opened inside that iron's scope).
 function parseHash() {
-  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
-  const nav = { view: 'projects', key: null, cid: null, machine: null, iron: null };
+  // `#/p/<key>/new?q=<text>[&send=1]` is the COMPOSE deep link: open that
+  // project with `q` waiting in its new-session box — or, with send=1, spawn a
+  // session and deliver it (docs/DEEPLINKS.md). The query is consumed here and
+  // stripped from the address bar at once, so a reload can never spawn twice;
+  // the text rides in memory as nav.compose until the project resolves.
+  const raw = location.hash.replace(/^#\/?/, '');
+  const qi = raw.indexOf('?');
+  const path = qi < 0 ? raw : raw.slice(0, qi);
+  const qs = qi < 0 ? '' : raw.slice(qi + 1);
+  const parts = path.split('/').filter(Boolean);
+  const nav = { view: 'projects', key: null, cid: null, machine: null, iron: null, compose: null };
   if (parts[0] === 'pm') { nav.view = 'pm'; return nav; }   // Fleet PM (its own top-level view)
   if (parts[0] === 'pins') { nav.view = 'pins'; return nav; }   // 📌 pin board (top-level, like pm)
   if (parts[0] === 'irons') { nav.view = 'irons'; return nav; }   // 🔥 the irons page
@@ -9557,9 +9566,27 @@ function parseHash() {
     if (parts[i + 2] === 's' && parts[i + 3]) {
       nav.cid = decodeURIComponent(parts[i + 3]);
       nav.view = 'tty';   // a session always opens in the terminal now
+    } else if (parts[i + 2] === 'new') {
+      const q = new URLSearchParams(qs);
+      nav.compose = { text: q.get('q') || '', send: q.get('send') === '1' };
+      try { history.replaceState(null, '', location.pathname + location.search + '#/' + parts.slice(0, i + 2).join('/')); } catch {}
     }
   }
   return nav;
+}
+// The compose link's landing — the project is resolved and its sessions rung is
+// on screen, so put the text exactly where a typed one would go. send → the
+// rung's own send path (spawn, deliver once booted, every recovery net intact);
+// otherwise it joins the project's new-session draft for you to finish.
+function applyCompose(c) {
+  if (!c || !c.text || !currentPid) return;
+  if (c.send && dispatchSend(c.text, [])) return;
+  const id = 'new:' + currentPid;
+  let v = '';
+  try { v = localStorage.getItem(draftKey(id)) || ''; } catch {}
+  v = v ? v + '\n' + c.text : c.text;
+  try { localStorage.setItem(draftKey(id), v); } catch {}
+  if (activeDraftId === id) { box.value = v; autosizeBox(); }
 }
 function syncUrl() {
   if (pendingNav) return;          // mid-restore: don't write until the URL's state is applied
@@ -9634,13 +9661,16 @@ function resolvePendingNav() {
   }
   if (FLEET) { resolvePendingNavFleet(nav); return; }
   if (isHomeRoute(nav)) { if (gotSessions) landHome(); return; }    // wait for the roster, then land on the warmest session
-  // -- direct mode: key is the local pid --------------------------------------
+  // -- direct mode: key is the local pid — or, for a link built off-box (the
+  // browser extension knows a repo, never a pid), the fleet projectKey / name --
   if (nav.key) {
     if (!projectList.length) return;                         // projects not in yet
-    if (!projectList.some(p => p.pid === nav.key)) {         // project is gone
+    const p = projectList.find(p => p.pid === nav.key)
+           || projectList.find(p => projectKey(p) === nav.key || p.name === nav.key);
+    if (!p) {                                                // project is gone
       pendingNav = null; currentPid = null; setView('projects'); return;
     }
-    currentPid = nav.key;
+    currentPid = p.pid;
     renderSessions();
   }
   if (nav.cid) {
@@ -9655,6 +9685,7 @@ function resolvePendingNav() {
   }
   pendingNav = null;
   setView(nav.view);
+  applyCompose(nav.compose);
 }
 // Fleet deep-link resolution against the async multi-machine fan-out: wait for the
 // roster + enough machines to reply, tell "still loading" apart from "gone", and
@@ -9703,7 +9734,7 @@ function resolvePendingNavFleet(nav) {
   attachMachine(entry.machineId);
   currentPid = entry.pid;
   renderSessions();
-  if (!nav.cid) { pendingNav = null; setView(nav.view); return; }
+  if (!nav.cid) { pendingNav = null; setView(nav.view); applyCompose(nav.compose); return; }
   const pm = perMachine[currentMachine] || {};
   if (!pm.gotSessions) return;                               // that machine's sessions not in yet
   const s = (pm.sessionList || []).find(x => x.cid === nav.cid);
