@@ -60,6 +60,11 @@ heals it: `_reexec_if_stale_env` runs before the env load and, if any key
 `fleet.env` defines is already in the env with a *different* value, re-execs
 once with those keys stripped (`FLEET_CLEAN_REEXEC` caps it at one hop; equal
 values and `FLEET_SELF_RESTART=0` are left alone). Converges by push.
+Second catch, same table: clawd-antenna pulled that, came up on the newest hash,
+and still said 86400 — its `fleet.env` had dropped the TTL line entirely (as
+ADD-MACHINE tells you to), so "disagrees with the file" never fired while the
+baked-in value beat the code default. The cadence key is now held to
+file-or-`buildinfo.CADENCE` even when the file is silent.
 
 ## 2026-09-08 — Council planning handoff (Claude)
 

@@ -41,7 +41,8 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     guards it. Boxes that already carried the bake-in when that shipped
 >     (clawd-head, clawd-leftclaw: new code, still `ttl 86400` in the roster)
 >     heal themselves: `_reexec_if_stale_env` re-execs ONCE with any env key
->     that disagrees with `fleet.env` stripped, so the file wins (equal values,
+>     that disagrees with `fleet.env` stripped — the cadence key is held to the
+>     file-or-default even when the file is silent (clawd-antenna) — so the file wins (equal values,
 >     e.g. a systemd `EnvironmentFile=`, are untouched; `FLEET_SELF_RESTART=0`
 >     opts out). So a cadence change converges by push alone; if a box still
 >     shows the wrong `ttl` in shipcheck's fleet table, THEN restart its worker.

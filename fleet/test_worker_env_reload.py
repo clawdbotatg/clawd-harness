@@ -97,6 +97,15 @@ def main():
         check("…marker not carried into the next exec env", out.get("boot_mark") is None)
         out = run({"FLEET_E2E_MAX_TTL": "12345"})   # EnvironmentFile= the same file: equal
         check("inherited value equal to fleet.env → no re-exec", out.get("mark") is None and out.get("ttl_env") == "12345")
+        (tmp / "fleet.env").write_text("FLEET_TEST_MARK=from-file\n")   # file silent on the cadence
+        out = run({"FLEET_E2E_MAX_TTL": "86400"})
+        check("file silent + stale cadence in env → re-exec, code default wins",
+              out.get("mark") == "1" and out.get("ttl_env") is None)
+        out = run({"FLEET_E2E_MAX_TTL": "604800"})
+        check("file silent + env equals the code default → no re-exec", out.get("mark") is None)
+        out = run({"FLEET_OTHER_KEY": "x"})
+        check("file silent on an unrelated key → its env override is untouched", out.get("mark") is None)
+        (tmp / "fleet.env").write_text("FLEET_E2E_MAX_TTL=12345\nFLEET_TEST_MARK=from-file\n")
         out = run({"FLEET_E2E_MAX_TTL": "86400", "FLEET_SELF_RESTART": "0"})
         check("FLEET_SELF_RESTART=0 opts out of the re-exec (env keeps winning)",
               out.get("mark") is None and out.get("ttl_env") == "86400")

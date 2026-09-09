@@ -152,13 +152,21 @@ def _reexec_if_stale_env():
     (clawd-head and clawd-leftclaw were on the new code and still enforcing
     FLEET_E2E_MAX_TTL=86400 from a Sep-2 env). If any key fleet.env defines is
     already in our env with a DIFFERENT value, re-exec with those keys stripped so
-    the file wins. A unit that EnvironmentFile=s the same fleet.env has equal
-    values and is untouched; a deliberate shell override of a key the file does
-    not define is untouched. One hop, ever (_CLEAN_MARK)."""
+    the file wins; the cadence key is held to the file-or-default even when the
+    file is silent. A unit that EnvironmentFile=s the same fleet.env has equal
+    values and is untouched; a shell override of any OTHER key the file does not
+    define is untouched. One hop, ever (_CLEAN_MARK)."""
     if os.environ.get(_CLEAN_MARK) or os.environ.get("FLEET_SELF_RESTART", "1") == "0":
         return
-    stale = {k: v for k, v in _read_env_file().items()
-             if k in os.environ and os.environ[k] != v}
+    filed = _read_env_file()
+    # What each key SHOULD be: fleet.env if it defines it. The cadence key is also
+    # pinned when the file is silent (clawd-antenna's file had dropped the line per
+    # ADD-MACHINE, so "disagrees with the file" never fired while the baked-in
+    # 86400 beat the code default). A live override of the cadence belongs in
+    # fleet.env, not the shell — a bare env value is treated as stale.
+    want = dict(filed)
+    want.setdefault("FLEET_E2E_MAX_TTL", str(buildinfo.CADENCE))
+    stale = {k: v for k, v in want.items() if k in os.environ and os.environ[k] != v}
     if not stale:
         return
     print(f"{time.strftime('%m-%d %H:%M:%S')} [worker] env disagrees with fleet.env for "
