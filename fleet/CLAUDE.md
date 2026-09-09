@@ -31,6 +31,15 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     `.fleet.e2e_resume.json` so restarts don't force re-auth. The relay likewise
 >     persists edge-session tokens to `.clawd-fleet.sessions.json`). Target: **one
 >     passkey per machine per week**, no storms. Spec: **`../docs/fleet/E2E-PROTOCOL.md`**.
+>     **A TTL change only takes effect after a worker restart that re-reads
+>     `fleet.env`** (2026-09-09): the self-restart used to `execv` with the live
+>     `os.environ`, and `_load_env_file` is setdefault, so the FIRST boot's
+>     `fleet.env` values rode along across every "restarting to pick up new
+>     code" forever — clawd-heart kept `FLEET_E2E_MAX_TTL=86400` for four days
+>     after the 7-day commit and prompted daily. Now `_BOOT_ENV` (snapshotted
+>     before the load) is handed to `execve`; `test_worker_env_reload.py`
+>     guards it. A box still re-prompting daily after a cadence change needs ONE
+>     real `launchctl kickstart -k` / `systemctl restart` of its worker.
 >     The relay needs **no** crypto for this (blind passthrough); `cryptography`
 >     is a **worker-only** dep. Tests: `test_e2e.py`, `test_e2e_mitm.py`,
 >     `test_e2e_interop.py` (Python↔browser byte-for-byte via `node`).

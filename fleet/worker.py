@@ -134,6 +134,14 @@ def _load_env_file():
             os.environ.setdefault(key, val)
 
 
+# Snapshot the REAL environment (what launchd/systemd handed us) BEFORE fleet.env is
+# layered in, so a self-restart (execve in update_watch_loop) gives the child that
+# same env and the child re-reads fleet.env fresh. Without this, setdefault above
+# meant a value fleet.env loaded at first boot rode along in os.environ across every
+# execv forever: the 2026-09-05 24h→7d passkey cadence change (fleet.env + e2e.py)
+# was a silent no-op on clawd-heart for four days — the worker "restarted to pick
+# up new code" twice and kept FLEET_E2E_MAX_TTL=86400 both times (HISTORY 09-09).
+_BOOT_ENV = dict(os.environ)
 _load_env_file()
 
 # The `exec` shell handler is a diagnostic, not part of the product (the harness
@@ -1282,7 +1290,7 @@ class Worker:
         """Exec a fresh copy of ourselves when the code on disk changes (git pull).
         Settle first (a pull touches several files over a moment), then wait for a
         lull — no mobile holding a harness link through us — before restarting;
-        after RESTART_MAX_WAIT restart anyway. execv keeps the same pid contract
+        after RESTART_MAX_WAIT restart anyway. execve keeps the same pid contract
         with launchd/systemd, and viewers silently resume off persisted material."""
         baseline = self._watch_mtimes()
         last, stable_since, changed_at = baseline, None, None
@@ -1310,7 +1318,8 @@ class Worker:
                 continue
             print(f"{ts()} [worker {self.machine}] restarting to pick up new code"
                   + (" (viewer attached — max wait hit)" if busy else ""), flush=True)
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            # _BOOT_ENV, not os.environ: fleet.env must be re-read by the child
+            os.execve(sys.executable, [sys.executable] + sys.argv, _BOOT_ENV)
 
     def run(self):
         # A relay node has no harness behind it, so there are no stats to poll —

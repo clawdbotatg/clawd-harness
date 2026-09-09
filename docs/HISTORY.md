@@ -11,6 +11,35 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-09 — the 7-day cadence was a no-op on clawd-heart: self-restart kept the old env
+
+Austin, four days after the 09-05 change: still doing passkeys all the time.
+The repo was right (`test_passkey_ttl.py` green, h.atg.link serving HEAD, relay
+box restarted on the commit with 7-day edge sessions) — and this box's worker
+was still handing out 24h channels: `.fleet.e2e_resume.json` held two `hard`
+deadlines 19h and 24h out, and `ps eww` on the worker showed
+`FLEET_E2E_MAX_TTL=86400` in its environment. The worker HAD "restarted to
+pick up new code" twice since (09-05 15:38, 09-06 11:50), but the restart was
+`os.execv(..., sys.argv)` — which hands the child the live `os.environ`, into
+which `_load_env_file` had setdefault'ed the Sep-2 `fleet.env` (`86400`). The
+child's setdefault then refused to overwrite it with the new file's `604800`.
+So a value loaded at first boot survived every self-restart forever; only a
+real launchd restart could clear it — and this box hadn't had one since Sep 2.
+Fix: `_BOOT_ENV = dict(os.environ)` is snapshotted before the load and handed to
+`os.execve`, so the child re-reads `fleet.env`; `fleet/test_worker_env_reload.py`
+guards both halves (source order + a behavioral import of a worker copy beside a
+fake `fleet.env`). Remediation here: one `launchctl kickstart -k` of the worker
+(viewers resumed silently off persisted material) and the two stored deadlines
+were rewritten from handshake+24h to handshake+7d — exactly what the fixed
+worker would have written. Other boxes: a worker that never had a `fleet.env`
+TTL override took the new e2e.py default on its self-pull restart and was fine;
+one that did (or that a stale env otherwise reached) needs ONE real
+restart — the fix only helps from the first clean start onward, because an
+old-code exec has already baked the stale value into the child's `_BOOT_ENV`.
+Lesson (same family as "local preview is not a deploy"): a config change isn't
+live until the *process* shows it — check the running process's env / the
+artifacts it writes, not the file on disk.
+
 ## 2026-09-08 — Council planning handoff (Claude)
 
 **What changed.** Austin asked for a plan to automate his manual claude↔codex
