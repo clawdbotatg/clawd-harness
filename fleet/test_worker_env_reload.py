@@ -16,7 +16,9 @@ Checks:
   3. the self-heal for boxes ALREADY carrying a stale bake-in when this shipped
      (clawd-head, clawd-leftclaw on 09-09): an inherited value that disagrees
      with fleet.env re-execs once with it stripped, so the file wins; an equal
-     value (EnvironmentFile=) or FLEET_SELF_RESTART=0 does not.
+     value (EnvironmentFile=) or FLEET_SELF_RESTART=0 does not;
+  4. the passkey cadence is PINNED to buildinfo.CADENCE regardless of fleet.env
+     or env (every other box's fleet.env still said 86400 on 09-09).
 
 Run: python3 fleet/test_worker_env_reload.py
 """
@@ -70,7 +72,8 @@ def main():
         check("worker import exits 0", r.returncode == 0)
         import json
         out = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else {}
-        check("fleet.env value IS loaded into os.environ", out.get("env") == "from-file" and out.get("ttl_env") == "12345")
+        check("fleet.env value IS loaded into os.environ", out.get("env") == "from-file")
+        check("…but the cadence is PINNED to buildinfo.CADENCE over the file's 12345", out.get("ttl_env") == "604800")
         check("fleet.env value is NOT in the exec env (_BOOT_ENV)", out.get("boot") is None and out.get("ttl_boot") is None)
 
         # 3. The self-heal: an inherited env that DISAGREES with fleet.env for a key
@@ -93,22 +96,15 @@ def main():
             return json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else {}
         out = run({"FLEET_E2E_MAX_TTL": "86400"})   # stale bake-in: file says 12345
         check("stale inherited value → re-exec'd once (marker set)", out.get("mark") == "1")
-        check("…and fleet.env wins after the re-exec", out.get("ttl_env") == "12345")
+        check("…and the cadence is pinned after the re-exec", out.get("ttl_env") == "604800")
         check("…marker not carried into the next exec env", out.get("boot_mark") is None)
         out = run({"FLEET_E2E_MAX_TTL": "12345"})   # EnvironmentFile= the same file: equal
-        check("inherited value equal to fleet.env → no re-exec", out.get("mark") is None and out.get("ttl_env") == "12345")
-        (tmp / "fleet.env").write_text("FLEET_TEST_MARK=from-file\n")   # file silent on the cadence
-        out = run({"FLEET_E2E_MAX_TTL": "86400"})
-        check("file silent + stale cadence in env → re-exec, code default wins",
-              out.get("mark") == "1" and out.get("ttl_env") is None)
-        out = run({"FLEET_E2E_MAX_TTL": "604800"})
-        check("file silent + env equals the code default → no re-exec", out.get("mark") is None)
+        check("inherited value equal to fleet.env → no re-exec", out.get("mark") is None and out.get("ttl_env") == "604800")
         out = run({"FLEET_OTHER_KEY": "x"})
-        check("file silent on an unrelated key → its env override is untouched", out.get("mark") is None)
-        (tmp / "fleet.env").write_text("FLEET_E2E_MAX_TTL=12345\nFLEET_TEST_MARK=from-file\n")
+        check("file silent on a key → its env override is untouched", out.get("mark") is None)
         out = run({"FLEET_E2E_MAX_TTL": "86400", "FLEET_SELF_RESTART": "0"})
-        check("FLEET_SELF_RESTART=0 opts out of the re-exec (env keeps winning)",
-              out.get("mark") is None and out.get("ttl_env") == "86400")
+        check("FLEET_SELF_RESTART=0 opts out of the re-exec; the cadence is still pinned",
+              out.get("mark") is None and out.get("ttl_env") == "604800")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

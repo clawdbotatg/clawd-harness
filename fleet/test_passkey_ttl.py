@@ -11,6 +11,9 @@ defaults to each other and to the intended cadence (7 days since 2026-09-05;
   fleet/e2e.py     MAX_TTL default       (worker hard ceiling; resume works until it)
   index.html       RESUME_TTL_MS         (browser resume material; the silent leg)
   index.html       pmt cookie max-age    (the /pm brain rides the same session)
+  fleet/buildinfo  CADENCE               (the worker PINS FLEET_E2E_MAX_TTL to it;
+                                          a fleet.env line is logged + ignored —
+                                          the fifth, invisible copy, 2026-09-09)
 
 Source-level on purpose: importing relay.py/e2e.py pulls in env + crypto.
 """
@@ -35,14 +38,22 @@ def main():
     resume_expr = grab(ROOT / "index.html", r"const RESUME_TTL_MS = ([0-9 *]+);")
     resume = eval(resume_expr, {"__builtins__": {}}) // 1000  # noqa: S307 — digits and '*' only
     pmt = int(grab(ROOT / "index.html", r"pmt=\$\{tok\}; path=/pm; max-age=(\d+);"))
-    vals = {"relay SESSION_TTL": relay, "e2e MAX_TTL": e2e, "index RESUME_TTL_MS/1000": resume, "index pmt max-age": pmt}
+    bi = int(grab(HERE / "buildinfo.py", r"CADENCE = ([0-9 *]+)\n").replace(" ", "").split("#")[0]
+             and eval(grab(HERE / "buildinfo.py", r"CADENCE = ([0-9 *]+)"), {"__builtins__": {}}))  # noqa: S307
+    vals = {"relay SESSION_TTL": relay, "e2e MAX_TTL": e2e, "index RESUME_TTL_MS/1000": resume,
+            "index pmt max-age": pmt, "buildinfo CADENCE (worker pins to it)": bi}
+    worker = (HERE / "worker.py").read_text()
+    if 'os.environ["FLEET_E2E_MAX_TTL"] = want' not in worker or "_pin_cadence()" not in worker:
+        print("FAIL: worker.py no longer pins FLEET_E2E_MAX_TTL to buildinfo.CADENCE — a per-box fleet.env "
+              "line would silently shorten the cadence again (HISTORY 2026-09-09)")
+        return 1
     bad = {k: v for k, v in vals.items() if v != CADENCE}
     for k, v in vals.items():
         print(f"  {'OK ' if v == CADENCE else 'BAD'} {k} = {v}")
     if bad:
         print(f"FAIL: passkey cadence drifted from {CADENCE}s: {bad}")
         return 1
-    print(f"passkey cadence pinned at {CADENCE}s ({CADENCE // 86400} days) in all four places")
+    print(f"passkey cadence pinned at {CADENCE}s ({CADENCE // 86400} days) in all five places")
     return 0
 
 

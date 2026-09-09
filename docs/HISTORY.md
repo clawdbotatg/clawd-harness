@@ -65,6 +65,21 @@ and still said 86400 — its `fleet.env` had dropped the TTL line entirely (as
 ADD-MACHINE tells you to), so "disagrees with the file" never fired while the
 baked-in value beat the code default. The cadence key is now held to
 file-or-`buildinfo.CADENCE` even when the file is silent.
+Third catch, and the real one: clawd-gut, -head, -leftclaw pulled *that*, came
+up on the newest hash, and STILL said 86400 — so their own `fleet.env` files
+pin 86400 explicitly. Of course they do: the 09-05 commit "moved this box's
+override too" and every other box's gitignored copy (cloned from this one, same
+`IDLE_TTL=43200`) was never touched, and there's no ssh to any of them. The
+self-heal was working exactly as designed — honoring the file. The file was
+the bug. A fleet-wide policy number has no business in a per-box gitignored
+file, so the worker now pins `FLEET_E2E_MAX_TTL` to `buildinfo.CADENCE`
+(`_pin_cadence`, before e2e.py's import reads the env), logs + ignores any
+file/env override, and `test_passkey_ttl.py` pins all five places. The four
+days of "why am I still doing passkeys" were three stacked causes on three
+different boxes, and each one was invisible until the fleet table existed.
+(Also: the relay box's own `--kind relay` worker skips the stats loop, so it
+never reported a build; it now sends one zeroed stats frame with its build on
+connect — the UI draws no stats line for a relay card.)
 
 ## 2026-09-08 — Council planning handoff (Claude)
 

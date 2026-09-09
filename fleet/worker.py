@@ -152,21 +152,14 @@ def _reexec_if_stale_env():
     (clawd-head and clawd-leftclaw were on the new code and still enforcing
     FLEET_E2E_MAX_TTL=86400 from a Sep-2 env). If any key fleet.env defines is
     already in our env with a DIFFERENT value, re-exec with those keys stripped so
-    the file wins; the cadence key is held to the file-or-default even when the
-    file is silent. A unit that EnvironmentFile=s the same fleet.env has equal
-    values and is untouched; a shell override of any OTHER key the file does not
-    define is untouched. One hop, ever (_CLEAN_MARK)."""
+    the file wins. A unit that EnvironmentFile=s the same fleet.env has equal
+    values and is untouched; a shell override of a key the file does not define
+    is untouched. One hop, ever (_CLEAN_MARK). (The passkey cadence itself is
+    no longer configurable this way at all — see _pin_cadence.)"""
     if os.environ.get(_CLEAN_MARK) or os.environ.get("FLEET_SELF_RESTART", "1") == "0":
         return
-    filed = _read_env_file()
-    # What each key SHOULD be: fleet.env if it defines it. The cadence key is also
-    # pinned when the file is silent (clawd-antenna's file had dropped the line per
-    # ADD-MACHINE, so "disagrees with the file" never fired while the baked-in
-    # 86400 beat the code default). A live override of the cadence belongs in
-    # fleet.env, not the shell — a bare env value is treated as stale.
-    want = dict(filed)
-    want.setdefault("FLEET_E2E_MAX_TTL", str(buildinfo.CADENCE))
-    stale = {k: v for k, v in want.items() if k in os.environ and os.environ[k] != v}
+    stale = {k: v for k, v in _read_env_file().items()
+             if k in os.environ and os.environ[k] != v}
     if not stale:
         return
     print(f"{time.strftime('%m-%d %H:%M:%S')} [worker] env disagrees with fleet.env for "
@@ -187,6 +180,27 @@ def _reexec_if_stale_env():
 _reexec_if_stale_env()
 _BOOT_ENV = {k: v for k, v in os.environ.items() if k != _CLEAN_MARK}
 _load_env_file()
+
+
+def _pin_cadence():
+    """The passkey cadence is ONE fleet-wide number, checked in (buildinfo.CADENCE,
+    pinned to relay/e2e/index.html by test_passkey_ttl.py). It is NOT per-box
+    config: on 2026-09-09 every box except this one still had an old
+    `FLEET_E2E_MAX_TTL=86400` line in its gitignored fleet.env — a fifth,
+    invisible copy of the number that beat the code default and kept Austin on
+    daily Face IDs four days after the 7-day commit, with no ssh to fix it.
+    Override attempts (file or env) are logged and ignored; e2e.py reads the env
+    at import, so this runs BEFORE that import."""
+    want = str(buildinfo.CADENCE)
+    have = os.environ.get("FLEET_E2E_MAX_TTL")
+    if have is not None and have != want:
+        print(f"{time.strftime('%m-%d %H:%M:%S')} [worker] FLEET_E2E_MAX_TTL={have} in "
+              f"fleet.env/env IGNORED — the passkey cadence is fleet-wide "
+              f"(buildinfo.CADENCE={want}); delete that line", flush=True)
+    os.environ["FLEET_E2E_MAX_TTL"] = want
+
+
+_pin_cadence()
 
 
 def _build_info():
@@ -730,7 +744,10 @@ class Worker:
         poll change, the sysstats tick, or the reconnect re-send in serve_once,
         will catch it up). Always sends a *combined* snapshot (counts default to
         zeros if not yet polled) so the relay can overwrite wholesale."""
-        if self.stats is None and self.sys is None:
+        # A relay-kind node has no harness and never polls, but it still has a
+        # BUILD to report (shipcheck's fleet leg lists it as "no build" otherwise);
+        # the UI draws no stats line for a relay card, so zeros are harmless.
+        if self.stats is None and self.sys is None and self.kind != "relay":
             return
         payload = dict(self.stats or {"projects": 0, "sessions": 0, "active": 0},
                        type="stats")

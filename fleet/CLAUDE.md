@@ -41,11 +41,15 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     guards it. Boxes that already carried the bake-in when that shipped
 >     (clawd-head, clawd-leftclaw: new code, still `ttl 86400` in the roster)
 >     heal themselves: `_reexec_if_stale_env` re-execs ONCE with any env key
->     that disagrees with `fleet.env` stripped — the cadence key is held to the
->     file-or-default even when the file is silent (clawd-antenna) — so the file wins (equal values,
+>     that disagrees with `fleet.env` stripped, so the file wins (equal values,
 >     e.g. a systemd `EnvironmentFile=`, are untouched; `FLEET_SELF_RESTART=0`
 >     opts out). So a cadence change converges by push alone; if a box still
 >     shows the wrong `ttl` in shipcheck's fleet table, THEN restart its worker.
+>     **The cadence is not per-box config at all** (`_pin_cadence`, same day):
+>     every other box's gitignored `fleet.env` still said `FLEET_E2E_MAX_TTL=86400`
+>     — a fifth copy of the number nobody could see or ssh to. The worker now
+>     forces `buildinfo.CADENCE` and logs any file/env attempt to override it;
+>     `test_passkey_ttl.py` pins all five.
 >     Since the same day every worker reports `build:{code,ttl,idle,started}`
 >     (`buildinfo.py` hash of its code files + the TTLs it resolved) in its stats
 >     frame, the relay dumps the roster to `.clawd-fleet.roster.json`, and
