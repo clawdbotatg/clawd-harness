@@ -64,6 +64,12 @@ exactly the line `?? HANDOFF.md` in case the exclude didn't land. A tracked
 committed — consistent. PM verb docstring + persona + WS-PROTOCOL updated
 with it (the three-places rule). Guards in `test_wrap.py`.
 
+**Same day, the miss:** the 📑 chip in `index.html` carries its OWN copy of
+the prompt (chip text wins over the server default), and I only changed the
+server's. Austin tapped 📑, the tooltip still said "commit it", the session
+committed. Chip text + tip synced; `test_wrap.py` now diffs the chip's string
+against `server.WRAP_PROMPT` byte-for-byte so the two copies can't drift again.
+
 ## 2026-09-09 — security review: the public edge had four holes, the local port one
 
 An external review (`/tmp/harness-security-review-2026-09-09.md`, probed

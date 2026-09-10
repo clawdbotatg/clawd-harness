@@ -7911,9 +7911,12 @@ const QUICK_PROMPTS = [
   // 📑 wrap — not just a prompt: the harness ARMS the session to close itself
   // once the handoff is written (`harness-close`, refused unless armed). The
   // tab then vanishes into 🗃️ closed sessions with the reply's TLDR as its row.
+  // `text` MUST equal server.py's WRAP_PROMPT byte-for-byte (chip text wins over
+  // the server default — a stale copy here shipped "commit it" for a day after
+  // the server said local-only, 09-10; test_wrap.py diffs the two).
   { e: '📑', label: 'doc', wrap: true,
-    tip: 'wrap up: write the handoff, commit it, then close this tab (armed for 2 turns; cancel above the composer; ↩ from 🗃️)',
-    text: "We're wrapping this session up. Write the handoff for another agent or a future you: what changed, what's shipped vs. still local, open threads, gotchas, and the exact next steps. Put it where this project keeps such notes (an existing HANDOFF / HISTORY / docs file; else HANDOFF.md at the repo root). If this is a git repo with a remote, commit and push it. Then run `harness-close` (on your PATH) — it closes this session once the turn ends. If something is unresolved or you need a decision from me, do NOT close: say what's open and stop. End your last message with a 3-line TLDR." },
+    tip: 'wrap up: write the handoff to a LOCAL HANDOFF.md (git-excluded, never committed), commit any real work, then close this tab (armed for 2 turns; cancel above the composer; ↩ from 🗃️)',
+    text: "We're wrapping this session up. Write the handoff for another agent or a future you: what changed, what's shipped vs. still local, open threads, gotchas, and the exact next steps. Write it to HANDOFF.md at the repo root (replace an old one; keep whatever in it is still true). That file is LOCAL notes, not repo history: it is already in this checkout's .git/info/exclude, so do NOT commit it, do NOT push it, and do NOT add it to .gitignore or any tracked file. Only if this project's own instructions say handoffs belong in a tracked log (a HISTORY / docs file) write there instead and commit as they say. Your actual work is separate from the handoff: if code changes are still uncommitted, commit and push them as usual. Then run `harness-close` (on your PATH) — it closes this session once the turn ends. If something is unresolved or you need a decision from me, do NOT close: say what's open and stop. End your last message with a 3-line TLDR." },
 ];
 // Custom hover hint (a fixed-position singleton, so the strip's overflow-x
 // clipping can't eat it — a ::after inside the scroll container would be cut

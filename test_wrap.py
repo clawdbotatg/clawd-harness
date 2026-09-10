@@ -20,6 +20,8 @@ Guards (server side, on fakes — never the live daemon):
 Exits non-zero on any failure.
 """
 import http.server
+import json
+import re
 import os
 import subprocess
 import sys
@@ -218,6 +220,15 @@ check("WRAP_PROMPT: the handoff is HANDOFF.md, local, never committed/pushed/git
       "HANDOFF.md" in server.WRAP_PROMPT and "do NOT commit it" in server.WRAP_PROMPT
       and "do NOT push it" in server.WRAP_PROMPT and ".gitignore" in server.WRAP_PROMPT
       and "commit and push it" not in server.WRAP_PROMPT)
+# index.html's 📑 chip sends its OWN copy of the prompt (chip text wins over the
+# server default), so the two must be byte-identical or the UI ships stale words.
+_html = open(os.path.join(HERE, "index.html"), encoding="utf-8").read()
+_m = re.search(r"label: 'doc', wrap: true,\n\s+tip: [^\n]*\n\s+text: (\"(?:[^\"\\\\]|\\\\.)*\")", _html)
+check("index.html 📑 chip text == server.WRAP_PROMPT (single source of truth)",
+      bool(_m) and json.loads(_m.group(1)) == server.WRAP_PROMPT,
+      (json.loads(_m.group(1))[:80] if _m else "chip not found"))
+check("index.html 📑 chip tip says local / never committed, not 'commit it'",
+      "never committed" in _html.split("label: 'doc'")[1].split("\n")[1] and "commit it," not in _html.split("label: 'doc'")[1].split("\n")[1])
 check("manager.wrap wrote the handoff exclude into the session's checkout",
       "/HANDOFF.md\n" in open(os.path.join(w_repo, ".git", "info", "exclude")).read())
 
