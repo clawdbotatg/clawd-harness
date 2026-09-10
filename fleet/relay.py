@@ -17,8 +17,9 @@ Protocol (all JSON text frames):
     {type:"reply",  to:<mobileId>, msg:{...}}   # route a result to one mobile
     {type:"status", msg:{...}}                  # broadcast (e.g. busy/idle)
     {type:"stats", projects:N, sessions:N, active:N, sys:{cpu,ram,disk,gpu}?}
-        # build:{code,ttl,idle,started}? — what the worker PROCESS runs (hash of
-        # its code files + its resolved E2E TTLs); passed through to the roster
+        # build:{code,ttl,idle,started,chan:{n,next,last}}? — what the worker
+        # PROCESS runs (hash of its code files + its resolved E2E TTLs) and its live
+        # channel deadlines (when it next owes a passkey); passed through to the roster
         # and dumped to ROSTER_FILE so tools/shipcheck.py can compare to HEAD
         # plaintext aggregate counts (no titles/content) + best-effort system
         # stats (CPU/RAM/disk/GPU) — for the at-a-glance roster load
@@ -1094,7 +1095,7 @@ class Relay:
                 st["sys"] = sys
             build = frame.get("build")   # {code,ttl,idle,started} — see header
             if isinstance(build, dict):
-                st["build"] = {k: build.get(k) for k in ("code", "ttl", "idle", "started")}
+                st["build"] = {k: build.get(k) for k in ("code", "ttl", "idle", "started", "chan")}
             worker.stats = st
             self.broadcast_roster()
             return

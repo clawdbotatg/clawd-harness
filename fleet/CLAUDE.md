@@ -61,6 +61,9 @@ from one phone, through one public relay. It lives in **`clawd-harness/fleet/`**
 >     frame, the relay dumps the roster to `.clawd-fleet.roster.json`, and
 >     `tools/shipcheck.py` fails until every online box matches HEAD
 >     (`test_buildinfo.py`). That table is the answer to "is it actually running".
+>     `build.chan` = `{n,next,last}` live channel deadlines, so the same table
+>     says when each box next owes a passkey ("still doing passkeys now and then",
+>     09-10, was the day-old 24h channels lapsing one by one).
 >     The relay needs **no** crypto for this (blind passthrough); `cryptography`
 >     is a **worker-only** dep. Tests: `test_e2e.py`, `test_e2e_mitm.py`,
 >     `test_e2e_interop.py` (Python↔browser byte-for-byte via `node`).

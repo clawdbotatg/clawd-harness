@@ -121,10 +121,18 @@ def fleet_check(lines):
         ok = code_ok and ttl_ok
         good &= ok or off
         mark = OK if ok else (WARN if off else BAD)
+        ch = b.get("chan") or {}
+        if ch.get("n"):
+            due = f" · {ch['n']} channel{'s' if ch['n'] != 1 else ''}, next passkey due " \
+                  f"{time.strftime('%m-%d %H:%M', time.localtime(ch['next']))}"
+        elif "chan" in b:
+            due = " · no live channels (next open pays a passkey)"
+        else:
+            due = ""
         lines.append(f"{mark} fleet: {m['id']:<14} " + ("(switched off) " if off else "") +
                      f"code {b.get('code')} {'= HEAD' if code_ok else '≠ HEAD ' + want}"
                      f"{'' if ttl is None else f' · ttl {ttl}s' + ('' if ttl_ok else f' (want {bi.CADENCE})')}"
-                     f" · up since {time.strftime('%m-%d %H:%M', time.localtime(b.get('started') or 0))}")
+                     f" · up since {time.strftime('%m-%d %H:%M', time.localtime(b.get('started') or 0))}" + due)
     return good
 
 

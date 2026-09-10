@@ -42,11 +42,13 @@ def main():
     check("worker.RESTART_WATCH = buildinfo.WATCH", "RESTART_WATCH = buildinfo.WATCH" in w)
     check("worker builds BUILD after the env load",
           w.find("_load_env_file()\n") < w.find("BUILD = _build_info()"))
-    check("worker reports build in every stats frame", 'payload["build"] = BUILD' in w)
+    check("worker reports build + channel deadlines in every stats frame",
+          'payload["build"] = dict(BUILD, chan=self._chan_summary())' in w)
     check("BUILD reads the TTLs from e2e", '"ttl"], info["idle"] = _e2e.MAX_TTL, _e2e.IDLE_TTL' in w)
 
     r = (HERE / "relay.py").read_text()
-    check("relay passes build into worker.stats", 'st["build"] = {k: build.get(k) for k in ("code", "ttl", "idle", "started")}' in r)
+    check("relay passes build (+chan) into worker.stats", 'st["build"] = {k: build.get(k) for k in ("code", "ttl", "idle", "started", "chan")}' in r)
+    check("shipcheck prints the next passkey due per box", "next passkey due" in (ROOT / "tools" / "shipcheck.py").read_text())
     check("relay dumps the roster on broadcast", "self._dump_roster(msg[\"machines\"])" in r and "ROSTER_FILE" in r)
 
     sc = (ROOT / "tools" / "shipcheck.py").read_text()

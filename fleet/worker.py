@@ -753,8 +753,19 @@ class Worker:
                        type="stats")
         if self.sys is not None:
             payload["sys"] = self.sys
-        payload["build"] = BUILD   # what this process actually runs (shipcheck reads it)
+        payload["build"] = dict(BUILD, chan=self._chan_summary())   # what this process runs + when it next prompts
         self.send_relay(payload)
+
+    def _chan_summary(self):
+        """{n, next, last}: live resume entries (one per viewer-channel) and the
+        earliest / latest hard deadline — i.e. when this box next owes a passkey
+        and when the newest channel lapses. Timestamps only, never material.
+        Lets shipcheck's fleet table answer "when will it prompt me again" per
+        box instead of guessing (Austin, 09-10: "I'm still doing passkeys now and
+        then" — the day-old 24h channels lapsing one by one)."""
+        with self.e2e_lock:
+            hards = [int(e["hard"]) for e in self.e2e_resume.values() if e["hard"] > time.time()]
+        return {"n": len(hards), "next": min(hards) if hards else None, "last": max(hards) if hards else None}
 
     def sysstats_loop(self):
         """Sample CPU/RAM/disk/GPU on a steady timer and push to the relay. Separate
