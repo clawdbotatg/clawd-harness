@@ -993,8 +993,9 @@ class Verbs:
                                     "confirm": confirm}, do)
 
     def wrap(self, machine, cid, text="", confirm=False):
-        """📑 Wrap a FINISHED session up: it writes its handoff (committed +
-        pushed when the project has a remote) and then closes ITSELF, landing
+        """📑 Wrap a FINISHED session up: it writes its handoff to a LOCAL
+        HANDOFF.md (git-excluded on that box — never committed or pushed;
+        the project's real work is committed as usual) and then closes ITSELF, landing
         in the 🗃️ closed history with its TLDR. Prefer this over `close` when
         the work is done. The harness arms the session for 2 turns / 30 min —
         only an armed session can self-close, and it refuses on a dirty

@@ -175,7 +175,10 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
     `WRAP_TURNS`/`WRAP_TTL_S`, and refuses on a dirty worktree. Never widen
     that gate, never force-close from the harness side (no call → the arm
     lapses, the tab stays), and keep the close deferred to the Stop so the
-    TLDR reaches the 🗃️ row. `test_wrap.py` + `tools/wrapprobe.mjs`.
+    TLDR reaches the 🗃️ row. The handoff is a **local** `HANDOFF.md`: the arm
+    lists it in the checkout's `.git/info/exclude`, the gate tolerates that
+    one untracked file, and the prompt forbids committing it — a handoff in
+    GitHub is noise (Austin, 09-10). `test_wrap.py` + `tools/wrapprobe.mjs`.
 
 ## Periodic
 

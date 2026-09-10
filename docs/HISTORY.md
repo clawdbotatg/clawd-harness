@@ -11,6 +11,27 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-10 — 📑 wrap: the handoff is local, not a commit
+
+Austin: "95% of the time we do not want that handoff document to be in the
+GitHub repo… I think we want to change the wording of the doc button." The
+cause was two things, not one. `WRAP_PROMPT` literally said "if this is a git
+repo with a remote, commit and push it", and `_worktree_dirty` counted an
+untracked `HANDOFF.md` as dirty — so even a session that left the file
+uncommitted got a 409 from `harness-close` telling it to commit, and did.
+
+Fix, all three legs together: (1) the prompt names `HANDOFF.md` at the repo
+root and says do NOT commit / push / gitignore it, with the project's actual
+work committed as usual and a stated exception for projects whose own
+instructions keep handoffs in a tracked log (this repo's HISTORY.md); (2)
+`manager.wrap` runs `_exclude_handoff` at arm time — `/HANDOFF.md` goes into
+the checkout's `.git/info/exclude` (local, never tracked, never a repo change,
+idempotent) so `git status` never shows it; (3) `_worktree_dirty` tolerates
+exactly the line `?? HANDOFF.md` in case the exclude didn't land. A tracked
+`HANDOFF.md` (the exception case) still shows as ` M` and still has to be
+committed — consistent. PM verb docstring + persona + WS-PROTOCOL updated
+with it (the three-places rule). Guards in `test_wrap.py`.
+
 ## 2026-09-09 — security review: the public edge had four holes, the local port one
 
 An external review (`/tmp/harness-security-review-2026-09-09.md`, probed
@@ -134,6 +155,23 @@ clawd-antenna — stuck on a hash matching no commit since 17:24 (a dirty
 checkout disables its auto-pull; no ssh to confirm) — and it is on the relay's
 switched-off list, so it opens no channel and costs no passkeys; shipcheck now
 shows a switched-off box's mismatch as a warning rather than failing on it.
+
+Next morning, Austin: "are you sure? I feel like I'm still doing passkeys now
+and then." Evidence, not reassurance: heart's log shows 3–4 paid passkeys a
+day through 09-09 and zero on 09-10; the relay holds four edge sessions, all
+created 09-06/07, so the front door hasn't prompted since. What's left is
+each other box's channels opened BEFORE it got the 7-day code yesterday
+afternoon — they carry a 24h deadline and lapse one by one today, one last
+prompt per box per device. (Only heart's stored deadlines were hand-extended.)
+Then the steady state is one per box per device per week, which with eight
+boxes and several devices is still "now and then" by design — the lever is
+the machines-tab switch. To make the next "are you sure" a table instead of
+a guess, the worker now reports `build.chan = {n, next, last}` (live channel
+count, earliest and latest hard deadline) and shipcheck prints "next passkey
+due" per box. Side find: the m2 viewer that has re-sent ClientHello every
+~100s since yesterday is this Mac's own Chrome (two sockets to the relay, no
+platform authenticator, so the assertion can never happen) — log noise, not
+a prompt on anyone's phone.
 
 ## 2026-09-08 — Council planning handoff (Claude)
 

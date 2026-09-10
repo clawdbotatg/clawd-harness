@@ -153,6 +153,23 @@ subprocess.run(["git", "-C", repo, "config", "user.name", "t"], check=True)
 open(os.path.join(repo, "notes.md"), "w").write("x")
 check("_worktree_dirty: untracked file counts", "?? notes.md" in server._worktree_dirty(repo))
 check("_worktree_dirty: not a repo → ''", server._worktree_dirty(TMP) == "")
+# 📑 the handoff itself is LOCAL: an untracked HANDOFF.md never counts as dirty,
+# and the arm writes it into .git/info/exclude (never .gitignore) so `git status`
+# doesn't even see it — the old prompt said "commit and push it", and the gate's
+# 409 on `?? HANDOFF.md` would have pushed a session that did not into doing so.
+open(os.path.join(repo, server.HANDOFF_FILE), "w").write("# handoff")
+check("_worktree_dirty: untracked HANDOFF.md is tolerated, other untracked still counts",
+      "notes.md" in server._worktree_dirty(repo) and "HANDOFF" not in server._worktree_dirty(repo),
+      server._worktree_dirty(repo))
+check("_exclude_handoff: writes the LOCAL exclude entry", server._exclude_handoff(repo) is True)
+excl = open(os.path.join(repo, ".git", "info", "exclude")).read()
+check("…as an anchored /HANDOFF.md line", "/HANDOFF.md\n" in excl)
+check("…idempotent (second call adds nothing)",
+      server._exclude_handoff(repo) is True and open(os.path.join(repo, ".git", "info", "exclude")).read() == excl)
+check("…and never touches .gitignore", not os.path.exists(os.path.join(repo, ".gitignore")))
+porc = subprocess.run(["git", "-C", repo, "status", "--porcelain"], capture_output=True, text=True).stdout
+check("git status no longer lists HANDOFF.md", "HANDOFF" not in porc and "notes.md" in porc, porc)
+check("_exclude_handoff: not a repo → False", server._exclude_handoff(TMP) is False)
 d = FakeSession(m3, "d", workdir=repo); d.wrap_arm()
 code, msg = d.self_close_request()
 check("dirty tree → 409 with the porcelain lines", code == 409 and "notes.md" in msg and not d.wrap_closing, f"{code} {msg}")
@@ -178,7 +195,9 @@ check("TTL passed → not armed (403)", not l.wrap_armed() and l.self_close_requ
 
 # --- 5. manager.wrap -----------------------------------------------------------
 m5 = FakeMgr()
-w = FakeSession(m5, "w")
+w_repo = os.path.join(TMP, "wrepo"); os.makedirs(w_repo)
+subprocess.run(["git", "init", "-q", w_repo], check=True)
+w = FakeSession(m5, "w", workdir=w_repo)
 err = m5.wrap("w")
 check("manager.wrap arms + delivers WRAP_PROMPT via 'wrap'",
       err == "" and w.wrap_armed() and m5.sent == [("w", server.WRAP_PROMPT, "wrap")] and m5.broadcasts == 1, f"{err} {m5.sent}")
@@ -195,6 +214,12 @@ check("manager.wrap_cancel disarms + broadcasts", not w.wrap_armed() and m5.broa
 check("prompt log got the wrap sends", open(server.PROMPTS_LOG).read().count('"via": "wrap"') == 2)
 check("WRAP_PROMPT names the command and the no-close rule",
       "harness-close" in server.WRAP_PROMPT and "do NOT close" in server.WRAP_PROMPT)
+check("WRAP_PROMPT: the handoff is HANDOFF.md, local, never committed/pushed/gitignored",
+      "HANDOFF.md" in server.WRAP_PROMPT and "do NOT commit it" in server.WRAP_PROMPT
+      and "do NOT push it" in server.WRAP_PROMPT and ".gitignore" in server.WRAP_PROMPT
+      and "commit and push it" not in server.WRAP_PROMPT)
+check("manager.wrap wrote the handoff exclude into the session's checkout",
+      "/HANDOFF.md\n" in open(os.path.join(w_repo, ".git", "info", "exclude")).read())
 
 # --- 6. the HTTP endpoint + bin/harness-close --------------------------------
 m6 = FakeMgr()

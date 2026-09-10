@@ -129,15 +129,30 @@ CLOSED_MAX = int(os.environ.get("CLOSED_MAX", "200"))
 WRAP_TTL_S = int(os.environ.get("WRAP_TTL_S", "1800"))
 WRAP_TURNS = int(os.environ.get("WRAP_TURNS", "2"))         # the doc turn + one follow-up
 WRAP_GRACE_S = int(os.environ.get("WRAP_GRACE_S", "20"))    # close anyway if no Stop follows the call
+# The handoff is a LOCAL file. 95% of wraps are not repo history, and a handoff
+# committed to GitHub is noise in the project's log — so the file is
+# HANDOFF.md at the repo root, listed in the checkout's .git/info/exclude (the
+# harness writes that entry when it arms the wrap; `_exclude_handoff`), never
+# committed, never pushed, never added to .gitignore. The self-close gate
+# tolerates exactly that one untracked file (`_worktree_dirty`); everything
+# else still has to be committed or stashed. A project whose own instructions
+# keep handoffs in a tracked log (HISTORY.md here) is the stated exception.
+HANDOFF_FILE = "HANDOFF.md"
 WRAP_PROMPT = (
     "We're wrapping this session up. Write the handoff for another agent or a "
     "future you: what changed, what's shipped vs. still local, open threads, "
-    "gotchas, and the exact next steps. Put it where this project keeps such "
-    "notes (an existing HANDOFF / HISTORY / docs file; else HANDOFF.md at the "
-    "repo root). If this is a git repo with a remote, commit and push it. Then "
-    "run `harness-close` (on your PATH) — it closes this session once the turn "
-    "ends. If something is unresolved or you need a decision from me, do NOT "
-    "close: say what's open and stop. End your last message with a 3-line TLDR.")
+    "gotchas, and the exact next steps. Write it to HANDOFF.md at the repo root "
+    "(replace an old one; keep whatever in it is still true). That file is "
+    "LOCAL notes, not repo history: it is already in this checkout's "
+    ".git/info/exclude, so do NOT commit it, do NOT push it, and do NOT add it "
+    "to .gitignore or any tracked file. Only if this project's own instructions "
+    "say handoffs belong in a tracked log (a HISTORY / docs file) write there "
+    "instead and commit as they say. Your actual work is separate from the "
+    "handoff: if code changes are still uncommitted, commit and push them as "
+    "usual. Then run `harness-close` (on your PATH) — it closes this session "
+    "once the turn ends. If something is unresolved or you need a decision "
+    "from me, do NOT close: say what's open and stop. End your last message "
+    "with a 3-line TLDR.")
 # A subscribe whose ring replay is this shallow gets the transcript rendered in
 # as seed scrollback first (see _history_seed_bytes) — the ring goes shallow
 # exactly when it can't carry history: a width-change fence (_apply_size) or a
@@ -1198,7 +1213,10 @@ def _worktree_dirty(path):
     """The first lines of `git status --porcelain` for a git checkout at
     `path` ("" = clean, not a repo, or git unavailable). The 📑 self-close
     gate: a dirty tree also blocks that box's auto-pull, so "wrap" must
-    leave it clean. Untracked files count — they're exactly what gets lost."""
+    leave it clean. Untracked files count — they're exactly what gets lost —
+    with ONE exception: an untracked HANDOFF.md at the root is the wrap's own
+    local handoff (deliberately uncommitted; normally hidden by the exclude
+    entry `_exclude_handoff` writes, tolerated here in case it isn't)."""
     if not path or not os.path.isdir(os.path.join(path, ".git")):
         return ""
     try:
@@ -1206,10 +1224,42 @@ def _worktree_dirty(path):
                            capture_output=True, text=True, timeout=5)
     except Exception:
         return ""
-    lines = [l for l in (r.stdout or "").splitlines() if l.strip()]
+    lines = [l for l in (r.stdout or "").splitlines()
+             if l.strip() and l != f"?? {HANDOFF_FILE}"]
     if not lines:
         return ""
     return "\n".join(lines[:5]) + (f"\n… +{len(lines) - 5} more" if len(lines) > 5 else "")
+
+
+def _exclude_handoff(path):
+    """List HANDOFF.md in the checkout's LOCAL exclude file (`git rev-parse
+    --git-path info/exclude` — lives under .git, never tracked, never pushed)
+    so the wrap handoff is invisible to `git status` and can't be committed by
+    accident. Idempotent. True when the entry is present (already or now);
+    False for a non-repo or a git failure (the gate's carve-out still covers
+    the file). Never touches .gitignore — that would be a repo change."""
+    if not path or not os.path.isdir(os.path.join(path, ".git")):
+        return False
+    try:
+        r = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=path,
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode != 0 or not r.stdout.strip():
+            return False
+        ex = r.stdout.strip()
+        if not os.path.isabs(ex):
+            ex = os.path.join(path, ex)
+        cur = open(ex, encoding="utf-8", errors="replace").read() if os.path.exists(ex) else ""
+        if any(l.strip() in (HANDOFF_FILE, "/" + HANDOFF_FILE) for l in cur.splitlines()):
+            return True
+        os.makedirs(os.path.dirname(ex), exist_ok=True)
+        with open(ex, "a", encoding="utf-8") as f:
+            if cur and not cur.endswith("\n"):
+                f.write("\n")
+            f.write("# \U0001f4d1 clawd-harness wrap handoff \u2014 local notes, never committed\n"
+                    f"/{HANDOFF_FILE}\n")
+        return True
+    except Exception:
+        return False
 
 
 def _transcript_exists(session_id, config_dir=""):
@@ -7909,6 +7959,7 @@ class SessionManager:
         if s.autopilot:
             return "autopilot is on — turn it off first"
         s.wrap_arm()
+        _exclude_handoff(s.workdir())             # HANDOFF.md stays local: .git/info/exclude, never committed
         txt = (text or "").strip() or WRAP_PROMPT
         log_prompt(s, txt, via)
         s.auto_tldr_armed = False                 # the reply ends with its own TLDR
