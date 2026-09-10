@@ -134,7 +134,7 @@ def fleet_check(lines):
         if ch.get("n"):
             due = f" · {ch['n']} channel{'s' if ch['n'] != 1 else ''}, next passkey due " \
                   f"{time.strftime('%m-%d %H:%M', time.localtime(ch['next']))}"
-        elif "chan" in b:
+        elif b.get("chan") is not None:     # relay passes chan:None through for pre-report workers
             due = " · no live channels (next open pays a passkey)"
         else:
             due = ""
