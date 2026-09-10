@@ -131,6 +131,7 @@ UPLOAD_QUOTA_WINDOW = float(os.environ.get("FLEET_UPLOAD_QUOTA_WINDOW", "600"))
 MOBILE_MAX_MESSAGE = int(os.environ.get("FLEET_MOBILE_MAX_MESSAGE", str(1024 * 1024)))
 # Sockets allowed to sit at the passkey gate at once (see add_mobile).
 MAX_UNAUTH = int(os.environ.get("FLEET_MAX_UNAUTH", "64"))
+UNAUTH_TTL = float(os.environ.get("FLEET_UNAUTH_TTL", "120"))   # absolute deadline; pongs cannot reserve login slots forever
 
 
 def _token_ok(provided, expected):
@@ -619,6 +620,7 @@ class Conn:
         self.kind = kind
         self.dead = False
         self.last_seen = time.time()
+        self.connected_at = time.monotonic()
         # Passkey second factor (mobiles). Workers are gated by their token at the
         # handshake; mobiles must additionally prove a WebAuthn assertion before any
         # frame is routed. mfa_ok flips true after a valid `auth` frame; auth_until
@@ -795,7 +797,8 @@ class Relay:
         """Best-effort write of the roster for shipcheck (see ROSTER_FILE)."""
         try:
             tmp = ROSTER_FILE.with_name(ROSTER_FILE.name + f".tmp{os.getpid()}")
-            tmp.write_text(json.dumps({"ts": int(time.time()), "machines": machines}))
+            tmp.write_text(json.dumps({"ts": int(time.time()), "machines": machines,
+                                       "expected": sorted(WORKER_ALLOW)}))
             os.chmod(tmp, 0o600)
             os.replace(tmp, ROSTER_FILE)
         except OSError:
@@ -829,21 +832,21 @@ class Relay:
         # second (stored session token) or after one Face ID; a pile of
         # never-authing sockets is abuse. Global, not per-IP: the whole fleet
         # and every phone share one home IP behind nginx.
-        if not conn.mfa_ok:
-            with self.lock:
-                parked = sum(1 for m in self.mobiles.values()
-                             if not m.dead and not m.mfa_ok)
-            if parked >= MAX_UNAUTH:
-                print(f"[relay] refusing mobile [{conn.peer}]: {parked} unauthenticated "
-                      f"sockets already parked (FLEET_MAX_UNAUTH={MAX_UNAUTH})", flush=True)
-                conn.send_json({"type": "error", "error": "too many unauthenticated connections"})
-                conn.close()
-                return
         with self.lock:
-            old = self.mobiles.get(conn.ident)
-            if old and old is not conn:
-                old.dead = True   # a reconnect supersedes the stale connection
-            self.mobiles[conn.ident] = conn
+            parked = sum(1 for m in self.mobiles.values()
+                         if not m.dead and not m.authed())
+            full = not conn.authed() and parked >= MAX_UNAUTH
+            old = None
+            if not full:
+                old = self.mobiles.get(conn.ident)
+                if old and old is not conn:
+                    old.dead = True
+                self.mobiles[conn.ident] = conn
+        if full:
+            conn.send_json({"type": "error", "error": "too many unauthenticated connections"})
+            conn.dead = True
+            conn.close()
+            return
         if old and old is not conn:
             # Close outside the lock: unblocks the old handler thread (else it
             # parks forever — only fixed idents like __ctl__ ever collide; a
@@ -1061,7 +1064,7 @@ class Relay:
         payload = data[1 + n:]
         with self.lock:
             m = self.mobiles.get(mobile_id)
-        if not m:
+        if not m or not m.authed():
             return
         mid = worker.ident.encode("ascii", "replace")
         m.send_binary(bytes([len(mid)]) + mid + payload)
@@ -1074,7 +1077,7 @@ class Relay:
                    "msg": frame.get("msg") or {}}
             with self.lock:
                 m = self.mobiles.get(to)
-            if m:
+            if m and m.authed():
                 m.send_json(out)
             return
         if t == "status":
@@ -1096,6 +1099,7 @@ class Relay:
             build = frame.get("build")   # {code,ttl,idle,started} — see header
             if isinstance(build, dict):
                 st["build"] = {k: build.get(k) for k in ("code", "ttl", "idle", "started", "chan")}
+            st["harnessBuild"] = frame.get("harnessBuild")
             worker.stats = st
             self.broadcast_roster()
             return
@@ -1112,6 +1116,11 @@ class Relay:
                 conns = list(self.workers.values()) + list(self.mobiles.values())
             stale = []
             for c in conns:
+                if (c.role == "mobile" and not c.authed()
+                        and time.monotonic() - c.connected_at > UNAUTH_TTL):
+                    c.dead = True
+                    c.close()
+                    continue
                 c.ping()
                 # A half-open worker keeps accepting our pings into the kernel
                 # buffer but never pongs back. If it's gone silent past the
@@ -1405,6 +1414,9 @@ class Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", "0") or 0)
         except ValueError:
             n = 0
+        if n <= 0:
+            self.close_connection = True
+            return self.send_error(400, "invalid content length")
         if not RELAY.upload_quota_ok(quota_key, n):
             self.close_connection = True
             return self.send_error(429, "upload quota exceeded")
@@ -1440,6 +1452,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _serve_ws(self, role, ident, host, kind="machine"):
+        # Pings keep healthy links active. Bound blocked writes too, so a peer
+        # that stops reading cannot stall the shared heartbeat indefinitely.
+        self.connection.settimeout(90)
         key = self.headers.get("Sec-WebSocket-Key", "")
         self.send_response(101)
         self.send_header("Upgrade", "websocket")
@@ -1457,6 +1472,7 @@ class Handler(BaseHTTPRequestHandler):
             RELAY.add_worker(conn)
         else:
             RELAY.add_mobile(conn)
+        budget_start, budget_used = time.monotonic(), 0
         try:
             while True:
                 try:
@@ -1465,6 +1481,13 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 if msg is None:
                     break
+                if role == "mobile" and not conn.authed():
+                    now = time.monotonic()
+                    if now - budget_start >= 10:
+                        budget_start, budget_used = now, 0
+                    budget_used += 1
+                    if budget_used > 30:
+                        break
                 kind, data = msg
                 if kind == "close":
                     break
@@ -1510,6 +1533,29 @@ class Handler(BaseHTTPRequestHandler):
 class ThreadingHTTPServer(ThreadingMixIn, TCPServer):
     daemon_threads = True
     allow_reuse_address = True
+    # Bound handler threads even before HTTP headers or a WS role arrive.
+    _slots = threading.BoundedSemaphore(256)
+
+    def get_request(self):
+        sock, address = super().get_request()
+        sock.settimeout(15)
+        return sock, address
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
     def handle_error(self, request, client_address):
         # A peer that vanished mid-response (worker socket flap, phone

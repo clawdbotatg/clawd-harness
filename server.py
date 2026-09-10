@@ -64,6 +64,9 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn, TCPServer
 
+# Snapshot at process start, never hash the possibly newer file on a request.
+HARNESS_BUILD = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+
 
 def _load_env_file():
     """Load KEY=VALUE lines from .clawd-harness.env (gitignored) into the env
@@ -8212,7 +8215,7 @@ class SessionManager:
         # Send projects then sessions; the client decides the initial view (no
         # forced focus — there may be zero sessions).
         client.send_json({"type": "projects", "projects": self.projects_meta(),
-                          "boot": BOOT_ID})
+                          "boot": BOOT_ID, "build": HARNESS_BUILD})
         client.send_json({"type": "sessions",
                           "sessions": self.sessions_meta(),
                           "current": self.default_cid()})
@@ -8839,6 +8842,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        # GETs also carry private data (/config, /pm) and serve executable UI.
+        # A rebinding page can read them without sending an Origin header.
+        if not self._origin_ok():
+            self.close_connection = True
+            return self.send_error(403, "bad origin")
         if path == "/ws" and self._is_ws_upgrade():
             if not self._origin_ok():
                 self.close_connection = True
@@ -8903,6 +8911,8 @@ class Handler(BaseHTTPRequestHandler):
         """Reverse-proxy /pm/* → the controller (sibling process on CONTROLLER_PORT)
         so the PM chat + debug live on this one origin. The controller stays a
         separate process; the browser never sees its port. 502 if it's down."""
+        if not self._token_ok():
+            return self.send_error(403, "bad token")
         import urllib.error
         sub = self.path[len("/pm"):] or "/"
         url = f"http://127.0.0.1:{CONTROLLER_PORT}{sub}"
@@ -9070,13 +9080,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_manifest(self):
-        # PWA manifest, served dynamically so direct mode can bake the token into
-        # start_url — an installed home-screen icon then authenticates the WS on a
-        # LAN bind (loopback ignores ?t=, so it's harmless there). The relay serves
-        # its OWN bare-start_url manifest (the passkey is the sole credential in
-        # fleet mode); see fleet/relay.py. start_url stays same-origin/same-scope so
-        # the launched window is treated as the installed app, not a browser tab.
-        start = f"/?t={TOKEN}" if TOKEN else "/"
+        # Public install metadata must never publish the LAN login credential.
+        # The installed app uses its saved credential or the normal login screen.
+        start = "/"
         man = {
             "name": "clawd-harness", "short_name": "clawd",
             "description": "Drive interactive Claude Code sessions from your phone.",

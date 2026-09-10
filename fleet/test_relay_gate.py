@@ -55,6 +55,7 @@ ENV = {
     "FLEET_RP_ID": "h.atg.link",
     "FLEET_ORIGIN": "https://h.atg.link",
     "FLEET_MAX_UNAUTH": "3",
+    "FLEET_UNAUTH_TTL": "10",
     "FLEET_MOBILE_MAX_MESSAGE": str(64 * 1024),
     "FLEET_UPLOAD_QUOTA": str(10 * 1024),
     # every state file isolated — never the live fleet/.clawd-fleet.*.json
@@ -208,6 +209,16 @@ def main():
         time.sleep(0.5)
         check("large worker frame accepted (per-role cap)", not wk.closed.is_set())
 
+        noisy = Peer(f"{RELAY}/ws?role=mobile")
+        noisy.wait_for(lambda f: f.get("type") == "authRequired")
+        for _ in range(31):
+            try:
+                noisy.send({"type": "ping"})
+            except OSError:
+                break
+        check("pre-auth message flood drops its socket", noisy.closed.wait(3))
+        noisy.close()
+
         # 7. unauthenticated-socket cap (3 here): mob is parked (1), open two
         #    more (2, 3), the fourth is refused and closed
         p2 = Peer(f"{RELAY}/ws?role=mobile")
@@ -219,6 +230,10 @@ def main():
         check("4th parked mobile refused (FLEET_MAX_UNAUTH)",
               err and "unauthenticated" in err.get("error", "") and p4.closed.wait(3.0))
         check("earlier parked mobiles unaffected", not (mob.closed.is_set() or p3.closed.is_set()))
+        p2.send({"type": "auth", "session": GOOD_SESS})
+        check("valid session authenticates", p2.wait_for(lambda f: f.get("type") == "authOk") is not None)
+        check("unauthenticated socket expires despite answering pings", mob.closed.wait(25))
+        check("authenticated socket survives login deadline", not p2.closed.is_set())
         for p in (mob, wk, big, p2, p3, p4):
             p.close()
     finally:

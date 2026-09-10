@@ -6,9 +6,7 @@
 <title>clawd-harness</title>
 <link rel="icon" type="image/png" href="favicon.png" />
 <!-- PWA: installable home-screen app (see manifest.webmanifest + sw.js). The
-     manifest is served dynamically per-mode (direct bakes ?t=<token> into
-     start_url; the relay serves a bare start_url since the passkey is the sole
-     credential). iOS half-ignores the manifest, so the apple-* tags below are
+     manifest always uses a bare start_url; credentials stay in the login flow. iOS half-ignores the manifest, so the apple-* tags below are
      what give the standalone full-screen feel + icon on iPhone. -->
 <link rel="manifest" href="manifest.webmanifest" />
 <meta name="theme-color" content="#000000" />
@@ -3293,6 +3291,7 @@ function hidePasskey(owner) {
 // already-paid Face ID instead of prompting a second one. One try only — on a
 // reject the relay re-challenges and the normal prompt takes over.
 let lastEdgeAuth = null;   // {frame, ts}
+let edgeAutoPrompted = false; // reconnecting at the gate must not repeat Face ID
 function onAuthRequired(m) {
   lastAuthReq = m;
   if (m.reason === 'expired') clearSession();
@@ -3313,7 +3312,10 @@ function onAuthRequired(m) {
   // Show the gnome and let the user tap to scan — a real user gesture, and the
   // experience they asked for ("what's the safe word?").
   showPasskey("prove it's you — unlock with your passkey");
-  setTimeout(() => doAssertion(m), REVEAL_MS);   // reveal the gnome, then auto-try (tap is the fallback)
+  if (!edgeAutoPrompted) {
+    edgeAutoPrompted = true;
+    setTimeout(() => doAssertion(lastAuthReq), REVEAL_MS);
+  } // subsequent attempts require the existing unlock button
 }
 
 async function doAssertion(m) {

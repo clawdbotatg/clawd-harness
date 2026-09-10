@@ -52,7 +52,7 @@ const html = readFileSync(join(ROOT, 'index.html'), 'utf8')
   .replace('<head>', '<head><script>window.__FLEET__=true;</script>');
 
 const browser = await chromium.launch({ executablePath: exec });
-const page = await browser.newPage({ viewport: { width: 500, height: 900 } });
+const page = await browser.newPage({ viewport: { width: 500, height: 900 }, hasTouch: true });
 
 // -- fake relay --------------------------------------------------------------
 // A WebSocket stand-in the probe drives from Node: __relayRx(frame) pushes a
@@ -210,6 +210,24 @@ await rx(ROSTER);
 await page.waitForTimeout(200);
 check('an EDGE prompt still closes on the roster that follows authOk',
       await page.$eval('#passkey', e => e.hidden));
+
+// Gate reconnects must not repeatedly launch the OS passkey prompt.
+await page.evaluate(() => {
+  clearSession(); lastEdgeAuth = null; edgeAutoPrompted = false;
+  window.__edgePrompts = 0;
+  Object.defineProperty(navigator, 'credentials', { configurable: true, value: {
+    get: async () => { window.__edgePrompts++; throw new Error('test cancelled'); }
+  }});
+});
+const authReq = { type: 'authRequired', enrolled: true, credentialIds: ['YQ'], challenge: 'YQ', rpId: 'h.atg.link' };
+await rx(authReq);
+await page.waitForTimeout(600);
+await rx(authReq); // the next socket after the unauthenticated deadline
+await page.waitForTimeout(600);
+check('gate reconnect prompts automatically only once', await page.evaluate(() => window.__edgePrompts) === 1);
+await page.locator('#passkeybtn').tap();
+await page.waitForTimeout(100);
+check('unlock button still retries the passkey', await page.evaluate(() => window.__edgePrompts) === 2);
 
 check('no uncaught page errors', errors.length === 0, errors.join(' | '));
 

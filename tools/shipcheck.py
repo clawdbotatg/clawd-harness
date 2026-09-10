@@ -19,16 +19,10 @@ refuses "IN PRODUCTION" until every ONLINE box reports HEAD's hash and the
 intended passkey cadence. Born of the 09-05 cadence change that sat dead on one
 box for four days while every file-level check here was green.
 
-What it does NOT check (say so out loud rather than imply coverage):
-  * server.py on each individual harness box (no version report yet). Those
-    boxes self-pull on their own ~5min timer; a dirty worktree on any box
-    silently opts it out of pulling at all (server.py auto_update_loop).
-  * OFFLINE boxes — listed, not failed. They come back running whatever they
-    had and self-restart within 30 min of the pull.
-  * SWITCHED-OFF boxes (the relay's inactive list) — shown with their mismatch
-    but not failed: the page opens no channel to them and they prompt for
-    nothing, so their worker code cannot reach the user.
-  * anything behind the passkey gate — this only reads the public UI bytes.
+All configured machines must be online and report matching worker AND harness
+process builds, including machines switched off in the UI. The relay's worker
+allowlist is the expected inventory. Missing inventory fails closed.
+This checks deployment, not every authenticated feature or compromise history.
 """
 import argparse
 import hashlib
@@ -88,6 +82,7 @@ def fleet_check(lines):
     at the intended cadence. Unreachable relay/roster = not verified = False."""
     bi = _buildinfo()
     want = head_code_hash(bi)
+    want_harness = hashlib.sha256(git("show", "HEAD:server.py").stdout.encode()).hexdigest()[:12]
     try:
         roster = fetch_roster()
     except Exception as e:
@@ -100,12 +95,23 @@ def fleet_check(lines):
                      f"running post-09-09 code? (systemctl status clawd-fleet-relay)")
         return False
     good = True
+    if not roster.get("machines"):
+        lines.append(f"{BAD} fleet: empty roster — no machines verified")
+        return False
+    expected = set(roster.get("expected") or [])
+    if not expected:
+        good = False
+        lines.append(f"{BAD} fleet: expected machine inventory not reported")
+    missing = expected - {m["id"] for m in roster.get("machines", [])}
+    for ident in sorted(missing):
+        good = False
+        lines.append(f"{BAD} fleet: {ident} missing/offline — not verified")
     inactive = roster.get("inactive", set())
     for m in sorted(roster.get("machines", []), key=lambda m: m["id"]):
-        # A box switched OFF from the machines tab opens no channel and prompts
-        # for nothing, so its worker code can't reach the user: shown, not failed.
+        # Switching a box off in the UI does not remove its attack surface.
         off = m["id"] in inactive
         if not m.get("online"):
+            good = False
             lines.append(f"{WARN} fleet: {m['id']:<14} offline (last seen "
                          f"{int((time.time() - m.get('lastSeen', 0)) / 60)} min ago) — not verified")
             continue
@@ -119,8 +125,11 @@ def fleet_check(lines):
         ttl = b.get("ttl")
         ttl_ok = ttl is None and m.get("kind") == "relay" or ttl == bi.CADENCE
         ok = code_ok and ttl_ok
-        good &= ok or off
-        mark = OK if ok else (WARN if off else BAD)
+        harness = (m.get("stats") or {}).get("harnessBuild")
+        harness_ok = m.get("kind") == "relay" or harness == want_harness
+        ok = ok and harness_ok
+        good &= ok
+        mark = OK if ok else BAD
         ch = b.get("chan") or {}
         if ch.get("n"):
             due = f" · {ch['n']} channel{'s' if ch['n'] != 1 else ''}, next passkey due " \
@@ -132,6 +141,8 @@ def fleet_check(lines):
         lines.append(f"{mark} fleet: {m['id']:<14} " + ("(switched off) " if off else "") +
                      f"code {b.get('code')} {'= HEAD' if code_ok else '≠ HEAD ' + want}"
                      f"{'' if ttl is None else f' · ttl {ttl}s' + ('' if ttl_ok else f' (want {bi.CADENCE})')}"
+                     f" · harness {harness or 'not reported'}"
+                     f"{'' if harness_ok else ' ≠ HEAD ' + want_harness}"
                      f" · up since {time.strftime('%m-%d %H:%M', time.localtime(b.get('started') or 0))}" + due)
     return good
 
@@ -163,7 +174,9 @@ def check(verbose=True):
     else:
         lines.append(f"{OK} working tree clean")
 
-    git("fetch", "--quiet", "origin", "main")
+    fetched = git("fetch", "--quiet", "origin", "main")
+    if fetched.returncode:
+        return False, lines + [f"{BAD} cannot fetch origin/main — latest code not verified"]
     ahead = git("rev-list", "--count", "origin/main..HEAD").stdout.strip()
     behind = git("rev-list", "--count", "HEAD..origin/main").stdout.strip()
     if ahead and ahead != "0":
@@ -171,6 +184,7 @@ def check(verbose=True):
         lines.append(f"{BAD} {ahead} commit(s) committed but NOT pushed — "
                      f"production cannot see them. `git push origin main`")
     elif behind and behind != "0":
+        good = False
         lines.append(f"{WARN} local is {behind} behind origin/main (someone else pushed)")
     else:
         lines.append(f"{OK} HEAD is pushed to origin/main")
@@ -218,8 +232,7 @@ def main():
             print("\n".join(lines))
             if good:
                 print("\nIN PRODUCTION — UI bytes on h.atg.link and the worker code + "
-                      "passkey TTL on every ONLINE box match HEAD. (Not checked: "
-                      "server.py on the boxes; offline boxes.)")
+                      "passkey TTL and running harness on every listed box match HEAD.")
             elif unpushed:
                 print("\nNOT SHIPPED — and waiting will not fix it. Push. See above.")
             elif prod_behind:

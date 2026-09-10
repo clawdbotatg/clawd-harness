@@ -519,6 +519,7 @@ class Worker:
         # the local harness and reported to the relay for the roster. None until
         # the first poll succeeds. Just three integers — never titles or content.
         self.stats = None
+        self.harness_build = None
         # Web Push: subscriptions handed down by the relay (the phone's, opaque)
         # and per-session notify state for "needs you" detection + throttling.
         self.push_subs = []
@@ -754,6 +755,7 @@ class Worker:
         if self.sys is not None:
             payload["sys"] = self.sys
         payload["build"] = dict(BUILD, chan=self._chan_summary())   # what this process runs + when it next prompts
+        payload["harnessBuild"] = self.harness_build
         self.send_relay(payload)
 
     def _chan_summary(self):
@@ -1176,6 +1178,8 @@ class Worker:
             except Exception as e:
                 print(f"{ts()} [worker {self.machine}] stats link error: {e}", flush=True)
                 self._harness_watchdog(e)
+            finally:
+                self.harness_build = None
             time.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
 
@@ -1212,6 +1216,7 @@ class Worker:
         self._harness_down_since = None
 
     def _poll_stats_once(self):
+        self.harness_build = None
         url = f"{self.harness_ws}/ws?t={quote(self.harness_token)}"
         sock, rfile, wfile = fleet_ws.client_connect(url)
         self._harness_watchdog_ok()
@@ -1246,6 +1251,8 @@ class Worker:
                     self.maybe_notify_accounts(frame)
                     continue
                 if t == "projects":
+                    if "build" in frame:
+                        self.harness_build = frame["build"]
                     projs = frame.get("projects") or []
                     nproj = len(projs)
                     # cache pid → name/repoUrl so a notification can build the

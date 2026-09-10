@@ -11,6 +11,38 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-10 — security follow-up and complete deployment checks
+
+The earlier Origin fix covered WS/POST but missed GET: `/config` and `/pm` were
+still readable through DNS rebinding. All harness GETs now enforce Host/Origin;
+the PM proxy also requires the harness token when bound beyond loopback.
+The public direct-mode PWA manifest also disclosed the LAN login token; its
+start URL is now bare and the installed app uses its saved login or login screen.
+The controller's own local HTTP API also accepted foreign websites with wildcard
+CORS; it now rejects foreign Origin and non-loopback Host on every method.
+
+Login slots are allocated atomically and expire after 120 seconds without auth,
+even if a peer answers pings. The UI automatically prompts once per page load;
+reconnects leave the existing unlock button available, avoiding Face ID loops.
+Relay HTTP header reads time out after 15 seconds and handler threads cap at 256.
+Pre-auth traffic is capped at 30 frames/10 seconds; established socket I/O has a
+90-second timeout so a stalled reader cannot indefinitely block heartbeat writes.
+Expired mobiles no longer receive targeted worker replies or binary frames.
+
+Production nginx's exact `/ws` location now caps a source IP at 32 connections
+and 5 handshakes/sec with burst 30 (household + nine workers fit). Versioned
+snippets are in fleet/deploy/harness-{limits,ws-limits}.conf; only h.atg.link
+uses them. Backups precede installation, and nginx validation precedes reload.
+
+Shipcheck previously skipped disabled boxes and did not check server.py. Now
+startup harness hashes travel worker → relay → shipcheck, and every expected
+machine from the relay allowlist must be present and current, even when switched
+off in the UI. Empty/missing inventory fails. Tests cover HTTP routes, controller
+routes, expired login sockets, prompt retries, and stale/missing build reports.
+
+Uploads still use authenticated HTTPS through the trusted relay, not E2E;
+relay-host compromise and distributed traffic floods remain outside these fixes.
+
 ## 2026-09-10 — 📑 wrap: the handoff is local, not a commit
 
 Austin: "95% of the time we do not want that handoff document to be in the

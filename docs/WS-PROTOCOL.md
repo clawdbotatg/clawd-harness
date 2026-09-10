@@ -418,3 +418,11 @@ frame with `event:"Stop"` — `data.last` is the assistant's final message.**
 For a full remote terminal/transcript UI, also relay the binary frames and
 `transcript` events verbatim — they already carry everything the harness's own
 `index.html` renders.
+
+### Running harness build (2026-09-10)
+
+The initial `projects` frame includes `build`, the first 12 hex characters of
+SHA-256 of server.py captured at startup. Workers forward it as `harnessBuild`
+in roster stats. Later `projects` frames may omit it. A stats-link disconnect
+clears the worker's cached value. This is running-process evidence, not a
+request-time hash of a newer file on disk.

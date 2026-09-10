@@ -51,6 +51,21 @@ const url = `http://127.0.0.1:${PORT}/?t=${token}`;
 
 const browser = await chromium.launch({ executablePath: exec });
 const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+// Live session broadcasts can repaint the fabricated breadcrumb mid-measurement.
+// This geometry probe needs no real session or transport.
+await page.addInitScript(() => {
+  class FakeWS {
+    static OPEN = 1;
+    constructor() {
+      this.readyState = 1;
+      setTimeout(() => this.onopen?.({}), 0);
+    }
+    send() {}
+    close() { this.readyState = 3; }
+    addEventListener() {}
+  }
+  window.WebSocket = FakeWS;
+});
 let failed = false;
 const fail = (m) => { console.error('FAIL: ' + m); failed = true; };
 
@@ -66,6 +81,7 @@ await page.waitForTimeout(1200);
 // Fabricate the breadcrumb the way refreshBreadcrumb() does, and drive the real
 // updateTtyStat() over a stubbed roster covering every state.
 const states = await page.evaluate(() => {
+  setView('tty'); // the fabricated session needs a visible session view
   const descrow = document.getElementById('descrow');
   const descEl = document.getElementById('sessiondesc');
   descrow.classList.add('insession');

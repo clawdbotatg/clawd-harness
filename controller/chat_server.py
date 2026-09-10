@@ -14,7 +14,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler
 from socketserver import TCPServer, ThreadingMixIn
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHAT_HTML = os.path.join(HERE, "chat.html")
@@ -50,6 +50,25 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None,
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
+        def parse_request(self):
+            if not super().parse_request():
+                return False
+            # Only the loopback proxy and same-origin local UI may reach this
+            # API. Wildcard CORS previously exposed fleet control to websites.
+            host = self.headers.get("Host", "").lower()
+            origin = self.headers.get("Origin")
+            try:
+                allowed = urlsplit("http://" + host).hostname in ("localhost", "127.0.0.1", "::1")
+                if origin is not None:
+                    u = urlsplit(origin)
+                    allowed = allowed and u.scheme in ("http", "https") and u.netloc.lower() == host
+            except ValueError:
+                allowed = False
+            if not allowed:
+                self.close_connection = True
+                self.send_error(403, "bad origin")
+            return allowed
+
         def log_message(self, *a):
             pass
 
@@ -62,16 +81,11 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None,
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
-            # CORS: let the main harness UI (a different port → different origin)
-            # fetch this API so the PM can be folded into index.html as a panel.
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
             self.wfile.write(body)
 
         def do_OPTIONS(self):
             self.send_response(204)
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Content-Length", "0")

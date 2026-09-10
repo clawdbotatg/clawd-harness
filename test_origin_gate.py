@@ -88,5 +88,56 @@ check("fragments under cap reassemble",
       srv.ws_read_message(io.BytesIO(frags), max_len=12) == (0x1, b"a" * 12))
 check("default cap is 8 MiB", srv.MAX_WS_MESSAGE == 8 * 1024 * 1024)
 
+# Exercise handlers over HTTP: helper-only tests missed the GET route omission.
+import http.client
+import threading
+from types import SimpleNamespace
+from controller.chat_server import make_handler, ThreadingHTTPServer
+
+def route_checks(handler, server_class, label):
+    server = server_class(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    try:
+        for method, path in (("GET", "/config"), ("GET", "/pm/api/tools"),
+                             ("GET", "/"), ("POST", "/api/tool")):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            c.request(method, path, headers={"Host": "attacker.invalid", "Content-Length": "0"})
+            r = c.getresponse()
+            check(f"{label} rebinding {method} {path} refused", r.status == 403)
+            r.read(); c.close()
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        c.request("GET", "/", headers={"Origin": "https://attacker.invalid"})
+        r = c.getresponse()
+        check(f"{label} foreign origin refused", r.status == 403)
+        r.read(); c.close()
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        c.request("GET", "/missing")
+        r = c.getresponse()
+        check(f"{label} local proxy allowed", r.status == 404)
+        check(f"{label} no wildcard CORS", r.getheader("Access-Control-Allow-Origin") != "*")
+        r.read(); c.close()
+    finally:
+        server.shutdown(); server.server_close()
+
+route_checks(srv.Handler, srv.ThreadingHTTPServer, "harness")
+route_checks(make_handler(None, None, SimpleNamespace(autonomy="readonly"), lambda: "test"),
+             ThreadingHTTPServer, "controller")
+# The public manifest must not disclose the bearer credential on a LAN bind.
+server = srv.ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+try:
+    srv.AUTH_REQUIRED = True
+    c = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+    c.request("GET", "/manifest.webmanifest")
+    r = c.getresponse(); body = r.read().decode(); c.close()
+    check("public manifest never publishes the token", r.status == 200 and srv.TOKEN not in body
+          and __import__("json").loads(body)["start_url"] == "/")
+finally:
+    server.shutdown(); server.server_close()
+
+check("harness build is the startup file hash", srv.HARNESS_BUILD ==
+      __import__("hashlib").sha256((REPO / "server.py").read_bytes()).hexdigest()[:12])
+
 print(f"\n{'RED' if FAILS else 'GREEN'}: {len(FAILS)} failure(s)")
 sys.exit(1 if FAILS else 0)

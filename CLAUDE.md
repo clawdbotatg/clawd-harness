@@ -14,9 +14,9 @@ because the story isn't inline here).
    touches `index.html`, `server.py`, or `fleet/`. When you add a feature,
    add/extend a guard; the gate picks it up automatically.
 2. **`python3 tools/shipcheck.py --wait` exits 0** — tree clean, HEAD pushed,
-   `h.atg.link` serving HEAD's `index.html` byte-for-byte, **and every ONLINE
-   fleet box reporting HEAD's worker code hash + the 7-day passkey TTL from its
-   running process** (the fleet leg, via the relay's roster dump; `fleet/`
+   `h.atg.link` serving HEAD's `index.html` byte-for-byte, **and every configured
+   fleet box reporting HEAD's worker and harness code hashes + the 7-day passkey
+   TTL from its running processes** (the fleet leg, via the relay's roster dump; `fleet/`
    changes take up to 30 min to converge — `--wait 2100`). Never say "fixed",
    "live" or "shipped" to Austin before this exits 0; if it can't be run, say
    *unverified*, not done.
