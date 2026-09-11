@@ -34,6 +34,25 @@ console session id (NOT claude's rotating `session_id`).
 
 ---
 
+## ⏏ Breakout window — one session, no chrome
+
+```
+<any session hash>  +  ?breakout=1 in the QUERY
+https://h.atg.link/?breakout=1#/m/clawd-heart/p/github.com%2Fclawdbotatg%2Fclawd-harness/s/<cid>/tty
+```
+
+`?breakout=1` is a **mode**, not a destination: the page hides everything above
+the session pane (header, iron row, tab strip, needs-you bar) and shows just
+the terminal + the composer — the session alone in its own window. Because nav
+lives in the hash and the flag lives in the query, hash routing never touches
+it: hop, reload, close-and-land-on-a-neighbour all stay broken out, and a link
+copied *without* the query opens the normal app. The window is titled by the
+session's name.
+
+The ⏏ button beside 📌/✕ on a session (desktop only) opens exactly this URL in a
+`popup` window named `breakout:<cid>`, so pressing it again on the same session
+focuses the window you already have. Guard: `tools/breakoutprobe.mjs`.
+
 ## Compose link — open a project with a message ready (or already sent)
 
 ```

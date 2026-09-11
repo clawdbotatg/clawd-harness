@@ -201,6 +201,23 @@
   #pinBtn:hover { opacity:1; color:var(--accent); border-color:var(--accent); }
   #pinBtn.show { display:block; }
   #pinBtn.pinned { opacity:.9; color:var(--accent); border-color:var(--accent-dim); }
+  /* ⏏ break out — the open session alone in its own popup window: no top bar,
+     no tab strip, just the terminal + composer (the `?breakout=1` mode below).
+     Desktop only: on touch a popup is just another tab with no way back. */
+  #ejectBtn { position:absolute; top:6px; right:84px; z-index:20; display:none;
+              width:30px; height:30px; line-height:28px; text-align:center; padding:0;
+              font-size:15px; cursor:pointer; border-radius:6px;
+              background:var(--bg); color:var(--dim); border:1px solid var(--edge);
+              opacity:.55; transition:opacity .12s, color .12s, border-color .12s; }
+  #ejectBtn:hover { opacity:1; color:var(--accent); border-color:var(--accent); }
+  #ejectBtn.show { display:block; }
+  @media (pointer: coarse) { #ejectBtn { display:none !important; } }
+  /* breakout window (`?breakout=1`): everything ABOVE the session pane goes —
+     header, iron row, tab strip, needs-you bar — and the ⏏ itself (you're
+     already out). What's left is exactly the pane + the footer. */
+  html.breakout header, html.breakout #ironrow, html.breakout #sessionbar,
+  html.breakout #needsbar, html.breakout #ejectBtn { display:none !important; }
+  html.breakout #machineTag { right:84px; }
   /* pill beside the close-✕ (top-right): which MODEL is answering (accent/
      yellow), how full its context window is, the session's 🔑 subscription
      account (when not the default login) and — fleet mode — which box it lives
@@ -211,7 +228,7 @@
      transparent label was unreadable the moment output scrolled under it.
      It used to be split — model+ctx sat bottom-right — until the 🟦 tldr
      overlay landed on exactly that corner and got covered. */
-  #machineTag { position:absolute; top:6px; right:84px; z-index:20; display:none;
+  #machineTag { position:absolute; top:6px; right:122px; z-index:20; display:none;
                 gap:8px; align-items:center; height:30px; font:11px var(--mono); color:var(--ink);
                 background:var(--bg); border:1px solid var(--edge); border-radius:6px;
                 padding:0 9px; opacity:.9; pointer-events:none; user-select:none; white-space:nowrap; }
@@ -221,6 +238,7 @@
   #machineTag .ctx.warn { color:var(--accent); }
   #machineTag .ctx.crit { color:var(--err); }
   #machineTag .acct, #machineTag .mach { color:var(--ink); }
+  @media (pointer: coarse) { #machineTag { right:84px; } }   /* no ⏏ on touch — close the gap */
   .col { display:flex; flex-direction:column; min-width:0; min-height:0; }
   #left  { flex:1; position:relative; }   /* anchors the #splash overlay */
   #right { flex:1; background:var(--bg); }
@@ -1374,6 +1392,7 @@
   <main>
     <span id="machineTag"></span>
     <button id="pinBtn" title="Pin this session — park it on the 📌 board and jump to the next session">📌</button>
+    <button id="ejectBtn" title="Break out — open this session alone in its own window (no top bar, no tabs: just the terminal and the composer)">⏏</button>
     <button id="closeBtn" title="Close this session (done with this job)">✕</button>
     <section class="col hidden" id="projects">
       <div id="projectlist"></div>
@@ -1514,6 +1533,13 @@
 // overlapping keystrokes ("thithis issthis is a…"), so all input goes through
 // the message box (which gets native dictation/paste/image handling for free).
 const isTouch = window.matchMedia('(pointer: coarse)').matches;
+// ⏏ breakout window: `?breakout=1` in the QUERY. The hash is nav, the query is
+// mode — hash routing never touches the query, so the flag survives every hop,
+// tab, and reload inside that window, and a normal link never inherits it.
+// html.breakout hides the harness chrome (header, iron row, tab strip, needs
+// bar): one session, terminal + composer, nothing else. Opened by #ejectBtn.
+const BREAKOUT = (() => { try { return new URL(location.href).searchParams.get('breakout') === '1'; } catch { return false; } })();
+if (BREAKOUT) document.documentElement.classList.add('breakout');
 // Preferred deep view when you dive into a session: desktop drives the live
 // terminal (full keyboard, drives the TUI directly); touch reads the transcript
 // The session view is the live terminal (tty) on every device — the transcript
@@ -3460,6 +3486,7 @@ function handleJson(m) {
     renderSessions();
     refreshBreadcrumb();                  // a renamed session updates the crumb live
     refreshSessionTag();                  // account may have just landed for the open session
+    syncBreakoutTitle();                  // ⏏ window title follows a rename
     renderPinsUI();                       // 📌 count/board tracks pin state live
     renderIronLive();                     // 🔥 an open iron page tracks its sessions live
     maybeIronDive();                      // an iron click waiting on the roster dives now
@@ -9398,6 +9425,7 @@ const menuBtn = document.getElementById('menuBtn');
 const projectsBtn = document.getElementById('projectsBtn');
 const ironsHdrBtn = document.getElementById('ironsBtn');   // 🔥 header icon, left of 🗂️
 const closeBtn = document.getElementById('closeBtn');
+const ejectBtn = document.getElementById('ejectBtn');   // ⏏ break out (handler below, beside 📌's)
 const machineTag = document.getElementById('machineTag');
 closeBtn.onclick = () => closeCurrentSession();
 // Pill beside the close-✕ (top-right): model · ctx% · 🔑 account · machine.
@@ -9463,6 +9491,8 @@ function setView(view) {
   const inSession = (tty || view === 'transcript') && !!currentCid;
   closeBtn.classList.toggle('show', inSession);  // big close-✕ only when a session is open
   updatePinBtn();       // 📌 toggle rides beside it, state mirrors the open session
+  ejectBtn.classList.toggle('show', inSession && !isTouch && !BREAKOUT);   // ⏏ desktop only; pointless once broken out
+  syncBreakoutTitle();  // a broken-out window is titled by its session
   refreshSessionTag();  // 🔑 account + machine tag beside the close-✕
   // Composer is hidden on the projects rung (nothing to talk to) and the pin
   // board (every card carries its own prompt row). On the sessions list it
@@ -9525,6 +9555,32 @@ pinBtn.onclick = () => {
   sendPin(cid, on);
   if (on) hopAfterPin(cid);
 };
+// ⏏ break out: this session alone in its own popup window — no top bar, no tabs,
+// just the terminal + composer (BREAKOUT / `?breakout=1`). The window is NAMED
+// by cid, so ejecting the same session twice focuses the window you already
+// have instead of opening a second one. This tab stays exactly where it is.
+// `popup` is as chromeless as the web allows (no tabs, no bookmarks, a read-only
+// address strip); the hash is the same machine-aware deep link the bar shows.
+function breakoutUrl() {
+  syncUrl();                                   // make sure the hash is this session's
+  const u = new URL(location.href);
+  u.searchParams.set('breakout', '1');
+  return u.pathname + u.search + location.hash;
+}
+ejectBtn.onclick = () => {
+  if (!currentCid) return;
+  const w = Math.min(1100, Math.round(screen.availWidth * .8));
+  const h = Math.min(900, Math.round(screen.availHeight * .9));
+  const win = window.open(breakoutUrl(), 'breakout:' + currentCid, `popup=1,width=${w},height=${h}`);
+  if (win) try { win.focus(); } catch {}
+};
+// The broken-out window has no header, so its TITLE is the session's name (the
+// OS window title / the dock is how you tell three of them apart).
+function syncBreakoutTitle() {
+  if (!BREAKOUT) return;
+  const s = currentCid && allSessions().find(x => x.cid === currentCid);
+  document.title = s ? '⏏ ' + (s.tab || s.title || 'session') : 'clawd-harness';
+}
 document.getElementById('reloadBtn').onclick = () => location.reload();   // manual escape hatch — draft + hash survive a reload
 machinesBtn.onclick = () => openMachines();          // 🖥️ roster page (no longer a rung)
 // The top-left title = "show me everything I'm working on": the sessions rung

@@ -80,8 +80,10 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   `docs/fleet/SUB-ROUTING.md`.
 - **index.html** — the single UI file, one page, hash routing
   (`#/` projects · `#/p/<pid>` sessions · `…/s/<cid>/tty` terminal ·
-  `#/pins` · `#/irons`, `#/i/<id>`). Served untouched in direct mode; the
-  fleet relay injects `window.__FLEET__`. **One copy — edit here, push.**
+  `#/pins` · `#/irons`, `#/i/<id>`; `?breakout=1` in the QUERY = ⏏ breakout
+  mode, chrome hidden, one session per window — `docs/DEEPLINKS.md`). Served
+  untouched in direct mode; the fleet relay injects `window.__FLEET__`.
+  **One copy — edit here, push.**
 - **fleet/** — relay + worker driving N harnesses from one phone. Hard
   boundary: fleet code never imports `server.py`; the wire contract is
   `docs/WS-PROTOCOL.md` — keep it in sync with any WS change. Deep docs:

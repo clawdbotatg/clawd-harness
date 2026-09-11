@@ -11,6 +11,22 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-11 — ⏏ break out: a session alone in its own window
+
+Austin still likes a good session in its own screen, not one tab among twenty.
+The ⏏ beside 📌/✕ opens the open session in a `popup` window at the same
+machine-aware hash the bar shows plus `?breakout=1`; that flag puts
+`html.breakout` on the root, which hides everything above the pane (header,
+iron row, tab strip, needs bar) — just the terminal + the composer, titled by
+the session. Design points: the flag rides the QUERY so hash routing (hops,
+reload, close→neighbour) can't lose it and a copied hash-only link never
+inherits it; the popup is NAMED `breakout:<cid>` so a second ⏏ focuses the
+existing window instead of stacking a duplicate; the ⏏ hides on touch (a
+popup there is a tab with no way back) and inside a breakout window (already
+out). `popup` is as chromeless as the web allows — no tabs/bookmarks, a
+read-only address strip; fully bare needs a Chrome `--app` window.
+`tools/breakoutprobe.mjs` (real click → real popup, both wires stubbed).
+
 ## 2026-09-11 — ＋ carries the rung's half-typed prompt into the new session
 
 Austin's nitpick: on a project's session list you start typing a prompt, then
