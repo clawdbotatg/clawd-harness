@@ -11,6 +11,22 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-11 — ＋ carries the rung's half-typed prompt into the new session
+
+Austin's nitpick: on a project's session list you start typing a prompt, then
+— because a spawn is never quite trusted to come up — you tap ＋ rather than
+Enter, land in the fresh session, and the composer is empty; the text is still
+sitting outside in the rung's draft. Now `newSession()` from the sessions rung
+moves the box text into `cc_pendingsend` (the same sessionStorage slot the
+Enter-on-the-rung path uses) and clears the outside draft; the focus reply
+takes it into the new session's composer as *that* session's draft — moved,
+never sent. Because it rides the existing slot, every recovery net applies
+unchanged: no focus in `NEW_FOCUS_WAIT_MS` → the rung's composer takes it
+back; a reload mid-spawn lands on the rung with it. Skipped when Enter already
+queued a send (`pendingSendText` owns the text) and on the sign-in ceremony's
+`'tty'` focus. `tools/spawnprobe.mjs` cases 6–7 (real typing + a real click on
+`#newSession`).
+
 ## 2026-09-10 — security follow-up and complete deployment checks
 
 The earlier Origin fix covered WS/POST but missed GET: `/config` and `/pm` were

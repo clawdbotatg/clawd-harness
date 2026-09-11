@@ -17,6 +17,9 @@
 //      sessions rung, the text back in the box, no stray `send`
 //   4. when the focus DOES land, the island goes away and the text is delivered
 //   5. a reload mid-void lands on the sessions rung with the text restored
+//   6. ＋ tapped with a half-typed prompt on the rung CARRIES it into the fresh
+//      session's composer (moved, never sent; the outside draft cleared)
+//   7. …and if that spawn never comes back, the carried text returns to the rung
 //
 // No harness, no relay, no session: window.WebSocket is stubbed before the page
 // loads. Exit code is non-zero if a check fails.
@@ -152,9 +155,59 @@ await page.waitForTimeout(500);
 await rx(PROJECTS);
 await rx({ type: 'sessions', sessions: [] });
 await page.waitForTimeout(600);
+await page.evaluate(w => { NEW_FOCUS_WAIT_MS = w; }, WAIT);   // the reload restored the 30s production wait
 st = await state();
 check('a reload mid-void lands on the sessions rung', st.view === 'sessions' && st.pid === 'p1', JSON.stringify(st));
 check('…with the text restored to the box', st.box === TEXT2, JSON.stringify(st.box));
+
+// ── 6: ＋ with a draft in the box carries it inside ─────────────────────────
+// 2026-09-11 (Austin): you never trust a spawn to come up, so instead of Enter
+// on the rung you tap ＋ and go in — and the prompt you'd started typing outside
+// should be waiting in the composer inside, not left behind (and not sent).
+const TEXT3 = 'started typing outside, tap plus, finish inside';
+const stores = () => page.evaluate(() => ({
+  outside: localStorage.getItem('cc_draft:new:p1'), inside: localStorage.getItem('cc_draft:c2'),
+  pending: sessionStorage.getItem('cc_pendingsend'), active: activeDraftId }));
+await page.evaluate(() => { pendingSendText = null; setView('sessions'); box.value = ''; saveDraft(); });
+await page.waitForTimeout(200);
+await clearSent();
+await page.focus('#box');
+await page.keyboard.type(TEXT3);
+let so = await stores();
+check('typing on the rung drafts into the project\'s outside slot', so.outside === TEXT3 && so.active === 'new:p1', JSON.stringify(so));
+await page.click('#newSession');
+await page.waitForTimeout(300);
+st = await state(); so = await stores(); fr = await sent();
+check('＋ opens the island with the box emptied', st.view === 'tty' && st.veil && st.box === '', JSON.stringify(st));
+check('…the outside draft is gone, the text parked in the pending slot', so.outside === null && so.pending === TEXT3, JSON.stringify(so));
+check('…and it is NOT queued as a send', st.pendingSendText === null && !fr.some(f => f.type === 'send'), JSON.stringify(st));
+await rx({ type: 'focus', cid: 'c2' });
+await rx({ type: 'sessions', sessions: [{ cid: 'c2', pid: 'p1', title: 'probe session 2', alive: true, status: 'idle', account: 'default' }] });
+await rx({ type: 'hook', cid: 'c2', event: 'SessionStart' });
+await page.waitForTimeout(900);
+st = await state(); so = await stores(); fr = await sent();
+check('the focus lands the carried text in the new session\'s composer', st.cid === 'c2' && st.box === TEXT3, JSON.stringify(st));
+check('…saved as that session\'s own draft, pending slot spent', so.inside === TEXT3 && so.pending === null && so.active === 'c2', JSON.stringify(so));
+check('…still never sent', !fr.some(f => f.type === 'send'), JSON.stringify(fr));
+await page.evaluate(() => setView('sessions'));
+await page.waitForTimeout(200);
+st = await state();
+check('back on the rung the outside box is empty (moved, not copied)', st.view === 'sessions' && st.box === '', JSON.stringify(st.box));
+
+// ── 7: ＋ with a draft, spawn never comes back → text returns to the rung ───
+const TEXT4 = 'carried into a void, handed back';
+await page.evaluate(() => { box.value = ''; saveDraft(); });
+await clearSent();
+await page.focus('#box');
+await page.keyboard.type(TEXT4);
+await page.click('#newSession');
+await page.waitForTimeout(300);
+st = await state();
+check('＋ with text parks on the island again', st.view === 'tty' && st.veil && st.box === '', JSON.stringify(st));
+await page.waitForTimeout(WAIT + 800);
+st = await state(); fr = await sent();
+check('no focus → back on the rung with the carried text in the box', st.view === 'sessions' && st.box === TEXT4, JSON.stringify(st));
+check('…and nothing was sent', !fr.some(f => f.type === 'send'), JSON.stringify(fr));
 
 check('no uncaught page errors', errors.length === 0, errors.join(' | '));
 await browser.close();

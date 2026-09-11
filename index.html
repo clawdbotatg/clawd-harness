@@ -3492,6 +3492,16 @@ function handleJson(m) {
       if (wantTty) setView('tty');        // sign-in ceremony: the login TUI needs the terminal
       // openSession→subscribe clears the feed, so show the queued box now (after).
       if (pendingSendText) addPending(pendingSendText, pendingSendText);
+      else if (!wantTty) {
+        // ＋ carried a draft in from the sessions rung (newSession): it lands in
+        // THIS session's composer — as a draft to finish, not a send. openSession
+        // already synced the box to the new cid, so saveDraft keys it right.
+        const carried = takePending();
+        if (carried) {
+          box.value = carried; autosizeBox(); saveDraft();
+          try { box.setSelectionRange(carried.length, carried.length); } catch {}
+        }
+      }
     } else {
       const stay = currentCid && sessionList.some(s => s.cid === currentCid);
       subscribe(stay ? currentCid : m.cid);
@@ -6356,6 +6366,21 @@ function newSession(targetMachine, engine) {
     pendingNewFocus = false;
     meta.textContent = 'not connected — try again in a moment';
     return;
+  }
+  // ＋ tapped on the sessions rung with a half-typed prompt in the box: bring the
+  // text INTO the fresh session rather than leaving it behind outside. (Austin,
+  // 2026-09-11: you land on a project's session list, start typing, and — since
+  // you never quite trust a spawn to come up — tap ＋ instead of Enter, then find
+  // the composer inside empty.) It rides the same slot the Enter path uses
+  // (cc_pendingsend), so every recovery net already applies: the focus reply
+  // moves it into the new session's composer (moved, never sent — see the focus
+  // handler); no focus → the rung's composer takes it back; a reload mid-spawn
+  // lands on the rung with it. The outside draft is cleared: one copy, one place.
+  // Skipped when Enter already queued a send (pendingSendText) — that path owns
+  // the text and clears the box itself.
+  if (currentView() === 'sessions' && !pendingSendText && box.value.trim()) {
+    stashPending(box.value);
+    box.value = ''; autosizeBox(); clearDraft();   // activeDraftId is still new:<pid> here
   }
   armNewFocusWatch();              // "starting…" now; stand down loudly if no focus ever lands
   setView(DEEP_VIEW);              // server replies with a focus → subscribe once it's spawned
