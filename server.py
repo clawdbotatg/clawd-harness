@@ -3441,10 +3441,10 @@ class ClaudeSession:
             return 409, "a sign-in session can't close itself."
         if self.autopilot:
             return 409, "autopilot owns this session — it can't close itself."
+        # Uncommitted files no longer block the close (Austin, 2026-09-11: local
+        # notes like HANDOFF.md live in the tree on purpose). They are named in
+        # the reply so claude can mention them in its TLDR.
         dirty = _worktree_dirty(self.workdir())
-        if dirty:
-            return 409, ("worktree has uncommitted changes — commit (or stash) "
-                         "first, then run harness-close again:\n" + dirty)
         self.wrap_closing = True
         print(f"[wrap {self.cid[:8]}] self-close accepted"
               + (f" ({reason[:80]!r})" if reason else "") + " — closing at turn end", flush=True)
@@ -3452,7 +3452,8 @@ class ClaudeSession:
         t.daemon = True
         self._wrap_timer = t
         t.start()
-        return 200, "closing when this turn ends — finish with a 3-line TLDR."
+        note = ("\nnote: uncommitted files in the worktree, left as they are:\n" + dirty) if dirty else ""
+        return 200, "closing when this turn ends — finish with a 3-line TLDR." + note
 
     def _wrap_close(self, how):
         """Perform the accepted self-close (from the Stop hook, or the grace

@@ -72,11 +72,10 @@ Plain-text replies; each is a sentence claude can act on. Gates, in order:
    you're done and stop.` **This is the guard.**
 3. not `s.ceremony`; not `s.autopilot` (the supervisor owns that session) →
    `409`.
-4. **clean tree**: if the project path has a `.git` and
-   `git status --porcelain` (5 s timeout) is non-empty → `409 worktree has
-   uncommitted changes — commit (or stash) first, then run harness-close
-   again.` A dirty tree in the self project also blocks that box's
-   auto-pull, so this gate is "keeping things clean" made literal.
+4. **dirty tree is not a gate** (changed 2026-09-11): `git status --porcelain`
+   is still run, but a non-empty result only adds a `note:` listing the files
+   to the 200 reply, so claude can mention them. Local notes such as a
+   HANDOFF.md kept out of git must not stop a session from closing.
 5. Accept: `s.wrap_closing = True`, reply `200 closing when this turn ends
    — finish with a 3-line TLDR.` Start a `WRAP_GRACE_S = 20` fallback timer
    in case no Stop hook ever arrives (e.g. the session is killed by claude
