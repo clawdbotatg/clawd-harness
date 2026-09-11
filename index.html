@@ -218,6 +218,15 @@
   html.breakout header, html.breakout #ironrow, html.breakout #sessionbar,
   html.breakout #needsbar, html.breakout #ejectBtn { display:none !important; }
   html.breakout #machineTag { right:84px; }
+  /* …and the session-name line moves UP into its own bar (Austin, 09-11: title
+     at the top, the footer row keeps the room for the chips and toggles).
+     Boot moves the #sessiondesc node itself in here, so every renderer keeps
+     writing to the same element. Gone when there's no name to show. */
+  #breakoutbar { display:flex; align-items:center; min-width:0; padding:6px 12px;
+                 border-bottom:1px solid var(--edge); background:var(--panel); }
+  #breakoutbar[hidden], #breakoutbar:has(#sessiondesc:empty) { display:none; }
+  html.breakout #breakoutbar #sessiondesc:not(:empty) { display:block; flex:1 1 auto; min-width:0; }
+  html.breakout #quickchips { flex:1 1 auto; margin-left:0; }   /* the chips take the freed line */
   /* pill beside the close-✕ (top-right): which MODEL is answering (accent/
      yellow), how full its context window is, the session's 🔑 subscription
      account (when not the default login) and — fleet mode — which box it lives
@@ -1389,6 +1398,7 @@
       <button id="passkeybtn">whisper the safe word 🔒</button>
     </div>
   </div>
+  <div id="breakoutbar" hidden></div>   <!-- ⏏ only: the session name, moved up out of the footer -->
   <main>
     <span id="machineTag"></span>
     <button id="pinBtn" title="Pin this session — park it on the 📌 board and jump to the next session">📌</button>
@@ -1539,7 +1549,13 @@ const isTouch = window.matchMedia('(pointer: coarse)').matches;
 // html.breakout hides the harness chrome (header, iron row, tab strip, needs
 // bar): one session, terminal + composer, nothing else. Opened by #ejectBtn.
 const BREAKOUT = (() => { try { return new URL(location.href).searchParams.get('breakout') === '1'; } catch { return false; } })();
-if (BREAKOUT) document.documentElement.classList.add('breakout');
+if (BREAKOUT) {
+  document.documentElement.classList.add('breakout');
+  // the session-name line lives at the TOP here (the node moves; its renderers don't care)
+  const bar = document.getElementById('breakoutbar');
+  bar.appendChild(document.getElementById('sessiondesc'));
+  bar.hidden = false;
+}
 // Preferred deep view when you dive into a session: desktop drives the live
 // terminal (full keyboard, drives the TUI directly); touch reads the transcript
 // The session view is the live terminal (tty) on every device — the transcript

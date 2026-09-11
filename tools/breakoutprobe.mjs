@@ -96,8 +96,13 @@ if (popup) {
     out.inTty = currentView() === 'tty' && currentCid === CID;
     out.ejectGone = gone('#ejectBtn');
     out.closeUp = getComputedStyle(document.getElementById('closeBtn')).display !== 'none';
+    // the session-name line sits in its own bar at the very top; the pane starts right under it
+    const desc = document.getElementById('sessiondesc');
+    const bar = document.getElementById('breakoutbar').getBoundingClientRect();
+    out.descOnTop = desc.parentElement.id === 'breakoutbar' && desc.textContent.includes('probe breakout session') && bar.top < 2 && bar.height > 10;
+    out.descOffFooter = !document.getElementById('descrow').contains(desc);
     const term = document.getElementById('term').getBoundingClientRect();
-    out.paneAtTop = term.top < 2 && term.height > 200;                  // nothing above the pane
+    out.paneAtTop = Math.abs(term.top - bar.bottom) < 3 && term.height > 200;   // nothing between the bar and the pane
     out.footerUp = getComputedStyle(document.querySelector('footer')).display !== 'none';
     out.title = document.title;
     out.titled = document.title === '⏏ eject-me';
@@ -121,7 +126,7 @@ const r3 = await page.evaluate((CID) => {
 
 const ok = r1.hiddenOnRung && r1.inTty && r1.shownInTty && r1.headerUp && r1.notBreakout && r1.reachable
   && r2.opened && r2.flag && r2.hashOk && r2.named && r2.noToken && r2.cls && r2.headerGone && r2.barGone && r2.ironGone && r2.needsGone
-  && r2.inTty && r2.ejectGone && r2.closeUp && r2.paneAtTop && r2.footerUp && r2.titled && r2.nothingSent && r2.noDuplicate
+  && r2.inTty && r2.ejectGone && r2.closeUp && r2.descOnTop && r2.descOffFooter && r2.paneAtTop && r2.footerUp && r2.titled && r2.nothingSent && r2.noDuplicate
   && r3.nothingSent;
 console.log(ok ? 'PASS — ⏏ shows in a session, a real click pops a breakout window with only the pane + composer, same session, no duplicate'
               : 'FAIL');
