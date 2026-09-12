@@ -2944,8 +2944,14 @@ async function e2eEnsure(machine, opts = {}) {
         const master = b64uDec(rs.master), rn = b64uDec(r.rn);
         if (!E2E._eq(await E2E.resumeConfirm(master, rn), b64uDec(r.cf))) throw new Error('resume-cf');
         ch.session = await E2E.resumeSession(master, rn);
+        ch.resumeMaster = rs.master; ch.rn = r.rn; ch.openedAt = Date.now();
         ch.status = 'open'; delete e2eFailUntil[machine]; delete e2eCfFails[machine]; meta.textContent = '';
         e2eLog(machine, '#' + ch.inst, 'resumed silently');
+        // A SECOND resumed reply may have landed while we derived (a previous
+        // attempt's late answer resolved dRes first — the 09-11 black tty): the
+        // worker keeps only its NEWEST resume, so follow it. See e2eRekey.
+        if (ch.lateResumed && ch.lateResumed.rn !== ch.rn) e2eRekey(machine, ch, ch.lateResumed);
+        ch.lateResumed = null;
         const q = ch.queue; ch.queue = [];
         for (const fr of q) e2eSendFrame(machine, fr);
         return ch;
@@ -2965,6 +2971,7 @@ async function e2eEnsure(machine, opts = {}) {
         }
         e2eLog(machine, '#' + ch.inst, 'resume dead (' + why + ') → full handshake');
         e2eClearResume(machine); delete e2eCfFails[machine];
+        if (opts.silentOnly) throw new Error('resume-dead');   // a background rebuild never raises an uninvited passkey
         ch.pendingCtl = null; ch.dSH = e2eDeferred(); ch.dSD = e2eDeferred();
       }
     }
@@ -2990,7 +2997,7 @@ async function e2eEnsure(machine, opts = {}) {
     ch.session = await cli.done(sd);
     ch.fp = await cli.fingerprint();
     e2eSaveResume(machine, cli.resumeMaterial().id, cli.resumeMaterial().master);  // no-passkey reloads
-    ch.status = 'open'; delete e2eFailUntil[machine];
+    ch.status = 'open'; delete e2eFailUntil[machine]; ch.openedAt = Date.now();
     e2eLog(machine, '#' + ch.inst, 'OPEN (full handshake)');
     meta.textContent = ch.firstPin ? ('🔒 pinned · ' + ch.fp) : '';
     const q = ch.queue; ch.queue = [];
@@ -3030,14 +3037,69 @@ function e2eSendFrame(machine, frame) {
   ch.sendChain = ch.sendChain.then(async () => {
     const rec = await ch.session.seal(E2E.KIND_JSON, bytes);
     relaySend({ type: 'toMachine', machine, msg: { t: 'e2e.rec', r: b64uEnc(rec) } });   // buffered until authed
+    e2eNoteSent(machine, ch);
   }).catch(() => {});
+}
+
+// ---- channel desync recovery (2026-09-11: every tty black, fleet-wide) -------
+// A channel can be 'open' here while the worker can't read a byte of it, and a
+// frame the worker can't open is dropped SILENTLY (fleet/e2e.py — no error, no
+// reply). Three ways in, all seen that night: (1) a resume reply arriving after
+// the 10s budget was consumed by the NEXT attempt, so our keys came from an older
+// worker nonce than the one the worker kept; (2) the worker lost its session
+// (restart/drop) and answers every record "no session"/"expired", which the
+// phase gate below filed as a zombie; (3) anything else that leaves the channel
+// deaf. With no recovery path the page asked for lists forever, never
+// subscribed, and the terminal stayed empty through ten reloads. So: follow the
+// worker's newest resume (e2eRekey), rebuild on a session-lost error, and
+// rebuild when frames go unanswered (e2eDeafCheck) — always silently: a rebuild
+// resumes off stored material and never raises an uninvited passkey
+// (silentOnly). tools/e2eresyncprobe.mjs drives all three against a fake relay.
+function e2eRekey(machine, ch, msg) {
+  (async () => {
+    const master = b64uDec(ch.resumeMaster), rn = b64uDec(msg.rn);
+    if (!E2E._eq(await E2E.resumeConfirm(master, rn), b64uDec(msg.cf))) { e2eLog(machine, '#' + ch.inst, 'later resume reply failed confirm — ignored'); return; }
+    const s = await E2E.resumeSession(master, rn);
+    // swap on the recv chain so records still in flight open under the keys they were sealed with
+    ch.recvChain = ch.recvChain.then(() => { if (e2eChans[machine] !== ch) return; ch.session = s; ch.rn = msg.rn; ch.sentSinceRecv = 0; e2eLog(machine, '#' + ch.inst, 're-keyed to the worker\'s newer resume (it keeps only the newest)'); });
+  })().catch(() => {});
+}
+function e2eRebuild(machine, ch, why) {
+  if (e2eChans[machine] !== ch) return;
+  clearTimeout(ch.deafTimer); ch.deafTimer = null;
+  delete e2eChans[machine];
+  if (!e2eLoadResume(machine)) return;     // no material → the next user gesture handshakes; never a background passkey
+  e2eEnsure(machine, { auto: true, silentOnly: true, reason: why }).then(() => {
+    e2eSendFrame(machine, { type: 'list' });
+    if (machine === currentMachine && currentCid && currentView() === 'tty') { subscribe(currentCid, { soft: true }); sendResize(ttyOwned); }
+  }).catch(() => {});
+}
+let E2E_DEAF_MS = 10000;                  // frames out, nothing back for this long → the channel is dead to the worker
+const e2eDeafAt = {};                      // machine -> last deaf rebuild (one per minute, so a quiet link can't churn)
+function e2eNoteSent(machine, ch) {
+  ch.sentSinceRecv = (ch.sentSinceRecv || 0) + 1;
+  if (!ch.deafTimer) ch.deafTimer = setTimeout(() => e2eDeafCheck(machine, ch), E2E_DEAF_MS);
+}
+function e2eDeafCheck(machine, ch) {
+  ch.deafTimer = null;
+  if (e2eChans[machine] !== ch || ch.status !== 'open') return;
+  const quiet = Date.now() - Math.max(ch.lastRecvAt || 0, ch.openedAt || 0);
+  if ((ch.sentSinceRecv || 0) >= 3 && quiet >= E2E_DEAF_MS && Date.now() - (e2eDeafAt[machine] || 0) > 60000) {
+    e2eDeafAt[machine] = Date.now();
+    e2eLog(machine, '#' + ch.inst, 'deaf: ' + ch.sentSinceRecv + ' frames sent, nothing back in ' + Math.round(quiet / 1000) + 's → rebuilding');
+    e2eRebuild(machine, ch, 'deaf');
+  } else if (ch.sentSinceRecv) ch.deafTimer = setTimeout(() => e2eDeafCheck(machine, ch), E2E_DEAF_MS);
 }
 
 function e2eOnCtl(machine, msg) {
   const ch = e2eChans[machine];
   if (!ch) return;
   if (msg.t === 'e2e.shello') ch.dSH.resolve(msg);
-  else if (msg.t === 'e2e.resumed') ch.dRes.resolve(msg);
+  else if (msg.t === 'e2e.resumed') {
+    if (ch.status === 'open' && ch.resumeMaster) { if (msg.rn !== ch.rn) e2eRekey(machine, ch, msg); return; }   // a later reply → newest wins
+    ch.lateResumed = msg;                  // remembered in case dRes was already settled by an earlier reply
+    ch.dRes.resolve(msg);
+  }
   else if (msg.t === 'e2e.done') ch.dSD.resolve(msg);
   else if (msg.t === 'e2e.err') {
     // A worker error only counts against the attempt it belongs to. Blanket
@@ -3049,6 +3111,17 @@ function e2eOnCtl(machine, msg) {
     // worker echoes `for` (the signed challenge / resume id), require it to
     // match this channel's attempt — otherwise it's a zombie: log and drop.
     const era = msg.error || 'worker error';
+    if ((era === 'no session' || era === 'expired') && ch.status === 'open') {
+      // The worker has no session for this channel — every record we send is
+      // being refused. Filing this as a zombie (below) is what kept a dead
+      // channel 'open' all night. Rebuild silently; replies to records that
+      // predate this channel are ignored for a moment after it opened.
+      if (Date.now() - (ch.openedAt || 0) < 1500) return;
+      e2eLog(machine, '#' + ch.inst, 'worker says "' + era + '" on an open channel → rebuilding');
+      if (era === 'expired') e2eClearResume(machine);
+      e2eRebuild(machine, ch, 'worker-' + era.replace(' ', '-'));
+      return;
+    }
     const phaseOk = era === 'e2e unavailable'
       || (era === 'resume' && ch.phase === 'resume')
       || (era === 'hello' && ch.phase === 'hello')
@@ -3079,6 +3152,7 @@ function e2eOnRecord(machine, rec) {
   ch.recvChain = ch.recvChain.then(async () => {
     let out;
     try { out = await ch.session.open(rec); } catch { return; }   // drop bad/replayed
+    ch.sentSinceRecv = 0; ch.lastRecvAt = Date.now();             // the worker can read us — not deaf
     if (out.kind === E2E.KIND_BIN) {
       if (machine !== currentMachine) return;                      // only the viewed terminal paints
       if (pendingNewFocus) return;                                 // awaiting a new session's focus — drop the leaving session's stragglers (see newSession)

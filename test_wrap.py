@@ -8,8 +8,8 @@ Guards (server side, on fakes — never the live daemon):
   1. unarmed `harness-close` → 403 and the session is untouched;
   2. armed → 200, deferred: the NEXT Stop closes it with reason "wrapped",
      and the grace timer closes it if no Stop ever comes;
-  3. gates: sign-in ceremony, autopilot, a dirty git worktree (untracked
-     counts; the porcelain lines ride in the refusal) → 409;
+  3. gates: sign-in ceremony, autopilot → 409; a dirty git worktree (untracked
+     counts) still closes, its porcelain lines named in the reply (6b5aec1);
   4. the arm lapses: WRAP_TURNS Stops without a call, or the TTL → disarmed,
      session alive; wrapCancel disarms and defuses an accepted close;
   5. manager.wrap arms + delivers the prompt (default WRAP_PROMPT, or the
@@ -174,7 +174,9 @@ check("git status no longer lists HANDOFF.md", "HANDOFF" not in porc and "notes.
 check("_exclude_handoff: not a repo → False", server._exclude_handoff(TMP) is False)
 d = FakeSession(m3, "d", workdir=repo); d.wrap_arm()
 code, msg = d.self_close_request()
-check("dirty tree → 409 with the porcelain lines", code == 409 and "notes.md" in msg and not d.wrap_closing, f"{code} {msg}")
+# 6b5aec1: a dirty tree no longer blocks the close (Austin, 09-11 — local notes
+# live in the tree on purpose); the porcelain lines ride in the reply instead.
+check("dirty tree → still closes, porcelain lines in the note", code == 200 and "notes.md" in msg and "uncommitted" in msg and d.wrap_closing, f"{code} {msg}")
 subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
 subprocess.run(["git", "-C", repo, "commit", "-qm", "handoff"], check=True)
 check("_worktree_dirty: clean after commit", server._worktree_dirty(repo) == "")

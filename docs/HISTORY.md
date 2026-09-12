@@ -11,6 +11,30 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-11 — every tty black: an E2E channel the worker couldn't read
+
+Evening: every terminal on h.atg.link black, head and heart alike, through ten
+reloads. Harnesses, workers and relay all healthy (plain pings 100 ms; a
+worker-style connect to each harness answered at once). The page held an
+`open` E2E channel to every machine and sent `list` every second — and got
+nothing back, because a record the worker can't open is dropped SILENTLY
+(`fleet/e2e.py`). Two machines did answer, "no session" on every record, and
+the page's phase gate filed those as a replaced attempt's zombie. With no
+sessions frame the deep-link resolver never subscribed → empty terminal.
+
+How the keys diverged: the 17:58 server.py commit restarted every harness,
+which killed the workers' viewer links, which fired relist storms plus a burst
+of reloads; handshake replies took 7–10 s past the page's 10 s resume budget,
+so the NEXT attempt consumed the previous attempt's late reply — page keys from
+an older worker nonce than the one the worker kept. Fix (page only, no wire
+change): a later `e2e.resumed` re-keys the open channel (`e2eRekey`, the
+worker keeps only its newest); "no session"/"expired" on an open channel
+rebuilds it silently (`e2eRebuild`, `silentOnly` — never an uninvited
+passkey); and a deaf watchdog rebuilds when 3+ frames go unanswered for 10 s,
+at most once a minute. `tools/e2eresyncprobe.mjs`. Proved live first: tearing
+down the probe tab's channel and resuming once made the very next list answer
+and the terminal draw on Austin's exact URL.
+
 ## 2026-09-11 — ⏏ break out: a session alone in its own window
 
 Austin still likes a good session in its own screen, not one tab among twenty.
