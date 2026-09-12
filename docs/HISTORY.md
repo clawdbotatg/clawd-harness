@@ -11,6 +11,21 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-11 — the tab strip scrolls again (wrap reverted)
+
+Austin: "I was wrong when I decided that we should show all the tabs… they
+should just get hidden off the screen like they were." The 2026-09-06 wrap
+(next entry) lasted five days: with a dozen sessions the strip took several
+rows and the terminal lost them, which turned out to be the worse trade. So
+`#sessionbar` is back to exactly what it was before 09-06 — one
+`overflow-x:auto` row, tabs past the edge roll off-screen and scroll sideways,
+the 🔎 filter is `position:sticky; right:0` with its fade gradient again, and
+the bar's `ResizeObserver` is gone (its height is constant, so the footer's
+observer + the hidden/shown flip cover every refit case). `tabfilterprobe`
+is the pre-wrap version verbatim: it asserts the filter stays pinned while
+the strip scrolls under it and fails if it stops being sticky. The CSS
+comment now says not to bring `flex-wrap` back.
+
 ## 2026-09-11 — every tty black: an E2E channel the worker couldn't read
 
 Evening: every terminal on h.atg.link black, head and heart alike, through ten

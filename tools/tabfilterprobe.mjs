@@ -9,10 +9,8 @@
 //
 // What it asserts — the four ways this widget can be broken:
 //   1. it exists and sits at the FAR RIGHT of the strip (its whole point);
-//   2. the strip WRAPS (2026-09-06): it never scrolls sideways, every tab is
-//      inside the bar's box, and on a narrow viewport the tabs spill onto extra
-//      rows rather than off-screen. (It was a single scrolling row with the
-//      filter position:sticky over the tabs — that's the regression to catch.)
+//   2. it stays pinned there when the strip is scrolled (position:sticky, so the
+//      tabs pass underneath it instead of carrying it off-screen);
 //   3. typing actually narrows the strip — a nonsense word hides every tab but
 //      the open one, a word from a real tab keeps that tab;
 //   4. a repaint doesn't eat it. renderSessionBar() runs on every `sessions`
@@ -63,54 +61,35 @@ try {
 }
 await page.waitForTimeout(2000);
 
-// ---- 1 + 2: present, far right, and the strip wraps instead of scrolling ----
+// ---- 1 + 2: present, far right, and pinned there while the strip scrolls ----
 const GEOM_FN = async () => {
   const bar = document.getElementById('sessionbar');
   const f = bar && bar.querySelector('.tfilter');
   if (!bar || bar.hidden || !f) return { ok: false, barHidden: !bar || bar.hidden, has: !!f };
   const settle = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const gapAt = () => bar.getBoundingClientRect().right - f.getBoundingClientRect().right;
+  const atLeft = gapAt();
+  const scrollable = bar.scrollWidth - bar.clientWidth;
+  bar.scrollLeft = scrollable;                      // shove the strip to its far end
   await settle();
-  const br = bar.getBoundingClientRect();
-  const gap = br.right - f.getBoundingClientRect().right;
-  const tabs = [...bar.querySelectorAll('.stab')].filter(t => t.offsetParent !== null);
-  const rects = tabs.map(t => t.getBoundingClientRect());
-  const rows = new Set(rects.map(r => Math.round(r.top))).size;
-  const tabsW = rects.reduce((a, r) => a + r.width, 0) + 6 * Math.max(0, rects.length - 1);
-  // every tab (and the filter) must sit inside the bar's own box — nothing clipped, nothing off to the side
-  const inside = rects.concat([f.getBoundingClientRect()]).every(r =>
-    r.left >= br.left - 1 && r.right <= br.right + 1 && r.top >= br.top - 1 && r.bottom <= br.bottom + 1);
-  return { ok: true, tabs: tabs.length, gap, rows, inside, tabsW, barW: bar.clientWidth,
-           overflowX: bar.scrollWidth - bar.clientWidth, overflowY: bar.scrollHeight - bar.clientHeight,
-           wrap: getComputedStyle(bar).flexWrap, position: getComputedStyle(f).position };
+  const atRight = gapAt();
+  bar.scrollLeft = 0; await settle();
+  return { ok: true, tabs: bar.querySelectorAll('.stab').length, scrollable, atLeft, atRight,
+           sticky: getComputedStyle(f).position };
 };
 function checkGeom(g, where) {
   console.log('GEOM' + where, JSON.stringify(g));
   if (!g.ok) { fail(`no .tfilter in the tab strip (barHidden=${g.barHidden}, has=${g.has})`); return; }
-  if (g.gap > 16) fail(`${where}: filter is not at the far right of the strip (${g.gap.toFixed(1)}px gap)`);
+  if (g.atLeft > 16) fail(`${where}: filter is not at the far right of the strip (${g.atLeft.toFixed(1)}px gap)`);
   else pass(`${where}: filter box sits at the far right of the tab strip`);
-  if (g.wrap !== 'wrap') fail(`${where}: #sessionbar must flex-wrap:wrap, got ${g.wrap}`);
-  if (g.position === 'sticky') fail(`${where}: the filter is position:sticky again — that was the scrolling strip`);
-  if (g.overflowX > 1 || g.overflowY > 1) fail(`${where}: the strip overflows its box (x=${g.overflowX}, y=${g.overflowY}) — tabs are hidden`);
-  else if (!g.inside) fail(`${where}: a tab or the filter lies outside the strip's box`);
-  else pass(`${where}: every tab is inside the strip — nothing to scroll to`);
-  // tabs wider than the bar MUST have wrapped onto more than one row
-  if (g.tabsW > g.barW) {
-    if (g.rows < 2) fail(`${where}: ${g.tabs} tabs (${g.tabsW}px) outrun a ${g.barW}px strip but sit on one row`);
-    else pass(`${where}: ${g.tabs} tabs wrap onto ${g.rows} rows, all visible`);
-  } else pass(`${where}: ${g.tabs} tabs fit on one row — wrap not exercised at this width`);
+  if (g.sticky !== 'sticky') fail(`expected position:sticky, got ${g.sticky}`);
+  if (g.scrollable > 20 && Math.abs(g.atRight - g.atLeft) > 2)
+    fail(`${where}: filter drifted when the strip scrolled (${g.atLeft.toFixed(1)} → ${g.atRight.toFixed(1)})`);
+  else pass(g.scrollable > 20 ? `${where}: filter stays pinned while the tabs scroll under it`
+                              : `${where}: strip does not overflow — pin-on-scroll not exercised`);
 }
 const geom = await page.evaluate(GEOM_FN);
 checkGeom(geom, ' desktop');
-// A phone-width viewport forces the wrap with any handful of tabs.
-if (geom.ok && geom.tabs >= 3) {
-  await page.setViewportSize({ width: 420, height: 800 });
-  await page.waitForTimeout(300);
-  const narrow = await page.evaluate(GEOM_FN);
-  checkGeom(narrow, ' narrow');
-  if (narrow.ok && narrow.rows < 2) fail(`narrow: ${narrow.tabs} tabs at 420px did not wrap (${narrow.rows} row)`);
-  await page.setViewportSize({ width: 900, height: 800 });
-  await page.waitForTimeout(300);
-}
 
 // ---- 3: typing narrows the strip -------------------------------------------
 if (geom.ok && geom.tabs > 0) {
