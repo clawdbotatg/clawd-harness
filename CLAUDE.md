@@ -93,7 +93,8 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   update three places together: the verb, its MCP description, and the persona**
   (`controller/prompts/private.md`). Deep doc: `docs/CONTROLLER.md`.
 - Feature docs on demand: `docs/CODEX-ENGINE.md`, `docs/DEEPLINKS.md`,
-  `docs/fleet/ACCOUNTS-PANEL.md`, voice in `docs/CONTROLLER.md` + `docs/voice/`,
+  `docs/fleet/ACCOUNTS-PANEL.md`, `docs/fleet/DOCS-STORE.md` (the shared
+  shelf: `/docs/*` on the relay, own token, the `fleet-docs` library skill), voice in `docs/CONTROLLER.md` + `docs/voice/`,
   `docs/fleet/SKILLS.md` (the private skill library on the relay: a 📚 tap
   ATTACHES the skill to your next message as a chip, like a dropped `.md`,
   and Enter sends text + a one-line pointer claude Reads; `skillput`

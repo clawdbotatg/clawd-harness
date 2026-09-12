@@ -11,6 +11,24 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-12 — the doc store: a shared shelf on the relay box
+
+Austin: "I find myself wanting to share documents between machines… tell
+one agent to make a plan and store it somewhere an agent on another computer
+can get to… maybe up on the web server where h.atg.link is… a quick file
+store up there that uses a token and we just have the token in the skill
+file." Built as exactly that: `fleet/relay.py` grew a flat store
+(`.clawd-fleet.docs/`) behind `GET /docs/list|get`, `POST /docs/put|rm`,
+raw bytes in and out, content-type by extension. Its own token
+(`.clawd-fleet.docs.token`, auto-generated on first boot) because the token
+lives in the `fleet-docs` library skill and therefore in transcripts and
+upload dirs on every machine — a leak must not equal the worker token.
+Overwrite and remove both keep the previous bytes in `.trash/`, same idea
+as the skill library. No UI, no sync, no WS verb: a session gets the skill
+with one 📚 tap and uses curl. Handoff doc `docs/fleet/DOCS-STORE.md`
+(holds the skill template with the token blanked); test
+`fleet/test_docs_store.py`.
+
 ## 2026-09-11 — the tab strip scrolls again (wrap reverted)
 
 Austin: "I was wrong when I decided that we should show all the tabs… they

@@ -57,3 +57,5 @@ tools/*.png
 # probe screenshots — regenerated on every run, pure churn in diffs
 
 # ⚙️ settings page probe shots
+# the fleet doc store (shared shelf on the relay box) + its token
+fleet/.clawd-fleet.docs*

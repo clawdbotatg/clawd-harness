@@ -260,6 +260,16 @@ store dir moves to `.trash/` (recoverable). Publish with `share/bin/skillput`.
 `_skills_sync_cleanup` (one-shot in worker.py) undoes its installs. **Deep
 doc: `../docs/fleet/SKILLS.md`**; test: `test_skills_lib.py`.
 
+## Fleet doc store (2026-09-12)
+The relay box also holds the **shared doc shelf** (`.clawd-fleet.docs/`,
+gitignored): flat named files any agent on any machine puts/gets over HTTP
+(`/docs/list|get|put|rm`) so a plan written on one box is one curl away on
+another, from anywhere on the web. Gated by its **own** token
+(`FLEET_DOCS_TOKEN`, else auto-generated `.clawd-fleet.docs.token`) — never
+the worker token, because the token rides inside the `fleet-docs` library
+skill. Overwrite and rm both keep the old bytes in `.trash/`. **Deep doc:
+`../docs/fleet/DOCS-STORE.md`**; test: `test_docs_store.py`.
+
 ## Deep docs
 - **`../docs/fleet/ADD-MACHINE.md`** — self-contained checklist to add a new
   machine to the fleet (the doc to hand a fresh Claude on the new box). Covers the
