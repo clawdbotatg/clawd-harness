@@ -176,12 +176,16 @@ d = FakeSession(m3, "d", workdir=repo); d.wrap_arm()
 code, msg = d.self_close_request()
 # 6b5aec1: a dirty tree no longer blocks the close (Austin, 09-11 — local notes
 # live in the tree on purpose); the porcelain lines ride in the reply instead.
-check("dirty tree → still closes, porcelain lines in the note", code == 200 and "notes.md" in msg and "uncommitted" in msg and d.wrap_closing, f"{code} {msg}")
+check("dirty tree → accepted, the porcelain lines in the reply",
+      code == 200 and d.wrap_closing and "uncommitted" in msg and "notes.md" in msg, f"{code} {msg}")
+d.wrap_cancel()                       # defuse before the 0.3 s grace fires; re-arm for the clean case
+check("…defused, still alive", not d.wrap_closing and "d" in m3.sessions)
 subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
 subprocess.run(["git", "-C", repo, "commit", "-qm", "handoff"], check=True)
 check("_worktree_dirty: clean after commit", server._worktree_dirty(repo) == "")
+d.wrap_arm()
 code, msg = d.self_close_request()
-check("clean tree → accepted", code == 200 and d.wrap_closing, f"{code} {msg}")
+check("clean tree → accepted, no uncommitted note", code == 200 and d.wrap_closing and "uncommitted" not in msg, f"{code} {msg}")
 d.wrap_cancel()
 check("wrapCancel defuses an accepted close", not d.wrap_closing and d._wrap_timer is None)
 time.sleep(0.5)

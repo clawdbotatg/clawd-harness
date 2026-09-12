@@ -174,12 +174,13 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
     isn't there.
 11. **Self-close is armed-only.** `POST /self/close` (what `bin/harness-close`
     hits) refuses unless the 📑 chip / PM `wrap` verb armed the session within
-    `WRAP_TURNS`/`WRAP_TTL_S`, and refuses on a dirty worktree. Never widen
-    that gate, never force-close from the harness side (no call → the arm
-    lapses, the tab stays), and keep the close deferred to the Stop so the
-    TLDR reaches the 🗃️ row. The handoff is a **local** `HANDOFF.md`: the arm
-    lists it in the checkout's `.git/info/exclude`, the gate tolerates that
-    one untracked file, and the prompt forbids committing it — a handoff in
+    `WRAP_TURNS`/`WRAP_TTL_S`. A dirty worktree no longer blocks it (Austin,
+    09-11): the close is accepted and the uncommitted files are named in the
+    reply for the TLDR. Never widen the arm gate, never force-close from the
+    harness side (no call → the arm lapses, the tab stays), and keep the close
+    deferred to the Stop so the TLDR reaches the 🗃️ row. The handoff is a
+    **local** `HANDOFF.md`: the arm lists it in the checkout's
+    `.git/info/exclude` and the prompt forbids committing it — a handoff in
     GitHub is noise (Austin, 09-10). `test_wrap.py` + `tools/wrapprobe.mjs`.
 
 ## Periodic
