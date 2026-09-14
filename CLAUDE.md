@@ -77,7 +77,11 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   when a plan walls. The contract is **`EXPECTATIONS.md`** — read it first on
   any "my sub broke" report. Everything in the router is fenced behind
   `Engine.routes_accounts` (claude-only). Deep doc:
-  `docs/fleet/SUB-ROUTING.md`.
+  `docs/fleet/SUB-ROUTING.md`. Logins die ~30 d after each sign-in (server
+  side, rotation doesn't help); the **🔑 sign in to X** button in a session's
+  top-right pill (`loginCta`, `SessionManager.login_cta`, `test_login_cta.py`)
+  fires only when a signed-out login would be the router's pick for that
+  session — never as housekeeping.
 - **index.html** — the single UI file, one page, hash routing
   (`#/` projects · `#/p/<pid>` sessions · `…/s/<cid>/tty` terminal ·
   `#/pins` · `#/irons`, `#/i/<id>`; `?breakout=1` in the QUERY = ⏏ breakout

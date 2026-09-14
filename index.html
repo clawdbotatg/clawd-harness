@@ -250,6 +250,12 @@
   #machineTag .ctx.warn { color:var(--accent); }
   #machineTag .ctx.crit { color:var(--err); }
   #machineTag .acct, #machineTag .mach { color:var(--ink); }
+  /* 🔑 sign-in call to action: a signed-out login beats the pool this session
+     is on (server: loginCta). Yellow = the one thing to tap. */
+  #machineTag .cta { background:var(--accent); color:#111; font-weight:700;
+    border:0; border-radius:8px; padding:2px 8px; cursor:pointer; font:inherit;
+    font-weight:700; pointer-events:auto; }
+  #machineTag .cta:active { filter:brightness(.9); }
   @media (pointer: coarse) { #machineTag { right:84px; } }   /* no ⏏ on touch — close the gap */
   .col { display:flex; flex-direction:column; min-width:0; min-height:0; }
   #left  { flex:1; position:relative; }   /* anchors the #splash overlay */
@@ -9856,10 +9862,28 @@ function refreshSessionTag() {
     el.className = cls; el.textContent = text;
     machineTag.appendChild(el);
   };
-  if (model) add('model', model);
-  if (pct > 0) add('ctx' + (pct >= 90 ? ' crit' : pct >= 70 ? ' warn' : ''), 'ctx ' + pct + '%');
-  if (acct) add('acct', '🔑 ' + acct);
-  if (mach) add('mach', mach);
+  // 🔑 CTA: the server says a SIGNED-OUT login would be the router's pick
+  // for this session (dead/hot/far-behind pool) — one tap opens that
+  // login's sign-in ceremony (same path as the 🧠 card's "sign in again").
+  // On a phone the pill is anchored right and grows LEFT off the screen, so
+  // the button stands alone there (ctaprobe 2026-09-14: model/ctx/acct were
+  // pushed to x = -180 on a 390px viewport).
+  const cta = s && s.loginCta && s.loginCta.name ? s.loginCta : null;
+  const room = !(cta && isTouch);
+  if (model && room) add('model', model);
+  if (pct > 0 && room) add('ctx' + (pct >= 90 ? ' crit' : pct >= 70 ? ' warn' : ''), 'ctx ' + pct + '%');
+  if (acct && room) add('acct', '🔑 ' + acct);
+  if (mach && room) add('mach', mach);
+  if (cta) {
+    const mid = FLEET ? currentMachine : 'local';
+    const b = document.createElement('button');
+    b.className = 'cta';
+    b.textContent = '🔑 sign in to ' + acctDisplay(mid, cta.name);
+    b.title = 'a better subscription is signed out: ' + (cta.reason || '')
+            + ' — tap to sign in to it';
+    b.onclick = (e) => { e.stopPropagation(); addAccount(mid, cta.name); };
+    machineTag.appendChild(b);
+  }
   machineTag.title = [model && ('model: ' + model),
                       pct > 0 && ('context window ' + pct + '% full'),
                       acct && ('running under the ' + acct + ' subscription'),

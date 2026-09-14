@@ -202,6 +202,24 @@ I never type around a limit."**
   you can spend. The card stays because the login is fine — that's the whole
   distinction the styling is carrying, so don't "fix" it into a dead card.
 
+### The 🔑 "sign in to X" button (2026-09-14)
+
+Logins die ~30 days after each sign-in (server-side; rotation does not extend
+it — `ef` rotated 3×/day for a week and died on schedule). Austin does not
+want to chase every dead login, only the high-leverage one. So a session's
+top-right pill (model · ctx · 🔑 account) grows a **yellow `🔑 sign in to
+<identity>` button** exactly when a signed-out login would be the router's
+pick for that session's next prompt: the pool it is on (or would be moved to)
+is dead, walled, ≥ `SUB_HOT` while the signed-out one is cooler, or
+≥ `SUB_HYSTERESIS` points behind it. Same thresholds as prompt-time routing,
+so the button never asks for a sign-in the router wouldn't use. A signed-out
+login with a working same-org sibling never earns the button (one limit).
+The signed-out pool's headroom is an estimate: its last reading, or "empty"
+once that reading's weekly reset has passed. Tapping the button opens that
+login's sign-in ceremony (`accountAdd`, the 🧠 card's "sign in again" path).
+Wire: `sessions` row `loginCta`; code `SessionManager.login_cta`;
+`test_login_cta.py`.
+
 ## Changes that implemented this (2026-07-08, chronological)
 
 | commit | what |

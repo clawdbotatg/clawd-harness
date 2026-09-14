@@ -336,6 +336,18 @@ no-op that would leave the previous session's stream flowing (that's how
 - `sessionId` = claude's own id; rotates on compaction/resume.
 - `account` = which subscription account this session's claude runs under
   (recorded at spawn; `"default"` = the machine's plain `~/.claude` login).
+- `loginCta` = `{name, reason, pct}` or `null` — the 🔑 **"sign in to X"**
+  call to action (2026-09-14). Set only when a SIGNED-OUT login (`accountMeta`
+  `status:"needs-login"`) would be the router's pick for this session's next
+  prompt by the router's own thresholds: the pool the session is on (or would
+  be moved to) is dead / walled / ≥ `SUB_EXHAUSTED`, ≥ `SUB_HOT` while the
+  signed-out one is cooler, or ≥ `SUB_HYSTERESIS` points behind it. `pct` is
+  the signed-out pool's ESTIMATE (its last reading; 0 once that reading's
+  weekly reset has passed). Never set for a signed-out login whose org has a
+  working sibling (one org = one limit), on ceremony sessions, non-routing
+  engines, or with the router off. Volatile, recomputed per frame. The UI
+  renders it as a yellow button in the session's top-right pill; tapping it
+  sends `accountAdd` for that name (the same re-sign-in path as the 🧠 card).
 
 ### accountMeta
 ```jsonc

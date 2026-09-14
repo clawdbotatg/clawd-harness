@@ -3445,6 +3445,18 @@ class ClaudeSession:
             return (t[:46] + "…") if len(t) > 47 else t
         return "new session"
 
+    def _login_cta(self):
+        """The row's 🔑 call to action (SessionManager.login_cta), never a
+        broadcast-breaking exception: a row must always render."""
+        fn = getattr(self.manager, "login_cta", None)
+        if not fn:
+            return None
+        try:
+            return fn(self)
+        except Exception as e:
+            print(f"[session {self.cid[:8]}] login_cta failed: {e!r}", flush=True)
+            return None
+
     def meta(self):
         """Menu-level snapshot broadcast to every client."""
         # Deterministic, LLM-free status for the controller's attention queue:
@@ -3486,7 +3498,8 @@ class ClaudeSession:
                 "wrapArmed": self.wrap_armed(),     # 📑 may close itself (badge + cancel line)
                 "wrapClosing": self.wrap_closing,   # 📑 harness-close accepted; closes at turn end
                 "checkArmed": self.check_armed(),   # 🔍 writing the brief; a reviewer spawns at its Stop
-                "checkOf": self.check_of or ""}     # 🔍 on a reviewer: the cid it double-checks
+                "checkOf": self.check_of or "",     # 🔍 on a reviewer: the cid it double-checks
+                "loginCta": self._login_cta()}      # 🔑 "sign in to X" — a signed-out login beats this pool
 
     # -- 📑 wrap: arm, cancel, the self-close request, the turn-end close ------
     def wrap_armed(self):
@@ -6330,6 +6343,72 @@ class SessionManager:
         if cur_pct - best_pct >= SUB_HYSTERESIS:
             return ("move", best, f"target has {cur_pct - best_pct:.0f} points more headroom")
         return ("stay", None, "healthy pool; headroom gap under hysteresis")
+
+    def _dead_pool_estimate(self, a, now):
+        """Best guess at a SIGNED-OUT login's headroom: its last reading, or
+        empty once that reading's weekly reset has passed (a week away is a
+        fresh pool). None when the login never had a reading at all."""
+        u = a.usage or {}
+        pct = u.get("pct")
+        if pct is None:
+            return None
+        reset = _weekly_reset(u)
+        if (reset and reset < now) or now - (u.get("checkedAt") or 0) > 7 * 86400:
+            return 0.0
+        return float(pct)
+
+    def login_cta(self, s):
+        """The 🔑 'sign in to X' call to action for session `s`, or None.
+        A pure read. Fires only when a SIGNED-OUT login (login_gone) would be
+        the router's pick for this session's next prompt by the router's own
+        thresholds — the pool it is on (or would move to) is dead, hot, or
+        SUB_HYSTERESIS points behind — so re-signing-in is high leverage,
+        not housekeeping. A signed-out login whose org has a working sibling
+        never fires (one org = one limit; the sibling already spends it).
+        {name, reason, pct} — `pct` is the estimate (_dead_pool_estimate)."""
+        if not SUB_AUTOSWITCH or s.ceremony or not s.eng.routes_accounts:
+            return None
+        now = time.time()
+        with self.lock:
+            accts = list(self.accounts.values())
+        live_orgs = {a.org for a in accts if a.ready and not a.broken and a.org}
+        dead = []
+        for a in accts:
+            if not (a.ready and a.login_gone and a.routable()
+                    and now >= getattr(a, "walled_until", 0.0)):
+                continue
+            if a.org and a.org in live_orgs:
+                continue
+            est = self._dead_pool_estimate(a, now)
+            if est is not None:
+                dead.append((est, _weekly_reset(a.usage) or float("inf"), a.name, a))
+        if not dead:
+            return None
+        dead.sort(key=lambda t: t[:3])
+        est, _, _, cand = dead[0]
+        # what the router can do WITHOUT that login: the pool this session
+        # is on, or the one preflight would move it to
+        cur = self.accounts.get(s.account)
+        decision, target, _ = self._route_decision(s)
+        eff = target if (decision == "move" and target) else cur
+        eff_u = (eff.usage or {}) if eff else {}
+        eff_pct = eff_u.get("pct")
+        eff_dead = (eff is None or eff.broken
+                    or now < getattr(eff, "walled_until", 0.0)
+                    or (eff_pct is not None and eff_pct >= SUB_EXHAUSTED))
+        if eff_dead:
+            if est >= SUB_EXHAUSTED:
+                return None
+            reason = "no working login has headroom"
+        elif eff_pct is None:
+            return None                       # nothing to compare against — don't nag
+        elif eff_pct >= SUB_HOT and est < SUB_HOT:
+            reason = f"this pool is {eff_pct:.0f}% used"
+        elif eff_pct - est >= SUB_HYSTERESIS:
+            reason = f"{eff_pct - est:.0f} points more headroom"
+        else:
+            return None
+        return {"name": cand.name, "reason": reason, "pct": round(est, 1)}
 
     def _log_route(self, s, decision, best, reason, via="", prompt_id="",
                    applied=False):
