@@ -19,6 +19,16 @@
 //   8. auto-repeat spaces are eaten while dictating;
 //   9. any other key during the wait cancels the pending hold (space kept).
 //
+// Third act (touch page again): 🎯 the DEEPGRAM engine behind the same gesture —
+//  10. with creds in hand a hold opens the page's own socket to Deepgram
+//      (subprotocol = the creds, URL = nova-3 + linear16 + every keyterm: the ⚙️
+//      word list, the harness's names, each project name) — the relay socket
+//      is not touched;
+//  11. Deepgram Results land through the SAME guard: interim trails, finals
+//      append, typing still wins and a late result can't clobber;
+//  12. release sends CloseStream (finals may trail) and stops the mic tracks;
+//  13. no creds (or another box's creds) → Web Speech, decided at the press.
+//
 // Fleet mode + stubbed relay WebSocket (tapprobe pattern): no real server, no
 // real session, no mic. Real touch gestures via CDP, not element.click().
 //   cd tools && node sttprobe.mjs
@@ -39,11 +49,20 @@ const iphone = devices['iPhone 12'];
 const page = await browser.newPage({ ...iphone, viewport:{width:390,height:844} });
 const initStub = () => {
   window.__sent=[]; const sockets=[];
-  class FakeWS{constructor(u){this.url=u;this.readyState=0;this.binaryType='arraybuffer';sockets.push(this);
+  window.__dgs=[];
+  class FakeWS{constructor(u,protos){this.url=u;this.protocols=protos||null;this.readyState=0;this.binaryType='arraybuffer';this.sent=[];
+    (u.includes('deepgram')?window.__dgs:sockets).push(this);
     setTimeout(()=>{this.readyState=1;this.onopen&&this.onopen({});},0);}
-   send(d){window.__sent.push(d);} close(){this.readyState=3;this.onclose&&this.onclose({});}}
+   send(d){window.__sent.push(d);this.sent.push(d);} close(){this.readyState=3;this.onclose&&this.onclose({});}}
   FakeWS.prototype.addEventListener=function(){}; window.WebSocket=FakeWS;
   window.__relayRx=(o)=>{const s=sockets[sockets.length-1]; if(s&&s.onmessage) s.onmessage({data:JSON.stringify(o)});};
+  // a mic + audio graph that never ticks: the Deepgram act checks the socket, not audio
+  window.__tracks=[];
+  navigator.mediaDevices=Object.assign(navigator.mediaDevices||{}, {getUserMedia: async()=>{ const t={stopped:false,stop(){this.stopped=true;}}; window.__tracks.push(t); return {getTracks:()=>[t]}; }});
+  window.AudioContext=class{constructor(){this.sampleRate=48000;this.state='running';this.destination={};}
+    resume(){return Promise.resolve();} createMediaStreamSource(){return {connect(){},disconnect(){}};}
+    createScriptProcessor(){return {connect(){},disconnect(){},onaudioprocess:null};}};
+  window.__dgResult=(text,isFinal)=>{const s=window.__dgs[window.__dgs.length-1]; s.onmessage({data:JSON.stringify({type:'Results',is_final:!!isFinal,channel:{alternatives:[{transcript:text}]}})});};
   try{localStorage.clear();}catch{}
   for (const m of ['clawd-atg'])
     try{localStorage.setItem('cc_e2e_rs_'+m, JSON.stringify({id:'p-'+m,master:'AAAA',exp:Date.now()+3600e3}));}catch{}
@@ -131,6 +150,46 @@ const bled = await page.evaluate(()=>({v:box.value, on:recOn,
 check("context switch: bravo's empty box stays empty", bled.v==='' && !bled.on, JSON.stringify({v:bled.v,on:bled.on}));
 check("…and alpha's stashed draft never got 'bleed two'", bled.alpha.endsWith('bleed one'), bled.alpha);
 await releaseMic();
+
+// ---- 🎯 Deepgram engine (same touch page, back on alpha) ----------------------
+await page.evaluate(()=>{ location.hash = '#/p/' + encodeURIComponent(projectRows().find(p=>p.name==='alpha').id); });
+await page.waitForTimeout(400);
+await page.evaluate(()=>{ box.value=''; saveDraft(); setSttWords('Codex, ethskills\nWispr Flow'); });
+// 13a. creds for ANOTHER box don't count: the press falls to Web Speech
+await page.evaluate(()=>{ sttCreds={proto:'token',secret:'k-other',model:'nova-3',exp:0}; sttMachine='clawd-elsewhere'; });
+const srBefore = await page.evaluate(()=>window.__sr.startedCount);
+await holdMic();
+check("another box's creds → Web Speech at the press", await page.evaluate((n)=>recOn && recEngine==='sr' && window.__dgs.length===0 && window.__sr.startedCount>n, srBefore));
+await releaseMic();
+// 10. creds for THIS box → the Deepgram socket
+await page.evaluate(()=>{ sttCreds={proto:'token',secret:'k-here',model:'nova-3',exp:0}; sttMachine=currentMachine; });
+const relaySockets = await page.evaluate(()=>window.__sent.length);
+await holdMic();
+await page.waitForTimeout(150);
+const dgi = await page.evaluate(()=>{ const s=window.__dgs[0]; const u=s&&new URL(s.url); return s?{on:recOn,eng:recEngine,host:u.host,path:u.pathname,proto:s.protocols,
+  q:Object.fromEntries([...u.searchParams].filter(([k])=>k!=='keyterm')), terms:u.searchParams.getAll('keyterm'), tracks:window.__tracks.length}:null; });
+check('hold with creds opens the Deepgram socket, engine dg', !!dgi && dgi.on && dgi.eng==='dg' && dgi.host==='api.deepgram.com' && dgi.path==='/v1/listen', JSON.stringify(dgi));
+check('creds ride the subprotocol', !!dgi && JSON.stringify(dgi.proto)==='["token","k-here"]', JSON.stringify(dgi&&dgi.proto));
+check('nova-3 · linear16 16k · smart_format · interim', !!dgi && dgi.q.model==='nova-3' && dgi.q.encoding==='linear16' && dgi.q.sample_rate==='16000' && dgi.q.smart_format==='true' && dgi.q.interim_results==='true', JSON.stringify(dgi&&dgi.q));
+check('keyterms: your words first, then the harness names, then every project', !!dgi && dgi.terms.slice(0,3).join('|')==='Codex|ethskills|Wispr Flow' && dgi.terms.includes('clawd') && dgi.terms.includes('alpha') && dgi.terms.includes('bravo'), JSON.stringify(dgi&&dgi.terms));
+check('mic track opened', !!dgi && dgi.tracks===1);
+check('nothing went to the relay socket for a hold', await page.evaluate((n)=>window.__sent.length===n, relaySockets));
+// 11. results through the shared guard
+await page.evaluate(()=>window.__dgResult('hello', false));
+check('interim trails', await page.evaluate(()=>box.value==='hello'));
+await page.evaluate(()=>window.__dgResult('Hello Codex', true));
+await page.evaluate(()=>window.__dgResult('and', false));
+check('final appends, next interim trails it', await page.evaluate(()=>box.value==='Hello Codex and'));
+check('draft saved', await page.evaluate(()=>(localStorage.getItem(draftKey(activeDraftId))||'')==='Hello Codex and'));
+// 12. release → CloseStream, tracks stopped; a trailing final still lands
+await releaseMic();
+const rel = await page.evaluate(()=>({on:recOn, close:window.__dgs[0].sent.some(d=>typeof d==='string'&&d.includes('CloseStream')), stopped:window.__tracks[0].stopped}));
+check('release sends CloseStream and stops the mic', !rel.on && rel.close && rel.stopped, JSON.stringify(rel));
+await page.evaluate(()=>window.__dgResult('and done', true));
+check('trailing final completes the sentence', await page.evaluate(()=>box.value==='Hello Codex and done'));
+await page.keyboard.type(' TYPED');
+await page.evaluate(()=>window.__dgResult('sneaky', true));
+check('typed text beats a late Deepgram result', await page.evaluate(()=>box.value==='Hello Codex and done TYPED'));
 
 // ---- desktop page: SPACE-HOLD push-to-talk ---------------------------------
 // A fresh non-emulated page: fine pointer → isTouch=false, real key events via

@@ -1013,6 +1013,10 @@
   .setselect:hover:enabled { border-color:var(--edge-hi); }
   .setselect:focus { outline:none; border-color:var(--accent); }
   .setselect:disabled { opacity:.45; cursor:default; color:var(--dim); }
+  .settext { display:block; width:100%; margin-top:8px; background:var(--raised); color:var(--ink);
+             border:1px solid var(--edge); padding:7px 10px; font-size:12px; font-family:var(--mono);
+             resize:vertical; min-height:56px; box-sizing:border-box; }
+  .settext:focus { outline:none; border-color:var(--accent); }
   @media (max-width:740px) {
     #settingsbody { padding:14px 12px 44px; }
     .setrow { gap:12px; flex-wrap:wrap; }
@@ -3687,6 +3691,10 @@ function handleJson(m) {
   } else if (m.type === 'tts') {
     const r = ttsPending.get(m.id); if (r) { ttsPending.delete(m.id); r(m); }
     return;
+  } else if (m.type === 'stt') {
+    // 🎤 Deepgram creds for this box (or "not configured" → Web Speech)
+    const r = sttPending.get(m.id); if (r) { sttPending.delete(m.id); r(m); }
+    return;
   } else if (m.type === 'say') {
     // 🔊 the voice: one spoken line for the viewed session (server-side decision, see VoiceAgent)
     if (m.cid !== currentCid) return;
@@ -5989,6 +5997,7 @@ function subscribe(cid, opts) {
   syncComposer();              // load this session's own draft (bring back text from before a reload)
   hsend({ type: 'subscribe', cid });
   tldrHello(cid);              // 🟦 tell the server whether this viewer wants the live summary
+  if (!sttCredsOk()) sttAsk(); // 🎤 Deepgram creds for THIS box, ready before the first hold (after the subscribe + tldr frames)
   armHelloWatch(cid);          // hello = the subscribe ACK; re-send if it never lands
   if (!soft) armHardRepaint(); // soft path repaints in place — hardRepaint would scrollToBottom mid-read
   syncUrl();
@@ -8559,51 +8568,208 @@ function speak(text) {
 }
 
 // --- speech-to-text: dictate into the box by press-and-holding the mic button.
+// Two recognizers behind the one gesture. 🎯 Deepgram (nova-3, streamed from
+// the mic over the page's OWN WebSocket, biased with `keyterm`s — your ⚙️ word
+// list, the harness's own names, every project name — so it hears Codex /
+// ethskills the first time) whenever the box we're on handed us creds (WS
+// `stt`); else the browser's Web Speech recognizer (Chrome → Google, iOS →
+// Apple: live, but no custom vocabulary — the 2026-09-13 "kodaks / codecs for
+// Codex" complaint). Both engines feed recApply(), so the write guard below is
+// shared and everything sttprobe pins about typing/navigation winning holds
+// for either. The engine is decided AT THE PRESS from creds already in hand —
+// the mic must light up at once, never wait on the network.
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
 let rec = null, recOn = false, recBase = '';   // recBase = box text captured when recording began
+let recEngine = null;                          // 'dg' | 'sr' while a hold is live
 // recWrote = exactly what dictation last put in the box; recCtx = the composer
-// context it was dictating into. Results trail rec.stop() (the last chunk often
-// finalizes only after release), so onresult keeps writing after recOn drops —
-// but ONLY while the box still holds our own last write, in the same context.
-// The moment typing or a tab switch touches the box, the mic loses: dictation
-// must never replace text the user can see (2026-09-01: a recognition session
-// left running "rushed in and replaced what I was typing").
+// context it was dictating into. Results trail the release (the last chunk often
+// finalizes only after), so results keep writing after recOn drops — but ONLY
+// while the box still holds our own last write, in the same context. The moment
+// typing or a tab switch touches the box, the mic loses: dictation must never
+// replace text the user can see (2026-09-01: a recognition session left
+// running "rushed in and replaced what I was typing").
 let recWrote = null, recCtx = null;
+// One result, either engine: finals append to recBase, the interim trails it.
+function recApply(finalT, interim) {
+  if (activeDraftId !== recCtx || (recWrote !== null && box.value !== recWrote)) { stopRec(); return false; }
+  if (finalT) recBase = (recBase + ' ' + finalT).replace(/\s+/g, ' ').trimStart();
+  recWrote = (interim ? recBase + ' ' + interim : recBase).replace(/\s+/g, ' ').trimStart();
+  box.value = recWrote;
+  saveDraft(); autosizeBox();   // dictated text must survive a reload like typed text does
+  return true;
+}
 function buildRec() {
   const r = new SR();
   r.continuous = true; r.interimResults = true; r.lang = 'en-US';
   r.onresult = (e) => {
-    if (activeDraftId !== recCtx || (recWrote !== null && box.value !== recWrote)) { stopRec(); return; }
     let finalT = '', interim = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const tr = e.results[i];
       if (tr.isFinal) finalT += tr[0].transcript; else interim += tr[0].transcript;
     }
-    if (finalT) recBase = (recBase + ' ' + finalT).replace(/\s+/g, ' ').trimStart();
-    recWrote = (interim ? recBase + ' ' + interim : recBase).replace(/\s+/g, ' ').trimStart();
-    box.value = recWrote;
-    saveDraft(); autosizeBox();   // dictated text must survive a reload like typed text does
+    recApply(finalT, interim);
   };
-  r.onend = () => { if (recOn) { try { r.start(); } catch {} } };  // Chrome auto-stops; keep alive while on
+  r.onend = () => { if (recOn && recEngine === 'sr') { try { r.start(); } catch {} } };  // Chrome auto-stops; keep alive while on
   r.onerror = (ev) => { if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') stopRec(); };
   return r;
 }
+
+// 🎯 Deepgram creds from the box we're on: {proto, secret, model, exp}. Asked on
+// every subscribe (a session opens → creds for ITS box) and re-asked a minute
+// before a JWT expires; a press with none in hand dictates with Web Speech and
+// asks again for next time. Per box: each machine holds its own DEEPGRAM_API_KEY.
+const STT_WORDS_KEY = 'cc_stt_words';
+const STT_BASE_TERMS = ['Codex', 'Claude', 'clawd', 'harness', 'TLDR', 'ethskills', 'Ethereum',
+                        'Solidity', 'GitHub', 'Wispr Flow', 'iron', 'passkey', 'relay', 'Deepgram'];
+let sttCreds = null, sttMachine = null, sttReqT = null;
+const sttPending = new Map();
+function sttWords() { try { return localStorage.getItem(STT_WORDS_KEY) || ''; } catch { return ''; } }
+function setSttWords(v) { try { localStorage.setItem(STT_WORDS_KEY, v); } catch {} }
+// The keyterm list: your words first, then the harness's own, then every project
+// name (plus its de-hyphenated form: "clawd harness"). Deepgram caps it at 100
+// terms / ~500 tokens; case is kept, so proper nouns go in capitalized.
+function sttTerms() {
+  const out = [], seen = new Set();
+  const add = (t) => {
+    t = String(t || '').trim();
+    if (!t || t.length > 40) return;
+    const k = t.toLowerCase(); if (seen.has(k)) return;
+    seen.add(k); out.push(t);
+  };
+  sttWords().split(/[\n,;]+/).forEach(add);
+  STT_BASE_TERMS.forEach(add);
+  let rows = []; try { rows = projectRows(); } catch {}
+  rows.forEach(p => { add(p.name); if (/[-_]/.test(p.name || '')) add(p.name.replace(/[-_]+/g, ' ')); });
+  return out.slice(0, 100);
+}
+function sttHere() { return FLEET ? currentMachine : 'direct'; }
+function sttCredsOk() {
+  return !!(sttCreds && sttMachine === sttHere() && (!sttCreds.exp || sttCreds.exp - Date.now() > 15000));
+}
+function sttAsk() {
+  if (!ws || ws.readyState !== 1 || !sttHere()) return;
+  const id = Math.random().toString(36).slice(2), here = sttHere();
+  const timer = setTimeout(() => sttPending.delete(id), 15000);
+  sttPending.set(id, (m) => {
+    clearTimeout(timer);
+    if (!m.secret) { if (sttMachine === here) sttCreds = null; return; }   // no key on that box → Web Speech
+    sttCreds = { proto: m.proto || 'token', secret: m.secret, model: m.model || 'nova-3',
+                 exp: m.ttl ? Date.now() + m.ttl * 1000 : 0 };
+    sttMachine = here;
+    clearTimeout(sttReqT);
+    if (m.ttl) sttReqT = setTimeout(sttAsk, Math.max(5000, (m.ttl - 60) * 1000));
+    micBtn.title = 'Hold to dictate (Deepgram — knows your words, see ⚙️) — or hold Space in the box';
+  });
+  if (!hsend({ type: 'stt', id })) { clearTimeout(timer); sttPending.delete(id); }
+}
+
+// 🎯 Deepgram engine: mic → 16 kHz PCM (a ScriptProcessor — every browser we run
+// in, iOS Safari included, which won't hand MediaRecorder a container Deepgram
+// can read) → the page's own socket to api.deepgram.com, keyterm-biased. Audio
+// captured before the socket opens is queued so the first word isn't lost; the
+// AudioContext is made IN the press gesture (iOS won't resume one made later)
+// and kept for the page's life. Results land through recApply like Web Speech's.
+let dg = null, dgCtx = null;
+function dgUrl(creds) {
+  const u = new URL('wss://api.deepgram.com/v1/listen'), q = u.searchParams;
+  q.set('model', creds.model || 'nova-3'); q.set('language', 'en');
+  q.set('encoding', 'linear16'); q.set('sample_rate', '16000'); q.set('channels', '1');
+  q.set('smart_format', 'true'); q.set('interim_results', 'true'); q.set('endpointing', '300');
+  sttTerms().forEach(t => q.append('keyterm', t));
+  return u.toString();
+}
+function dgFallback(d) {
+  // this hold lost its Deepgram path (mic denied, socket refused) → Web Speech
+  // finishes the hold, the creds are dropped and re-asked for next time
+  if (d && dg === d) dg = null;
+  if (!recOn || recEngine !== 'dg') return;
+  sttCreds = null; sttAsk();
+  if (!SR) { stopRec(); return; }
+  recEngine = 'sr'; rec = rec || buildRec(); try { rec.start(); } catch {}
+}
+function dgStart(creds) {
+  const d = { ws: null, src: null, proc: null, stream: null, q: [], open: false, done: false, got: false };
+  dg = d;
+  let streamP;
+  try {
+    streamP = navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!dgCtx) dgCtx = new AC();
+    if (dgCtx.state !== 'running') { try { dgCtx.resume(); } catch {} }
+    d.ws = new WebSocket(dgUrl(creds), [creds.proto, creds.secret]);
+  } catch { dgFallback(d); return; }
+  const w = d.ws;
+  w.onopen = () => {
+    d.open = true;
+    d.q.forEach(b => { try { w.send(b); } catch {} }); d.q = [];
+    if (d.done) { try { w.send(JSON.stringify({ type: 'CloseStream' })); } catch {} }   // released before we connected
+  };
+  w.onmessage = (e) => {
+    if (dg !== d) return;                      // a newer hold owns the box now
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.type !== 'Results') return;
+    d.got = true;
+    const t = (((m.channel || {}).alternatives || [])[0] || {}).transcript || '';
+    if (m.is_final) { if (t) recApply(t, ''); }
+    else recApply('', t);
+  };
+  w.onclose = () => {
+    d.open = false;
+    if (dg === d && !d.done && !d.got) dgFallback(d);   // refused before a single result → finish with Web Speech
+  };
+  w.onerror = () => {};
+  streamP.then(stream => {
+    if (dg !== d || d.done) { stream.getTracks().forEach(t => t.stop()); return; }
+    d.stream = stream;
+    d.src = dgCtx.createMediaStreamSource(stream);
+    d.proc = dgCtx.createScriptProcessor(4096, 1, 1);
+    const ratio = dgCtx.sampleRate / 16000;
+    d.proc.onaudioprocess = (ev) => {
+      if (d.done) return;
+      const inp = ev.inputBuffer.getChannelData(0), n = Math.floor(inp.length / ratio);
+      const out = new Int16Array(n);
+      for (let i = 0; i < n; i++) { const v = Math.max(-1, Math.min(1, inp[Math.floor(i * ratio)])); out[i] = v < 0 ? v * 0x8000 : v * 0x7FFF; }
+      if (d.open) { try { w.send(out.buffer); } catch {} }
+      else if (d.q.length < 400) d.q.push(out.buffer);   // ≤ ~50 s queued while connecting
+    };
+    d.src.connect(d.proc); d.proc.connect(dgCtx.destination);   // a processor only ticks when wired to the sink
+  }).catch(() => dgFallback(d));
+}
+function dgStop() {
+  const d = dg; if (!d || d.done) return;
+  d.done = true;                               // dg stays = d: trailing finals still land (guarded)
+  try { if (d.proc) d.proc.disconnect(); if (d.src) d.src.disconnect(); } catch {}
+  if (d.stream) d.stream.getTracks().forEach(t => t.stop());
+  const w = d.ws;
+  if (!w) return;
+  if (d.open) { try { w.send(JSON.stringify({ type: 'CloseStream' })); } catch {} }   // flush → finals → server closes
+  setTimeout(() => { try { w.close(); } catch {} if (dg === d) dg = null; }, 5000);
+}
+
 function startRec() {
-  if (!SR || recOn) return;
+  if (recOn) return;
+  const creds = sttCredsOk() ? sttCreds : null;
+  if (!creds && !SR) return;
   if (synth) synth.cancel();                  // barge-in: don't read replies back into the mic
-  rec = rec || buildRec();
   recBase = box.value; recWrote = box.value; recCtx = activeDraftId;
   recOn = true;
   micBtn.classList.add('rec'); box.focus();
-  try { rec.start(); } catch {}
+  if (creds) { recEngine = 'dg'; dgStart(creds); }
+  else {
+    recEngine = 'sr'; rec = rec || buildRec();
+    try { rec.start(); } catch {}
+    if (!sttCreds) sttAsk();                  // maybe this box has a key we never asked for
+  }
 }
 function stopRec() {
   if (!recOn) return;
   recOn = false; micBtn.classList.remove('rec');
-  try { rec.stop(); } catch {}
+  if (recEngine === 'dg') dgStop(); else { try { rec.stop(); } catch {} }
+  recEngine = null;
   flushHeldSay();                                  // 🔊 whatever the voice held while you talked
 }
-if (!SR) { micBtn.disabled = true; micBtn.title = 'Speech-to-text not supported in this browser'; }
+const micPossible = !!(SR || (navigator.mediaDevices && navigator.mediaDevices.getUserMedia));
+if (!micPossible) { micBtn.disabled = true; micBtn.title = 'Speech-to-text not supported in this browser'; }
 else {
   // Push-to-talk: press and hold the mic to dictate, release to stop. On
   // desktop, holding the SPACE BAR in the composer is the same gesture — see
@@ -10394,6 +10560,34 @@ function renderSettings() {
           renderProjectRung();    // the rung's 'default/all · new repos → X' label follows
         } });
   }
+
+  // ── 🎤 dictation word list (Deepgram keyterms) ─────────────────────────────
+  renderSttSetting();
+}
+
+
+// Same row, but the control is a small <textarea> — for a setting that is a
+// LIST you type (the 🎤 word list). Saves on every input; no button.
+function settingTextRow(title, sub, { value = '', placeholder = '', onInput = null }) {
+  const row = document.createElement('div');
+  row.className = 'setrow';
+  const main = document.createElement('div'); main.className = 'setmain';
+  const t = document.createElement('div'); t.className = 'set-t'; t.textContent = title;
+  const s = document.createElement('div'); s.className = 'set-s'; s.textContent = sub;
+  const ta = document.createElement('textarea');
+  ta.className = 'settext'; ta.rows = 3; ta.value = value; ta.placeholder = placeholder;
+  ta.spellcheck = false; ta.autocapitalize = 'off';
+  if (onInput) ta.oninput = () => onInput(ta.value);
+  main.append(t, s, ta);
+  row.append(main);
+  return row;
+}
+function renderSttSetting() {
+  const live = sttCredsOk();
+  settingsBody.appendChild(settingTextRow('🎤 words the mic should know',
+    (live ? 'Deepgram is live on this box: ' : 'no Deepgram key on this box yet (DEEPGRAM_API_KEY in .clawd-harness.env) — until then the browser\'s own recognizer dictates and this list waits. ')
+      + 'names dictation keeps getting wrong, one per line or comma-separated (capitalize proper nouns). Codex, clawd and every project name are already in.',
+    { value: sttWords(), placeholder: 'Codex\nethskills\nWispr Flow', onInput: (v) => setSttWords(v) }));
 }
 
 function openSettings() { renderSettings(); settingsModal.hidden = false; }

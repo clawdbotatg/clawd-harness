@@ -251,6 +251,17 @@ BANKR_API      = os.environ.get("BANKR_API", "openai").lower()   # openai | anth
 # piping the MP3 straight back. Voice ID defaults to "Brian" if unset.
 ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "") or "ogwqBH5bbF03DSbNiRNN"   # Austin's pick (2026-09-05)
+# 🎤 Deepgram streaming speech-to-text. Optional — without a key the browser
+# dictates with its own Web Speech recognizer (live, but no custom vocabulary:
+# the 2026-09-13 "kodaks / codecs for Codex" complaint). The page streams mic
+# audio STRAIGHT to Deepgram over its own WebSocket (never through the relay),
+# nova-3 biased with `keyterm`s (project names + the ⚙️ word list), so it needs a
+# credential in hand: WS `stt` answers with a short-lived JWT when the key can
+# mint one (POST /v1/auth/grant needs a Member-level key), else the key itself.
+# The reply rides the E2E channel to a passkey-gated page — the same trust as
+# the session transcript it dictates into. See deepgram_creds / serve_stt.
+DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
+DEEPGRAM_MODEL   = os.environ.get("DEEPGRAM_MODEL", "") or "nova-3"
 
 # The AI controller (PM brain) runs as a *separate* process (see controller/), but
 # we reverse-proxy /pm/* to it so the whole UI lives on one origin — the browser
@@ -8869,6 +8880,64 @@ def eleven_tts(text):
         return resp.read()
 
 
+DG_GRANT_URL = "https://api.deepgram.com/v1/auth/grant"
+DG_GRANT_TTL = 3600              # asked for; Deepgram may hand back less (default 30 s)
+_dg_cache = {"secret": "", "exp": 0.0}
+_dg_lock = threading.Lock()
+
+
+def deepgram_creds(_urlopen=None, _now=None):
+    """What the browser opens its Deepgram socket with — {proto, secret, ttl,
+    model} — or None with no key. proto "bearer" = a temporary JWT minted here
+    (cached, re-minted a minute before it expires); "token" = the API key
+    itself, when the key can't mint (grant needs Member permission → 403) or the
+    mint fails for any reason — dictation must not depend on a second Deepgram
+    endpoint being up. ttl 0 = doesn't expire. A grant that refuses our TTL is
+    retried with Deepgram's default (a 30 s token: the page asks per hold)."""
+    if not DEEPGRAM_API_KEY:
+        return None
+    urlopen = _urlopen or urllib.request.urlopen
+    now = (_now or time.time)()
+    with _dg_lock:
+        if _dg_cache["secret"] and _dg_cache["exp"] - now > 60:
+            return {"proto": "bearer", "secret": _dg_cache["secret"],
+                    "ttl": int(_dg_cache["exp"] - now), "model": DEEPGRAM_MODEL}
+        for body in ({"ttl_seconds": DG_GRANT_TTL}, {}):
+            try:
+                req = urllib.request.Request(
+                    DG_GRANT_URL, data=json.dumps(body).encode(), method="POST",
+                    headers={"Authorization": "Token " + DEEPGRAM_API_KEY,
+                             "Content-Type": "application/json"})
+                with urlopen(req, timeout=10) as resp:
+                    j = json.loads(resp.read().decode())
+                tok = j.get("access_token")
+                ttl = int(j.get("expires_in") or 30)
+                if tok:
+                    _dg_cache.update(secret=tok, exp=now + ttl)
+                    return {"proto": "bearer", "secret": tok, "ttl": ttl, "model": DEEPGRAM_MODEL}
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 400 and body:
+                    continue         # our TTL refused → try Deepgram's default
+                print(f"[stt] grant refused ({e.code}); handing the key itself", flush=True)
+                break
+            except Exception as e:
+                print(f"[stt] grant failed ({e}); handing the key itself", flush=True)
+                break
+    return {"proto": "token", "secret": DEEPGRAM_API_KEY, "ttl": 0, "model": DEEPGRAM_MODEL}
+
+
+def serve_stt(client, frame):
+    """WS `stt`: the 🎤 credential for the page's own Deepgram socket (see
+    deepgram_creds). Replies to this client only; no key on the box → an error
+    reply, and the browser dictates with its own recognizer."""
+    sid = frame.get("id")
+    creds = deepgram_creds()
+    if not creds:
+        return client.send_json({"type": "stt", "id": sid, "error": "stt not configured"})
+    client.send_json(dict({"type": "stt", "id": sid}, **creds))
+
+
 def serve_tts(client, frame):
     """WS `tts`: the fleet path for ElevenLabs (the relay doesn't proxy /tts and
     the browser can't reach a machine's HTTP). The text rides the E2E channel
@@ -9087,6 +9156,7 @@ class Handler(BaseHTTPRequestHandler):
                 "lanIp": lan_ip(),
                 "port": PORT,
                 "tts": bool(ELEVENLABS_API_KEY),   # browser uses ElevenLabs when true
+                "stt": bool(DEEPGRAM_API_KEY),     # 🎤 Deepgram dictation available (creds via WS `stt`)
             })
         self.send_error(404, "not found")
 
@@ -9392,6 +9462,10 @@ class Handler(BaseHTTPRequestHandler):
         if t == "tts":
             # 🔊 ElevenLabs over the socket (fleet) — network call, threaded.
             threading.Thread(target=serve_tts, args=(client, frame), daemon=True).start()
+            return
+        if t == "stt":
+            # 🎤 Deepgram credential for the page's own socket — may mint a JWT, threaded.
+            threading.Thread(target=serve_stt, args=(client, frame), daemon=True).start()
             return
         if t == "ironDescribe":
             # 🔥 iron description — an LLM call, threaded for the same reason.

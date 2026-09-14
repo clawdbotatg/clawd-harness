@@ -115,6 +115,15 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   the handoff doc is **`docs/TLDR-VOICE.md`** (data flow, every knob, the
   client landmines, `tools/tldr_e2e.py` for a real isolated run,
   `tools/tldrgeom.mjs` to measure a live session's overlay).
+  **🎤 dictation** = two recognizers behind the mic hold / space-hold: 🎯
+  Deepgram (the page's OWN socket to api.deepgram.com, nova-3 + `keyterm`s =
+  the ⚙️ word list + harness names + every project name — this is what makes
+  it hear Codex/ethskills; creds per box via WS `stt`, `DEEPGRAM_API_KEY` in
+  `.clawd-harness.env`, JWT when the key can mint else the key itself) and
+  the browser's Web Speech fallback (live, no vocabulary). Both write through
+  one guard (`recApply`): typing and tab switches always win. The engine is
+  decided AT THE PRESS from creds in hand — never wait on the network to light
+  the mic. `test_stt.py` + `tools/sttprobe.mjs`.
   Wall-display boxes (clawd-sat): `tools/kiosk/README.md`. **⑂ fork** =
   `SessionManager.fork` → `create_session(resume=<source id>, fork=True)` →
   claude's own `--resume <id> --fork-session` (new id + transcript, source
