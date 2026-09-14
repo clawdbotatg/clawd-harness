@@ -8619,8 +8619,21 @@ function buildRec() {
 // before a JWT expires; a press with none in hand dictates with Web Speech and
 // asks again for next time. Per box: each machine holds its own DEEPGRAM_API_KEY.
 const STT_WORDS_KEY = 'cc_stt_words';
-const STT_BASE_TERMS = ['Codex', 'Claude', 'clawd', 'harness', 'TLDR', 'ethskills', 'Ethereum',
-                        'Solidity', 'GitHub', 'Wispr Flow', 'iron', 'passkey', 'relay', 'Deepgram'];
+// Mined 2026-09-13 from ~6,000 of Austin's own prompts (every box's send log +
+// the last 392 session transcripts): the names that came up again and again and
+// that a stock recognizer mangles ("quad code", "kodaks", "east skills").
+// Deepgram takes ≤ 100 terms in all — your ⚙️ words go first, these next, then
+// project names — so keep this to the ones a plain model won't already know.
+const STT_BASE_TERMS = [
+  'Claude Code', 'Codex', 'clawd', 'harness', 'TLDR', 'ethskills', 'Deepgram', 'Wispr Flow',
+  'Opus', 'Sonnet', 'Haiku', 'Fable', 'Bankr', 'ElevenLabs', 'passkey', 'YubiKey', 'iron', 'relay',
+  'nerve cord', 'leftclaw', 'zkllmapi', 'launchd', 'kickstart', 'PTY', 'xterm', 'Playwright',
+  'Ethereum', 'ETH', 'Solidity', 'BuidlGuidl', 'Scaffold-ETH', 'SpeedRunEthereum', 'Foundry', 'Hardhat',
+  'Alchemy', 'Etherscan', 'MetaMask', 'multisig', 'testnet', 'mainnet', 'onchain', 'IPFS', 'bgipfs',
+  'WETH', 'USDS', 'Devcon', 'cypherpunk', 'ZKNox', 'Vercel', 'OBS', 'OAuth', 'Twilio', 'Sendblue',
+  'Qwiic', 'SparkFun', 'Adafruit', 'GeeekPi', 'Waveshare', 'MicroPython', 'STM32', 'PETG',
+  'picowallet', 'centipico', 'Omarchy', 'Vestaboard', 'godMode', 'eli5',
+];
 let sttCreds = null, sttMachine = null, sttReqT = null;
 const sttPending = new Map();
 function sttWords() { try { return localStorage.getItem(STT_WORDS_KEY) || ''; } catch { return ''; } }
