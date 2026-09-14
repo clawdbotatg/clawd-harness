@@ -69,17 +69,17 @@ print("_dead_pool_estimate:")
 m = manager()
 fresh_week = acct("x", 70.0, "X", weekly_reset=(
     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW + 3 * 86400))))
-check("a reading whose weekly reset is still ahead keeps its number",
+check("a recent reading whose weekly reset is still ahead is trusted",
       m._dead_pool_estimate(fresh_week, NOW) == 70.0)
-passed = acct("y", 70.0, "Y", weekly_reset=(
+passed = acct("y", 70.0, "Y", checked=NOW - 7200, weekly_reset=(
     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - 3600))))
-check("a reading whose weekly reset has passed counts as a fresh pool",
-      m._dead_pool_estimate(passed, NOW) == 0.0)
-old = acct("z", 70.0, "Z", checked=NOW - 8 * 86400)
-check("a reading older than a week counts as a fresh pool",
-      m._dead_pool_estimate(old, NOW) == 0.0)
+check("a reading from before its weekly reset is UNKNOWN (never 'empty')",
+      m._dead_pool_estimate(passed, NOW) is None)
+old = acct("z", 70.0, "Z", checked=NOW - server.USAGE_STALE_TRUST - 60)
+check("a reading older than USAGE_STALE_TRUST is unknown",
+      m._dead_pool_estimate(old, NOW) is None)
 blank = server.Account("b", config_dir="/nope/b", ready=True, org="B")
-check("no reading at all → no estimate", m._dead_pool_estimate(blank, NOW) is None)
+check("no reading at all → unknown", m._dead_pool_estimate(blank, NOW) is None)
 
 print("login_cta:")
 # current pool hot, a signed-out login with headroom → fire
@@ -121,6 +121,23 @@ m = manager(acct("clawd", 98.0, "ORG"), acct("ef", 60.0, "EF", dead=True),
 cta = m.login_cta(session("clawd"))
 check("several signed-out logins → the one with the most headroom",
       cta and cta["name"] == "sub3", cta)
+# the 2026-09-14 incident: a signed-out login with only an OLD reading must
+# never be offered over a working pool — other boxes burn that org
+m = manager(acct("clawd", 60.0, "ORG"),
+            acct("ef", 5.0, "EF", dead=True, checked=NOW - 3 * 86400))
+check("stale-reading signed-out login vs a working pool → no CTA (no guessing)",
+      m.login_cta(session("clawd")) is None)
+m = manager(acct("clawd", 98.0, "ORG"),
+            acct("ef", 5.0, "EF", dead=True, checked=NOW - 3 * 86400))
+check("…even when the working pool is hot",
+      m.login_cta(session("clawd")) is None)
+m = manager(acct("slop", 50.0, "ORG", dead=True),
+            acct("ef", 5.0, "EF", dead=True, checked=NOW - 3 * 86400))
+cta = m.login_cta(session("slop"))
+check("…but with NOTHING live, an unknown login is still offered",
+      cta and cta["name"] == "slop" and cta["pct"] == 50.0, cta)
+check("the CTA carries the org for the client's cross-machine check",
+      cta and cta["org"] == "ORG", cta)
 # a walled dead login is not a candidate
 m = manager(acct("clawd", 98.0, "ORG"),
             acct("ef", 5.0, "EF", dead=True, walled=NOW + 3600))

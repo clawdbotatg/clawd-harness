@@ -6345,34 +6345,46 @@ class SessionManager:
         return ("stay", None, "healthy pool; headroom gap under hysteresis")
 
     def _dead_pool_estimate(self, a, now):
-        """Best guess at a SIGNED-OUT login's headroom: its last reading, or
-        empty once that reading's weekly reset has passed (a week away is a
-        fresh pool). None when the login never had a reading at all."""
+        """What we KNOW about a SIGNED-OUT login's pool: its last reading,
+        only while that reading is still worth trusting — younger than
+        USAGE_STALE_TRUST and from before its weekly window reset. Anything
+        older is None = unknown. Never a guess: the first version of this
+        called a reset-since window "empty" and sent Austin to sign in to a
+        pool that was in fact hot on other boxes, then to the next one
+        (2026-09-14). Other machines burn the same org; a stale number is
+        not a number."""
         u = a.usage or {}
         pct = u.get("pct")
         if pct is None:
             return None
+        checked = u.get("checkedAt") or 0
+        if now - checked > USAGE_STALE_TRUST:
+            return None
         reset = _weekly_reset(u)
-        if (reset and reset < now) or now - (u.get("checkedAt") or 0) > 7 * 86400:
-            return 0.0
+        if reset and checked < reset <= now:
+            return None
         return float(pct)
 
     def login_cta(self, s):
         """The 🔑 'sign in to X' call to action for session `s`, or None.
-        A pure read. Fires only when a SIGNED-OUT login (login_gone) would be
-        the router's pick for this session's next prompt by the router's own
-        thresholds — the pool it is on (or would move to) is dead, hot, or
-        SUB_HYSTERESIS points behind — so re-signing-in is high leverage,
-        not housekeeping. A signed-out login whose org has a working sibling
-        never fires (one org = one limit; the sibling already spends it).
-        {name, reason, pct} — `pct` is the estimate (_dead_pool_estimate)."""
+        A pure read. Fires only when a SIGNED-OUT login (login_gone) is
+        KNOWN to be the router's pick for this session's next prompt by the
+        router's own thresholds — the pool it is on (or would move to) is
+        dead, hot, or SUB_HYSTERESIS points behind a signed-out pool with a
+        trusted reading — so re-signing-in is high leverage, not
+        housekeeping. A signed-out login with no trusted reading is offered
+        only when NOTHING live is usable (then any sign-in beats none). A
+        signed-out login whose org has a working sibling never fires (one
+        org = one limit; the sibling already spends it). {name, org,
+        reason, pct} — `pct` is the trusted reading or None (unknown); the
+        client re-checks `org` against every machine's live numbers."""
         if not SUB_AUTOSWITCH or s.ceremony or not s.eng.routes_accounts:
             return None
         now = time.time()
         with self.lock:
             accts = list(self.accounts.values())
         live_orgs = {a.org for a in accts if a.ready and not a.broken and a.org}
-        dead = []
+        known, unknown = [], []
         for a in accts:
             if not (a.ready and a.login_gone and a.routable()
                     and now >= getattr(a, "walled_until", 0.0)):
@@ -6380,12 +6392,12 @@ class SessionManager:
             if a.org and a.org in live_orgs:
                 continue
             est = self._dead_pool_estimate(a, now)
-            if est is not None:
-                dead.append((est, _weekly_reset(a.usage) or float("inf"), a.name, a))
-        if not dead:
+            if est is None:
+                unknown.append(((a.usage or {}).get("checkedAt") or 0, a.name, a))
+            else:
+                known.append((est, _weekly_reset(a.usage) or float("inf"), a.name, a))
+        if not known and not unknown:
             return None
-        dead.sort(key=lambda t: t[:3])
-        est, _, _, cand = dead[0]
         # what the router can do WITHOUT that login: the pool this session
         # is on, or the one preflight would move it to
         cur = self.accounts.get(s.account)
@@ -6396,19 +6408,31 @@ class SessionManager:
         eff_dead = (eff is None or eff.broken
                     or now < getattr(eff, "walled_until", 0.0)
                     or (eff_pct is not None and eff_pct >= SUB_EXHAUSTED))
+        if known:
+            known.sort(key=lambda t: t[:3])
+            est, _, _, cand = known[0]
+        else:
+            est, cand = None, None
         if eff_dead:
-            if est >= SUB_EXHAUSTED:
-                return None
-            reason = "no working login has headroom"
-        elif eff_pct is None:
-            return None                       # nothing to compare against — don't nag
-        elif eff_pct >= SUB_HOT and est < SUB_HOT:
+            if cand is not None and est < SUB_EXHAUSTED:
+                return {"name": cand.name, "org": cand.org or "", "pct": round(est, 1),
+                        "reason": "no working login has headroom"}
+            if unknown:
+                unknown.sort(key=lambda t: (-t[0], t[1]))
+                a = unknown[0][2]
+                return {"name": a.name, "org": a.org or "", "pct": None,
+                        "reason": "no working login has headroom"}
+            return None
+        if cand is None or eff_pct is None:
+            return None                       # nothing KNOWN to be better — don't nag
+        if eff_pct >= SUB_HOT and est < SUB_HOT:
             reason = f"this pool is {eff_pct:.0f}% used"
         elif eff_pct - est >= SUB_HYSTERESIS:
             reason = f"{eff_pct - est:.0f} points more headroom"
         else:
             return None
-        return {"name": cand.name, "reason": reason, "pct": round(est, 1)}
+        return {"name": cand.name, "org": cand.org or "", "reason": reason,
+                "pct": round(est, 1)}
 
     def _log_route(self, s, decision, best, reason, via="", prompt_id="",
                    applied=False):

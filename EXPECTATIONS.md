@@ -214,8 +214,13 @@ is dead, walled, ≥ `SUB_HOT` while the signed-out one is cooler, or
 ≥ `SUB_HYSTERESIS` points behind it. Same thresholds as prompt-time routing,
 so the button never asks for a sign-in the router wouldn't use. A signed-out
 login with a working same-org sibling never earns the button (one limit).
-The signed-out pool's headroom is an estimate: its last reading, or "empty"
-once that reading's weekly reset has passed. Tapping the button opens that
+The signed-out pool's number is its last TRUSTED reading only (younger than
+`USAGE_STALE_TRUST`, from after its weekly reset) — **never a guess**. The
+first cut called a reset-since window "empty": it sent Austin to sign in to
+EF, whose org was hot on other boxes, then to clawd (2026-09-14, the "woah
+woah woah" report). Now a login with no trusted number is offered only when
+nothing live is usable, and the fleet page re-checks the target's org against
+every machine's fresh numbers before showing the button. Tapping it opens that
 login's sign-in ceremony (`accountAdd`, the 🧠 card's "sign in again" path).
 Wire: `sessions` row `loginCta`; code `SessionManager.login_cta`;
 `test_login_cta.py`.

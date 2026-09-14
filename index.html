@@ -9838,6 +9838,35 @@ const closeBtn = document.getElementById('closeBtn');
 const ejectBtn = document.getElementById('ejectBtn');   // ⏏ break out (handler below, beside 📌's)
 const machineTag = document.getElementById('machineTag');
 closeBtn.onclick = () => closeCurrentSession();
+// 🔑 CTA sanity gate: the server that emitted `loginCta` only knows its own
+// box, and a signed-out login there may be a LIVE login on another machine
+// burning the same org. The fleet page sees every machine's accounts, so
+// before showing "sign in to X" check the real numbers: if any machine has
+// a fresh reading for X's org, X must actually beat the pool this session
+// is on by the router's own bars (hot vs cool, or 20 points), or the CTA is
+// a guess and stays hidden. No fresh reading anywhere → trust the server.
+const CTA_FRESH_MS = 15 * 60 * 1000, CTA_HOT = 97, CTA_GAP = 20;
+function ctaStillTrue(s) {
+  const cta = s.loginCta;
+  if (!cta || !cta.org) return true;
+  const mids = FLEET ? Object.keys(perMachine) : ['local'];
+  let target = null;
+  for (const mid of mids) {
+    const info = accountsInfoFor(mid);
+    for (const a of (info && info.accounts) || []) {
+      if (a.orgUuid !== cta.org || a.status !== 'ready' || a.usagePct == null) continue;
+      if (!a.checkedAt || Date.now() - a.checkedAt * 1000 > CTA_FRESH_MS) continue;
+      if (!target || a.checkedAt > target.checkedAt) target = a;
+    }
+  }
+  if (!target) return true;                       // nothing fresher than the server had
+  const mid = FLEET ? currentMachine : 'local';
+  const info = accountsInfoFor(mid);
+  const cur = info && (info.accounts || []).find(a => a.name === s.account);
+  if (!cur || cur.status !== 'ready' || cur.usagePct == null) return true;   // current pool dead
+  if (cur.usagePct >= CTA_HOT) return target.usagePct < CTA_HOT;
+  return cur.usagePct - target.usagePct >= CTA_GAP;
+}
 // Pill beside the close-✕ (top-right): model · ctx% · 🔑 account · machine.
 // Re-run on view changes AND on `sessions` frames: model, context and the
 // account all ride session metadata, which can land after the view is open.
@@ -9868,7 +9897,7 @@ function refreshSessionTag() {
   // On a phone the pill is anchored right and grows LEFT off the screen, so
   // the button stands alone there (ctaprobe 2026-09-14: model/ctx/acct were
   // pushed to x = -180 on a 390px viewport).
-  const cta = s && s.loginCta && s.loginCta.name ? s.loginCta : null;
+  const cta = s && s.loginCta && s.loginCta.name && ctaStillTrue(s) ? s.loginCta : null;
   const room = !(cta && isTouch);
   if (model && room) add('model', model);
   if (pct > 0 && room) add('ctx' + (pct >= 90 ? ' crit' : pct >= 70 ? ' warn' : ''), 'ctx ' + pct + '%');
