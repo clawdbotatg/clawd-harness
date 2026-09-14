@@ -213,6 +213,19 @@ def _make_handler(state):
                                         else "claude")
                 j({"type": "focus", "cid": cid})
                 state.broadcast(state.sessions_frame())
+            elif t == "check":
+                # 🔍 double-check = arm + the brief turn, then a reviewer session
+                # of the OTHER engine appears with checkOf = the source
+                cid = f.get("cid")
+                src = state.sessions.get(cid) or {}
+                other = "claude" if src.get("engine") == "codex" else "codex"
+                state.set_session(cid, checkArmed=True, busy=True, status="working")
+                state.set_session(cid, checkArmed=False, busy=False, status="idle",
+                                  lastAnswer="brief written to REVIEW.md")
+                rev = state.add_session(f.get("pid") or src.get("pid", "p1"), engine=other,
+                                        title="\U0001f50d " + src.get("title", "session"))
+                state.set_session(rev, checkOf=cid, desc="double-checking")
+                state.broadcast(state.sessions_frame())
             elif t == "pin":
                 cid, on = f.get("cid"), f.get("on", True)
                 state.set_session(cid, pinned=(1.0 if on else 0.0),

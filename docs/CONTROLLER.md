@@ -134,6 +134,7 @@ ask(cid, text)                                       # → send
 answer_prompt(cid, choice)                           # → input (raw keys) — the hard one
 interrupt(cid) / pause(cid)
 wrap(cid, text?)                                     # 📑 → wrap frame: handoff, commit, then it closes ITSELF
+check(cid)                                           # 🔍 → check frame: the OTHER engine reviews its work in a new session
 session_digest(cid)                                  # deep-read one session on demand
 ```
 
@@ -142,6 +143,15 @@ itself once its handoff is written and committed; it lands in the 🗃️ closed
 history with a TLDR, reopenable. Only an armed session can self-close and it
 refuses on a dirty worktree, so a wrap that doesn't end is the session saying
 something — `transcript_tail`. `close` stays for the broken or abandoned.
+
+`check` is the verify verb: the session writes a short local brief
+(`REVIEW.md`, git-excluded like `HANDOFF.md`), and the first Stop after that
+brief spawns a reviewer session of the OTHER engine in the same project (codex
+for claude, claude for codex), briefed with the file + the diff since the
+source spawned. The brief is claims, the diff is truth, the reviewer never
+edits; it ends with a severity-tagged issue list + TLDR. The reviewer's roster
+row carries `checkOf` = the source cid — its `lastAnswer` / `transcript_tail`
+is the verdict, which the PM hands back to the source with `ask`.
 
 **`answer_prompt` is the one that's genuinely harder than the rest.** A
 `waiting` session is parked on a TUI menu; answering means raw arrow-keys+enter

@@ -11,6 +11,43 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-13 — 🔍 double-check: the other engine reviews a session's work
+
+Austin's loop: claude builds, codex checks. The ask was one button, and NOT
+"hand the whole session over" — a summary of what it did and where, given to
+codex to verify. Built as a wrap-shaped feature, not a fork-shaped one:
+
+- **The brief is written by the source itself**, not summarised by the
+  harness: the tap arms the session and types `CHECK_BRIEF_PROMPT` (what it
+  was asked, what it changed and where, what it verified, what it's unsure
+  of, what's uncommitted — under 60 lines, no code changes this turn) into a
+  LOCAL `REVIEW.md`, listed in `.git/info/exclude` exactly like the wrap's
+  `HANDOFF.md` (`_exclude_handoff(path, name)` generalised;
+  `_worktree_dirty` tolerates it). A haiku summary of a transcript was the
+  cheap alternative; the author's own account is a better brief and costs
+  one short turn.
+- **The reviewer spawns from the Stop hook**, like the wrap's close: the arm
+  remembers `prompt_count` and fires on the first Stop PAST it, so a tap
+  while the session is mid-turn (the brief queues in its composer) does not
+  fire on the turn that was already running. Volatile arm, 30-min TTL, a
+  restart disarms (the safe direction).
+- **The diff is the truth.** Every session now records `head_at_spawn`
+  (ctor param + registry, landmine 5) so the reviewer is pointed at
+  `git diff <base>..HEAD` + the working tree; a pre-feature row falls back
+  to commits since `created`; base == HEAD says "it's all in the working
+  tree". The review prompt calls the brief CLAIMS, tells the reviewer to run
+  the repo's tests, never edit, and end with a severity-tagged issue list +
+  TLDR. Reviewer = the OTHER engine (codex for claude, claude for codex),
+  `check_of` = the source cid (ctor + registry) → the tab wears 🔍, the PM
+  can follow it.
+- **UI:** 🔍 beside ⑂. The viewer stays on the source while it writes (a row
+  above the composer, cancel = `checkCancel`), and jumps to the reviewer tab
+  when it appears IF still watching the source (`noteCheckSpawned`);
+  otherwise the tab is just in the strip. The PM has a `check` verb (three
+  places updated: verb, MCP description, persona). Not built yet: a "send
+  the findings back to the source" button — `check_of` makes it a small
+  follow-on.
+
 ## 2026-09-12 — the doc store: a shared shelf on the relay box
 
 Austin: "I find myself wanting to share documents between machines… tell

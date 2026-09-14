@@ -205,6 +205,11 @@ class HarnessClient:
         harness's default text when `text` is empty)."""
         return self.send({"type": "wrap", "cid": cid, "text": text or ""})
 
+    def check_session(self, cid):
+        """🔍 arm the session for a double-check: it writes its brief, then
+        the harness spawns the other engine's reviewer in the same project."""
+        return self.send({"type": "check", "cid": cid, "via": "pm"})
+
     def pin_session(self, cid, on=True):
         return self.send({"type": "pin", "cid": cid, "on": bool(on)})
 

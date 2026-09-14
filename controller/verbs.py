@@ -18,7 +18,7 @@ import time
 import urllib.parse
 
 WRITE_VERBS = {"assign", "ask", "answer_prompt", "interrupt",
-               "create_project", "clone_project", "spawn", "close", "wrap",
+               "create_project", "clone_project", "spawn", "close", "wrap", "check",
                "start_pipeline", "pin", "add_local_project", "remove_project",
                "external_project"}
 
@@ -1008,6 +1008,26 @@ class Verbs:
             return {"ok": c.wrap_session(cid, text), "machine": machine, "cid": cid}
         return self._gate("wrap", {"machine": machine, "cid": cid, "text": text,
                                    "confirm": confirm}, do)
+
+    def check(self, machine, cid, confirm=False):
+        """🔍 Double-check a session's work with the OTHER engine (codex
+        reviews a claude session, claude reviews a codex one). The session
+        first writes a short local brief (REVIEW.md, git-excluded, never
+        committed); when that turn ends the harness spawns a reviewer session
+        in the same project — it reads the brief as claims, the diff since the
+        source started as truth, runs the repo's tests, never edits, and ends
+        with a severity-tagged issue list + TLDR. The reviewer appears in the
+        roster with `checkOf` = the source cid; read its transcript_tail /
+        lastAnswer for the verdict. Refused (with a reason) for a sign-in
+        session, one with no conversation yet, or when codex isn't signed in.
+        The source keeps running untouched."""
+        def do():
+            c = self.clients.get(machine)
+            if not c:
+                return {"ok": False, "error": f"no such machine: {machine}"}
+            return {"ok": c.check_session(cid), "machine": machine, "cid": cid}
+        return self._gate("check", {"machine": machine, "cid": cid,
+                                    "confirm": confirm}, do)
 
     def pin(self, machine, cid, on=True, confirm=False):
         """📌 Park a finished session on the pin board (`on=true`) or bring it

@@ -156,6 +156,42 @@ WRAP_PROMPT = (
     "once the turn ends. If something is unresolved or you need a decision "
     "from me, do NOT close: say what's open and stop. End your last message "
     "with a 3-line TLDR.")
+# 🔍 double-check: the OTHER engine reviews what a session built (codex checks
+# a claude session, claude checks a codex one). One tap: the source session is
+# armed and asked for a short brief — what it did, where, what it verified,
+# what it's unsure of — written to a LOCAL REVIEW.md (excluded like HANDOFF.md,
+# never committed). The first Stop AFTER that brief was submitted spawns the
+# reviewer in the same project (ClaudeSession._check_on_stop →
+# SessionManager.check_spawn) with the brief + the git range since the source
+# spawned (head_at_spawn). The brief is CLAIMS; the diff is the truth; the
+# reviewer is told never to edit. The arm is volatile (a restart disarms — the
+# safe direction) and lapses after CHECK_TTL_S. A tap mid-turn waits: the arm
+# remembers the prompt count and ignores the Stop of the turn already running.
+CHECK_TTL_S = int(os.environ.get("CHECK_TTL_S", "1800"))
+CHECK_READY_S = float(os.environ.get("CHECK_READY_S", "30"))   # wait for the reviewer's TUI before typing
+REVIEW_FILE = "REVIEW.md"
+CHECK_BRIEF_PROMPT = (
+    "A second agent ({reviewer}) is about to double-check your work in this "
+    "repo. Write it a short brief in {file} at the repo root (replace an old "
+    "one): what you were asked to do, what you changed and where (files, "
+    "functions), what you verified and how, what is still unverified or you "
+    "are unsure of, and what is uncommitted. Plain facts, under 60 lines. That "
+    "file is LOCAL notes: it is already in this checkout's .git/info/exclude, "
+    "so do NOT commit it, push it, or add it to .gitignore or any tracked "
+    "file. Do nothing else this turn — no code changes — and reply with one "
+    "line once it is written.")
+CHECK_REVIEW_PROMPT = (
+    "You are the second pair of eyes. Another agent ({src_engine}, session "
+    "\"{title}\") just worked in this repo. Its own account of the work is in "
+    "{file} at the repo root — read it first, but treat it as CLAIMS, not "
+    "facts. The truth is the code: {range} plus anything uncommitted "
+    "(`git status`, `git diff`). Verify every claim against the code, run the "
+    "tests and checks this repo defines, and look for bugs, missed edge cases, "
+    "unhandled errors, things claimed done but not done, and changes the brief "
+    "does not mention. Do NOT edit, commit, or push anything — you are "
+    "reviewing, not fixing (running tests and read-only commands is fine). "
+    "Finish with a numbered list of issues, each tagged critical / should-fix "
+    "/ nit with file:line, or 'No issues found', and then a 3-line TLDR.")
 # A subscribe whose ring replay is this shallow gets the transcript rendered in
 # as seed scrollback first (see _history_seed_bytes) — the ring goes shallow
 # exactly when it can't carry history: a width-change fence (_apply_size) or a
@@ -1219,7 +1255,8 @@ def _worktree_dirty(path):
     leave it clean. Untracked files count — they're exactly what gets lost —
     with ONE exception: an untracked HANDOFF.md at the root is the wrap's own
     local handoff (deliberately uncommitted; normally hidden by the exclude
-    entry `_exclude_handoff` writes, tolerated here in case it isn't)."""
+    entry `_exclude_handoff` writes, tolerated here in case it isn't). The 🔍
+    double-check's REVIEW.md is the same kind of file, same treatment."""
     if not path or not os.path.isdir(os.path.join(path, ".git")):
         return ""
     try:
@@ -1228,14 +1265,15 @@ def _worktree_dirty(path):
     except Exception:
         return ""
     lines = [l for l in (r.stdout or "").splitlines()
-             if l.strip() and l != f"?? {HANDOFF_FILE}"]
+             if l.strip() and l not in (f"?? {HANDOFF_FILE}", f"?? {REVIEW_FILE}")]
     if not lines:
         return ""
     return "\n".join(lines[:5]) + (f"\n… +{len(lines) - 5} more" if len(lines) > 5 else "")
 
 
-def _exclude_handoff(path):
-    """List HANDOFF.md in the checkout's LOCAL exclude file (`git rev-parse
+def _exclude_handoff(path, name=HANDOFF_FILE):
+    """List HANDOFF.md (or another local-notes file: the 🔍 REVIEW.md) in the
+    checkout's LOCAL exclude file (`git rev-parse
     --git-path info/exclude` — lives under .git, never tracked, never pushed)
     so the wrap handoff is invisible to `git status` and can't be committed by
     accident. Idempotent. True when the entry is present (already or now);
@@ -1252,17 +1290,32 @@ def _exclude_handoff(path):
         if not os.path.isabs(ex):
             ex = os.path.join(path, ex)
         cur = open(ex, encoding="utf-8", errors="replace").read() if os.path.exists(ex) else ""
-        if any(l.strip() in (HANDOFF_FILE, "/" + HANDOFF_FILE) for l in cur.splitlines()):
+        if any(l.strip() in (name, "/" + name) for l in cur.splitlines()):
             return True
         os.makedirs(os.path.dirname(ex), exist_ok=True)
         with open(ex, "a", encoding="utf-8") as f:
             if cur and not cur.endswith("\n"):
                 f.write("\n")
-            f.write("# \U0001f4d1 clawd-harness wrap handoff \u2014 local notes, never committed\n"
-                    f"/{HANDOFF_FILE}\n")
+            f.write(f"# clawd-harness local notes ({name}) \u2014 never committed\n"
+                    f"/{name}\n")
         return True
     except Exception:
         return False
+
+
+def _git_head(path):
+    """`git rev-parse HEAD` for the checkout at `path`; "" for a non-repo, an
+    unborn branch, or any git failure. Recorded on every session at spawn
+    (`head_at_spawn`, ctor param + registry) so a 🔍 double-check can name
+    the exact range the reviewer should read."""
+    if not path or not os.path.isdir(os.path.join(path, ".git")):
+        return ""
+    try:
+        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=path,
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return ""
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
 
 
 def _transcript_exists(session_id, config_dir=""):
@@ -3151,8 +3204,16 @@ class ClaudeSession:
                  pinned=0.0, test_hint="", model="", ctx_tokens=0,
                  engine="claude", autopilot=0.0, pilot_goal="",
                  pilot_status="", pilot_rounds=0,
-                 tldr_text="", tldr_on=False, voice_on=False, fork=False):
+                 tldr_text="", tldr_on=False, voice_on=False, fork=False,
+                 head_at_spawn="", check_of=""):
         self.manager = manager
+        # 🔍 double-check: the git HEAD when this session was created (""
+        # for a non-repo or a pre-feature row) — the reviewer's diff base;
+        # and, on a reviewer session, the cid of the session it is checking.
+        # Both durable (ctor params + registry) so a restart/handoff keeps the
+        # range and the tab's badge.
+        self.head_at_spawn = head_at_spawn or ""
+        self.check_of = check_of or ""
         # ⑂ this session was forked from another: its first launch is
         # `--resume <source id> --fork-session`. Persisted (ctor param +
         # registry) only until claude hands us the fork's own id — see
@@ -3277,6 +3338,10 @@ class ClaudeSession:
         self.wrap_turns_left = 0                  # Stops the arm survives (WRAP_TURNS)
         self.wrap_closing = False                 # harness-close accepted: close on the next Stop
         self._wrap_timer = None                   # the WRAP_GRACE_S fallback
+        # 🔍 double-check (volatile on purpose: a restart disarms)
+        self.check_armed_at = 0.0                 # epoch of the tap; 0 = not armed
+        self.check_after = 0                      # prompt_count at the tap: fire on the first Stop past it
+        self.check_engine = ""                    # the reviewer engine chosen at the tap
         # 🟦 live TLDR (volatile; the viewer re-asserts its preference on subscribe)
         self.tldr_on = bool(tldr_on)              # a viewer wants the blue block (ctor param: survives respawn/restart)
         self.tldr_turn_text = ""                  # this turn's streamed assistant prose (API tee)
@@ -3316,7 +3381,8 @@ class ClaudeSession:
                 "model": self.model, "ctx_tokens": self.ctx_tokens,
                 "tldr_text": (self.tldr_text or "")[:3000],
                 "tldr_on": self.tldr_on, "voice_on": self.voice_on,
-                "fork": self.fork}
+                "fork": self.fork,
+                "head_at_spawn": self.head_at_spawn, "check_of": self.check_of}
 
     def clone_for_respawn(self, **overrides):
         """A fresh session object for an in-place respawn under the SAME cid
@@ -3407,7 +3473,9 @@ class ClaudeSession:
                 "model": self.model,
                 "ctxTokens": self.ctx_tokens,
                 "wrapArmed": self.wrap_armed(),     # 📑 may close itself (badge + cancel line)
-                "wrapClosing": self.wrap_closing}   # 📑 harness-close accepted; closes at turn end
+                "wrapClosing": self.wrap_closing,   # 📑 harness-close accepted; closes at turn end
+                "checkArmed": self.check_armed(),   # 🔍 writing the brief; a reviewer spawns at its Stop
+                "checkOf": self.check_of or ""}     # 🔍 on a reviewer: the cid it double-checks
 
     # -- 📑 wrap: arm, cancel, the self-close request, the turn-end close ------
     def wrap_armed(self):
@@ -3476,6 +3544,38 @@ class ClaudeSession:
                 print(f"[wrap {self.cid[:8]}] arm lapsed — turn budget spent, "
                       "tab stays open", flush=True)
                 self.wrap_cancel()
+
+    # -- 🔍 double-check: arm on the tap, fire on the first Stop AFTER the brief --
+    def check_armed(self):
+        return bool(self.check_armed_at
+                    and time.time() - self.check_armed_at < CHECK_TTL_S)
+
+    def check_arm(self, engine):
+        self.check_armed_at = time.time()
+        self.check_after = self.prompt_count      # the brief's UserPromptSubmit bumps past this
+        self.check_engine = engine
+
+    def check_cancel(self):
+        self.check_armed_at, self.check_after, self.check_engine = 0.0, 0, ""
+
+    def _check_on_stop(self):
+        """The Stop hook's half: spawn the reviewer once the brief turn ends.
+        A Stop that arrives before the brief was even submitted (the tap
+        landed mid-turn; the text is queued in the composer) is not ours —
+        prompt_count tells the two apart. The spawn runs off-thread: it
+        waits for the reviewer's TUI before typing."""
+        if not self.check_armed_at:
+            return
+        if not self.check_armed():
+            print(f"[check {self.cid[:8]}] arm lapsed (TTL) — no reviewer spawned", flush=True)
+            self.check_cancel()
+            return
+        if self.prompt_count <= self.check_after:
+            return                                # the turn that was already running at the tap
+        engine = self.check_engine
+        self.check_cancel()
+        threading.Thread(target=self.manager.check_spawn, args=(self, engine),
+                         daemon=True).start()
 
     def _bg_probe_claude(self):
         """One read-only look at claude's status file → "shell" | "agent" | "".
@@ -3714,6 +3814,7 @@ class ClaudeSession:
                 self.last_answer = data["last"][:500]
             self.tldr_turn_done()                # 🟦 the tightening pass
             self._wrap_on_stop()                 # 📑 an accepted self-close lands here
+            self._check_on_stop()                # 🔍 the brief is written → spawn the reviewer
             # Turn complete → the transcript now has a real exchange. Name it if
             # it's still unnamed (so even a 1-prompt session gets a title), and
             # re-name at the 1/3/6/9/… milestones to sharpen as it grows.
@@ -5399,7 +5500,8 @@ class SessionManager:
                     pilot_rounds=e.get("pilot_rounds", 0),
                     model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0),
                     tldr_text=e.get("tldr_text", ""), tldr_on=bool(e.get("tldr_on")),
-                    voice_on=bool(e.get("voice_on")), fork=bool(e.get("fork")))
+                    voice_on=bool(e.get("voice_on")), fork=bool(e.get("fork")),
+                    head_at_spawn=e.get("head_at_spawn", ""), check_of=e.get("check_of", ""))
                 self.sessions[s.cid] = s
                 self._park_for_boot(s)
                 continue
@@ -5477,7 +5579,8 @@ class SessionManager:
                 pilot_rounds=e.get("pilot_rounds", 0),
                 model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0),
                 tldr_text=e.get("tldr_text", ""), tldr_on=bool(e.get("tldr_on")),
-                voice_on=bool(e.get("voice_on")), fork=bool(e.get("fork")))
+                voice_on=bool(e.get("voice_on")), fork=bool(e.get("fork")),
+                head_at_spawn=e.get("head_at_spawn", ""), check_of=e.get("check_of", ""))
             self.sessions[s.cid] = s
             self._park_for_boot(s)
         threading.Thread(target=self._boot_stagger, daemon=True).start()
@@ -7717,14 +7820,16 @@ class SessionManager:
 
     # -- session crud ----------------------------------------------------------
     def create_session(self, pid, account=None, ceremony=False,
-                       engine="claude", resume="", title="", fork=False):
+                       engine="claude", resume="", title="", fork=False,
+                       check_of=""):
         """`resume`: an engine session id to reopen (`claude --resume <id>` /
         codex's rollout) — the way back for a session whose tab got closed
         (the ✕ has no confirm; 2026-09-05 three were lost to it mid-panic).
         Falls back to a fresh session, with a log line, when the transcript
         is gone. `title` seeds the tab name until the namer runs. `fork`
         (with `resume`): continue under a NEW id, the source untouched —
-        the ⑂ button; see SessionManager.fork."""
+        the ⑂ button; see SessionManager.fork. `check_of`: this is a 🔍
+        reviewer for that cid (SessionManager.check_spawn)."""
         if pid not in self.projects:
             return None
         proj = self.projects[pid]
@@ -7754,7 +7859,8 @@ class SessionManager:
                               session_id=resume if resuming else "",
                               resuming=resuming, created=time.time(),
                               engine=engine, title=title,
-                              fork=bool(fork and resuming))
+                              fork=bool(fork and resuming),
+                              head_at_spawn=_git_head(proj.path), check_of=check_of)
             if not _codex_signed_in():
                 s.desc = ("codex is not signed in on this machine — run "
                           "`codex login` in a terminal once, then start a "
@@ -7853,7 +7959,8 @@ class SessionManager:
                           resuming=resuming, created=time.time(),
                           account=name, config_dir=cfg, title=title,
                           ceremony=ceremony or no_creds_anywhere,
-                          fork=bool(fork and resuming))
+                          fork=bool(fork and resuming),
+                          head_at_spawn=_git_head(proj.path), check_of=check_of)
         if no_creds_anywhere:
             s.desc = ("no plan is signed in on this machine yet — complete "
                       "the login in this terminal (once per machine)")
@@ -7983,6 +8090,100 @@ class SessionManager:
             print(f"[wrap {cid[:8]}] cancelled by a human", flush=True)
             self.broadcast_sessions()
 
+
+    # -- 🔍 double-check: the other engine reviews this session's work --------
+    def check(self, cid, via="check"):
+        """Arm `cid` and ask it for the brief. "" on success, else the reason
+        it can't be checked. The reviewer spawns from the Stop hook
+        (ClaudeSession._check_on_stop → check_spawn): the first Stop AFTER
+        the brief prompt was submitted, so a tap mid-turn waits its turn."""
+        s = self.sessions.get(cid)
+        if not s:
+            return "no such session"
+        if s.ceremony:
+            return "a sign-in session can't be double-checked"
+        if not s._has_conversation():
+            return "nothing to check yet — send a message first"
+        reviewer = "codex" if s.engine == "claude" else "claude"
+        if reviewer == "codex" and not _codex_signed_in():
+            return "codex is not signed in on this machine — run `codex login` once"
+        s.check_arm(reviewer)
+        _exclude_handoff(s.workdir(), REVIEW_FILE)   # REVIEW.md stays local, like HANDOFF.md
+        txt = CHECK_BRIEF_PROMPT.format(reviewer=reviewer, file=REVIEW_FILE)
+        log_prompt(s, txt, via)
+        print(f"[check {cid[:8]}] armed — {reviewer} reviews after the brief "
+              f"({CHECK_TTL_S}s)", flush=True)
+        if SUB_ROUTE_ON_PROMPT:
+            threading.Thread(target=self.send_prompt, args=(cid, txt),
+                             kwargs={"via": via}, daemon=True).start()
+        else:
+            self.send_prompt(cid, txt, via=via)
+        self.broadcast_sessions()
+        return ""
+
+    def check_cancel(self, cid):
+        s = self.sessions.get(cid)
+        if s:
+            s.check_cancel()
+            self.broadcast_sessions()
+
+    def check_range(self, src):
+        """The sentence that tells the reviewer WHERE the source's changes
+        are: the range from head_at_spawn when we have it (and the ref still
+        resolves), else the commits since the session was created."""
+        base, path = (src.head_at_spawn or "").strip(), src.workdir()
+        head = _git_head(path)
+        if base and head:
+            if base == head:
+                return ("nothing has been committed since it started, so the work "
+                        "is all in the working tree")
+            try:
+                ok = subprocess.run(["git", "cat-file", "-e", base + "^{commit}"],
+                                    cwd=path, capture_output=True, timeout=5).returncode == 0
+            except Exception:
+                ok = False
+            if ok:
+                return (f"the changes since it started are `git diff {base[:12]}..HEAD` "
+                        f"(commits: `git log --oneline {base[:12]}..HEAD`)")
+        since = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(src.created or time.time()))
+        return (f"the changes are the commits since it started at {since} "
+                f"(`git log --since='{since}' --oneline`, then diff from the "
+                "oldest of those to HEAD)")
+
+    def check_prompt(self, src, engine):
+        """The reviewer's opening prompt."""
+        title = (src.title or src._fallback_title() or "the source session").strip()
+        return CHECK_REVIEW_PROMPT.format(
+            src_engine=src.engine, title=title.replace('"', "'"),
+            file=REVIEW_FILE, range=self.check_range(src))
+
+    def check_spawn(self, src, engine):
+        """Spawn the reviewer for `src` (from the Stop hook's thread) and
+        brief it. Never raises — a failure is a log line, the source is
+        untouched either way. Returns the reviewer session or None."""
+        title = (src.title or src._fallback_title() or "").strip()
+        try:
+            txt = self.check_prompt(src, engine)
+            s = self.create_session(src.pid, engine=engine,
+                                    title=("\U0001f50d " + title)[:80] if title else "\U0001f50d double-check",
+                                    check_of=src.cid)
+            if not s:
+                print(f"[check {src.cid[:8]}] couldn't start a {engine} session "
+                      "in that project — no reviewer", flush=True)
+                return None
+            s.desc = f"double-checking {title}" if title else "double-checking"
+            self.broadcast_sessions()
+            if not s.wait_ready(CHECK_READY_S):
+                print(f"[check {src.cid[:8]}] reviewer {s.cid[:8]} not ready after "
+                      f"{CHECK_READY_S:.0f}s — briefing anyway", flush=True)
+            log_prompt(s, txt, "check")
+            self.send_prompt(s.cid, txt, via="check")
+            print(f"[check {src.cid[:8]}] \U0001f50d {engine} reviewer {s.cid[:8]} briefed",
+                  flush=True)
+            return s
+        except Exception as e:
+            print(f"[check {src.cid[:8]}] reviewer spawn failed: {e!r}", flush=True)
+            return None
     # -- 🗃️ closed-session history -------------------------------------------
     # The tab ✕ has no confirm, and until 2026-09-05 a closed session was
     # simply gone (three lost mid-panic that day). Every close files a row
@@ -9224,6 +9425,16 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 client.send_json({"type": "error", "cid": src_cid,
                                   "fork": src_cid, "error": f"can't fork: {why}"})
+        elif t == "check":
+            # 🔍 the double-check button (docs/WS-PROTOCOL.md): arm + brief;
+            # the reviewer tab arrives in a later `sessions` frame (checkOf).
+            src_cid = str(frame.get("cid") or "")
+            why = MGR.check(src_cid, via=str(frame.get("via") or "check"))
+            if why:
+                client.send_json({"type": "error", "cid": src_cid,
+                                  "check": src_cid, "error": f"can't double-check: {why}"})
+        elif t == "checkCancel":
+            MGR.check_cancel(str(frame.get("cid") or ""))
         elif t == "closedForget":
             MGR.closed_forget(frame.get("cid") or None)
         elif t in ("skillsLib", "skillsRm"):

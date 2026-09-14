@@ -120,6 +120,14 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   claude's own `--resume <id> --fork-session` (new id + transcript, source
   untouched); the `fork` flag is a ctor param + registry field that clears on
   the first id rotation. `test_fork.py`; WS verb `fork` in `docs/WS-PROTOCOL.md`.
+  **🔍 double-check** = `SessionManager.check` → the source writes a LOCAL
+  `REVIEW.md` (excluded like `HANDOFF.md`) → the first Stop past that brief
+  (`_check_on_stop`, keyed on `prompt_count`, volatile arm) → `check_spawn`
+  opens the OTHER engine in the same project with the brief + `git diff
+  <head_at_spawn>..HEAD` (every session records HEAD at spawn: ctor param +
+  registry). Brief = claims, diff = truth, the reviewer never edits. The
+  reviewer's `check_of` is a ctor param + registry field. `test_check.py` +
+  `tools/checkprobe.mjs`; WS verbs `check`/`checkCancel`.
 
 ## Landmines (don't regress; stories in HISTORY.md)
 

@@ -511,14 +511,15 @@
   #pilotrow .tag { flex:0 0 auto; padding-top:1px; }
   /* 📑 wrap — the session is armed to close itself once its handoff is written;
      same slot as the 🤖 row, accent-edged, with the one way out: cancel */
-  #wraprow { display:flex; gap:8px; align-items:center; background:var(--raised);
+  #wraprow, #checkrow { display:flex; gap:8px; align-items:center; background:var(--raised);
              border:1px solid var(--accent); color:var(--ink); padding:6px 10px; font-size:13px; }
-  #wraprow[hidden] { display:none; }
-  #wraprow .tag { flex:0 0 auto; }
-  #wraprow #wraptext { flex:1 1 auto; min-width:0; }
-  #wraprow button { flex:0 0 auto; background:transparent; border:1px solid var(--edge); color:var(--dim);
+  #wraprow[hidden], #checkrow[hidden] { display:none; }
+  #wraprow .tag, #checkrow .tag { flex:0 0 auto; }
+  #wraprow #wraptext, #checkrow #checktext { flex:1 1 auto; min-width:0; }
+  #wraprow button, #checkrow button { flex:0 0 auto; background:transparent; border:1px solid var(--edge); color:var(--dim);
                     border-radius:6px; padding:3px 9px; font-size:12px; cursor:pointer; }
-  #wraprow button:hover { border-color:var(--accent); color:var(--accent); }
+  #wraprow button:hover, #checkrow button:hover { border-color:var(--accent); color:var(--accent); }
+  /* 🔍 double-check — the session is writing its brief; a reviewer tab opens when its turn ends */
   /* 📑 wrapped-up toast: the tab just vanished on purpose — say so, offer ↩ */
   #wraptoast { position:fixed; left:50%; bottom:84px; transform:translateX(-50%); z-index:60;
                display:flex; gap:10px; align-items:center; background:var(--raised); color:var(--ink);
@@ -1490,13 +1491,14 @@
              title="🤖 autopilot — let the harness keep this session working on its goal, narrating progress in a status row. Bounded; your own messages steer it." />
       <div id="ttystat" hidden role="img"><span class="dot"></span></div>
       <div id="sessiondesc" title="AI-generated name for this session"></div>
-      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — your skill library (same list everywhere). Tap one to attach it to your next message; Enter sends your text with a one-line pointer claude reads.">📚</button><button id="closedBtn" title="Closed sessions — every session closed on any machine, newest first. ↩ brings one back as a new tab resuming the old conversation.">🗃️</button><button id="forkBtn" title="Fork — a new tab in this project that continues this conversation (everything claude knows so far), while this session keeps going on its own. One context, two directions.">⑂</button></div>
+      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — your skill library (same list everywhere). Tap one to attach it to your next message; Enter sends your text with a one-line pointer claude reads.">📚</button><button id="closedBtn" title="Closed sessions — every session closed on any machine, newest first. ↩ brings one back as a new tab resuming the old conversation.">🗃️</button><button id="forkBtn" title="Fork — a new tab in this project that continues this conversation (everything claude knows so far), while this session keeps going on its own. One context, two directions.">⑂</button><button id="checkBtn" title="Double-check — the OTHER engine reviews this session's work (codex checks claude, claude checks codex). This session writes a short brief first; when that turn ends a reviewer tab opens in this project with the brief + the diff since this session started, verifies it, and reports issues. It never edits.">🔍</button></div>
     </div>
     <!-- 🤖 the autopilot's narration row — same slot style as the upload chips:
          where the work stands / what the supervisor is doing, live per round -->
     <div id="pilotrow" hidden><span class="tag">🤖</span><span id="pilottext"></span></div>
     <!-- 📑 wrap: armed to close itself once the handoff is written (cancel = keep the tab) -->
     <div id="wraprow" hidden><span class="tag">📑</span><span id="wraptext"></span><button id="wrapCancel">cancel</button></div>
+    <div id="checkrow" hidden><span class="tag">🔍</span><span id="checktext"></span><button id="checkCancel">cancel</button></div>
     <div id="attachments"></div>
     <div id="keys" title="Send keys to the session (works even when the terminal is read-only) — for navigating TUI menus like /model">
       <button data-k="esc">esc</button>
@@ -3296,6 +3298,7 @@ function handleMachineJson(machine, m) {
     pm.sessionList = m.sessions || [];
     pm.gotSessions = true;
     noteWrapVanished(prevList, pm.sessionList, machine);   // 📑 a wrapping tab vanished on purpose → land + ↩ toast
+    noteCheckSpawned(prevList, pm.sessionList);            // 🔍 the reviewer for the open session arrived → open it
     pm.sessionsAt = Date.now();          // freshness stamp for wake()'s stale sweep
     relistSatisfied(machine);            // a pending re-list chain got its answer
     saveFleetCacheSoon();                // tabs survive the next reload
@@ -3571,6 +3574,7 @@ function handleJson(m) {
     sessionList = m.sessions || [];
     gotSessions = true;
     noteWrapVanished(prevList, sessionList, null);   // 📑 a wrapping tab vanished on purpose → land + ↩ toast
+    noteCheckSpawned(prevList, sessionList);         // 🔍 the reviewer for the open session arrived → open it
     renderSessions();
     refreshBreadcrumb();                  // a renamed session updates the crumb live
     refreshSessionTag();                  // account may have just landed for the open session
@@ -3716,6 +3720,12 @@ function handleJson(m) {
     // with create:true (direct mode; the fleet path rides handleMachineJson).
     confirmCreateLocal(null, m.path);
   } else if (m.type === 'error') {
+    if (m.check && m.check === checkSrcCid) {
+      // 🔍 refused (nothing to check yet / ceremony / codex not signed in): stay put, say why
+      checkSrcCid = null;
+      meta.textContent = m.error || "couldn't double-check";
+      return;
+    }
     if (m.fork && pendingNewFocus && m.fork === forkSrcCid) {
       // ⑂ refused (nothing to fork yet / codex / ceremony): back to the source
       pendingNewFocus = false; forkSrcCid = null;
@@ -4153,6 +4163,7 @@ function renderSessionBar(view) {
     tab.title = (s.title || 'new session') +
                 (s.pinned ? ' — 📌 pinned (parked on the board)' : '') +
                 (s.wrapClosing ? ' — 📑 closing when its turn ends' : s.wrapArmed ? ' — 📑 wrapping up (will close itself)' : '') +
+                (s.checkArmed ? ' — 🔍 writing its brief; a reviewer opens when this turn ends' : s.checkOf ? ' — 🔍 double-checking another session\'s work' : '') +
                 (mOff ? ` — ${s._machine} is offline (cached tab; opens when it returns)` : '');
     tab.onclick = () => { clearTabFilter(); focusSession(s); };   // may cross project/machine; cancels any queued new-session send; picking a tab is the filter's endpoint, so it clears
     const dot = document.createElement('span');
@@ -4168,7 +4179,9 @@ function renderSessionBar(view) {
     }
     const lbl = document.createElement('span');
     // the AI's 1-2 word tab handle when it exists; full title until then
-    lbl.className = 'lbl'; lbl.textContent = (s.pinned ? '📌 ' : '') + ((s.wrapArmed || s.wrapClosing) ? '📑 ' : '') + (s.tab || s.title || 'new session');
+    // 🔍 a source writing its brief, or a reviewer whose namer dropped the seeded 🔍
+    const chk = (s.checkArmed || (s.checkOf && !/^🔍/.test(s.tab || s.title || ''))) ? '🔍 ' : '';
+    lbl.className = 'lbl'; lbl.textContent = (s.pinned ? '📌 ' : '') + ((s.wrapArmed || s.wrapClosing) ? '📑 ' : '') + chk + (s.tab || s.title || 'new session');
     tab.appendChild(lbl);
     const eb = engineBadge(s);           // only renders for non-claude engines
     if (eb) tab.appendChild(eb);
@@ -6065,6 +6078,7 @@ function renderPilotUI() {
   tldrBtn.hidden = !show;                  // 🟦 lives beside it, same rule
   applyTldrHold();                         // 🟦 hold + overlay: on with the mode; waiting-on-you lifts both; leaving the view drops them
   renderWrapRow(s, show);                  // 📑 armed-to-close row, same visibility rule
+  renderCheckRow(s, show);                 // 🔍 writing-the-brief row, same rule
   if (!show) { pilotRow.hidden = true; return; }
   if (s.cid !== pilotCidShown) { pilotCidShown = s.cid; pilotPendingAt = 0; }
   if (Date.now() - pilotPendingAt > 4000) pilotChk.checked = !!s.autopilot;
@@ -7756,6 +7770,55 @@ function forkSession() {
   meta.textContent = 'forking…';
 }
 document.getElementById('forkBtn').onclick = forkSession;
+
+// ── 🔍 double-check ───────────────────────────────────────────────────────────
+// The OTHER engine reviews this session's work. One frame: the owning machine
+// arms the session and types the brief prompt (it writes a local REVIEW.md);
+// the first Stop after that brief spawns the reviewer tab in the same project
+// (`sessions` frames carry checkArmed on the source, checkOf on the reviewer).
+// We stay on the source while it writes — no blank terminal, nothing to wait
+// for — and jump to the reviewer when it appears IF we are still watching the
+// source (noteCheckSpawned). A refusal comes back as an `error` carrying
+// `check: <source cid>`.
+let checkSrcCid = null;
+function checkSession() {
+  const src = currentCid;
+  if (!src || !inSessionView()) { meta.textContent = 'open a session to double-check it'; return; }
+  const mid = FLEET ? machineForCid(src) : null;
+  if (FLEET && (!mid || !isMachineOnline(mid))) { meta.textContent = 'that machine is offline'; return; }
+  const f = { type: 'check', cid: src, via: 'check' };
+  if (!(mid ? hsendTo(mid, f) : hsend(f))) { meta.textContent = 'not connected — try again in a moment'; return; }
+  checkSrcCid = src;
+  meta.textContent = 'asking it for a brief — the reviewer opens when this turn ends';
+}
+document.getElementById('checkBtn').onclick = checkSession;
+const checkRow = document.getElementById('checkrow'), checkText = document.getElementById('checktext');
+function renderCheckRow(s, show) {
+  const on = !!(show && s && s.checkArmed);
+  checkRow.hidden = !on;
+  if (!on) return;
+  const eng = s.engine === 'codex' ? 'claude' : 'codex';
+  checkText.textContent = `writing its brief — a ${eng} reviewer opens in this project when this turn ends`;
+}
+document.getElementById('checkCancel').onclick = () => {
+  if (!currentCid) return;
+  const f = { type: 'checkCancel', cid: currentCid };
+  const mid = FLEET ? machineForCid(currentCid) : null;
+  if (mid) hsendTo(mid, f); else hsend(f);
+  if (checkSrcCid === currentCid) checkSrcCid = null;
+  checkRow.hidden = true;                      // optimistic; the next sessions frame confirms
+};
+function noteCheckSpawned(prev, next) {
+  if (!checkSrcCid || !next || !next.length) return;
+  const seen = new Set((prev || []).map(p => p.cid));
+  const rev = next.find(n => n.checkOf === checkSrcCid && !seen.has(n.cid));
+  if (!rev) return;
+  const src = checkSrcCid; checkSrcCid = null;
+  if (currentCid !== src || !inSessionView()) return;   // the viewer moved on — the tab is in the strip
+  const live = allSessions().find(x => x.cid === rev.cid) || rev;
+  focusSession(live);
+  meta.textContent = 'the reviewer is reading the brief';
+}
 document.getElementById('closedlogclose').onclick = () => { closedlogEl.hidden = true; };
 closedFilterEl.addEventListener('input', renderClosedLog);
 closedlogEl.addEventListener('pointerdown', (e) => { if (e.target === closedlogEl) closedlogEl.hidden = true; });
