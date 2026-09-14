@@ -227,7 +227,8 @@
   #breakoutbar { display:flex; align-items:center; min-width:0; padding:6px 12px;
                  border-bottom:1px solid var(--edge); background:var(--panel); }
   #breakoutbar[hidden], #breakoutbar:has(#sessiondesc:empty) { display:none; }
-  html.breakout #breakoutbar #sessiondesc:not(:empty) { display:block; flex:1 1 auto; min-width:0; }
+  html.breakout #breakoutbar #sessiondesc:not(:empty) { display:block; flex:1 1 auto; min-width:0;
+                 font-size:17px; line-height:1.35; }   /* it's the window's only heading — read it across the room */
   html.breakout #quickchips { flex:1 1 auto; margin-left:0; }   /* the chips take the freed line */
   /* pill beside the close-✕ (top-right): which MODEL is answering (accent/
      yellow), how full its context window is, the session's 🔑 subscription
