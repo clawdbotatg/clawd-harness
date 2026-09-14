@@ -176,7 +176,12 @@ check('nova-3 · linear16 16k · smart_format · interim', !!dgi && dgi.q.model=
 check('keyterms: your words first, then the harness names, then every project', !!dgi && dgi.terms.slice(0,3).join('|')==='Codex|ethskills|Wispr Flow' && dgi.terms.includes('clawd') && dgi.terms.includes('alpha') && dgi.terms.includes('bravo'), JSON.stringify(dgi&&dgi.terms));
 check('mic track opened', !!dgi && dgi.tracks===1);
 check('nothing went to the relay socket for a hold', await page.evaluate((n)=>window.__sent.length===n, relaySockets));
-// 11. results through the shared guard
+// 11. results through the shared guard — with the replace rules applied (built-in + the ⚙️ `=>` one)
+await page.evaluate(()=>{ setSttWords('Codex, ethskills\nWispr Flow\nwhat ever => whatever'); });
+await page.evaluate(()=>window.__dgResult('we are on chain with quad code what ever', false));
+check('rules rewrite an interim: on chain→onchain, quad code→Claude Code, ⚙️ what ever→whatever',
+  await page.evaluate(()=>box.value==='we are onchain with Claude Code whatever'), await page.evaluate(()=>box.value));
+check('a rule\'s right side rides as a keyterm', await page.evaluate(()=>sttTerms().includes('whatever')));
 await page.evaluate(()=>window.__dgResult('hello', false));
 check('interim trails', await page.evaluate(()=>box.value==='hello'));
 await page.evaluate(()=>window.__dgResult('Hello Codex', true));

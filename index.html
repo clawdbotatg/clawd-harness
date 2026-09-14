@@ -1024,7 +1024,7 @@
              border:1px solid var(--edge); padding:7px 10px; font-size:12px; font-family:var(--mono);
              resize:vertical; min-height:56px; box-sizing:border-box; }
   .settext:focus { outline:none; border-color:var(--accent); }
-  .setnote { margin-top:6px; word-break:break-word; }
+  .setnote { margin-top:6px; word-break:break-word; white-space:pre-line; }
   @media (max-width:740px) {
     #settingsbody { padding:14px 12px 44px; }
     .setrow { gap:12px; flex-wrap:wrap; }
@@ -8662,8 +8662,8 @@ let recWrote = null, recCtx = null;
 // One result, either engine: finals append to recBase, the interim trails it.
 function recApply(finalT, interim) {
   if (activeDraftId !== recCtx || (recWrote !== null && box.value !== recWrote)) { stopRec(); return false; }
-  if (finalT) recBase = (recBase + ' ' + finalT).replace(/\s+/g, ' ').trimStart();
-  recWrote = (interim ? recBase + ' ' + interim : recBase).replace(/\s+/g, ' ').trimStart();
+  if (finalT) recBase = (recBase + ' ' + sttFix(finalT)).replace(/\s+/g, ' ').trimStart();
+  recWrote = (interim ? recBase + ' ' + sttFix(interim) : recBase).replace(/\s+/g, ' ').trimStart();
   box.value = recWrote;
   saveDraft(); autosizeBox();   // dictated text must survive a reload like typed text does
   return true;
@@ -8697,6 +8697,18 @@ const STT_WORDS_KEY = 'cc_stt_words';
 // that a stock recognizer mangles ("quad code", "kodaks", "east skills").
 // Deepgram takes ≤ 100 terms in all — your ⚙️ words go first, these next, then
 // project names — so keep this to the ones a plain model won't already know.
+// Replace rules: a keyterm only NUDGES the recognizer toward a spelling — two
+// common words with the same sound ("on chain") still beat a compound it has
+// never seen ("onchain"), on every attempt (Austin, 2026-09-14). So a rule is a
+// hard rewrite after recognition: `on chain => onchain` in the ⚙️ word box
+// (the right side also rides along as a keyterm). Whole words, case-blind,
+// applied to finals and interims alike. These are the baseline rules.
+const STT_BASE_RULES = [
+  ['on chain', 'onchain'], ['off chain', 'offchain'], ['eth skills', 'ethskills'], ['multi sig', 'multisig'],
+  ['test net', 'testnet'], ['main net', 'mainnet'], ['quad code', 'Claude Code'], ['cloud code', 'Claude Code'],
+  ['clod code', 'Claude Code'], ['kodaks', 'Codex'], ['codecs', 'Codex'], ['whisper flow', 'Wispr Flow'],
+  ['deep ground', 'Deepgram'], ['deep gram', 'Deepgram'], ['buidl guidl', 'BuidlGuidl'], ['scaffold eth', 'Scaffold-ETH'],
+];
 const STT_BASE_TERMS = [
   'Claude Code', 'Codex', 'clawd', 'harness', 'TLDR', 'ethskills', 'Deepgram', 'Wispr Flow',
   'Opus', 'Sonnet', 'Haiku', 'Fable', 'Bankr', 'ElevenLabs', 'passkey', 'YubiKey', 'iron', 'relay',
@@ -8710,6 +8722,32 @@ const STT_BASE_TERMS = [
 let sttCreds = null, sttMachine = null, sttReqT = null;
 const sttPending = new Map();
 function sttWords() { try { return localStorage.getItem(STT_WORDS_KEY) || ''; } catch { return ''; } }
+// The ⚙️ box, parsed: plain lines are words; `from => to` (or → / ->) lines are rules.
+function sttUserEntries() {
+  const words = [], rules = [];
+  sttWords().split(/[\n,;]+/).forEach(line => {
+    const m = line.match(/^\s*(.+?)\s*(?:=>|->|→)\s*(.+?)\s*$/);
+    if (m) rules.push([m[1], m[2]]); else if (line.trim()) words.push(line.trim());
+  });
+  return { words, rules };
+}
+let sttRuleCache = { key: null, rx: [] };
+function sttRules() {
+  const key = sttWords();
+  if (sttRuleCache.key === key) return sttRuleCache.rx;
+  const rx = [];
+  for (const [from, to] of sttUserEntries().rules.concat(STT_BASE_RULES)) {
+    const f = String(from || '').trim(); if (!f) continue;
+    rx.push([new RegExp('\\b' + f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '\\b', 'gi'), to]);
+  }
+  sttRuleCache = { key, rx };
+  return rx;
+}
+function sttFix(text) {
+  if (!text) return text;
+  for (const [re, to] of sttRules()) text = text.replace(re, to);
+  return text;
+}
 function setSttWords(v) { try { localStorage.setItem(STT_WORDS_KEY, v); } catch {} }
 // The keyterm list: your words first, then the harness's own, then every project
 // name (plus its de-hyphenated form: "clawd harness"). Deepgram caps it at 100
@@ -8722,7 +8760,8 @@ function sttTerms() {
     const k = t.toLowerCase(); if (seen.has(k)) return;
     seen.add(k); out.push(t);
   };
-  sttWords().split(/[\n,;]+/).forEach(add);
+  const mine = sttUserEntries();
+  mine.words.forEach(add); mine.rules.forEach(r => add(r[1]));
   STT_BASE_TERMS.forEach(add);
   let rows = []; try { rows = projectRows(); } catch {}
   rows.forEach(p => { add(p.name); if (/[-_]/.test(p.name || '')) add(p.name.replace(/[-_]+/g, ' ')); });
@@ -10755,14 +10794,16 @@ function renderSttSetting() {
   const live = sttCredsOk();
   settingsBody.appendChild(settingTextRow('🎤 words the mic should know',
     (live ? 'Deepgram is live on this box: ' : 'no Deepgram key on this box yet (DEEPGRAM_API_KEY in .clawd-harness.env) — until then the browser\'s own recognizer dictates and this list waits. ')
-      + 'names dictation keeps getting wrong, one per line or comma-separated (capitalize proper nouns). Codex, clawd and every project name are already in.',
-    { value: sttWords(), placeholder: 'Codex\nethskills\nWispr Flow', onInput: (v) => setSttWords(v),
-      note: 'already knows (' + sttBuiltin().length + '): ' + sttBuiltin().join(', ') }));
+      + 'names dictation keeps getting wrong, one per line (capitalize proper nouns). A word only nudges the recognizer; when it keeps writing two words for one, add a rule: "on chain => onchain" rewrites it every time.',
+    { value: sttWords(), placeholder: 'Codex\nethskills\non chain => onchain', onInput: (v) => setSttWords(v),
+      note: 'already knows (' + sttBuiltin().length + '): ' + sttBuiltin().join(', ')
+          + '\nbuilt-in rules: ' + STT_BASE_RULES.map(r => r[0] + ' => ' + r[1]).join(', ') }));
 }
 // The words that ride along without you typing them: the mined baseline + every
 // project name (what sttTerms() sends after your own list).
 function sttBuiltin() {
-  const mine = new Set(sttWords().split(/[\n,;]+/).map(t => t.trim().toLowerCase()).filter(Boolean));
+  const u = sttUserEntries();
+  const mine = new Set(u.words.concat(u.rules.map(r => r[1])).map(t => t.trim().toLowerCase()));
   return sttTerms().filter(t => !mine.has(t.toLowerCase()));
 }
 
