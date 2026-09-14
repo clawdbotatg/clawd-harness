@@ -8008,6 +8008,11 @@ box.addEventListener('blur', () => {
 });
 
 function sendMessage() {
+  // Sending while the mic is on stops it first, then waits for the tail: the
+  // last words finalize only after the stream closes (Deepgram flushes on
+  // CloseStream, Web Speech on stop) — sending at once would drop them. Capped
+  // so a dead socket can't hold a message hostage; the guard still applies.
+  if (recOn) { stopRecThen(sendMessage); return; }
   const text = box.value.trim();
   // PM view: the composer talks to the current PM thread (HTTP), not a WS session.
   if (currentView() === 'pm') { if (text) { box.value = ''; autosizeBox(); clearDraft(); pmSend(text); } return; }
@@ -8611,7 +8616,10 @@ function buildRec() {
     }
     recApply(finalT, interim);
   };
-  r.onend = () => { if (recOn && recEngine === 'sr') { try { r.start(); } catch {} } };  // Chrome auto-stops; keep alive while on
+  r.onend = () => {
+    if (recOn && recEngine === 'sr') { try { r.start(); } catch {} return; }   // Chrome auto-stops; keep alive while on
+    const h = recEndHook; recEndHook = null; if (h) setTimeout(h, 150);        // the stop's last final lands just after onend
+  };
   r.onerror = (ev) => { if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') stopRec(); };
   return r;
 }
@@ -8731,6 +8739,7 @@ function dgStart(creds) {
   w.onclose = () => {
     d.open = false;
     if (dg === d && !d.done && !d.got) dgFallback(d);   // refused before a single result → finish with Web Speech
+    const h = d.onDone; d.onDone = null; if (h) h();      // the flush is over: a waiting send may go
   };
   w.onerror = () => {};
   streamP.then(stream => {
@@ -8783,23 +8792,29 @@ function stopRec() {
   recEngine = null;
   flushHeldSay();                                  // 🔊 whatever the voice held while you talked
 }
+const REC_TAIL_MS = 900;
+// stop, then run fn once the trailing results are in (stream closed / recognizer
+// ended) or REC_TAIL_MS has passed — whichever first. fn runs exactly once.
+function stopRecThen(fn) {
+  const wasDg = recEngine === 'dg', d = dg;
+  let done = false; const go = () => { if (done) return; done = true; fn(); };
+  if (wasDg && d) d.onDone = go; else if (rec) recEndHook = go;
+  stopRec();
+  setTimeout(go, REC_TAIL_MS);
+}
+let recEndHook = null;
 const micPossible = !!(SR || (navigator.mediaDevices && navigator.mediaDevices.getUserMedia));
 if (!micPossible) { micBtn.disabled = true; micBtn.title = 'Speech-to-text not supported in this browser'; }
 else {
-  // Push-to-talk: press and hold the mic to dictate, release to stop. On
-  // desktop, holding the SPACE BAR in the composer is the same gesture — see
+  // Tap to talk: one tap starts dictation, the next tap — or Enter / ➤ send —
+  // stops it (2026-09-13: a press-and-hold can't be held right on the phone).
+  // It toggles on pointerDOWN so the mic lights up at the touch, no click
+  // delay, and the press is the user gesture iOS wants for the microphone. On
+  // desktop, holding the SPACE BAR in the composer is still push-to-talk — see
   // the space-hold block below.
-  micBtn.title = 'Hold to dictate (speech-to-text) — or hold Space in the box';
-  // Capture the pointer for the whole hold: a finger drifting off the button no
-  // longer kills dictation mid-sentence, and pointerup/cancel are guaranteed to
-  // land here — a missed release used to strand recognition in the on state.
-  const hold = (e) => { e.preventDefault(); try { micBtn.setPointerCapture(e.pointerId); } catch {} startRec(); };
-  const release = () => stopRec();
-  micBtn.addEventListener('pointerdown', hold);
-  micBtn.addEventListener('pointerup', release);
-  micBtn.addEventListener('pointerleave', release);
-  micBtn.addEventListener('pointercancel', release);
-  micBtn.addEventListener('contextmenu', (e) => e.preventDefault());  // long-press must not pop a menu mid-hold
+  micBtn.title = 'Tap to dictate; tap again, Enter or ➤ to stop — or hold Space in the box';
+  micBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); if (recOn) stopRec(); else startRec(); });
+  micBtn.addEventListener('contextmenu', (e) => e.preventDefault());  // long-press must not pop a menu
 
   // Space-hold push-to-talk (desktop only): hold the space bar in the composer
   // to dictate, release to stop. A quick tap is still a normal space — the hold

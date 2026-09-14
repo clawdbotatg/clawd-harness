@@ -115,7 +115,9 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   the handoff doc is **`docs/TLDR-VOICE.md`** (data flow, every knob, the
   client landmines, `tools/tldr_e2e.py` for a real isolated run,
   `tools/tldrgeom.mjs` to measure a live session's overlay).
-  **🎤 dictation** = two recognizers behind the mic hold / space-hold: 🎯
+  **🎤 dictation** = two recognizers behind the mic TAP (tap on; tap again,
+  Enter or ➤ stop it — a send waits ≤ `REC_TAIL_MS` for the last words) and
+  the desktop space-hold: 🎯
   Deepgram (the page's OWN socket to api.deepgram.com, nova-3 + `keyterm`s =
   the ⚙️ word list + harness names + every project name — this is what makes
   it hear Codex/ethskills; creds per box via WS `stt`, `DEEPGRAM_API_KEY` in

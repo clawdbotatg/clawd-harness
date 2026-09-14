@@ -105,19 +105,22 @@ const micXY = await page.evaluate(()=>{ const r=micBtn.getBoundingClientRect(); 
 check('mic button visible on the sessions rung', micXY.visible, JSON.stringify(micXY));
 check('#micBtn owns its touches (touch-action:none)',
   await page.evaluate(()=>getComputedStyle(micBtn).touchAction==='none'));
-const holdMic = async ()=>{ await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:micXY.x,y:micXY.y}]}); await page.waitForTimeout(120); };
-const releaseMic = async ()=>{ await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]}); await page.waitForTimeout(120); };
+// the mic is a TAP toggle (2026-09-13): tap on, tap again to stop — holdMic /
+// releaseMic are both one real tap; the names keep the acts readable.
+const tapMic = async ()=>{ await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:micXY.x,y:micXY.y}]}); await page.waitForTimeout(60);
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]}); await page.waitForTimeout(120); };
+const holdMic = tapMic, releaseMic = tapMic;
 
 // --- 1. hold → dictate → box fills, draft saved -----------------------------
 await holdMic();
-check('hold starts recognition', await page.evaluate(()=>recOn===true && window.__sr.startedCount>=1));
+check('tap starts recognition (and the finger lifting does not stop it)', await page.evaluate(()=>recOn===true && window.__sr.startedCount>=1));
 await page.evaluate(()=>window.__emit(['hello world'],'again'));
 check('results (final + interim) land in the box', await page.evaluate(()=>box.value==='hello world again'));
 check('dictated text is saved as the draft', await page.evaluate(()=>(localStorage.getItem(draftKey(activeDraftId))||'')==='hello world again'));
 
 // --- 2. release; a trailing final still lands in the untouched box ----------
 await releaseMic();
-check('release stops recognition', await page.evaluate(()=>recOn===false));
+check('second tap stops recognition', await page.evaluate(()=>recOn===false));
 await page.evaluate(()=>window.__emit(['again yes'],null));
 check('trailing final completes the sentence', await page.evaluate(()=>box.value==='hello world again yes'));
 
@@ -136,7 +139,6 @@ await page.evaluate(()=>window.__emit(['flood of ambient speech'],null));
 const stuck = await page.evaluate(()=>({v:box.value, on:recOn, cls:micBtn.classList.contains('rec')}));
 check('typing beats a live recognition: box kept', stuck.v.endsWith('TYPED more MID'), stuck.v);
 check('…and the stranded recognition self-stopped', !stuck.on && !stuck.cls, JSON.stringify(stuck));
-await releaseMic();
 
 // --- 5. switching composer context kills dictation (no cross-draft bleed) ---
 await holdMic();
@@ -149,7 +151,7 @@ const bled = await page.evaluate(()=>({v:box.value, on:recOn,
   alpha: localStorage.getItem(draftKey('new:p1'))||''}));
 check("context switch: bravo's empty box stays empty", bled.v==='' && !bled.on, JSON.stringify({v:bled.v,on:bled.on}));
 check("…and alpha's stashed draft never got 'bleed two'", bled.alpha.endsWith('bleed one'), bled.alpha);
-await releaseMic();
+
 
 // ---- 🎯 Deepgram engine (same touch page, back on alpha) ----------------------
 await page.evaluate(()=>{ location.hash = '#/p/' + encodeURIComponent(projectRows().find(p=>p.name==='alpha').id); });
@@ -239,6 +241,22 @@ await dpage.keyboard.up(' ');
 await dpage.waitForTimeout(500);
 check('typing during the wait cancels the hold, space kept',
   await dpage.evaluate(()=>box.value==='hi there space talk x' && !recOn));
+
+// --- 10. Enter with the mic on: stop, wait for the tail, then send ----------
+await dpage.evaluate(()=>{ box.value=''; saveDraft(); window.__sends=[]; const orig=hsend; hsend=(f)=>{ window.__sends.push(f); return orig(f); }; });
+await dpage.mouse.click(await dpage.evaluate(()=>micBtn.getBoundingClientRect().x+8), await dpage.evaluate(()=>micBtn.getBoundingClientRect().y+8));
+await dpage.waitForTimeout(100);
+check('mic tap on desktop starts recognition', await dpage.evaluate(()=>recOn));
+await dpage.evaluate(()=>window.__emit(['send this'],null));
+await dpage.keyboard.press('Enter');
+await dpage.waitForTimeout(50);
+// (on the sessions rung a send parks in pendingSendText for the session it spawns — that's the "went out" signal here)
+const mid = await dpage.evaluate(()=>({on:recOn, sent:(pendingSendText||'').includes('send this') || window.__sends.some(f=>JSON.stringify(f).includes('send this'))}));
+check('Enter stops the mic and holds the send for the tail', !mid.on && !mid.sent, JSON.stringify(mid));
+await dpage.evaluate(()=>window.__emit(['please'],null));   // the stop's trailing final (arrives before onend's hook fires)
+await dpage.waitForTimeout(400);
+const after = await dpage.evaluate(()=>({ sent:(pendingSendText||'').includes('send this please') || window.__sends.some(f=>JSON.stringify(f).includes('send this please')), box:box.value }));
+check('…then sends the whole sentence, tail included', after.sent && after.box==='', JSON.stringify(after));
 
 // ---- ⚙️ the word box: built-ins listed, and a roster frame can't rebuild it mid-word ----
 await dpage.evaluate(()=>window.openSettings());
