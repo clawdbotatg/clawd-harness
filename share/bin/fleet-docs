@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Private shared documents. Credentials never appear in argv, URLs or skills."""
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("list")
+    for command in ("put", "get", "rm"):
+        p = sub.add_parser(command)
+        p.add_argument("name")
+        if command in ("put", "get"):
+            p.add_argument("file", type=Path)
+    args = parser.parse_args()
+    credential = Path.home() / ".config" / "fleet-docs" / "credential.json"
+    try:
+        if credential.stat().st_mode & 0o077:
+            raise ValueError("credential file must have mode 600")
+        cfg = json.loads(credential.read_text())
+        token = cfg["token"]
+        if not isinstance(token, str) or not token or len(token) > 256 or not token.isascii():
+            raise ValueError("invalid credential")
+    except (OSError, ValueError, KeyError):
+        sys.exit("fleet-docs: missing/invalid private credential; ask the fleet administrator to provision this machine")
+    url = "https://h.atg.link/docs/" + args.command
+    if args.command != "list":
+        url += "?" + urllib.parse.urlencode({"name": args.name})
+    body = None
+    if args.command == "put":
+        try:
+            with args.file.open("rb") as f:
+                body = f.read(4*1024*1024 + 1)
+        except OSError:
+            sys.exit("fleet-docs: cannot read input file")
+        if len(body) > 4*1024*1024:
+            sys.exit("fleet-docs: document exceeds 4 MiB")
+    elif args.command == "rm":
+        body = b""
+    req = urllib.request.Request(url, data=body, headers={
+        "Authorization": "Bearer " + token, "Content-Type": "application/octet-stream"})
+    try:
+        with urllib.request.build_opener(NoRedirect).open(req, timeout=30) as r:
+            data = r.read(4*1024*1024 + 1)
+        if len(data) > 4*1024*1024:
+            sys.exit("fleet-docs: server response exceeds limit")
+    except urllib.error.HTTPError as e:
+        messages = {403: "credential denied or insufficient permission", 404: "document not found",
+                    429: "rate limited; retry after 5 seconds", 507: "store full; administrator cleanup required"}
+        sys.exit(f"fleet-docs: HTTP {e.code}: {messages.get(e.code, 'request refused')}")
+    except (OSError, urllib.error.URLError):
+        sys.exit("fleet-docs: connection failed")
+    if args.command == "get":
+        # Download as data to a private local file; never render or execute it.
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=args.file.parent, delete=False) as f:
+                tmp = f.name
+                f.write(data)
+            os.replace(tmp, args.file)
+        except OSError:
+            sys.exit("fleet-docs: cannot save output file")
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
+        print(f"Saved {args.name} to {args.file}")
+    else:
+        print(json.dumps(json.loads(data), indent=2))
+
+
+if __name__ == "__main__":
+    main()

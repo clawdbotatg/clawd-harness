@@ -1,116 +1,107 @@
-# Fleet doc store — the shared shelf (handoff doc)
+# Fleet document store
 
-Read this before touching the relay's `/docs/*` or the `fleet-docs` skill.
-History with dates lives in [`../HISTORY.md`](../HISTORY.md) (2026-09-12).
+The private shelf at `https://h.atg.link/docs/` shares documents across authorized
+fleet machines. Each machine has its own revocable credential. Sessions on one
+machine share that identity; this is not isolation between processes using the
+same OS account. By default all provisioned machines share the same shelf.
+An authorized writer can still replace other writers' files on that shelf.
+Use read-only permissions or filename prefixes when stronger separation is needed.
 
-## What it is, in one paragraph
+## Agent workflow
 
-A flat shelf of named files on the relay box (h.atg.link) that any agent on
-any machine can write to and read from, over the web, with one token. Austin
-tells a session on one computer "make a plan and put it in the doc store";
-a session on another computer (or his laptop, or a box off the LAN) pulls it
-down by name. No sync, no machines talking to each other, no git: one HTTP
-store, four calls. The `fleet-docs` skill in the 📚 library carries the token
-and the four curl lines, so a session with zero context can use it after one
-tap.
+The canonical skill is [fleet-docs-SKILL.md](fleet-docs-SKILL.md). Publish that
+credential-free text to the private library. `share/bin/fleet-docs` is installed
+as `~/bin/fleet-docs`; it reads the mode-600 file
+`~/.config/fleet-docs/credential.json` without printing its token or passing it
+in command-line arguments. Downloads are saved as private files, never executed.
 
-## The four calls
-
-All under `https://h.atg.link/docs/`, all take `?t=<DOCS_TOKEN>`:
-
-| Call | Method | In | Out |
-|---|---|---|---|
-| `/docs/list` | GET | — | `{docs:[{name,size,mtime}]}` |
-| `/docs/get?name=X` | GET | — | the raw bytes, content-type by extension (`.md` → text/markdown, unknown → octet-stream); 404 if missing |
-| `/docs/put?name=X` | POST | raw body | `{ok,name,size,url}`; upsert |
-| `/docs/rm?name=X` | POST | — | `{ok,removed}`; 404 if missing |
-
-Names: `[A-Za-z0-9._-]`, first char alnum, ≤128 chars, flat (no `/`). Use
-a suffix so the reader knows what it is (`plan-vision-cast.md`). Caps:
-4 MB per doc (`FLEET_MAX_DOC_BYTES`), 2000 docs (`FLEET_MAX_DOCS`); nginx's
-`client_max_body_size 26m` on `location /` is above that.
-
-```bash
-curl -sS --data-binary @plan.md "https://h.atg.link/docs/put?t=$T&name=plan.md"
-curl -sS "https://h.atg.link/docs/list?t=$T"
-curl -sS "https://h.atg.link/docs/get?t=$T&name=plan.md" -o plan.md
-curl -sS -X POST "https://h.atg.link/docs/rm?t=$T&name=plan.md"
+```
+~/bin/fleet-docs list
+~/bin/fleet-docs put plan-example.md /tmp/plan-example.md
+~/bin/fleet-docs get plan-example.md /tmp/fetched-plan.md
+~/bin/fleet-docs rm plan-example.md
 ```
 
-## Store (`fleet/relay.py`, the "fleet doc store" section)
+## HTTP contract
 
-- Dir: `fleet/.clawd-fleet.docs/` next to `relay.py` (`FLEET_DOCS_DIR` to
-  move it), gitignored (`fleet/.clawd-fleet.docs*`). Writes go tmp +
-  `os.replace`, so a half-written doc is never served.
-- **Overwrite and remove both keep the old bytes** in
-  `.clawd-fleet.docs/.trash/<name>-<epoch>[-n]` — a dot-dir, never listed.
-  An admin on the box (`ssh zkllmapi`) restores with `mv`.
-- **Its own token.** `FLEET_DOCS_TOKEN` env, else
-  `fleet/.clawd-fleet.docs.token` (auto-generated, mode 600, on the first
-  start without one). It is deliberately NOT the worker token: the docs
-  token rides inside a library skill that lands in session transcripts and
-  upload dirs on every machine; if it leaks, someone can read and write this
-  shelf, not register a machine or push to a session. No token file and no
-  env → `/docs/*` answers 403 and the boot banner says so.
-- Constant-time compare (`_token_ok`), like every other relay token.
+All four endpoints require `Authorization: Bearer <credential>`. Query tokens,
+including the former skill token, are rejected. Missing or invalid credentials
+fail closed. POST requires exactly one valid Content-Length; chunked, incomplete,
+negative and malformed bodies are rejected without changing the document.
 
-To rotate: `ssh zkllmapi`, write a new value into
-`~/clawd-harness/fleet/.clawd-fleet.docs.token`, `sudo systemctl restart
-clawd-fleet-relay`, republish the `fleet-docs` skill with the new token
-(`skillput`), done. Nothing else holds it.
+| Endpoint | Method | Permission | Response |
+| --- | --- | --- | --- |
+| `/docs/list` | GET | read | Names, byte sizes, mtimes filtered by allowed prefix |
+| `/docs/get?name=X` | GET | read | Raw bytes as a sandboxed attachment |
+| `/docs/put?name=X` | POST | write | `{ok,name,size}`; previous version retained |
+| `/docs/rm?name=X` | POST, empty body | delete | `{ok,removed}`; previous file retained |
 
-## The skill (`fleet-docs`, in the private 📚 library — NOT in this repo)
+Names begin with an ASCII letter/digit and contain only letters, digits, `.`, `_`,
+`-`, up to 128 characters. No paths, dotfiles, trailing newlines, or symlinks.
+All downloads use application/octet-stream, Content-Disposition: attachment,
+a sandbox CSP, nosniff, no-referrer, same-origin resource policy, and no-store.
 
-The skill is the product surface: it holds the token, so it lives only in
-the library (gitignored on the relay box). Republish it from a private
-working dir after any change to the calls; delete the dir after. The
-template, `<DOCS_TOKEN>` to be filled from the relay box:
+## Storage and abuse limits
 
-```markdown
----
-name: fleet-docs
-description: Shared doc store on h.atg.link — put a plan/notes/file where a session on ANY other machine can get it, or fetch what another machine left. Use when Austin says "put that in the doc store / shared docs / where the other machine can get it", "grab the plan from the store", "what's in the doc store".
----
+`fleet/docs_store.py` implements the store. Directory mode is 700; new files and
+credentials are 600. Relative directory descriptors and no-follow opens confine
+reads/writes, including `.trash`. Hardlinked files are rejected too.
+Overwrites write a new temporary file and preserve the prior bytes before an
+atomic replacement; a failure does not first remove the current document.
 
-# Fleet doc store
+| Environment setting | Default |
+| --- | --- |
+| FLEET_DOCS_DIR | fleet/.clawd-fleet.docs |
+| FLEET_MAX_DOC_BYTES | 4 MiB |
+| FLEET_MAX_DOCS | 2000 active documents |
+| FLEET_DOCS_MAX_TOTAL_BYTES | 256 MiB including trash/temp and transient copies |
+| FLEET_DOCS_MAX_ENTRIES | 4000 files including trash/temp and transient copies |
+| FLEET_DOCS_RESERVE_BYTES | 256 MiB free filesystem space |
+| FLEET_DOCS_CREDENTIALS_FILE | fleet/.clawd-fleet.docs.credentials.json |
 
-One shelf of named files on https://h.atg.link, reachable from every machine
-(LAN or not). Any session can write and read it with this token. Don't echo
-the token in replies.
+Quota exhaustion returns 507; no historical files are automatically purged.
+An administrator reviews retention and removes approved versions from `.trash`
+over SSH to reclaim quota. Removals move data into trash without increasing its
+byte count. Keep backups separately: same-disk trash is not a disaster backup.
 
-    T=<DOCS_TOKEN>
+The relay allows eight concurrent docs handlers, 2 requests/second per identity
+with burst 30, and 20/second globally with burst 60. Excess receives 429 and
+Retry-After. Authenticated uploads are bounded to 4 MiB and incomplete body reads
+time out. nginx adds per-IP limits before request buffering/authentication:
+5 requests/second with burst 20 and eight active connections per IP; globally
+20 requests/second with burst 40 and 32 active connections; 4 MiB upload limit,
+10-second body inactivity timeout and 20-second upstream timeouts. These bounds
+limit abuse; they do not promise availability against distributed network floods.
 
-    # list           → {"docs":[{"name","size","mtime"}]}
-    curl -sS "https://h.atg.link/docs/list?t=$T"
-    # put (upsert)   → {"ok":true,"name":...,"size":...}
-    curl -sS --data-binary @FILE "https://h.atg.link/docs/put?t=$T&name=NAME"
-    # get            → the raw file (404 if missing)
-    curl -sS "https://h.atg.link/docs/get?t=$T&name=NAME" -o FILE
-    # remove (trashed on the box, an admin can restore)
-    curl -sS -X POST "https://h.atg.link/docs/rm?t=$T&name=NAME"
+Install `fleet/deploy/harness-docs-limits.conf` under `/etc/nginx/conf.d/` and
+`harness-docs-location.conf` under `/etc/nginx/snippets/`. Include the latter only
+in h.atg.link's HTTPS server block. It requires the existing `noquery` log format.
+Always run `sudo nginx -t` before reloading.
 
-Names: letters, digits, `.`, `_`, `-`; no spaces or slashes; ≤128 chars; keep
-the extension (`plan-foo.md`). 4 MB per doc.
+## Credential administration
 
-## How to behave
+Run `fleet/docs_admin.py` on the relay host, serially (no concurrent registry
+writers). It writes files atomically with mode 600. The registry stores SHA256
+hashes, identities, operations and allowed filename prefixes, never raw tokens.
+It is reloaded on every request; revocation needs no restart.
 
-- **Storing**: write the document to a local file first, then put it. Name
-  it for the topic, not the machine (`plan-vision-cast.md`, not `plan.md`),
-  so the shelf stays readable as it grows. Reply with the name and one line
-  on what it holds — that's what Austin will tell the other machine.
-- **Fetching**: if Austin names a doc, get it. If he says "the plan" and
-  doesn't name it, list first and pick the obvious match; if two could fit,
-  show the list and ask. Read the file, then do what he asked with it.
-- **Updating**: put again under the same name. The old version is kept in
-  the trash on the box, so overwriting is safe.
-- **Cleaning up**: only remove when asked.
+```
+python3 fleet/docs_admin.py provision clawd-example --out /private/path/credential.json
+python3 fleet/docs_admin.py provision reader --permissions read --prefix shared- --out /private/path/reader.json
+python3 fleet/docs_admin.py revoke clawd-example
 ```
 
-## Tests
+Transfer each output file over SSH to that machine's
+`~/.config/fleet-docs/credential.json` in a mode-700 parent directory, with mode
+600. Install `share/bin/fleet-docs` as `~/bin/fleet-docs` (755). Remove the staging
+copy after verifying access. Never publish credentials in the library or git.
+The legacy `.clawd-fleet.docs.token` and FLEET_DOCS_TOKEN are no longer consulted.
+Provision clients and the registry before upgrading the relay and skill.
 
-- `fleet/test_docs_store.py` — real relay on a tmp store: auth (docs token
-  only — the worker token does NOT open it), name fences, size cap,
-  put/list/get round-trip with content-types, upsert → `.trash`, rm →
-  `.trash`, 404s, `.trash` never listed. `tools/checkall.sh` picks it up.
-- Live check after a deploy: the four curl lines above against h.atg.link
-  with the token from the box.
+## Verification
+
+`python3 fleet/test_docs_store.py` covers round trips, access gates, naming,
+size limits and recoverable changes. `python3 fleet/test_docs_security.py` covers
+quotas including history, failed replacement, symlinks/hardlinks, file permissions,
+HTML isolation, scoped credentials, immediate revocation, malformed requests,
+rate limits and disk reserve. Run the fleet tests when changing this surface.

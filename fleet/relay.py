@@ -69,6 +69,7 @@ from socketserver import TCPServer, ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 import fleet_ws
+import docs_store
 import webauthn
 
 HERE = Path(__file__).resolve().parent
@@ -495,138 +496,20 @@ def skills_lib():
 
 
 # ── fleet doc store ──────────────────────────────────────────────────────────
-# A shared scratch shelf for the fleet: one agent on one machine writes a plan
-# here, another agent on another machine reads it — from anywhere, since this
-# box is on the web (h.atg.link). Flat namespace of named files, gitignored on
-# this box, gated by its OWN token (FLEET_DOCS_TOKEN, else
-# `.clawd-fleet.docs.token` next to relay.py, auto-generated on first start):
-# the token rides inside a library skill that every session can read, so it
-# must not be the worker token — a leak here lets someone read/write this
-# shelf, not register a machine. Overwrite/remove keep the old bytes in
-# `.trash/` (dot-dir, never listed). Deep doc: docs/fleet/DOCS-STORE.md.
+# Credentials are provisioned per agent/machine outside the skill text.
 DOCS_DIR = Path(os.environ.get("FLEET_DOCS_DIR") or (HERE / ".clawd-fleet.docs"))
-_docs_lock = threading.Lock()
-DOC_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_DOC_BYTES = int(os.environ.get("FLEET_MAX_DOC_BYTES", str(4 * 1024 * 1024)))
-MAX_DOCS = int(os.environ.get("FLEET_MAX_DOCS", "2000"))
-_DOC_TYPES = {".md": "text/markdown; charset=utf-8", ".txt": "text/plain; charset=utf-8",
-              ".json": "application/json", ".html": "text/html; charset=utf-8",
-              ".csv": "text/csv; charset=utf-8", ".yaml": "text/plain; charset=utf-8",
-              ".yml": "text/plain; charset=utf-8", ".py": "text/plain; charset=utf-8",
-              ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-              ".pdf": "application/pdf"}
-
-
-def _load_docs_token():
-    env = os.environ.get("FLEET_DOCS_TOKEN")
-    if env:
-        return env
-    f = HERE / ".clawd-fleet.docs.token"
-    try:
-        if f.exists():
-            return f.read_text().strip()
-        tok = secrets.token_urlsafe(24)
-        f.write_text(tok + "\n")
-        os.chmod(f, 0o600)
-        print(f"[relay] doc store token generated → {f.name}", flush=True)
-        return tok
-    except OSError as e:
-        print(f"[relay] ⚠ doc store token unavailable ({e}) — /docs/* disabled", flush=True)
-        return ""
-
-
-DOCS_TOKEN = _load_docs_token()
-
-
-def _docs_trash(f):
-    """Move a doc into .trash/<name>-<epoch>[-n] — overwrite and remove both
-    keep the old bytes, recoverable by an admin on the box."""
-    trash = DOCS_DIR / ".trash"
-    trash.mkdir(parents=True, exist_ok=True)
-    dst, n = trash / f"{f.name}-{int(time.time())}", 0
-    while dst.exists():
-        n += 1
-        dst = trash / f"{f.name}-{int(time.time())}-{n}"
-    os.replace(f, dst)
-
-
-def docs_list():
-    out = []
-    with _docs_lock:
-        try:
-            entries = sorted(DOCS_DIR.iterdir())
-        except OSError:
-            return out
-        for f in entries:
-            if f.is_file() and DOC_NAME_RE.match(f.name):
-                try:
-                    st = f.stat()
-                except OSError:
-                    continue
-                out.append({"name": f.name, "size": st.st_size, "mtime": int(st.st_mtime)})
-    return out
-
-
-def docs_put(name, body):
-    """Upsert one doc (raw bytes). Returns '' or an error string. Written via
-    tmp + os.replace so a half-written doc is never served; a previous version
-    goes to .trash first."""
-    if not DOC_NAME_RE.match(name or ""):
-        return "bad doc name ([A-Za-z0-9._-], must start alnum, ≤128 chars)"
-    if len(body) > MAX_DOC_BYTES:
-        return f"doc too large (max {MAX_DOC_BYTES} bytes)"
-    with _docs_lock:
-        try:
-            DOCS_DIR.mkdir(parents=True, exist_ok=True)
-            dst = DOCS_DIR / name
-            if not dst.exists() and len(docs_list_unlocked()) >= MAX_DOCS:
-                return f"store full (max {MAX_DOCS} docs)"
-            tmp = DOCS_DIR / f".put-tmp{os.getpid()}"
-            tmp.write_bytes(body)
-            if dst.exists():
-                _docs_trash(dst)
-            os.replace(tmp, dst)
-        except OSError as e:
-            return f"store write failed: {e}"
-    print(f"[relay] doc put: {name} ({len(body)} bytes)", flush=True)
-    return ""
-
-
-def docs_list_unlocked():
-    try:
-        return [f for f in DOCS_DIR.iterdir() if f.is_file() and DOC_NAME_RE.match(f.name)]
-    except OSError:
-        return []
-
-
-def docs_get(name):
-    """(bytes, content-type) or (None, error)."""
-    if not DOC_NAME_RE.match(name or ""):
-        return None, "bad doc name"
-    with _docs_lock:
-        f = DOCS_DIR / name
-        if not f.is_file():
-            return None, "no such doc"
-        try:
-            data = f.read_bytes()
-        except OSError as e:
-            return None, f"read failed: {e}"
-    return data, _DOC_TYPES.get(f.suffix.lower(), "application/octet-stream")
-
-
-def docs_delete(name):
-    if not DOC_NAME_RE.match(name or ""):
-        return "bad doc name"
-    with _docs_lock:
-        f = DOCS_DIR / name
-        if not f.is_file():
-            return "no such doc"
-        try:
-            _docs_trash(f)
-        except OSError as e:
-            return f"delete failed: {e}"
-    print(f"[relay] doc removed (→ .trash): {name}", flush=True)
-    return ""
+DOCS = docs_store.Store(
+    DOCS_DIR, max_bytes=MAX_DOC_BYTES,
+    max_docs=int(os.environ.get("FLEET_MAX_DOCS", "2000")),
+    max_total=int(os.environ.get("FLEET_DOCS_MAX_TOTAL_BYTES", str(256 * 1024 * 1024))),
+    max_entries=int(os.environ.get("FLEET_DOCS_MAX_ENTRIES", "4000")),
+    reserve_bytes=int(os.environ.get("FLEET_DOCS_RESERVE_BYTES", str(256 * 1024 * 1024))))
+DOCS_CREDENTIALS = docs_store.Credentials(
+    os.environ.get("FLEET_DOCS_CREDENTIALS_FILE") or (HERE / ".clawd-fleet.docs.credentials.json"))
+DOCS_RATE = docs_store.RateLimit()
+DOCS_GLOBAL_RATE = docs_store.RateLimit(rate=20, burst=60)
+DOCS_SLOTS = threading.BoundedSemaphore(8)
 
 
 def find_passkey(cred_id):
@@ -1395,6 +1278,93 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _docs_request(self, method, path, q):
+        # No keep-alive/body ambiguity on this small HTTP surface. Auth before
+        # reading bytes, with at most eight concurrent docs handlers fleet-wide.
+        self.close_connection = True
+        if not DOCS_SLOTS.acquire(blocking=False):
+            return self._docs_response({"error": "doc store busy"}, 429)
+        try:
+            if not DOCS_GLOBAL_RATE.allow("all"):
+                return self._docs_response({"error": "doc store rate limit"}, 429)
+            auth = self.headers.get_all("Authorization", [])
+            if len(auth) != 1 or not auth[0].startswith("Bearer ") or "t" in q:
+                return self._docs_response({"error": "bearer credential required"}, 403)
+            identity = DOCS_CREDENTIALS.authenticate(auth[0][7:])
+            if identity is None:
+                return self._docs_response({"error": "denied"}, 403)
+            if not DOCS_RATE.allow(identity["id"]):
+                return self._docs_response({"error": "agent rate limit"}, 429)
+            routes = {("GET", "/docs/list"): "read", ("GET", "/docs/get"): "read",
+                      ("POST", "/docs/put"): "write", ("POST", "/docs/rm"): "delete"}
+            operation = routes.get((method, path))
+            if operation is None:
+                return self._docs_response({"error": "unsupported doc operation"}, 405)
+            if not DOCS_CREDENTIALS.allowed(identity, operation):
+                return self._docs_response({"error": "permission denied"}, 403)
+            if path == "/docs/list":
+                return self._docs_response({"docs": [d for d in DOCS.list()
+                    if DOCS_CREDENTIALS.allowed(identity, "read", d["name"])]})
+            names = q.get("name", [])
+            if len(names) != 1:
+                raise docs_store.DocError("exactly one doc name required")
+            name = names[0]
+            DOCS.validate(name)
+            if not DOCS_CREDENTIALS.allowed(identity, operation, name):
+                return self._docs_response({"error": "permission denied"}, 403)
+            if method == "POST":
+                lengths = self.headers.get_all("Content-Length", [])
+                if self.headers.get_all("Transfer-Encoding"):
+                    raise docs_store.DocError("transfer encoding is not supported")
+                if len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,10}", lengths[0]):
+                    raise docs_store.DocError("one valid Content-Length required")
+                n = int(lengths[0])
+                if n > MAX_DOC_BYTES:
+                    raise docs_store.DocError("doc too large", 413)
+                if path == "/docs/rm" and n:
+                    raise docs_store.DocError("remove requires an empty body")
+                self.connection.settimeout(15)
+                body = self.rfile.read(n)
+                if len(body) != n:
+                    raise docs_store.DocError("incomplete request body")
+            if path == "/docs/get":
+                return self._docs_response(DOCS.get(name), name=name)
+            if path == "/docs/put":
+                DOCS.put(name, body)
+                result = {"ok": True, "name": name, "size": len(body)}
+            else:
+                DOCS.delete(name)
+                result = {"ok": True, "removed": name}
+            print(f"[relay] docs {operation}: agent={identity['id']} name={name}", flush=True)
+            return self._docs_response(result)
+        except docs_store.DocError as e:
+            return self._docs_response({"error": str(e)}, e.status)
+        except TimeoutError:
+            return self._docs_response({"error": "request body timed out"}, 408)
+        except OSError:
+            # Filesystem exception strings can reveal paths; keep them private.
+            return self._docs_response({"error": "doc store unavailable"}, 503)
+        finally:
+            DOCS_SLOTS.release()
+
+    def _docs_response(self, data, code=200, name=None):
+        body = data if isinstance(data, bytes) else json.dumps(data).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/octet-stream" if name else "application/json")
+        if name:
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+        self.send_header("Content-Security-Policy", "sandbox; default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(body)))
+        if code == 429:
+            self.send_header("Retry-After", "5")
+        self.end_headers()
+        self.wfile.write(body)
+
     # (No web enrollment: the passkey public key is provisioned by an admin into
     # .clawd-fleet.passkeys.json — see docs/fleet/DEPLOY.md. Verification only.)
 
@@ -1449,22 +1419,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"name": name,
                                     "files": {p: base64.b64encode(b).decode()
                                               for p, b in files.items()}})
-        # Fleet doc store (its own token; see the doc-store section up top).
-        if path in ("/docs/list", "/docs/get"):
-            if not (DOCS_TOKEN and _token_ok(q.get("t", [""])[0], DOCS_TOKEN)):
-                self.close_connection = True
-                return self.send_error(403, "denied")
-            if path == "/docs/list":
-                return self._send_json({"docs": docs_list()})
-            data, ctype = docs_get(q.get("name", [""])[0])
-            if data is None:
-                return self._send_json({"error": ctype}, 404 if ctype == "no such doc" else 400)
-            self.send_response(200)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return self.wfile.write(data)
+        if path.startswith("/docs/"):
+            return self._docs_request("GET", path, q)
         if path != "/ws":
             return self.send_error(404, "not found")
         up = (self.headers.get("Upgrade", "").lower() == "websocket")
@@ -1543,31 +1499,8 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 return self._send_json({"error": err}, 400)
             return self._send_json({"ok": True, "skills": skills_manifest()})
-        if path in ("/docs/put", "/docs/rm"):
-            # The doc store: raw body in, {ok} out. Its own token (the one the
-            # fleet-docs skill carries) — never the worker or mobile token.
-            if not (DOCS_TOKEN and _token_ok(q.get("t", [""])[0], DOCS_TOKEN)):
-                self.close_connection = True
-                return self.send_error(403, "denied")
-            name = q.get("name", [""])[0]
-            if path == "/docs/rm":
-                err = docs_delete(name)
-                if err:
-                    return self._send_json({"error": err}, 404 if err == "no such doc" else 400)
-                return self._send_json({"ok": True, "removed": name})
-            try:
-                n = int(self.headers.get("Content-Length", "0") or 0)
-            except ValueError:
-                n = 0
-            if n < 0 or n > MAX_DOC_BYTES:
-                self.close_connection = True
-                return self.send_error(413, "doc too large")
-            body = self.rfile.read(n) if n > 0 else b""
-            err = docs_put(name, body)
-            if err:
-                return self._send_json({"error": err}, 400)
-            return self._send_json({"ok": True, "name": name, "size": len(body),
-                                    "url": f"/docs/get?name={name}"})
+        if path.startswith("/docs/"):
+            return self._docs_request("POST", path, q)
         if path != "/upload":
             self.close_connection = True
             return self.send_error(404, "denied")
@@ -1768,8 +1701,7 @@ def main():
     # Never print the token: the relay runs on a shared box and its stdout lands
     # in the systemd journal, which is a leak. Show only that auth is configured.
     print(f"[relay]   worker url: ws://<host>:{PORT}/ws?role=worker&machine=<id>&t=<WORKER_TOKEN>", flush=True)
-    print(f"[relay]   doc store: {DOCS_DIR} ({len(docs_list())} docs; token "
-          f"{'set' if DOCS_TOKEN else 'MISSING — /docs/* disabled'})", flush=True)
+    print(f"[relay]   doc store: {DOCS_DIR} (per-agent bearer credentials)", flush=True)
     if PASSKEY_ONLY:
         print(f"[relay]   mobile url: ws://<host>:{PORT}/ws?role=mobile   (PASSKEY-ONLY — no token)", flush=True)
     else:

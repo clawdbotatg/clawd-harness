@@ -16,6 +16,8 @@ library skill). Boots a REAL relay on a tmp store and asserts:
 Run: python3 fleet/test_docs_store.py
 """
 import json
+import hashlib
+import socket
 import os
 import shutil
 import subprocess
@@ -28,12 +30,20 @@ from pathlib import Path
 from urllib.parse import quote
 
 HERE = Path(__file__).resolve().parent
-PORT = "8809"
+_socket = socket.socket()
+_socket.bind(("127.0.0.1", 0))
+PORT = str(_socket.getsockname()[1])
+_socket.close()
 BASE = f"http://127.0.0.1:{PORT}"
 TOKEN = "docs-test-token"
 WORKER = "docs-test-worker"
 TMP = Path(tempfile.mkdtemp(prefix="clawd-docs-test."))
 STORE = TMP / "docs"
+CREDENTIALS = TMP / "credentials.json"
+CREDENTIALS.write_text(json.dumps([{
+    "id": "test-agent", "sha256": hashlib.sha256(TOKEN.encode()).hexdigest(),
+    "permissions": ["read", "write", "delete"], "prefixes": [""]
+}]))
 
 ENV = {
     **os.environ,
@@ -41,7 +51,7 @@ ENV = {
     "FLEET_BIND": "127.0.0.1",
     "FLEET_MOBILE_TOKEN": "docs-test-mobile",
     "FLEET_WORKER_TOKEN": WORKER,
-    "FLEET_DOCS_TOKEN": TOKEN,
+    "FLEET_DOCS_CREDENTIALS_FILE": str(CREDENTIALS),
     "FLEET_DOCS_DIR": str(STORE),
     "FLEET_MAX_DOC_BYTES": "4096",
     "FLEET_REQUIRE_PASSKEY": "0",
@@ -54,9 +64,9 @@ ENV = {
 
 def call(path, body=None, token=TOKEN, method=None):
     """→ (status, bytes, content-type)."""
-    url = f"{BASE}{path}{'&' if '?' in path else '?'}t={quote(token)}"
+    url = f"{BASE}{path}"
     req = urllib.request.Request(url, method=method or ("POST" if body is not None else "GET"),
-                                 data=body, headers={"Content-Type": "application/octet-stream"})
+                                 data=body, headers={"Content-Type": "application/octet-stream", "Authorization": "Bearer " + token})
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return r.status, r.read(), r.headers.get("Content-Type", "")
@@ -109,8 +119,8 @@ def main():
         check("list shows the doc with size", code == 200 and len(docs) == 1
               and docs[0]["name"] == "plan.md" and docs[0]["size"] == len(plan))
         code, data, ctype = call("/docs/get?name=plan.md")
-        check("get returns the exact bytes as text/markdown",
-              code == 200 and data == plan and ctype.startswith("text/markdown"))
+        check("get returns the exact bytes as a download",
+              code == 200 and data == plan and ctype == "application/octet-stream")
         blob = bytes(range(256))
         call("/docs/put?name=bits.bin", blob)
         code, data, ctype = call("/docs/get?name=bits.bin")
