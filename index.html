@@ -1017,6 +1017,7 @@
              border:1px solid var(--edge); padding:7px 10px; font-size:12px; font-family:var(--mono);
              resize:vertical; min-height:56px; box-sizing:border-box; }
   .settext:focus { outline:none; border-color:var(--accent); }
+  .setnote { margin-top:6px; word-break:break-word; }
   @media (max-width:740px) {
     #settingsbody { padding:14px 12px 44px; }
     .setrow { gap:12px; flex-wrap:wrap; }
@@ -10512,6 +10513,12 @@ function settingSelectRow(title, sub, { options, value = '', disabled = false, o
 }
 
 function renderSettings() {
+  // Repaint, don't rebuild under a finger (landmine 4): `machines` frames re-run
+  // this while the page is open — wiping the 🎤 word box mid-word stole focus
+  // and the half-typed line (2026-09-13). While you're typing in it, skip the
+  // repaint; the next frame after you leave the box catches everything up.
+  const ae = document.activeElement;
+  if (ae && ae.classList && ae.classList.contains('settext') && settingsBody.contains(ae)) return;
   settingsBody.innerHTML = '';
 
   // ── notifications ──────────────────────────────────────────────────────────
@@ -10581,7 +10588,7 @@ function renderSettings() {
 
 // Same row, but the control is a small <textarea> — for a setting that is a
 // LIST you type (the 🎤 word list). Saves on every input; no button.
-function settingTextRow(title, sub, { value = '', placeholder = '', onInput = null }) {
+function settingTextRow(title, sub, { value = '', placeholder = '', onInput = null, note = '' }) {
   const row = document.createElement('div');
   row.className = 'setrow';
   const main = document.createElement('div'); main.className = 'setmain';
@@ -10592,6 +10599,7 @@ function settingTextRow(title, sub, { value = '', placeholder = '', onInput = nu
   ta.spellcheck = false; ta.autocapitalize = 'off';
   if (onInput) ta.oninput = () => onInput(ta.value);
   main.append(t, s, ta);
+  if (note) { const n = document.createElement('div'); n.className = 'set-s setnote'; n.textContent = note; main.appendChild(n); }
   row.append(main);
   return row;
 }
@@ -10600,7 +10608,14 @@ function renderSttSetting() {
   settingsBody.appendChild(settingTextRow('🎤 words the mic should know',
     (live ? 'Deepgram is live on this box: ' : 'no Deepgram key on this box yet (DEEPGRAM_API_KEY in .clawd-harness.env) — until then the browser\'s own recognizer dictates and this list waits. ')
       + 'names dictation keeps getting wrong, one per line or comma-separated (capitalize proper nouns). Codex, clawd and every project name are already in.',
-    { value: sttWords(), placeholder: 'Codex\nethskills\nWispr Flow', onInput: (v) => setSttWords(v) }));
+    { value: sttWords(), placeholder: 'Codex\nethskills\nWispr Flow', onInput: (v) => setSttWords(v),
+      note: 'already knows (' + sttBuiltin().length + '): ' + sttBuiltin().join(', ') }));
+}
+// The words that ride along without you typing them: the mined baseline + every
+// project name (what sttTerms() sends after your own list).
+function sttBuiltin() {
+  const mine = new Set(sttWords().split(/[\n,;]+/).map(t => t.trim().toLowerCase()).filter(Boolean));
+  return sttTerms().filter(t => !mine.has(t.toLowerCase()));
 }
 
 function openSettings() { renderSettings(); settingsModal.hidden = false; }

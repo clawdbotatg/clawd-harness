@@ -240,6 +240,20 @@ await dpage.waitForTimeout(500);
 check('typing during the wait cancels the hold, space kept',
   await dpage.evaluate(()=>box.value==='hi there space talk x' && !recOn));
 
+// ---- ⚙️ the word box: built-ins listed, and a roster frame can't rebuild it mid-word ----
+await dpage.evaluate(()=>window.openSettings());
+await dpage.waitForTimeout(150);
+const noteTxt = await dpage.evaluate(()=>{ const n=document.querySelector('#settingsbody .setnote'); return n?n.textContent:''; });
+check('word box lists the built-in words (mined baseline + project names)', /already knows \(\d+\)/.test(noteTxt) && noteTxt.includes('Codex') && noteTxt.includes('alpha'), noteTxt.slice(0,120));
+await dpage.evaluate(()=>{ const ta=document.querySelector('#settingsbody .settext'); ta.focus(); ta.value=''; });
+await dpage.keyboard.type('Qwi');
+await dpage.evaluate(()=>window.__relayRx({type:'machines',machines:[{id:'clawd-atg',host:'atg',kind:'machine',online:true,lastSeen:0,stats:{projects:1,sessions:0,active:0}}]}));
+await dpage.waitForTimeout(100);
+await dpage.keyboard.type('ic');
+const wb = await dpage.evaluate(()=>{ const ta=document.querySelector('#settingsbody .settext'); return {v:ta&&ta.value, focused:document.activeElement===ta, saved:localStorage.getItem('cc_stt_words')}; });
+check('a machines frame mid-word keeps the box, its focus and the text', wb.v==='Qwiic' && wb.focused && wb.saved==='Qwiic', JSON.stringify(wb));
+await dpage.evaluate(()=>{ document.getElementById('settingsclose').click(); });
+
 check('no page errors', errors.length===0, errors.join(' | '));
 await browser.close();
 console.log(failed ? 'FAIL' : 'PASS — dictation writes only into a box it owns; typing and navigation always win');
