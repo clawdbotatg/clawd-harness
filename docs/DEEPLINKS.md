@@ -53,6 +53,18 @@ The ⏏ button beside 📌/✕ on a session (desktop only) opens exactly this UR
 `popup` window named `breakout:<cid>`, so pressing it again on the same session
 focuses the window you already have. Guard: `tools/breakoutprobe.mjs`.
 
+**An ejected session hides from the other tabs of the same browser while its
+window lives.** No server is involved: the popup heartbeats its cid over a
+`BroadcastChannel` (`cc_breakout`, every 1.5 s); every normal tab hides any cid
+heard from in the last 6 s — off the tab strip, the rail cycling, the sessions
+rung and the boot landing — and the tab that pressed ⏏ hops to a neighbour
+(the sessions rung if it was the only one). Close the window (or kill the
+browser) and the beats stop: the tab is back within ~6 s. Focusing a hidden
+session from the main tab (picker, needs bar, deep link, a session card) brings
+its window forward instead of opening it in the tab. A reload of the popup does
+not flash the tab back (`gone` only shortens the expiry). Your phone or another
+browser can't see the popup, so they keep showing the session — deliberate.
+
 ## Compose link — open a project with a message ready (or already sent)
 
 ```

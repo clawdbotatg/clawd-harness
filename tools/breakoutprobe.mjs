@@ -29,6 +29,7 @@ function findChromium() {
 }
 
 const CID = '00000000-probe-breakout-eject';
+const EJECT_TTL = 6000;   // EJECT_TTL_MS in index.html
 const token = readFileSync(join(ROOT, '.clawd-harness.token'), 'utf8').trim();
 const url = `http://127.0.0.1:8787/?t=${token}#/p/self`;
 const browser = await chromium.launch({ executablePath: findChromium() });
@@ -109,12 +110,32 @@ if (popup) {
     out.nothingSent = !(window.__sent || []).some(f => f && (f.type === 'send' || f.type === 'input' || f.type === 'close'));
     return out;
   }, { CID, fake: fake(CID) }));
-  // ejecting the same session again must REUSE the window (named by cid), not open a second one
+  // ⏏ HIDE: while the popup lives (heartbeat over BroadcastChannel) the main tab
+  // drops the session from its strip/rung and lands elsewhere (it was the only
+  // session → the sessions rung); it must never have opened it in the tab.
+  await page.waitForTimeout(EJECT_TTL + 500);   // longer than one TTL: only the popup's own beats can be keeping it hidden by now
+  Object.assign(r2, await page.evaluate((CID) => ({
+    hiddenHere: typeof isEjected === 'function' && isEjected(CID),
+    offStrip: !Array.from(document.querySelectorAll('#sessionbar .stab')).some(t => t.textContent.includes('eject-me')),
+    offRung: !Array.from(document.querySelectorAll('#sessions .scard')).some(c => c.dataset.cid === CID),
+    hopped: currentCid !== CID,   // a neighbour tab, or the sessions rung when it was the only one
+  }), CID));
+  // ejecting/focusing the same session again must REUSE the window (named by
+  // cid), not open a second one, and must not open it in the main tab either
   const second = await Promise.all([
     context.waitForEvent('page', { timeout: 1500 }).then(() => true).catch(() => false),
-    page.mouse.click(r1.rc[0], r1.rc[1]),
+    page.evaluate((CID) => { focusSession(sessionList.find(s => s.cid === CID)); return currentCid !== CID; }, CID),
   ]);
   r2.noDuplicate = second[0] === false;
+  r2.refocusNotHere = second[1] === true;
+  r2.popupKept = !popup.isClosed() && new URL(popup.url()).hash === `#/p/self/s/${CID}/tty`;
+  // close the window → the beats stop → the tab comes back on its own
+  await popup.close();
+  await page.waitForTimeout(EJECT_TTL + 1500);
+  Object.assign(r2, await page.evaluate((CID) => ({
+    backHere: !isEjected(CID),
+    backOnStrip: Array.from(document.querySelectorAll('#sessionbar .stab')).some(t => t.textContent.includes('eject-me')),
+  }), CID));
 }
 console.log('POPUP:', JSON.stringify(r2));
 
@@ -126,9 +147,10 @@ const r3 = await page.evaluate((CID) => {
 
 const ok = r1.hiddenOnRung && r1.inTty && r1.shownInTty && r1.headerUp && r1.notBreakout && r1.reachable
   && r2.opened && r2.flag && r2.hashOk && r2.named && r2.noToken && r2.cls && r2.headerGone && r2.barGone && r2.ironGone && r2.needsGone
-  && r2.inTty && r2.ejectGone && r2.closeUp && r2.descOnTop && r2.descOffFooter && r2.paneAtTop && r2.footerUp && r2.titled && r2.nothingSent && r2.noDuplicate
+  && r2.inTty && r2.ejectGone && r2.closeUp && r2.descOnTop && r2.descOffFooter && r2.paneAtTop && r2.footerUp && r2.titled && r2.nothingSent
+  && r2.hiddenHere && r2.offStrip && r2.offRung && r2.hopped && r2.noDuplicate && r2.refocusNotHere && r2.popupKept && r2.backHere && r2.backOnStrip
   && r3.nothingSent;
-console.log(ok ? 'PASS — ⏏ shows in a session, a real click pops a breakout window with only the pane + composer, same session, no duplicate'
+console.log(ok ? 'PASS — ⏏ pops a breakout window (pane + composer only), the tab hides here while it lives, refocus reuses it, closing it brings the tab back'
               : 'FAIL');
 await browser.close();
 process.exit(ok ? 0 : 1);
