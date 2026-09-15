@@ -1222,6 +1222,58 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    STT_WORDS_DOC = "stt-words.txt"
+    STT_WORDS_MAX = 64 * 1024
+
+    def _mobile_http_ok(self, q):
+        """The page's HTTP credential, same as /upload: the passkey session (`s=`)
+        in PASSKEY_ONLY mode, else the mobile token (`t=`)."""
+        if PASSKEY_ONLY:
+            sess = q.get("s", [""])[0]
+            return bool(sess and session_valid(sess))
+        return _token_ok(q.get("t", [""])[0], MOBILE_TOKEN)
+
+    def _stt_words(self, method, q):
+        """🎤 the shared dictation word list — ONE file (`stt-words.txt` on the doc
+        shelf) read and written by the harness page here, and read by
+        clawd-dictate on the Mac / the phone keyboard with a fleet-docs credential.
+        GET → text/plain (empty if none yet); POST → replace. Page-gated like
+        /upload; the list is words, never a secret."""
+        if not self._mobile_http_ok(q):
+            self.close_connection = True
+            return self.send_error(403, "denied")
+        if method == "POST":
+            lengths = self.headers.get_all("Content-Length", [])
+            if len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,7}", lengths[0]):
+                return self._send_json({"error": "one valid Content-Length required"}, 400)
+            n = int(lengths[0])
+            if n > self.STT_WORDS_MAX:
+                return self._send_json({"error": "word list too large"}, 413)
+            self.connection.settimeout(15)
+            body = self.rfile.read(n)
+            if len(body) != n:
+                return self._send_json({"error": "incomplete request body"}, 400)
+            try:
+                body.decode("utf-8")
+            except UnicodeDecodeError:
+                return self._send_json({"error": "text only"}, 400)
+            try:
+                DOCS.put(self.STT_WORDS_DOC, body)
+            except docs_store.DocError as e:
+                return self._send_json({"error": str(e)}, e.status)
+            return self._send_json({"ok": True, "size": n})
+        try:
+            body = DOCS.get(self.STT_WORDS_DOC)
+        except docs_store.DocError:
+            body = b""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        return self.wfile.write(body)
+
     def _pm_session_ok(self):
         """The /pm surface is gated by the same passkey session as everything else:
         the browser stores the session token (issued on passkey success) in a
@@ -1421,6 +1473,8 @@ class Handler(BaseHTTPRequestHandler):
                                               for p, b in files.items()}})
         if path.startswith("/docs/"):
             return self._docs_request("GET", path, q)
+        if path == "/stt/words":
+            return self._stt_words("GET", q)
         if path != "/ws":
             return self.send_error(404, "not found")
         up = (self.headers.get("Upgrade", "").lower() == "websocket")
@@ -1501,6 +1555,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": True, "skills": skills_manifest()})
         if path.startswith("/docs/"):
             return self._docs_request("POST", path, q)
+        if path == "/stt/words":
+            return self._stt_words("POST", q)
         if path != "/upload":
             self.close_connection = True
             return self.send_error(404, "denied")

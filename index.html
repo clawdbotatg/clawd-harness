@@ -8756,7 +8756,34 @@ function sttFix(text) {
   for (const [re, to] of sttRules()) text = text.replace(re, to);
   return text;
 }
-function setSttWords(v) { try { localStorage.setItem(STT_WORDS_KEY, v); } catch {} }
+function setSttWords(v) { try { localStorage.setItem(STT_WORDS_KEY, v); } catch {} sttSyncPush(); }
+// 🎤 the word list is SHARED (fleet mode): one file on the relay (`/stt/words`,
+// passkey-session gated like /upload) that this page, clawd-dictate on the Mac
+// and the phone keyboard all read — so a word added on the phone fixes the Mac
+// too. localStorage is the cache: pulled when creds arrive and when ⚙️ opens
+// (never over a box you're typing in), pushed a moment after each edit.
+let sttPushT = null, sttPulled = false;
+function sttSyncUrl() { return `/stt/words?t=${encodeURIComponent(token)}&s=${encodeURIComponent(loadSession())}`; }
+function sttSyncPull(force) {
+  if (!FLEET || (sttPulled && !force)) return;
+  sttPulled = true;
+  fetch(sttSyncUrl(), { cache: 'no-store' }).then(r => r.ok ? r.text() : null).then(txt => {
+    if (txt === null) return;
+    const ae = document.activeElement;
+    if (ae && ae.classList && ae.classList.contains('settext')) return;   // mid-edit: theirs would clobber yours
+    if (txt !== sttWords()) {
+      try { localStorage.setItem(STT_WORDS_KEY, txt); } catch {}
+      if (!settingsModal.hidden) renderSettings();
+    }
+  }).catch(() => {});
+}
+function sttSyncPush() {
+  if (!FLEET) return;
+  clearTimeout(sttPushT);
+  sttPushT = setTimeout(() => {
+    fetch(sttSyncUrl(), { method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: sttWords() }).catch(() => {});
+  }, 800);
+}
 // The keyterm list: your words first, then the harness's own, then every project
 // name (plus its de-hyphenated form: "clawd harness"). Deepgram caps it at 100
 // terms / ~500 tokens; case is kept, so proper nouns go in capitalized.
@@ -8792,6 +8819,7 @@ function sttAsk() {
     clearTimeout(sttReqT);
     if (m.ttl) sttReqT = setTimeout(sttAsk, Math.max(5000, (m.ttl - 60) * 1000));
     micBtn.title = 'Hold to dictate (Deepgram — knows your words, see ⚙️) — or hold Space in the box';
+    sttSyncPull();                                            // creds in hand = a live session token: fetch the shared list once
   });
   if (!hsend({ type: 'stt', id })) { clearTimeout(timer); sttPending.delete(id); }
 }
@@ -10800,6 +10828,7 @@ function settingTextRow(title, sub, { value = '', placeholder = '', onInput = nu
 }
 function renderSttSetting() {
   const live = sttCredsOk();
+  sttSyncPull(true);                                          // ⚙️ opened: show the fleet's current list
   settingsBody.appendChild(settingTextRow('🎤 words the mic should know',
     (live ? 'Deepgram is live on this box: ' : 'no Deepgram key on this box yet (DEEPGRAM_API_KEY in .clawd-harness.env) — until then the browser\'s own recognizer dictates and this list waits. ')
       + 'names dictation keeps getting wrong, one per line (capitalize proper nouns). A word only nudges the recognizer; when it keeps writing two words for one, add a rule: "on chain => onchain" rewrites it every time.',

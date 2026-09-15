@@ -41,6 +41,17 @@ Names begin with an ASCII letter/digit and contain only letters, digits, `.`, `_
 All downloads use application/octet-stream, Content-Disposition: attachment,
 a sandbox CSP, nosniff, no-referrer, same-origin resource policy, and no-store.
 
+## The shared dictation word list (`stt-words.txt`)
+
+One document on this shelf is written by the harness PAGE, not an agent: the
+🎤 word list from ⚙️ settings. The page reaches it through `GET|POST /stt/words`
+(gated by the passkey session `s=` like `/upload`, text/plain, ≤ 64 KB) — no
+doc credential in a browser. `clawd-dictate` on the Mac and the phone keyboard
+read the same file with their machine's credential (`fleet-docs get
+stt-words.txt`). A word added on any surface reaches the others: the page pulls
+when Deepgram creds arrive and when ⚙️ opens, the Mac tool every five minutes.
+`fleet/test_stt_words.py`.
+
 ## Storage and abuse limits
 
 `fleet/docs_store.py` implements the store. Directory mode is 700; new files and
