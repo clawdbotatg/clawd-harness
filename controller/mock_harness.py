@@ -221,10 +221,18 @@ def _make_handler(state):
                 other = "claude" if src.get("engine") == "codex" else "codex"
                 state.set_session(cid, checkArmed=True, busy=True, status="working")
                 state.set_session(cid, checkArmed=False, busy=False, status="idle",
-                                  lastAnswer="brief written to REVIEW.md")
+                                  lastAnswer="brief written to REVIEW-20260914-120000.md")
                 rev = state.add_session(f.get("pid") or src.get("pid", "p1"), engine=other,
                                         title="\U0001f50d " + src.get("title", "session"))
                 state.set_session(rev, checkOf=cid, desc="double-checking")
+                state.broadcast(state.sessions_frame())
+                # …and the loop closes: the reviewer's verdict goes back to the
+                # source, which is prompted to act on it (check_back)
+                state.set_session(rev, busy=False, status="idle",
+                                  lastAnswer="1. [nit] fine\nTLDR: no real issues",
+                                  desc="reviewed \u2192 findings sent back to " + src.get("title", "session"))
+                state.set_session(cid, busy=True, status="working",
+                                  lastPrompt="act on the review")
                 state.broadcast(state.sessions_frame())
             elif t == "pin":
                 cid, on = f.get("cid"), f.get("on", True)

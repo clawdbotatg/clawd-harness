@@ -11,6 +11,42 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-14 — 🔍 the review comes back: the source is told to act on it
+
+First real run of 🔍 (claude → codex): the reviewer opened, did the review,
+said "done" — and nothing happened. Austin: the verdict has to go back to the
+claude session with a call to action, "review the review, think critically,
+make the changes you think are correct". Two changes:
+
+- **The loop closes by itself.** A reviewer is born with `check_pending`
+  (ctor + registry, with `check_file`); its first Stop past the review prompt
+  (`_check_back_on_stop`) fires `SessionManager.check_back`: the reviewer's
+  final message (the Stop payload's `last_assistant_message`; the transcript's
+  last assistant text as fallback) is appended to the review file under
+  `## Review by <engine>`, and `CHECK_ACT_PROMPT` is typed into the SOURCE —
+  read it, think critically (the reviewer only saw the brief + the diff and
+  can be wrong), fix what's right, one line why not for the rest, tests,
+  commit as usual, don't commit the file, end with a TLDR. The review prompt
+  now says the final message is handed over verbatim, so the whole verdict
+  goes in it. A gone source leaves the findings in the file with a note on
+  the reviewer's tab. The reviewer stays open (it's the human-readable copy).
+- **One file per review.** `REVIEW.md` → `REVIEW-<YYYYMMDD-HHMMSS>.md`
+  (`review_file_name`); the exclude entry is the pattern `/REVIEW-*.md`
+  (`_exclude_handoff(path, REVIEW_GLOB)`, `_worktree_dirty` tolerates any
+  match). Austin's question — "how do you even know it's git-ignored?" —
+  the answer: the arm writes the entry into the checkout's own
+  `.git/info/exclude` (per-clone, never tracked, unlike `.gitignore`) before
+  the brief prompt is typed, so the file is invisible to `git status` from
+  the start; the prompt's "do NOT commit" is the belt to that suspender.
+  The file name is chosen at the tap (`check_brief`, volatile with the arm)
+  and travels tap → brief prompt → reviewer prompt → reviewer row → act
+  prompt, so two reviews of one project never clobber each other and old
+  ones stay readable.
+
+PM: the `check` description and persona say the hand-back is automatic —
+report the reviewer's `lastAnswer` (verdict) and the source's next one (what
+it did), don't `ask` the source to act. `test_check.py` group 9.
+
 ## 2026-09-13 — 🔍 double-check: the other engine reviews a session's work
 
 Austin's loop: claude builds, codex checks. The ask was one button, and NOT
@@ -44,9 +80,8 @@ codex to verify. Built as a wrap-shaped feature, not a fork-shaped one:
   above the composer, cancel = `checkCancel`), and jumps to the reviewer tab
   when it appears IF still watching the source (`noteCheckSpawned`);
   otherwise the tab is just in the strip. The PM has a `check` verb (three
-  places updated: verb, MCP description, persona). Not built yet: a "send
-  the findings back to the source" button — `check_of` makes it a small
-  follow-on.
+  places updated: verb, MCP description, persona). The hand-back of the
+  findings to the source landed the next day (above).
 
 ## 2026-09-12 — the doc store: a shared shelf on the relay box
 

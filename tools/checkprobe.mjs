@@ -1,7 +1,8 @@
 // checkprobe — 🔍 double-check: the OTHER engine reviews a session's work
 // (2026-09-13). The harness ARMS the source (check frame), it writes a local
-// REVIEW.md, the Stop hook spawns a reviewer tab (checkOf = source) briefed
-// with the file + the diff. Guards the client half, on emulated touch with
+// REVIEW-<stamp>.md, the Stop hook spawns a reviewer tab (checkOf = source)
+// briefed with the file + the diff; the reviewer's Stop hands the verdict back
+// to the source (server-side). Guards the client half, on emulated touch with
 // REAL taps (three production bugs were invisible to element.click()):
 //   1. a tap on 🔍 sends {type:'check', cid} and STAYS on the source (no blank
 //      terminal, no pending focus) — the meta line says the brief is coming;

@@ -136,13 +136,18 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   untouched); the `fork` flag is a ctor param + registry field that clears on
   the first id rotation. `test_fork.py`; WS verb `fork` in `docs/WS-PROTOCOL.md`.
   **🔍 double-check** = `SessionManager.check` → the source writes a LOCAL
-  `REVIEW.md` (excluded like `HANDOFF.md`) → the first Stop past that brief
-  (`_check_on_stop`, keyed on `prompt_count`, volatile arm) → `check_spawn`
-  opens the OTHER engine in the same project with the brief + `git diff
-  <head_at_spawn>..HEAD` (every session records HEAD at spawn: ctor param +
-  registry). Brief = claims, diff = truth, the reviewer never edits. The
-  reviewer's `check_of` is a ctor param + registry field. `test_check.py` +
-  `tools/checkprobe.mjs`; WS verbs `check`/`checkCancel`.
+  `REVIEW-<stamp>.md` (one per review; `REVIEW-*.md` excluded like
+  `HANDOFF.md`) → the first Stop past that brief (`_check_on_stop`, keyed on
+  `prompt_count`, volatile arm) → `check_spawn` opens the OTHER engine in
+  the same project with the brief + `git diff <head_at_spawn>..HEAD` (every
+  session records HEAD at spawn: ctor param + registry). Brief = claims,
+  diff = truth, the reviewer never edits. **The loop closes:** the reviewer's
+  first Stop (`_check_back_on_stop` → `check_back`) appends its verdict to
+  the review file and prompts the SOURCE to act on it (`CHECK_ACT_PROMPT`:
+  think critically, fix what's right, say why not). A review nobody acts on
+  is a tab nobody reads (Austin, 09-14). The reviewer's `check_of` /
+  `check_file` / `check_pending` are ctor params + registry fields.
+  `test_check.py` + `tools/checkprobe.mjs`; WS verbs `check`/`checkCancel`.
 
 ## Landmines (don't regress; stories in HISTORY.md)
 

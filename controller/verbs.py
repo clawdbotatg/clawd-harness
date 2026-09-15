@@ -1012,13 +1012,16 @@ class Verbs:
     def check(self, machine, cid, confirm=False):
         """🔍 Double-check a session's work with the OTHER engine (codex
         reviews a claude session, claude reviews a codex one). The session
-        first writes a short local brief (REVIEW.md, git-excluded, never
-        committed); when that turn ends the harness spawns a reviewer session
-        in the same project — it reads the brief as claims, the diff since the
-        source started as truth, runs the repo's tests, never edits, and ends
-        with a severity-tagged issue list + TLDR. The reviewer appears in the
-        roster with `checkOf` = the source cid; read its transcript_tail /
-        lastAnswer for the verdict. Refused (with a reason) for a sign-in
+        first writes a short local brief (REVIEW-<stamp>.md, one per review,
+        git-excluded, never committed); when that turn ends the harness spawns
+        a reviewer session in the same project — it reads the brief as claims,
+        the diff since the source started as truth, runs the repo's tests,
+        never edits, and ends with a severity-tagged issue list + TLDR. When
+        the reviewer finishes, the harness appends its verdict to the review
+        file and prompts the SOURCE to act on it — no relay needed. The
+        reviewer appears in the roster with `checkOf` = the source cid; its
+        lastAnswer is the verdict, the source's next lastAnswer is what it did
+        about it. Refused (with a reason) for a sign-in
         session, one with no conversation yet, or when codex isn't signed in.
         The source keeps running untouched."""
         def do():

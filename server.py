@@ -37,6 +37,7 @@ import base64
 import datetime
 import difflib
 import fcntl
+import fnmatch
 import glob
 import hashlib
 import json
@@ -159,24 +160,43 @@ WRAP_PROMPT = (
 # 🔍 double-check: the OTHER engine reviews what a session built (codex checks
 # a claude session, claude checks a codex one). One tap: the source session is
 # armed and asked for a short brief — what it did, where, what it verified,
-# what it's unsure of — written to a LOCAL REVIEW.md (excluded like HANDOFF.md,
-# never committed). The first Stop AFTER that brief was submitted spawns the
-# reviewer in the same project (ClaudeSession._check_on_stop →
-# SessionManager.check_spawn) with the brief + the git range since the source
-# spawned (head_at_spawn). The brief is CLAIMS; the diff is the truth; the
-# reviewer is told never to edit. The arm is volatile (a restart disarms — the
-# safe direction) and lapses after CHECK_TTL_S. A tap mid-turn waits: the arm
-# remembers the prompt count and ignores the Stop of the turn already running.
+# what it's unsure of — written to a LOCAL, per-review file at the repo root
+# (`REVIEW-<stamp>.md`; the pattern is in the checkout's .git/info/exclude like
+# HANDOFF.md, never committed; one file per tap so two reviews never clobber
+# each other and old ones stay readable). The first Stop AFTER that brief was
+# submitted spawns the reviewer in the same project
+# (ClaudeSession._check_on_stop → SessionManager.check_spawn) with the brief +
+# the git range since the source spawned (head_at_spawn). The brief is CLAIMS;
+# the diff is the truth; the reviewer is told never to edit. The arm is
+# volatile (a restart disarms — the safe direction) and lapses after
+# CHECK_TTL_S. A tap mid-turn waits: the arm remembers the prompt count and
+# ignores the Stop of the turn already running.
+# THE LOOP CLOSES: the reviewer's first Stop (ClaudeSession._check_back_on_stop
+# → SessionManager.check_back) appends its final message to the same review
+# file under "## Review" and types CHECK_ACT_PROMPT into the SOURCE — read the
+# findings, think critically, fix what's right, say why not for the rest. A
+# review nobody acts on is a tab nobody reads (Austin, 09-14). The reviewer's
+# `check_of` / `check_file` / `check_pending` are ctor params + registry rows
+# so a restart between its spawn and its Stop still hands the findings back.
 CHECK_TTL_S = int(os.environ.get("CHECK_TTL_S", "1800"))
 CHECK_READY_S = float(os.environ.get("CHECK_READY_S", "30"))   # wait for the reviewer's TUI before typing
-REVIEW_FILE = "REVIEW.md"
+REVIEW_GLOB = "REVIEW-*.md"                                    # the exclude entry; one file per review
+
+
+def review_file_name(now=None):
+    """The per-review local file: REVIEW-YYYYMMDD-HHMMSS.md (sorts by time,
+    matches REVIEW_GLOB)."""
+    return time.strftime("REVIEW-%Y%m%d-%H%M%S.md", time.localtime(now or time.time()))
+
+
 CHECK_BRIEF_PROMPT = (
     "A second agent ({reviewer}) is about to double-check your work in this "
     "repo. Write it a short brief in {file} at the repo root (replace an old "
-    "one): what you were asked to do, what you changed and where (files, "
-    "functions), what you verified and how, what is still unverified or you "
-    "are unsure of, and what is uncommitted. Plain facts, under 60 lines. That "
-    "file is LOCAL notes: it is already in this checkout's .git/info/exclude, "
+    "one if it exists): what you were asked to do, what you changed and where "
+    "(files, functions), what you verified and how, what is still unverified "
+    "or you are unsure of, and what is uncommitted. Plain facts, under 60 "
+    "lines. That file is LOCAL notes: REVIEW-*.md is already in this "
+    "checkout's .git/info/exclude, "
     "so do NOT commit it, push it, or add it to .gitignore or any tracked "
     "file. Do nothing else this turn — no code changes — and reply with one "
     "line once it is written.")
@@ -190,8 +210,19 @@ CHECK_REVIEW_PROMPT = (
     "unhandled errors, things claimed done but not done, and changes the brief "
     "does not mention. Do NOT edit, commit, or push anything — you are "
     "reviewing, not fixing (running tests and read-only commands is fine). "
-    "Finish with a numbered list of issues, each tagged critical / should-fix "
-    "/ nit with file:line, or 'No issues found', and then a 3-line TLDR.")
+    "Your FINAL message is handed back to that agent verbatim, so put the "
+    "whole verdict in it: a numbered list of issues, each tagged critical / "
+    "should-fix / nit with file:line and what to do about it, or 'No issues "
+    "found', and then a 3-line TLDR.")
+CHECK_ACT_PROMPT = (
+    "{reviewer} has double-checked your work. Its findings are at the end of "
+    "{file} at the repo root, under '## Review'. Read them and think "
+    "critically: the reviewer only saw your brief and the diff, and it can be "
+    "wrong. For each issue decide — fix it, or say in one line why not. Make "
+    "the changes you agree with, run the tests, and if the earlier work was "
+    "committed, commit and push these as usual. {file} stays local: do NOT "
+    "commit it. Finish with what you changed, what you rejected and why, and "
+    "a 3-line TLDR.")
 # A subscribe whose ring replay is this shallow gets the transcript rendered in
 # as seed scrollback first (see _history_seed_bytes) — the ring goes shallow
 # exactly when it can't carry history: a width-change fence (_apply_size) or a
@@ -1267,7 +1298,7 @@ def _worktree_dirty(path):
     with ONE exception: an untracked HANDOFF.md at the root is the wrap's own
     local handoff (deliberately uncommitted; normally hidden by the exclude
     entry `_exclude_handoff` writes, tolerated here in case it isn't). The 🔍
-    double-check's REVIEW.md is the same kind of file, same treatment."""
+    double-check's REVIEW-*.md files are the same kind, same treatment."""
     if not path or not os.path.isdir(os.path.join(path, ".git")):
         return ""
     try:
@@ -1276,14 +1307,15 @@ def _worktree_dirty(path):
     except Exception:
         return ""
     lines = [l for l in (r.stdout or "").splitlines()
-             if l.strip() and l not in (f"?? {HANDOFF_FILE}", f"?? {REVIEW_FILE}")]
+             if l.strip() and l != f"?? {HANDOFF_FILE}"
+             and not fnmatch.fnmatch(l, f"?? {REVIEW_GLOB}")]
     if not lines:
         return ""
     return "\n".join(lines[:5]) + (f"\n… +{len(lines) - 5} more" if len(lines) > 5 else "")
 
 
 def _exclude_handoff(path, name=HANDOFF_FILE):
-    """List HANDOFF.md (or another local-notes file: the 🔍 REVIEW.md) in the
+    """List HANDOFF.md (or another local-notes entry: the 🔍 REVIEW-*.md) in the
     checkout's LOCAL exclude file (`git rev-parse
     --git-path info/exclude` — lives under .git, never tracked, never pushed)
     so the wrap handoff is invisible to `git status` and can't be committed by
@@ -3216,15 +3248,19 @@ class ClaudeSession:
                  engine="claude", autopilot=0.0, pilot_goal="",
                  pilot_status="", pilot_rounds=0,
                  tldr_text="", tldr_on=False, voice_on=False, fork=False,
-                 head_at_spawn="", check_of=""):
+                 head_at_spawn="", check_of="", check_file="", check_pending=False):
         self.manager = manager
         # 🔍 double-check: the git HEAD when this session was created (""
         # for a non-repo or a pre-feature row) — the reviewer's diff base;
-        # and, on a reviewer session, the cid of the session it is checking.
-        # Both durable (ctor params + registry) so a restart/handoff keeps the
-        # range and the tab's badge.
+        # and, on a reviewer session, the cid of the session it is checking,
+        # the review file (brief + findings) and whether the findings still
+        # have to go back to the source (cleared at the reviewer's first
+        # Stop). All durable (ctor params + registry) so a restart/handoff
+        # keeps the range, the tab's badge, and the hand-back.
         self.head_at_spawn = head_at_spawn or ""
         self.check_of = check_of or ""
+        self.check_file = check_file or ""
+        self.check_pending = bool(check_pending)
         # ⑂ this session was forked from another: its first launch is
         # `--resume <source id> --fork-session`. Persisted (ctor param +
         # registry) only until claude hands us the fork's own id — see
@@ -3353,6 +3389,7 @@ class ClaudeSession:
         self.check_armed_at = 0.0                 # epoch of the tap; 0 = not armed
         self.check_after = 0                      # prompt_count at the tap: fire on the first Stop past it
         self.check_engine = ""                    # the reviewer engine chosen at the tap
+        self.check_brief = ""                     # the per-review file the brief goes to (volatile with the arm)
         # 🟦 live TLDR (volatile; the viewer re-asserts its preference on subscribe)
         self.tldr_on = bool(tldr_on)              # a viewer wants the blue block (ctor param: survives respawn/restart)
         self.tldr_turn_text = ""                  # this turn's streamed assistant prose (API tee)
@@ -3393,7 +3430,8 @@ class ClaudeSession:
                 "tldr_text": (self.tldr_text or "")[:3000],
                 "tldr_on": self.tldr_on, "voice_on": self.voice_on,
                 "fork": self.fork,
-                "head_at_spawn": self.head_at_spawn, "check_of": self.check_of}
+                "head_at_spawn": self.head_at_spawn, "check_of": self.check_of,
+                "check_file": self.check_file, "check_pending": self.check_pending}
 
     def clone_for_respawn(self, **overrides):
         """A fresh session object for an in-place respawn under the SAME cid
@@ -3574,13 +3612,15 @@ class ClaudeSession:
         return bool(self.check_armed_at
                     and time.time() - self.check_armed_at < CHECK_TTL_S)
 
-    def check_arm(self, engine):
+    def check_arm(self, engine, file=""):
         self.check_armed_at = time.time()
         self.check_after = self.prompt_count      # the brief's UserPromptSubmit bumps past this
         self.check_engine = engine
+        self.check_brief = file or review_file_name()
 
     def check_cancel(self):
         self.check_armed_at, self.check_after, self.check_engine = 0.0, 0, ""
+        self.check_brief = ""
 
     def _check_on_stop(self):
         """The Stop hook's half: spawn the reviewer once the brief turn ends.
@@ -3596,10 +3636,40 @@ class ClaudeSession:
             return
         if self.prompt_count <= self.check_after:
             return                                # the turn that was already running at the tap
-        engine = self.check_engine
+        engine, file = self.check_engine, self.check_brief
         self.check_cancel()
-        threading.Thread(target=self.manager.check_spawn, args=(self, engine),
+        threading.Thread(target=self.manager.check_spawn, args=(self, engine, file),
                          daemon=True).start()
+
+    def _check_back_on_stop(self, last):
+        """The reviewer's half: its first Stop past the review prompt hands
+        the verdict back to the source (SessionManager.check_back). Once —
+        the durable flag clears here, so a reviewer that keeps getting
+        prompted by a human afterwards stays a plain tab."""
+        if not (self.check_of and self.check_pending):
+            return
+        if self.prompt_count < 1:
+            return                                # no prompt landed yet — not our Stop
+        self.check_pending = False
+        self.manager.save_registry()
+        threading.Thread(target=self.manager.check_back, args=(self, last or ""),
+                         daemon=True).start()
+
+    def _last_assistant_text(self):
+        """The last assistant message in the transcript ("" if none) — the
+        fallback when a Stop payload has no last_assistant_message."""
+        path = self.transcript_path or self._find_transcript()
+        if not path:
+            return ""
+        try:
+            lines = open(path).read().splitlines()
+        except OSError:
+            return ""
+        for ln in reversed(lines):
+            ev = self._slim_event(ln)
+            if ev and ev.get("role") == "assistant" and ev.get("text"):
+                return ev["text"]
+        return ""
 
     def _bg_probe_claude(self):
         """One read-only look at claude's status file → "shell" | "agent" | "".
@@ -3839,6 +3909,7 @@ class ClaudeSession:
             self.tldr_turn_done()                # 🟦 the tightening pass
             self._wrap_on_stop()                 # 📑 an accepted self-close lands here
             self._check_on_stop()                # 🔍 the brief is written → spawn the reviewer
+            self._check_back_on_stop(data["last"])   # 🔍 the verdict is in → hand it to the source
             # Turn complete → the transcript now has a real exchange. Name it if
             # it's still unnamed (so even a 1-prompt session gets a title), and
             # re-name at the 1/3/6/9/… milestones to sharpen as it grows.
@@ -5525,7 +5596,8 @@ class SessionManager:
                     model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0),
                     tldr_text=e.get("tldr_text", ""), tldr_on=bool(e.get("tldr_on")),
                     voice_on=bool(e.get("voice_on")), fork=bool(e.get("fork")),
-                    head_at_spawn=e.get("head_at_spawn", ""), check_of=e.get("check_of", ""))
+                    head_at_spawn=e.get("head_at_spawn", ""), check_of=e.get("check_of", ""),
+                    check_file=e.get("check_file", ""), check_pending=bool(e.get("check_pending")))
                 self.sessions[s.cid] = s
                 self._park_for_boot(s)
                 continue
@@ -5604,7 +5676,8 @@ class SessionManager:
                 model=e.get("model", ""), ctx_tokens=e.get("ctx_tokens", 0),
                 tldr_text=e.get("tldr_text", ""), tldr_on=bool(e.get("tldr_on")),
                 voice_on=bool(e.get("voice_on")), fork=bool(e.get("fork")),
-                head_at_spawn=e.get("head_at_spawn", ""), check_of=e.get("check_of", ""))
+                head_at_spawn=e.get("head_at_spawn", ""), check_of=e.get("check_of", ""),
+                check_file=e.get("check_file", ""), check_pending=bool(e.get("check_pending")))
             self.sessions[s.cid] = s
             self._park_for_boot(s)
         threading.Thread(target=self._boot_stagger, daemon=True).start()
@@ -7935,15 +8008,13 @@ class SessionManager:
     # -- session crud ----------------------------------------------------------
     def create_session(self, pid, account=None, ceremony=False,
                        engine="claude", resume="", title="", fork=False,
-                       check_of=""):
+                       check_of="", check_file=""):
         """`resume`: an engine session id to reopen (`claude --resume <id>` /
-        codex's rollout) — the way back for a session whose tab got closed
-        (the ✕ has no confirm; 2026-09-05 three were lost to it mid-panic).
-        Falls back to a fresh session, with a log line, when the transcript
-        is gone. `title` seeds the tab name until the namer runs. `fork`
-        (with `resume`): continue under a NEW id, the source untouched —
-        the ⑂ button; see SessionManager.fork. `check_of`: this is a 🔍
-        reviewer for that cid (SessionManager.check_spawn)."""
+        codex's rollout) — the way back for a closed tab (HISTORY 09-05);
+        falls back to a fresh session when the transcript is gone. `title`
+        seeds the tab name until the namer runs. `fork` (with `resume`): a
+        NEW id, source untouched (SessionManager.fork). `check_of` /
+        `check_file`: a 🔍 reviewer, hand-back pending (check_spawn)."""
         if pid not in self.projects:
             return None
         proj = self.projects[pid]
@@ -7974,7 +8045,8 @@ class SessionManager:
                               resuming=resuming, created=time.time(),
                               engine=engine, title=title,
                               fork=bool(fork and resuming),
-                              head_at_spawn=_git_head(proj.path), check_of=check_of)
+                              head_at_spawn=_git_head(proj.path), check_of=check_of,
+                              check_file=check_file, check_pending=bool(check_of))
             if not _codex_signed_in():
                 s.desc = ("codex is not signed in on this machine — run "
                           "`codex login` in a terminal once, then start a "
@@ -8074,7 +8146,8 @@ class SessionManager:
                           account=name, config_dir=cfg, title=title,
                           ceremony=ceremony or no_creds_anywhere,
                           fork=bool(fork and resuming),
-                          head_at_spawn=_git_head(proj.path), check_of=check_of)
+                          head_at_spawn=_git_head(proj.path), check_of=check_of,
+                          check_file=check_file, check_pending=bool(check_of))
         if no_creds_anywhere:
             s.desc = ("no plan is signed in on this machine yet — complete "
                       "the login in this terminal (once per machine)")
@@ -8222,8 +8295,8 @@ class SessionManager:
         if reviewer == "codex" and not _codex_signed_in():
             return "codex is not signed in on this machine — run `codex login` once"
         s.check_arm(reviewer)
-        _exclude_handoff(s.workdir(), REVIEW_FILE)   # REVIEW.md stays local, like HANDOFF.md
-        txt = CHECK_BRIEF_PROMPT.format(reviewer=reviewer, file=REVIEW_FILE)
+        _exclude_handoff(s.workdir(), REVIEW_GLOB)   # REVIEW-*.md stays local, like HANDOFF.md
+        txt = CHECK_BRIEF_PROMPT.format(reviewer=reviewer, file=s.check_brief)
         log_prompt(s, txt, via)
         print(f"[check {cid[:8]}] armed — {reviewer} reviews after the brief "
               f"({CHECK_TTL_S}s)", flush=True)
@@ -8264,23 +8337,24 @@ class SessionManager:
                 f"(`git log --since='{since}' --oneline`, then diff from the "
                 "oldest of those to HEAD)")
 
-    def check_prompt(self, src, engine):
+    def check_prompt(self, src, engine, file):
         """The reviewer's opening prompt."""
         title = (src.title or src._fallback_title() or "the source session").strip()
         return CHECK_REVIEW_PROMPT.format(
             src_engine=src.engine, title=title.replace('"', "'"),
-            file=REVIEW_FILE, range=self.check_range(src))
+            file=file, range=self.check_range(src))
 
-    def check_spawn(self, src, engine):
+    def check_spawn(self, src, engine, file=""):
         """Spawn the reviewer for `src` (from the Stop hook's thread) and
         brief it. Never raises — a failure is a log line, the source is
         untouched either way. Returns the reviewer session or None."""
         title = (src.title or src._fallback_title() or "").strip()
+        file = file or review_file_name()
         try:
-            txt = self.check_prompt(src, engine)
+            txt = self.check_prompt(src, engine, file)
             s = self.create_session(src.pid, engine=engine,
                                     title=("\U0001f50d " + title)[:80] if title else "\U0001f50d double-check",
-                                    check_of=src.cid)
+                                    check_of=src.cid, check_file=file)
             if not s:
                 print(f"[check {src.cid[:8]}] couldn't start a {engine} session "
                       "in that project — no reviewer", flush=True)
@@ -8298,6 +8372,42 @@ class SessionManager:
         except Exception as e:
             print(f"[check {src.cid[:8]}] reviewer spawn failed: {e!r}", flush=True)
             return None
+
+    def check_back(self, rev, last=""):
+        """The reviewer `rev` finished: append its verdict to the review file
+        (under "## Review") and type CHECK_ACT_PROMPT into the source —
+        read it, think critically, fix what's right. Never raises. A source
+        that is gone leaves the findings in the file and a note on the
+        reviewer's tab. Returns True when the source was prompted."""
+        src = self.sessions.get(rev.check_of)
+        verdict = (last or "").strip() or rev._last_assistant_text().strip()
+        file = rev.check_file or review_file_name()
+        try:
+            path = os.path.join(rev.workdir(), file)
+            stamp = time.strftime("%Y-%m-%d %H:%M")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"\n\n## Review by {rev.engine} ({stamp})\n\n"
+                        f"{verdict or '(the reviewer ended its turn without a final message)'}\n")
+        except Exception as e:
+            print(f"[check {rev.cid[:8]}] couldn't write the verdict to {file}: {e!r}", flush=True)
+        src_title = (src.title or src._fallback_title() or "the source").strip() if src else ""
+        if not src or not getattr(src, "alive", True):
+            rev.desc = f"reviewed — findings in {file} (the source session is gone)"
+            print(f"[check {rev.cid[:8]}] verdict written to {file}; source "
+                  f"{rev.check_of[:8]} is gone — nothing to hand it to", flush=True)
+            self.broadcast_sessions()
+            return False
+        try:
+            txt = CHECK_ACT_PROMPT.format(reviewer=rev.engine, file=file)
+            log_prompt(src, txt, "check")
+            self.send_prompt(src.cid, txt, via="check")
+            rev.desc = f"reviewed \u2192 findings sent back to {src_title}"[:120]
+            print(f"[check {rev.cid[:8]}] \U0001f50d verdict \u2192 {src.cid[:8]} ({file})", flush=True)
+            self.broadcast_sessions()
+            return True
+        except Exception as e:
+            print(f"[check {rev.cid[:8]}] hand-back to {rev.check_of[:8]} failed: {e!r}", flush=True)
+            return False
     # -- 🗃️ closed-session history -------------------------------------------
     # The tab ✕ has no confirm, and until 2026-09-05 a closed session was
     # simply gone (three lost mid-panic that day). Every close files a row

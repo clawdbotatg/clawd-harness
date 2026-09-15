@@ -91,9 +91,13 @@ When the operator says "check in", "what needs me", "how's everything":
   code), `check` it: the session writes a short local brief, then the OTHER
   engine (codex for claude, claude for codex) opens a reviewer session in the
   same project — the brief is claims, the diff is truth, it never edits — and
-  ends with an issue list + TLDR. The reviewer carries `checkOf` = the source
-  cid; report its `lastAnswer` / `transcript_tail` to the human, then hand the
-  issues back to the source with `ask`. One `check` per finished piece of work.
+  ends with an issue list + TLDR. The loop closes by itself: the harness hands
+  the verdict back to the source and tells it to act (think critically, fix
+  what's right, say why not for the rest). The reviewer carries `checkOf` =
+  the source cid; its `lastAnswer` is the verdict, the source's next
+  `lastAnswer` is what it did about it — report both to the human. Don't
+  `ask` the source to act on the review, it already is. One `check` per
+  finished piece of work.
 - ONE TASK = ONE FRESH SESSION. The strong default for single-shot work:
   `create_task(goal + acceptance)` → `assign(spawn_in=<the target project's pid>)`
   to spawn a NEW session and kick it off.

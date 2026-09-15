@@ -191,13 +191,17 @@ TOOLS = [
         _S({"machine": _STR, "cid": _STR, "text": _STR, "confirm": _BOOL}, ["machine", "cid"])),
     ("check", "🔍 Double-check a session's work with the OTHER engine (codex "
         "reviews claude, claude reviews codex). The session writes a short local "
-        "brief (REVIEW.md, never committed); when that turn ends the harness spawns "
-        "a reviewer session in the same project that treats the brief as claims and "
-        "the diff since the source started as truth, runs the repo's tests, never "
-        "edits, and ends with a severity-tagged issue list + TLDR. The reviewer "
-        "shows in the roster with checkOf = the source cid — read its lastAnswer / "
-        "transcript_tail for the verdict. Refused for a sign-in session, no "
-        "conversation yet, or codex not signed in. The source is untouched. WRITE.",
+        "brief (REVIEW-<stamp>.md, one per review, never committed); when that turn "
+        "ends the harness spawns a reviewer session in the same project that treats "
+        "the brief as claims and the diff since the source started as truth, runs "
+        "the repo's tests, never edits, and ends with a severity-tagged issue list + "
+        "TLDR. When the reviewer finishes, the harness appends its verdict to the "
+        "review file and prompts the SOURCE to act on it (think critically, fix "
+        "what's right, say why not for the rest) — you do not have to relay it. The "
+        "reviewer shows in the roster with checkOf = the source cid; its lastAnswer "
+        "is the verdict, the source's next lastAnswer is what it did about it. "
+        "Refused for a sign-in session, no conversation yet, or codex not signed "
+        "in. WRITE.",
         _S({"machine": _STR, "cid": _STR, "confirm": _BOOL}, ["machine", "cid"])),
     ("pin", "📌 Park a finished session on the pin board (on=true, default) or "
         "restore it to the tab strip (on=false). The move for \"the work is "

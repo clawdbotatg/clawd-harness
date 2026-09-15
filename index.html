@@ -7847,9 +7847,12 @@ document.getElementById('forkBtn').onclick = forkSession;
 
 // ── 🔍 double-check ───────────────────────────────────────────────────────────
 // The OTHER engine reviews this session's work. One frame: the owning machine
-// arms the session and types the brief prompt (it writes a local REVIEW.md);
-// the first Stop after that brief spawns the reviewer tab in the same project
-// (`sessions` frames carry checkArmed on the source, checkOf on the reviewer).
+// arms the session and types the brief prompt (it writes a local
+// REVIEW-<stamp>.md, one per review); the first Stop after that brief spawns
+// the reviewer tab in the same project (`sessions` frames carry checkArmed on
+// the source, checkOf on the reviewer). The reviewer's first Stop hands its
+// verdict back to the source, which is prompted to act on it — server-side,
+// nothing for the client to do; the reviewer's desc says so.
 // We stay on the source while it writes — no blank terminal, nothing to wait
 // for — and jump to the reviewer when it appears IF we are still watching the
 // source (noteCheckSpawned). A refusal comes back as an `error` carrying
