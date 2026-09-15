@@ -124,7 +124,13 @@ if (popup) {
   // cid), not open a second one, and must not open it in the main tab either
   const second = await Promise.all([
     context.waitForEvent('page', { timeout: 1500 }).then(() => true).catch(() => false),
-    page.evaluate((CID) => { focusSession(sessionList.find(s => s.cid === CID)); return currentCid !== CID; }, CID),
+    // (a live `sessions` frame rebuilds sessionList wholesale — on a busy box it
+    // can land between our push and this find; re-seat the fake rather than crash)
+    page.evaluate(({ CID, fake }) => {
+      let s = sessionList.find(s => s.cid === CID);
+      if (!s) { s = fake; sessionList.push(s); }
+      focusSession(s); return currentCid !== CID;
+    }, { CID, fake: fake(CID) }),
   ]);
   r2.noDuplicate = second[0] === false;
   r2.refocusNotHere = second[1] === true;
