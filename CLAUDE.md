@@ -9,6 +9,13 @@ because the story isn't inline here).
 
 ## Definition of done
 
+**Small fix (Austin, 09-15: "I don't want nine minutes of process for a one
+minute fix"):** change the code, run the probe that covers it, `checkall`,
+push, `shipcheck`. No HISTORY.md entry, no CLAUDE.md edit, no new probe acts
+unless the fix touches something that broke before. The full list below is
+for real features.
+
+
 1. **`tools/checkall.sh` green** — discovers and runs every `test_*.py`
    (root + fleet) and every probe in `tools/`. Run it before any push that
    touches `index.html`, `server.py`, or `fleet/`. When you add a feature,
