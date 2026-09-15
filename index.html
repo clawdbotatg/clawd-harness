@@ -8660,19 +8660,33 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
 let rec = null, recOn = false, recBase = '';   // recBase = box text captured when recording began
 let recEngine = null;                          // 'dg' | 'sr' while a hold is live
 // recWrote = exactly what dictation last put in the box; recCtx = the composer
-// context it was dictating into. Results trail the release (the last chunk often
-// finalizes only after), so results keep writing after recOn drops — but ONLY
-// while the box still holds our own last write, in the same context. The moment
-// typing or a tab switch touches the box, the mic loses: dictation must never
-// replace text the user can see (2026-09-01: a recognition session left
-// running "rushed in and replaced what I was typing").
-let recWrote = null, recCtx = null;
+// context it was dictating into; recTail = the interim suffix inside recWrote.
+// Results trail the stop (the last chunk often finalizes only after), so results
+// keep writing after recOn drops — but ONLY while the box still holds our own
+// last write, in the same context: a late result must never replace text the
+// user can see (2026-09-01: a recognition session left running "rushed in and
+// replaced what I was typing"). A tab switch kills dictation the same way.
+// While the mic is ON, though, an edit is the user fixing a misheard word
+// mid-dictation (2026-09-15: "select it, delete it, type something else — that
+// should not turn the mic off"): the edited box becomes the new base and
+// dictation carries on after it. Only Enter, ➤ or the mic tap stop the mic.
+let recWrote = null, recCtx = null, recTail = '';
 // One result, either engine: finals append to recBase, the interim trails it.
 function recApply(finalT, interim) {
-  if (activeDraftId !== recCtx || (recWrote !== null && box.value !== recWrote)) { stopRec(); return false; }
+  if (activeDraftId !== recCtx) { stopRec(); return false; }
+  if (recWrote !== null && box.value !== recWrote) {
+    if (!recOn) return false;                 // mic off, box moved: typing won, drop the straggler
+    // re-base on the user's edit; peel off the interim we were showing if it's
+    // still there whole (its final is about to land again), else keep it all
+    recBase = recTail && box.value.endsWith(recTail) ? box.value.slice(0, -recTail.length) : box.value;
+  }
   if (finalT) recBase = (recBase + ' ' + sttFix(finalT)).replace(/\s+/g, ' ').trimStart();
   recWrote = (interim ? recBase + ' ' + sttFix(interim) : recBase).replace(/\s+/g, ' ').trimStart();
+  recTail = interim && recWrote.startsWith(recBase) ? recWrote.slice(recBase.length) : '';
+  // keep the caret where the user is editing — we only ever append past it
+  const s = box.selectionStart, e = box.selectionEnd, mid = document.activeElement === box && e < box.value.length;
   box.value = recWrote;
+  if (mid) { try { box.setSelectionRange(s, e); } catch {} }
   saveDraft(); autosizeBox();   // dictated text must survive a reload like typed text does
   return true;
 }
@@ -8913,7 +8927,7 @@ function startRec() {
   const creds = sttCredsOk() ? sttCreds : null;
   if (!creds && !SR) return;
   if (synth) synth.cancel();                  // barge-in: don't read replies back into the mic
-  recBase = box.value; recWrote = box.value; recCtx = activeDraftId;
+  recBase = box.value; recWrote = box.value; recCtx = activeDraftId; recTail = '';
   recOn = true;
   micBtn.classList.add('rec'); box.focus();
   if (creds) { recEngine = 'dg'; dgStart(creds); }

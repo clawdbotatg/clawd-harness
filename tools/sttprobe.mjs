@@ -7,9 +7,11 @@
 // The contract pinned here:
 //   1. mic hold → results write into the box; dictated text is saved as a draft;
 //   2. a result trailing the release still lands — IF the box is untouched;
-//   3. once the user types, no result may ever replace the box again, and a
-//      still-running recognition self-stops the moment it tries;
-//   4. a composer context switch (leaving the rung) kills dictation the same way;
+//   3. once the user types with the mic OFF, no late result may replace the box;
+//   4. typing with the mic ON does not stop it (2026-09-15): the edit becomes
+//      the new base, dictation carries on after it, the caret stays put, and
+//      an interim being shown at the edit isn't doubled when its final lands;
+//   4b. a composer context switch (leaving the rung) kills dictation;
 //   5. #micBtn carries touch-action:none so a pan can't pointercancel the hold.
 //
 // Second act (desktop page): SPACE-HOLD push-to-talk in the composer —
@@ -130,15 +132,29 @@ await page.keyboard.type(' TYPED');
 await page.evaluate(()=>window.__emit(['sneaky late chunk'],null));
 check('late result cannot clobber typed text', await page.evaluate(()=>box.value==='hello world again yes TYPED'));
 
-// --- 4. stranded-on recognition self-stops when typing appears --------------
+// --- 4. an edit while the mic is ON keeps it on; dictation resumes after it --
 await holdMic();                                    // recording again, legitimately
 await page.evaluate(()=>window.__emit(['more'],null));
-check('held mic still dictates after typing round', await page.evaluate(()=>box.value.endsWith('TYPED more')));
-await page.keyboard.type(' MID');                   // user types while rec is (stuck) on
-await page.evaluate(()=>window.__emit(['flood of ambient speech'],null));
-const stuck = await page.evaluate(()=>({v:box.value, on:recOn, cls:micBtn.classList.contains('rec')}));
-check('typing beats a live recognition: box kept', stuck.v.endsWith('TYPED more MID'), stuck.v);
-check('…and the stranded recognition self-stopped', !stuck.on && !stuck.cls, JSON.stringify(stuck));
+check('mic dictates again after the typing round', await page.evaluate(()=>box.value.endsWith('TYPED more')));
+// fix a misheard word: select "TYPED", retype it — the mic must stay lit
+await page.evaluate(()=>{ box.focus(); const i=box.value.indexOf('TYPED'); box.setSelectionRange(i, i+5); });
+await page.keyboard.type('FIXED');
+await page.evaluate(()=>window.__emit(['next'],'trailing'));
+const fixed = await page.evaluate(()=>({v:box.value, on:recOn, cls:micBtn.classList.contains('rec'), caret:box.selectionStart, at:box.value.indexOf('FIXED')+5}));
+check('the edit is kept and dictation carries on after it', fixed.v==='hello world again yes FIXED more next trailing', fixed.v);
+check('…the mic stayed on', fixed.on && fixed.cls, JSON.stringify(fixed));
+check('…and the caret stayed where the user was editing', fixed.caret===fixed.at, JSON.stringify(fixed));
+// an interim on screen at the edit is not doubled when its final lands
+await page.evaluate(()=>{ box.focus(); const i=box.value.indexOf('more'); box.setSelectionRange(i, i+4); });
+await page.keyboard.type('less');
+await page.evaluate(()=>window.__emit(['trailing'],null));
+check('interim shown at the edit lands once as its final', await page.evaluate(()=>box.value==='hello world again yes FIXED less next trailing'), await page.evaluate(()=>box.value));
+await releaseMic();
+check('the mic tap still stops it', await page.evaluate(()=>!recOn));
+await page.evaluate(()=>{ box.focus(); box.setSelectionRange(box.value.length, box.value.length); });
+await page.keyboard.type(' OFF');
+await page.evaluate(()=>window.__emit(['late again'],null));
+check('mic off + typed: a late result is dropped', await page.evaluate(()=>box.value.endsWith('trailing OFF')), await page.evaluate(()=>box.value));
 
 // --- 5. switching composer context kills dictation (no cross-draft bleed) ---
 await holdMic();
@@ -197,6 +213,16 @@ check('trailing final completes the sentence', await page.evaluate(()=>box.value
 await page.keyboard.type(' TYPED');
 await page.evaluate(()=>window.__dgResult('sneaky', true));
 check('typed text beats a late Deepgram result', await page.evaluate(()=>box.value==='Hello Codex and done TYPED'));
+// 11b. an edit with the Deepgram mic ON re-bases, never stops
+await holdMic();
+await page.waitForTimeout(150);
+await page.evaluate(()=>window.__dgResult('and', false));
+await page.evaluate(()=>{ box.focus(); const i=box.value.indexOf('TYPED'); box.setSelectionRange(i, i+5); });
+await page.keyboard.type('EDITED');
+await page.evaluate(()=>window.__dgResult('and more', true));
+const dge = await page.evaluate(()=>({v:box.value, on:recOn, eng:recEngine}));
+check('Deepgram: the edit is kept, the interim is not doubled, the mic stays on', dge.v==='Hello Codex and done EDITED and more' && dge.on && dge.eng==='dg', JSON.stringify(dge));
+await releaseMic();
 
 // ---- desktop page: SPACE-HOLD push-to-talk ---------------------------------
 // A fresh non-emulated page: fine pointer → isTouch=false, real key events via
@@ -279,5 +305,5 @@ await dpage.evaluate(()=>{ document.getElementById('settingsclose').click(); });
 
 check('no page errors', errors.length===0, errors.join(' | '));
 await browser.close();
-console.log(failed ? 'FAIL' : 'PASS — dictation writes only into a box it owns; typing and navigation always win');
+console.log(failed ? 'FAIL' : 'PASS — dictation writes only into a box it owns; an edit re-bases a live mic, beats a late result, and navigation always wins');
 process.exit(failed ? 1 : 0);
