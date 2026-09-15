@@ -13,12 +13,15 @@ Guards (server side, on fakes — never the live daemon):
   4. the arm lapses: WRAP_TURNS Stops without a call, or the TTL → disarmed,
      session alive; wrapCancel disarms and defuses an accepted close;
   5. manager.wrap arms + delivers the prompt (default WRAP_PROMPT, or the
-     chip's text) and refuses ceremony/autopilot; meta carries wrapArmed;
+     chip's text — `{file}` → this wrap's HANDOFF-<stamp>.md, one per wrap so
+     old handoffs stay readable) and refuses ceremony/autopilot; meta carries
+     wrapArmed;
   6. the real HTTP endpoint + bin/harness-close: exit 2 without the env, 1 on
      a refusal, 0 on accept — the message reaches stdout either way;
   7. a wrapped session's history row carries its TLDR (last_answer).
 Exits non-zero on any failure.
 """
+import fnmatch
 import http.server
 import json
 import re
@@ -155,22 +158,30 @@ subprocess.run(["git", "-C", repo, "config", "user.name", "t"], check=True)
 open(os.path.join(repo, "notes.md"), "w").write("x")
 check("_worktree_dirty: untracked file counts", "?? notes.md" in server._worktree_dirty(repo))
 check("_worktree_dirty: not a repo → ''", server._worktree_dirty(TMP) == "")
-# 📑 the handoff itself is LOCAL: an untracked HANDOFF.md never counts as dirty,
-# and the arm writes it into .git/info/exclude (never .gitignore) so `git status`
-# doesn't even see it — the old prompt said "commit and push it", and the gate's
-# 409 on `?? HANDOFF.md` would have pushed a session that did not into doing so.
+# 📑 the handoff itself is LOCAL: an untracked HANDOFF-<stamp>.md never counts as
+# dirty, and the arm writes the pattern into .git/info/exclude (never .gitignore)
+# so `git status` doesn't even see it — the old prompt said "commit and push it",
+# and the gate's 409 on `?? HANDOFF.md` would have pushed a session that did not
+# into doing so. One file per wrap since 09-15 (a single HANDOFF.md overwrote
+# itself); the pre-09-15 HANDOFF.md is still tolerated for older checkouts.
+stamped = server.handoff_file_name(1757952000)      # 2025-09-15 15:20:00 UTC → local
+check("handoff_file_name: HANDOFF-YYYYMMDD-HHMMSS.md, matches the glob, not the old name",
+      re.fullmatch(r"HANDOFF-\d{8}-\d{6}\.md", stamped) and fnmatch.fnmatch(stamped, server.HANDOFF_GLOB)
+      and stamped != server.HANDOFF_FILE, stamped)
 open(os.path.join(repo, server.HANDOFF_FILE), "w").write("# handoff")
-check("_worktree_dirty: untracked HANDOFF.md is tolerated, other untracked still counts",
+open(os.path.join(repo, stamped), "w").write("# handoff")
+check("_worktree_dirty: untracked HANDOFF-<stamp>.md and the old HANDOFF.md are tolerated, other untracked still counts",
       "notes.md" in server._worktree_dirty(repo) and "HANDOFF" not in server._worktree_dirty(repo),
       server._worktree_dirty(repo))
 check("_exclude_handoff: writes the LOCAL exclude entry", server._exclude_handoff(repo) is True)
 excl = open(os.path.join(repo, ".git", "info", "exclude")).read()
-check("…as an anchored /HANDOFF.md line", "/HANDOFF.md\n" in excl)
+check("…as an anchored /HANDOFF-*.md line", "/HANDOFF-*.md\n" in excl)
 check("…idempotent (second call adds nothing)",
       server._exclude_handoff(repo) is True and open(os.path.join(repo, ".git", "info", "exclude")).read() == excl)
 check("…and never touches .gitignore", not os.path.exists(os.path.join(repo, ".gitignore")))
 porc = subprocess.run(["git", "-C", repo, "status", "--porcelain"], capture_output=True, text=True).stdout
-check("git status no longer lists HANDOFF.md", "HANDOFF" not in porc and "notes.md" in porc, porc)
+check("git status no longer lists HANDOFF-<stamp>.md", stamped not in porc and "notes.md" in porc, porc)
+os.remove(os.path.join(repo, server.HANDOFF_FILE))   # the legacy name isn't excluded (never written now); keep the tree honest
 check("_exclude_handoff: not a repo → False", server._exclude_handoff(TMP) is False)
 d = FakeSession(m3, "d", workdir=repo); d.wrap_arm()
 code, msg = d.self_close_request()
@@ -207,11 +218,16 @@ w_repo = os.path.join(TMP, "wrepo"); os.makedirs(w_repo)
 subprocess.run(["git", "init", "-q", w_repo], check=True)
 w = FakeSession(m5, "w", workdir=w_repo)
 err = m5.wrap("w")
-check("manager.wrap arms + delivers WRAP_PROMPT via 'wrap'",
-      err == "" and w.wrap_armed() and m5.sent == [("w", server.WRAP_PROMPT, "wrap")] and m5.broadcasts == 1, f"{err} {m5.sent}")
+_sent = m5.sent[0][1] if m5.sent else ""
+_fn = re.search(r"HANDOFF-\d{8}-\d{6}\.md", _sent)
+check("manager.wrap arms + delivers WRAP_PROMPT via 'wrap', {file} → this wrap's HANDOFF-<stamp>.md",
+      err == "" and w.wrap_armed() and len(m5.sent) == 1 and m5.sent[0][0] == "w" and m5.sent[0][2] == "wrap"
+      and _fn and _sent == server.WRAP_PROMPT.replace("{file}", _fn.group(0)) and "{file}" not in _sent
+      and m5.broadcasts == 1, f"{err} {m5.sent}")
 check("…and the AUTO_TLDR arm is dropped (the reply carries its own TLDR)", w.auto_tldr_armed is False)
-m5.wrap("w", text="custom words")
-check("chip text wins over the default", m5.sent[-1][1] == "custom words")
+m5.wrap("w", text="custom words for {file}")
+check("chip text wins over the default, and gets the same {file} substitution",
+      re.fullmatch(r"custom words for HANDOFF-\d{8}-\d{6}\.md", m5.sent[-1][1]), m5.sent[-1][1])
 check("wrap refuses an unknown cid", m5.wrap("zz") == "no such session")
 cc = FakeSession(m5, "cc", ceremony=True)
 check("wrap refuses a ceremony", "sign-in" in m5.wrap("cc") and not cc.wrap_armed())
@@ -222,10 +238,12 @@ check("manager.wrap_cancel disarms + broadcasts", not w.wrap_armed() and m5.broa
 check("prompt log got the wrap sends", open(server.PROMPTS_LOG).read().count('"via": "wrap"') == 2)
 check("WRAP_PROMPT names the command and the no-close rule",
       "harness-close" in server.WRAP_PROMPT and "do NOT close" in server.WRAP_PROMPT)
-check("WRAP_PROMPT: the handoff is HANDOFF.md, local, never committed/pushed/gitignored",
-      "HANDOFF.md" in server.WRAP_PROMPT and "do NOT commit it" in server.WRAP_PROMPT
-      and "do NOT push it" in server.WRAP_PROMPT and ".gitignore" in server.WRAP_PROMPT
-      and "commit and push it" not in server.WRAP_PROMPT)
+check("WRAP_PROMPT: the handoff is {file} (a new HANDOFF-*.md per wrap, older ones read first), local, never committed/pushed/gitignored",
+      "{file} at the repo root" in server.WRAP_PROMPT and "HANDOFF-*.md" in server.WRAP_PROMPT
+      and "older HANDOFF-*.md" in server.WRAP_PROMPT and "HANDOFF.md" not in server.WRAP_PROMPT
+      and "replace an old one" not in server.WRAP_PROMPT
+      and "do NOT commit" in server.WRAP_PROMPT and "do NOT push" in server.WRAP_PROMPT
+      and ".gitignore" in server.WRAP_PROMPT and "commit and push it" not in server.WRAP_PROMPT)
 # index.html's 📑 chip sends its OWN copy of the prompt (chip text wins over the
 # server default), so the two must be byte-identical or the UI ships stale words.
 _html = open(os.path.join(HERE, "index.html"), encoding="utf-8").read()
@@ -235,8 +253,8 @@ check("index.html 📑 chip text == server.WRAP_PROMPT (single source of truth)"
       (json.loads(_m.group(1))[:80] if _m else "chip not found"))
 check("index.html 📑 chip tip says local / never committed, not 'commit it'",
       "never committed" in _html.split("label: 'doc'")[1].split("\n")[1] and "commit it," not in _html.split("label: 'doc'")[1].split("\n")[1])
-check("manager.wrap wrote the handoff exclude into the session's checkout",
-      "/HANDOFF.md\n" in open(os.path.join(w_repo, ".git", "info", "exclude")).read())
+check("manager.wrap wrote the handoff exclude (the glob) into the session's checkout",
+      "/HANDOFF-*.md\n" in open(os.path.join(w_repo, ".git", "info", "exclude")).read())
 
 # --- 6. the HTTP endpoint + bin/harness-close --------------------------------
 m6 = FakeMgr()

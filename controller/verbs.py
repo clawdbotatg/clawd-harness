@@ -994,13 +994,17 @@ class Verbs:
 
     def wrap(self, machine, cid, text="", confirm=False):
         """📑 Wrap a FINISHED session up: it writes its handoff to a LOCAL
-        HANDOFF.md (git-excluded on that box — never committed or pushed;
-        the project's real work is committed as usual) and then closes ITSELF, landing
-        in the 🗃️ closed history with its TLDR. Prefer this over `close` when
-        the work is done. The harness arms the session for 2 turns / 30 min —
-        only an armed session can self-close, and it refuses on a dirty
-        worktree, so a wrap that doesn't end means it has something to say:
-        read its transcript_tail. Never wrap a blocked session."""
+        HANDOFF-<stamp>.md at the repo root (one new file per wrap, older
+        ones stay readable; git-excluded on that box — never committed or
+        pushed; the project's real work is committed as usual) and then
+        closes ITSELF, landing in the 🗃️ closed history with its TLDR. Prefer
+        this over `close` when the work is done. The harness arms the session
+        for 2 turns / 30 min — only an armed session can self-close (a dirty
+        worktree no longer blocks it; the uncommitted files are named in its
+        reply), so a wrap that doesn't end means it has something to say:
+        read its transcript_tail. Never wrap a blocked session. Optional
+        `text` replaces the harness's wrap prompt; a literal `{file}` in it
+        becomes this wrap's HANDOFF-<stamp>.md."""
         def do():
             c = self.clients.get(machine)
             if not c:

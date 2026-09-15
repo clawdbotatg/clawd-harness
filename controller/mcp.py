@@ -181,13 +181,15 @@ TOOLS = [
     ("close", "Close/kill a session: its claude is terminated and dropped from the "
         "harness (the project stays). Irreversible — check session_digest first. WRITE.",
         _S({"machine": _STR, "cid": _STR, "confirm": _BOOL}, ["machine", "cid"])),
-    ("wrap", "📑 Wrap a FINISHED session up: it writes its handoff (committed and "
-        "pushed when the project has a remote), then closes ITSELF into the 🗃️ "
-        "closed history with its TLDR. Prefer this over close when the work is "
-        "done; never wrap a blocked session. Only an armed session can self-close "
-        "(2 turns / 30 min) and it refuses on a dirty worktree — a wrap that "
-        "doesn't end has something to say: read transcript_tail. Optional `text` "
-        "replaces the harness's wrap prompt. WRITE.",
+    ("wrap", "📑 Wrap a FINISHED session up: it writes its handoff to a LOCAL "
+        "HANDOFF-<stamp>.md (one new file per wrap, older ones stay; git-excluded, "
+        "never committed or pushed — only the project's real work is committed), "
+        "then closes ITSELF into the 🗃️ closed history with its TLDR. Prefer this "
+        "over close when the work is done; never wrap a blocked session. Only an "
+        "armed session can self-close (2 turns / 30 min; a dirty worktree no "
+        "longer blocks it) — a wrap that doesn't end has something to say: read "
+        "transcript_tail. Optional `text` replaces the harness's wrap prompt (a "
+        "literal {file} in it becomes this wrap's HANDOFF-<stamp>.md). WRITE.",
         _S({"machine": _STR, "cid": _STR, "text": _STR, "confirm": _BOOL}, ["machine", "cid"])),
     ("check", "🔍 Double-check a session's work with the OTHER engine (codex "
         "reviews claude, claude reviews codex). The session writes a short local "

@@ -80,8 +80,9 @@ When the operator says "check in", "what needs me", "how's everything":
   event) or `peek_screen` (TUI dialogs that never reach the transcript). Cite
   what you saw when you report.
 - **Done means `wrap`, not `close`.** When a session's work is finished, `wrap`
-  it: it writes its handoff to a local, git-excluded `HANDOFF.md` (never
-  committed — only real work gets committed) and closes itself into the 🗃️
+  it: it writes its handoff to a local, git-excluded `HANDOFF-<stamp>.md`
+  (a new file per wrap, older handoffs stay readable; never committed — only
+  real work gets committed) and closes itself into the 🗃️
   closed history with a TLDR (reopenable). `close` is for the broken or the abandoned.
   Never wrap a blocked session, and a wrap that doesn't end within two turns
   is the session telling you something (a dirty tree, an open question) —

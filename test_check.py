@@ -100,8 +100,8 @@ excl = open(os.path.join(repo, ".git", "info", "exclude")).read()
 check("…as an anchored /REVIEW-*.md line", "/REVIEW-*.md\n" in excl)
 check("…idempotent", srv._exclude_handoff(repo, srv.REVIEW_GLOB) is True
       and open(os.path.join(repo, ".git", "info", "exclude")).read() == excl)
-check("…the HANDOFF entry still works alongside", srv._exclude_handoff(repo) is True
-      and "/HANDOFF.md\n" in open(os.path.join(repo, ".git", "info", "exclude")).read())
+check("…the HANDOFF-*.md entry still works alongside", srv._exclude_handoff(repo) is True
+      and "/HANDOFF-*.md\n" in open(os.path.join(repo, ".git", "info", "exclude")).read())
 porc = git(repo, "status", "--porcelain")
 check("git status no longer lists any REVIEW-*.md", "REVIEW" not in porc and "notes.md" in porc, porc)
 check("…and never touches .gitignore", not os.path.exists(os.path.join(repo, ".gitignore")))

@@ -137,7 +137,7 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   the first id rotation. `test_fork.py`; WS verb `fork` in `docs/WS-PROTOCOL.md`.
   **🔍 double-check** = `SessionManager.check` → the source writes a LOCAL
   `REVIEW-<stamp>.md` (one per review; `REVIEW-*.md` excluded like
-  `HANDOFF.md`) → the first Stop past that brief (`_check_on_stop`, keyed on
+  `HANDOFF-*.md`) → the first Stop past that brief (`_check_on_stop`, keyed on
   `prompt_count`, volatile arm) → `check_spawn` opens the OTHER engine in
   the same project with the brief + `git diff <head_at_spawn>..HEAD` (every
   session records HEAD at spawn: ctor param + registry). Brief = claims,
@@ -208,9 +208,13 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
     reply for the TLDR. Never widen the arm gate, never force-close from the
     harness side (no call → the arm lapses, the tab stays), and keep the close
     deferred to the Stop so the TLDR reaches the 🗃️ row. The handoff is a
-    **local** `HANDOFF.md`: the arm lists it in the checkout's
-    `.git/info/exclude` and the prompt forbids committing it — a handoff in
-    GitHub is noise (Austin, 09-10). `test_wrap.py` + `tools/wrapprobe.mjs`.
+    **local** `HANDOFF-<stamp>.md`, one NEW file per wrap (`handoff_file_name`,
+    chosen at the arm and swapped for `{file}` in the prompt — the 📑 chip's
+    copy keeps the placeholder): the arm lists `HANDOFF-*.md` in the
+    checkout's `.git/info/exclude` and the prompt forbids committing them — a
+    handoff in GitHub is noise (Austin, 09-10), and a single overwritten
+    `HANDOFF.md` lost every earlier handoff (Austin, 09-15). `test_wrap.py` +
+    `tools/wrapprobe.mjs`.
 
 ## Periodic
 

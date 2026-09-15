@@ -11,6 +11,33 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-15 — 📑 wrap: one handoff file per wrap
+
+Austin: "Why are you calling it handoff.md? Why doesn't it have a unique name
+every time? If I work at a repo over and over again, I'm gonna have lots of
+handoffs. And I may wanna read back through all the different handoffs I've
+done." No technical reason — nothing read `HANDOFF.md` by name; the single
+file was the smallest edit on 09-10, and the prompt even baked the loss in
+("replace an old one; keep whatever in it is still true"). The 🔍 review had
+already gone the other way four days later (`REVIEW-<stamp>.md`, "old ones
+stay readable"). Wrap now matches it:
+
+- `HANDOFF-<YYYYMMDD-HHMMSS>.md` per wrap (`handoff_file_name`), chosen at
+  the arm in `manager.wrap` and substituted for a literal `{file}` in the
+  prompt (plain `replace`, so a PM's custom `text` can carry the placeholder
+  too). The 📑 chip's own copy of the prompt keeps `{file}` literal, so the
+  byte-for-byte guard between chip and `WRAP_PROMPT` still holds.
+- The prompt says: a NEW file; older `HANDOFF-*.md` are earlier sessions'
+  handoffs — skim the latest first, carry forward what's still true.
+- Exclude entry is the glob `/HANDOFF-*.md` (`_exclude_handoff` default);
+  `_worktree_dirty` tolerates the glob and still the old `HANDOFF.md` (older
+  checkouts have one lying around; it is never written again).
+- Three places for the PM (verb, MCP description, persona) + WS-PROTOCOL,
+  CONTROLLER.md, CLAUDE.md. The MCP description had still said "committed
+  and pushed when the project has a remote" — stale since 09-10, fixed with
+  it. Guards in `test_wrap.py` (stamp shape, glob, substitution on both the
+  default and a custom text) and `test_check.py`.
+
 ## 2026-09-14 — 🔍 the review comes back: the source is told to act on it
 
 First real run of 🔍 (claude → codex): the reviewer opened, did the review,

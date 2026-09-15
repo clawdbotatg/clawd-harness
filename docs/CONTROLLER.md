@@ -133,19 +133,22 @@ assign(task_id, {spawn_in: pid} | {existing: cid}, engine)  # → new + send
 ask(cid, text)                                       # → send
 answer_prompt(cid, choice)                           # → input (raw keys) — the hard one
 interrupt(cid) / pause(cid)
-wrap(cid, text?)                                     # 📑 → wrap frame: handoff, commit, then it closes ITSELF
+wrap(cid, text?)                                     # 📑 → wrap frame: local HANDOFF-<stamp>.md, commit real work, then it closes ITSELF
 check(cid)                                           # 🔍 → check frame: the OTHER engine reviews its work in a new session
 session_digest(cid)                                  # deep-read one session on demand
 ```
 
 `wrap` is the finish verb: the session is armed (2 turns / 30 min) to close
-itself once its handoff is written and committed; it lands in the 🗃️ closed
-history with a TLDR, reopenable. Only an armed session can self-close and it
-refuses on a dirty worktree, so a wrap that doesn't end is the session saying
-something — `transcript_tail`. `close` stays for the broken or abandoned.
+itself once its handoff is written — a LOCAL `HANDOFF-<stamp>.md` at the repo
+root, one new file per wrap so older handoffs stay readable, git-excluded and
+never committed (only the project's real work is) — and it lands in the 🗃️
+closed history with a TLDR, reopenable. Only an armed session can self-close
+(a dirty worktree no longer blocks it; the uncommitted files are named in the
+reply), so a wrap that doesn't end is the session saying something —
+`transcript_tail`. `close` stays for the broken or abandoned.
 
 `check` is the verify verb: the session writes a short local brief
-(`REVIEW-<stamp>.md`, one per review, git-excluded like `HANDOFF.md`), and the
+(`REVIEW-<stamp>.md`, one per review, git-excluded like `HANDOFF-*.md`), and the
 first Stop after that brief spawns a reviewer session of the OTHER engine in
 the same project (codex for claude, claude for codex), briefed with the file +
 the diff since the source spawned. The brief is claims, the diff is truth, the

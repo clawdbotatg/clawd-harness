@@ -134,35 +134,51 @@ WRAP_TTL_S = int(os.environ.get("WRAP_TTL_S", "1800"))
 WRAP_TURNS = int(os.environ.get("WRAP_TURNS", "2"))         # the doc turn + one follow-up
 WRAP_GRACE_S = int(os.environ.get("WRAP_GRACE_S", "20"))    # close anyway if no Stop follows the call
 # The handoff is a LOCAL file. 95% of wraps are not repo history, and a handoff
-# committed to GitHub is noise in the project's log — so the file is
-# HANDOFF.md at the repo root, listed in the checkout's .git/info/exclude (the
-# harness writes that entry when it arms the wrap; `_exclude_handoff`), never
-# committed, never pushed, never added to .gitignore. The self-close gate
-# tolerates exactly that one untracked file (`_worktree_dirty`); everything
-# else still has to be committed or stashed. A project whose own instructions
-# keep handoffs in a tracked log (HISTORY.md here) is the stated exception.
-HANDOFF_FILE = "HANDOFF.md"
-WRAP_PROMPT = (
+# committed to GitHub is noise in the project's log — so it lives at the repo
+# root, listed in the checkout's .git/info/exclude (the harness writes that
+# entry when it arms the wrap; `_exclude_handoff`), never committed, never
+# pushed, never added to .gitignore. ONE FILE PER WRAP: HANDOFF-<stamp>.md
+# (`handoff_file_name`, chosen at the arm and substituted for `{file}` in the
+# prompt — the 📑 chip's own copy of the text carries the placeholder). A
+# single HANDOFF.md overwrote itself every wrap, so a project worked over and
+# over kept only its last handoff (Austin, 09-15: "I may wanna read back
+# through all the different handoffs"). The self-close gate tolerates those
+# untracked files (`_worktree_dirty`) — and the pre-09-15 HANDOFF.md, still
+# lying around in older checkouts; everything else still has to be committed
+# or stashed. A project whose own instructions keep handoffs in a tracked log
+# (HISTORY.md here) is the stated exception.
+HANDOFF_FILE = "HANDOFF.md"          # the pre-09-15 single file: never written now, still tolerated
+HANDOFF_GLOB = "HANDOFF-*.md"        # the exclude entry; one file per wrap
+
+
+def handoff_file_name(now=None):
+    """The per-wrap local file: HANDOFF-YYYYMMDD-HHMMSS.md (sorts by time,
+    matches HANDOFF_GLOB, never collides with the old HANDOFF.md)."""
+    return time.strftime("HANDOFF-%Y%m%d-%H%M%S.md", time.localtime(now or time.time()))
+
+
+WRAP_PROMPT = (      # `{file}` → handoff_file_name() at the arm (manager.wrap; plain replace, not str.format)
     "We're wrapping this session up. Write the handoff for another agent or a "
     "future you: what changed, what's shipped vs. still local, open threads, "
-    "gotchas, and the exact next steps. Write it to HANDOFF.md at the repo root "
-    "(replace an old one; keep whatever in it is still true). That file is "
-    "LOCAL notes, not repo history: it is already in this checkout's "
-    ".git/info/exclude, so do NOT commit it, do NOT push it, and do NOT add it "
-    "to .gitignore or any tracked file. Only if this project's own instructions "
-    "say handoffs belong in a tracked log (a HISTORY / docs file) write there "
-    "instead and commit as they say. Your actual work is separate from the "
-    "handoff: if code changes are still uncommitted, commit and push them as "
-    "usual. Then run `harness-close` (on your PATH) — it closes this session "
-    "once the turn ends. If something is unresolved or you need a decision "
-    "from me, do NOT close: say what's open and stop. End your last message "
-    "with a 3-line TLDR.")
+    "gotchas, and the exact next steps. Write it to {file} at the repo root — a "
+    "NEW file for this wrap; any older HANDOFF-*.md there are earlier sessions' "
+    "handoffs, so skim the latest first and carry forward whatever is still "
+    "true. Those files are LOCAL notes, not repo history: HANDOFF-*.md is "
+    "already in this checkout's .git/info/exclude, so do NOT commit them, do "
+    "NOT push them, and do NOT add them to .gitignore or any tracked file. "
+    "Only if this project's own instructions say handoffs belong in a tracked "
+    "log (a HISTORY / docs file) write there instead and commit as they say. "
+    "Your actual work is separate from the handoff: if code changes are still "
+    "uncommitted, commit and push them as usual. Then run `harness-close` (on "
+    "your PATH) — it closes this session once the turn ends. If something is "
+    "unresolved or you need a decision from me, do NOT close: say what's open "
+    "and stop. End your last message with a 3-line TLDR.")
 # 🔍 double-check: the OTHER engine reviews what a session built (codex checks
 # a claude session, claude checks a codex one). One tap: the source session is
 # armed and asked for a short brief — what it did, where, what it verified,
 # what it's unsure of — written to a LOCAL, per-review file at the repo root
 # (`REVIEW-<stamp>.md`; the pattern is in the checkout's .git/info/exclude like
-# HANDOFF.md, never committed; one file per tap so two reviews never clobber
+# HANDOFF-*.md, never committed; one file per tap so two reviews never clobber
 # each other and old ones stay readable). The first Stop AFTER that brief was
 # submitted spawns the reviewer in the same project
 # (ClaudeSession._check_on_stop → SessionManager.check_spawn) with the brief +
@@ -1295,10 +1311,11 @@ def _worktree_dirty(path):
     `path` ("" = clean, not a repo, or git unavailable). The 📑 self-close
     gate: a dirty tree also blocks that box's auto-pull, so "wrap" must
     leave it clean. Untracked files count — they're exactly what gets lost —
-    with ONE exception: an untracked HANDOFF.md at the root is the wrap's own
-    local handoff (deliberately uncommitted; normally hidden by the exclude
-    entry `_exclude_handoff` writes, tolerated here in case it isn't). The 🔍
-    double-check's REVIEW-*.md files are the same kind, same treatment."""
+    with ONE exception: untracked HANDOFF-*.md at the root (and the pre-09-15
+    HANDOFF.md) are the wrap's own local handoffs (deliberately uncommitted;
+    normally hidden by the exclude entry `_exclude_handoff` writes, tolerated
+    here in case it isn't). The 🔍 double-check's REVIEW-*.md files are the
+    same kind, same treatment."""
     if not path or not os.path.isdir(os.path.join(path, ".git")):
         return ""
     try:
@@ -1308,14 +1325,15 @@ def _worktree_dirty(path):
         return ""
     lines = [l for l in (r.stdout or "").splitlines()
              if l.strip() and l != f"?? {HANDOFF_FILE}"
+             and not fnmatch.fnmatch(l, f"?? {HANDOFF_GLOB}")
              and not fnmatch.fnmatch(l, f"?? {REVIEW_GLOB}")]
     if not lines:
         return ""
     return "\n".join(lines[:5]) + (f"\n… +{len(lines) - 5} more" if len(lines) > 5 else "")
 
 
-def _exclude_handoff(path, name=HANDOFF_FILE):
-    """List HANDOFF.md (or another local-notes entry: the 🔍 REVIEW-*.md) in the
+def _exclude_handoff(path, name=HANDOFF_GLOB):
+    """List HANDOFF-*.md (or another local-notes entry: the 🔍 REVIEW-*.md) in the
     checkout's LOCAL exclude file (`git rev-parse
     --git-path info/exclude` — lives under .git, never tracked, never pushed)
     so the wrap handoff is invisible to `git status` and can't be committed by
@@ -3572,7 +3590,7 @@ class ClaudeSession:
         if self.autopilot:
             return 409, "autopilot owns this session — it can't close itself."
         # Uncommitted files no longer block the close (Austin, 2026-09-11: local
-        # notes like HANDOFF.md live in the tree on purpose). They are named in
+        # notes like HANDOFF-*.md live in the tree on purpose). They are named in
         # the reply so claude can mention them in its TLDR.
         dirty = _worktree_dirty(self.workdir())
         self.wrap_closing = True
@@ -8257,11 +8275,12 @@ class SessionManager:
         if s.autopilot:
             return "autopilot is on — turn it off first"
         s.wrap_arm()
-        _exclude_handoff(s.workdir())             # HANDOFF.md stays local: .git/info/exclude, never committed
-        txt = (text or "").strip() or WRAP_PROMPT
+        _exclude_handoff(s.workdir())             # HANDOFF-*.md stays local: .git/info/exclude, never committed
+        fname = handoff_file_name()               # one file per wrap; old handoffs stay readable
+        txt = ((text or "").strip() or WRAP_PROMPT).replace("{file}", fname)
         log_prompt(s, txt, via)
         s.auto_tldr_armed = False                 # the reply ends with its own TLDR
-        print(f"[wrap {cid[:8]}] armed ({WRAP_TURNS} turns, {WRAP_TTL_S}s)", flush=True)
+        print(f"[wrap {cid[:8]}] armed ({WRAP_TURNS} turns, {WRAP_TTL_S}s) → {fname}", flush=True)
         if SUB_ROUTE_ON_PROMPT:
             threading.Thread(target=self.send_prompt, args=(cid, txt),
                              kwargs={"via": via}, daemon=True).start()
@@ -8295,7 +8314,7 @@ class SessionManager:
         if reviewer == "codex" and not _codex_signed_in():
             return "codex is not signed in on this machine — run `codex login` once"
         s.check_arm(reviewer)
-        _exclude_handoff(s.workdir(), REVIEW_GLOB)   # REVIEW-*.md stays local, like HANDOFF.md
+        _exclude_handoff(s.workdir(), REVIEW_GLOB)   # REVIEW-*.md stays local, like HANDOFF-*.md
         txt = CHECK_BRIEF_PROMPT.format(reviewer=reviewer, file=s.check_brief)
         log_prompt(s, txt, via)
         print(f"[check {cid[:8]}] armed — {reviewer} reviews after the brief "
