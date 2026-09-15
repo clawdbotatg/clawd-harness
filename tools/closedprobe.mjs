@@ -52,8 +52,14 @@ const r1 = await page.evaluate(() => {
   out.codexTag = items[1].querySelector('.cl-when').textContent.includes('codex');
   const f = document.getElementById('closedfilter');
   f.value = 'beta'; f.dispatchEvent(new Event('input'));
-  const vis = [...document.querySelectorAll('#closedloglist .cl-item')].filter(n => !n.hidden);
+  // what's PAINTED, not the attribute: .sl-item's display:flex silently beat
+  // [hidden] for ten days while this check passed on `!n.hidden` (2026-09-15)
+  const vis = [...document.querySelectorAll('#closedloglist .cl-item')].filter(n => getComputedStyle(n).display !== 'none');
   out.filtered = vis.length === 1 && vis[0].querySelector('.cl-title').textContent === 'Beta closed';
+  out.nomatchMsg = !!document.querySelector('#closedloglist .cl-nomatch') === false;
+  f.value = 'zzz-nothing'; f.dispatchEvent(new Event('input'));
+  out.noneShown = [...document.querySelectorAll('#closedloglist .cl-item')].every(n => getComputedStyle(n).display === 'none')
+                  && !!document.querySelector('#closedloglist .cl-nomatch');
   f.value = ''; f.dispatchEvent(new Event('input'));
   // reconcile: mark A's node, drop B, A's node must survive untouched
   items[0].__mark = 1;
@@ -79,7 +85,7 @@ const r2 = await page.evaluate(() => {
 });
 const r = Object.assign({}, r1, r2);
 console.log('CLOSED:', JSON.stringify(r));
-const ok = r.modalUp && r.two && r.newestFirst && r.codexTag && r.filtered && r.reconciled && r.reopenSent && r.modalDown && r.awaitingFocus;
+const ok = r.modalUp && r.two && r.newestFirst && r.codexTag && r.filtered && r.nomatchMsg && r.noneShown && r.reconciled && r.reopenSent && r.modalDown && r.awaitingFocus;
 console.log(ok ? 'PASS — closed rows newest-first, filter narrows, frames reconcile by node, ↩ sends reopen + closes' : 'FAIL');
 await browser.close();
 process.exit(ok ? 0 : 1);
