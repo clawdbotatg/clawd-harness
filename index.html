@@ -8714,9 +8714,9 @@ function buildRec() {
 // before a JWT expires; a press with none in hand dictates with Web Speech and
 // asks again for next time. Per box: each machine holds its own DEEPGRAM_API_KEY.
 const STT_WORDS_KEY = 'cc_stt_words';
-// Mined 2026-09-13 from ~6,000 of Austin's own prompts (every box's send log +
-// the last 392 session transcripts): the names that came up again and again and
-// that a stock recognizer mangles ("quad code", "kodaks", "east skills").
+// Mined 2026-09-13 from ~6,000 of Austin's own prompts, then trimmed 09-15 to
+// the names he actually says (a stock model already knows MetaMask, Vercel…):
+// the ones a recognizer mangles ("quad code", "kodaks", "east skills").
 // Deepgram takes ≤ 100 terms in all — your ⚙️ words go first, these next, then
 // project names — so keep this to the ones a plain model won't already know.
 // Replace rules: a keyterm only NUDGES the recognizer toward a spelling — two
@@ -8734,13 +8734,9 @@ const STT_BASE_RULES = [
 ];
 const STT_BASE_TERMS = [
   'Claude Code', 'Codex', 'clawd', 'harness', 'TLDR', 'ethskills', 'Deepgram', 'Wispr Flow',
-  'Opus', 'Sonnet', 'Haiku', 'Fable', 'Bankr', 'ElevenLabs', 'passkey', 'YubiKey', 'iron', 'relay',
-  'nerve cord', 'leftclaw', 'zkllmapi', 'launchd', 'kickstart', 'PTY', 'xterm', 'Playwright',
-  'Ethereum', 'ETH', 'Solidity', 'BuidlGuidl', 'Scaffold-ETH', 'SpeedRunEthereum', 'Foundry', 'Hardhat',
-  'Alchemy', 'Etherscan', 'MetaMask', 'multisig', 'testnet', 'mainnet', 'onchain', 'IPFS', 'bgipfs',
-  'WETH', 'USDS', 'Devcon', 'cypherpunk', 'ZKNox', 'Vercel', 'OBS', 'OAuth', 'Twilio', 'Sendblue',
-  'Qwiic', 'SparkFun', 'Adafruit', 'GeeekPi', 'Waveshare', 'MicroPython', 'STM32', 'PETG',
-  'picowallet', 'centipico', 'Omarchy', 'Vestaboard', 'godMode', 'eli5',
+  'Opus', 'Sonnet', 'Haiku', 'Fable', 'passkey', 'iron',
+  'Ethereum', 'ETH', 'Solidity', 'BuidlGuidl', 'Scaffold-ETH', 'SpeedRunEthereum', 'multisig', 'onchain',
+  'Devcon', 'ZKNox', 'picowallet', 'centipico', 'Omarchy', 'eli5',
 ];
 let sttCreds = null, sttMachine = null, sttReqT = null;
 const sttPending = new Map();
