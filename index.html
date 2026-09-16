@@ -8757,7 +8757,8 @@ function sttRules() {
   const rx = [];
   for (const [from, to] of sttUserEntries().rules.concat(STT_BASE_RULES)) {
     const f = String(from || '').trim(); if (!f) continue;
-    rx.push([new RegExp('\\b' + f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') + '\\b', 'gi'), to]);
+    // between the words of a rule, allow what smart_format sticks there ("ETH, skills")
+    rx.push([new RegExp('\\b' + f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '[\\s,.]+') + '\\b', 'gi'), to]);
   }
   sttRuleCache = { key, rx };
   return rx;
