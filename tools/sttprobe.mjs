@@ -224,6 +224,50 @@ const dge = await page.evaluate(()=>({v:box.value, on:recOn, eng:recEngine}));
 check('Deepgram: the edit is kept, the interim is not doubled, the mic stays on', dge.v==='Hello Codex and done EDITED and more' && dge.on && dge.eng==='dg', JSON.stringify(dge));
 await releaseMic();
 
+// 11c. 2026-09-17 "it duplicates a lot of things": text PASTED after the live
+// interim. Interims repeat, then the final lands — the spoken sentence must end
+// up exactly once, IN PLACE, the paste after it, and new speech goes to the end.
+await page.evaluate(()=>{ box.value=''; saveDraft(); });
+await holdMic();
+await page.waitForTimeout(150);
+await page.evaluate(()=>window.__dgResult('Explain this to me', false));
+await page.evaluate(()=>{ box.focus(); box.setSelectionRange(box.value.length, box.value.length); });
+await page.keyboard.type('tell Eddie the state files moved and why.');
+await page.evaluate(()=>window.__dgResult('Explain this to me', false));     // Deepgram re-sends an unchanged interim
+await page.evaluate(()=>window.__dgResult('Explain this to me.', true));
+const pasted = await page.evaluate(()=>({v:box.value, on:recOn, caret:box.selectionStart}));
+check('paste after the live interim: the sentence lands once, in place, the paste after it',
+  pasted.v==='Explain this to me. tell Eddie the state files moved and why.' && pasted.on, JSON.stringify(pasted));
+check('…caret stays at the end of the paste', pasted.caret===pasted.v.length, JSON.stringify(pasted));
+await page.evaluate(()=>window.__dgResult('and then', false));
+await page.evaluate(()=>window.__dgResult('and then some.', true));
+check('speech after the paste goes to the end', await page.evaluate(()=>box.value==='Explain this to me. tell Eddie the state files moved and why. and then some.'), await page.evaluate(()=>box.value));
+// typing keeps going while the interim grows underneath: still no doubling
+await page.evaluate(()=>window.__dgResult('one', false));
+await page.evaluate(()=>{ box.focus(); box.setSelectionRange(box.value.length, box.value.length); });
+await page.keyboard.type(' X');
+await page.evaluate(()=>window.__dgResult('one two', false));
+await page.keyboard.type('Y');
+await page.evaluate(()=>window.__dgResult('one two three.', true));
+check('typing while the interim grows: each spoken word once, typed text kept after',
+  await page.evaluate(()=>box.value==='Explain this to me. tell Eddie the state files moved and why. and then some. one two three. XY'), await page.evaluate(()=>box.value));
+// "I can just say something, hit the space bar, and I get double" (09-17):
+// a space typed right after the live words, then the final + more speech
+await page.evaluate(()=>window.__dgResult('control panel', false));
+await page.evaluate(()=>{ box.focus(); box.setSelectionRange(box.value.length, box.value.length); });
+await page.keyboard.type(' ');
+await page.evaluate(()=>window.__dgResult('control panel', false));
+await page.evaluate(()=>window.__dgResult('control panel.', true));
+await page.evaluate(()=>window.__dgResult('next', false));
+check('a space typed after the live words: they land once, the space kept, speech continues',
+  await page.evaluate(()=>box.value.endsWith('XY control panel. next')), await page.evaluate(()=>JSON.stringify(box.value.slice(-40))));
+await page.evaluate(()=>window.__dgResult('next.', true));
+// a newline the user typed is never flattened into a space
+await page.evaluate(()=>{ box.focus(); box.setSelectionRange(box.value.length, box.value.length); box.value += '\nline two'; saveDraft(); });
+await page.evaluate(()=>window.__dgResult('spoken', true));
+check("the user's newline survives a result", await page.evaluate(()=>box.value.endsWith('XY control panel. next.\nline two spoken')), await page.evaluate(()=>JSON.stringify(box.value.slice(-40))));
+await releaseMic();
+
 // ---- desktop page: SPACE-HOLD push-to-talk ---------------------------------
 // A fresh non-emulated page: fine pointer → isTouch=false, real key events via
 // CDP (keyboard.down twice = held key with repeat, exactly what a hold sends).
