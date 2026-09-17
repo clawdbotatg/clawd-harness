@@ -73,6 +73,9 @@ Watch it: `journalctl -u clawd-fleet-pull -f`. Disable:
   + `.clawd-controller.tasks.jsonl` at the repo root.
 - `fleet.env` on the box (gitignored) holds: `FLEET_MOBILE_TOKEN`, `FLEET_WORKER_TOKEN`,
   `FLEET_WORKER_ALLOW`, `FLEET_RP_ID=h.atg.link`, `FLEET_ORIGIN=https://h.atg.link`,
+  `FLEET_AASA_APPS=<TEAMID>.<bundle id>[,…]` (serves
+  `/.well-known/apple-app-site-association` so the native iOS wrapper's web view
+  may use the passkey — `clawd-dictate/ios/Harness`, `test_aasa.py`; unset → 404),
   `FLEET_REQUIRE_PASSKEY=1`, `FLEET_ALLOW_ENROLL=0`.
 
 ## The worker (each machine)

@@ -99,6 +99,11 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   boundary: fleet code never imports `server.py`; the wire contract is
   `docs/WS-PROTOCOL.md` — keep it in sync with any WS change. Deep docs:
   `fleet/CLAUDE.md`, `docs/fleet/` (ADD-MACHINE.md for new boxes).
+  **📱 native iOS app** = `clawd-dictate/ios/Harness` (a WKWebView on the
+  relay; exists because a home-screen PWA re-asks for the mic every launch).
+  Its passkey works only because the relay serves
+  `/.well-known/apple-app-site-association` from `FLEET_AASA_APPS`
+  (`fleet/test_aasa.py`) — don't drop that route or env.
 - **controller/** — the PM, a WS client like any other; verbs in
   `controller/verbs.py`. **A harness feature doesn't exist to the PM until you
   update three places together: the verb, its MCP description, and the persona**

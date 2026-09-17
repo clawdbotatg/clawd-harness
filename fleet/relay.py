@@ -154,6 +154,12 @@ WORKER_ALLOW = {m.strip() for m in os.environ.get("FLEET_WORKER_ALLOW", "").spli
 # provisioned by an admin into .clawd-fleet.passkeys.json; see docs/fleet/DEPLOY.md.)
 RP_ID = os.environ.get("FLEET_RP_ID", "h.atg.link")
 ORIGIN = os.environ.get("FLEET_ORIGIN", "https://" + RP_ID)
+# Native iOS wrapper (clawd-dictate/ios, target ClawdHarness): a WKWebView can
+# only use a passkey for RP_ID when the app is tied to the domain — Associated
+# Domains `webcredentials:<RP_ID>` in the app + this domain naming the app in
+# /.well-known/apple-app-site-association. FLEET_AASA_APPS = comma-separated
+# "<TEAMID>.<bundle id>" entries; unset → the route 404s (nothing to associate).
+AASA_APPS = [a.strip() for a in os.environ.get("FLEET_AASA_APPS", "").split(",") if a.strip()]
 REQUIRE_PASSKEY = (os.environ.get("FLEET_REQUIRE_PASSKEY", "1").lower() not in ("0", "false", "no")) or PASSKEY_ONLY
 SESSION_TTL = int(os.environ.get("FLEET_SESSION_TTL", "604800"))  # passkey session validity (7 days)
 # 7 days everywhere (this, FLEET_E2E_MAX_TTL, RESUME_TTL_MS + the pmt cookie in
@@ -1222,6 +1228,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_aasa(self):
+        # Apple fetches this (via its CDN, or directly for `?mode=developer`
+        # builds) to let the native wrapper's web view use the fleet passkey.
+        # Public by design: it names app ids, nothing secret. Must be plain
+        # application/json with no redirect — nginx passes the path through.
+        if not AASA_APPS:
+            return self.send_error(404, "not found")
+        body = json.dumps({"webcredentials": {"apps": AASA_APPS}}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     STT_WORDS_DOC = "stt-words.txt"
     STT_WORDS_MAX = 64 * 1024
 
@@ -1433,6 +1454,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_file("logo-ui.png", "image/png")
         if path == "/manifest.webmanifest":
             return self._serve_manifest()
+        if path == "/.well-known/apple-app-site-association":
+            return self._serve_aasa()
         if path == "/sw.js":
             return self._serve_file("sw.js", "text/javascript; charset=utf-8")
         if path in ("/icon-180.png", "/icon-192.png", "/icon-512.png"):
