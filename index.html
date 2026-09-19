@@ -8919,6 +8919,9 @@ function sttAsk() {
 // harness comes to the front (the phone keyboard's "error: wake" flip-flop,
 // 09-18). Results land through recApply like Web Speech's.
 let dg = null, dgCtx = null;
+// One line per step, to the console — in the 📱 app the console is a file on the
+// phone (WebView.swift), the only view of the mic there.
+function dgLog(msg) { try { console.log('[dg] ' + msg); } catch {} }
 function dgUrl(creds) {
   const u = new URL('wss://api.deepgram.com/v1/listen'), q = u.searchParams;
   q.set('model', creds.model || 'nova-3'); q.set('language', 'en');
@@ -8931,6 +8934,7 @@ function dgFallback(d) {
   // this hold lost its Deepgram path (mic denied, socket refused) → Web Speech
   // finishes the hold, the creds are dropped and re-asked for next time
   if (d && dg === d) dg = null;
+  dgLog('fallback: recOn=' + recOn + ' engine=' + recEngine + ' SR=' + !!SR);
   if (!recOn || recEngine !== 'dg') return;
   sttCreds = null; sttAsk();
   if (!SR) { stopRec(); return; }
@@ -8945,11 +8949,13 @@ function dgStart(creds) {
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!dgCtx || dgCtx.state === 'closed') dgCtx = new AC();   // a NEW context in the gesture: the one path iOS always honors
     if (dgCtx.state !== 'running') { try { dgCtx.resume(); } catch {} }
+    dgLog('start: ctx=' + dgCtx.state + ' ' + dgCtx.sampleRate + 'Hz mediaDevices=' + !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) + ' proto=' + creds.proto);
     d.ws = new WebSocket(dgUrl(creds), [creds.proto, creds.secret]);
-  } catch { dgFallback(d); return; }
+  } catch (e) { dgLog('start threw: ' + (e && e.message)); dgFallback(d); return; }
   const w = d.ws;
   w.onopen = () => {
     d.open = true;
+    dgLog('socket open, ' + d.q.length + ' queued buffers');
     d.q.forEach(b => { try { w.send(b); } catch {} }); d.q = [];
     if (d.done) { try { w.send(JSON.stringify({ type: 'CloseStream' })); } catch {} }   // released before we connected
   };
@@ -8957,18 +8963,21 @@ function dgStart(creds) {
     if (dg !== d) return;                      // a newer hold owns the box now
     let m; try { m = JSON.parse(e.data); } catch { return; }
     if (m.type !== 'Results') return;
+    if (!d.got) dgLog('first result: "' + ((((m.channel || {}).alternatives || [])[0] || {}).transcript || '').slice(0, 30) + '"');
     d.got = true;
     const t = (((m.channel || {}).alternatives || [])[0] || {}).transcript || '';
     if (m.is_final) { if (t) recApply(t, ''); }
     else recApply('', t);
   };
-  w.onclose = () => {
+  w.onclose = (e) => {
     d.open = false;
+    dgLog('socket closed code=' + (e && e.code) + ' got=' + d.got + ' done=' + d.done);
     if (dg === d && !d.done && !d.got) dgFallback(d);   // refused before a single result → finish with Web Speech
     const h = d.onDone; d.onDone = null; if (h) h();      // the flush is over: a waiting send may go
   };
   w.onerror = () => {};
   streamP.then(stream => {
+    dgLog('mic stream ok (' + stream.getTracks().map(t => t.label + ':' + t.readyState).join(',') + ') ctx=' + dgCtx.state + (dg !== d || d.done ? ' — hold already over' : ''));
     if (dg !== d || d.done) { stream.getTracks().forEach(t => t.stop()); return; }
     d.stream = stream;
     d.src = dgCtx.createMediaStreamSource(stream);
@@ -8983,7 +8992,10 @@ function dgStart(creds) {
       else if (d.q.length < 400) d.q.push(out.buffer);   // ≤ ~50 s queued while connecting
     };
     d.src.connect(d.proc); d.proc.connect(dgCtx.destination);   // a processor only ticks when wired to the sink
-  }).catch(() => dgFallback(d));
+    let ticks = 0; const t0 = Date.now();
+    const tickLog = setInterval(() => { if (d.done) { clearInterval(tickLog); return; } dgLog('audio: ' + ticks + ' buffers in ' + (Date.now() - t0) + ' ms, ctx=' + dgCtx.state + ' open=' + d.open); if (Date.now() - t0 > 6000) clearInterval(tickLog); }, 2000);
+    const proc0 = d.proc.onaudioprocess; d.proc.onaudioprocess = (ev) => { ticks++; proc0(ev); };
+  }).catch((e) => { dgLog('mic stream FAILED: ' + (e && (e.name + ' ' + e.message))); dgFallback(d); });
 }
 function dgStop() {
   const d = dg; if (!d || d.done) return;
@@ -9000,6 +9012,7 @@ function dgStop() {
 function startRec() {
   if (recOn) return;
   const creds = sttCredsOk() ? sttCreds : null;
+  dgLog('tap: creds=' + !!creds + ' SR=' + !!SR + ' ws=' + (ws ? ws.readyState : 'none') + ' machine=' + sttHere());
   if (!creds && !SR) {                        // the 📱 harness app has no Web Speech: a tap before the key landed used to do NOTHING (09-18)
     sttStartAt = Date.now() + 5000; micBtn.classList.add('wait'); sttAsk();
     setTimeout(() => { if (sttStartAt && Date.now() >= sttStartAt) { sttStartAt = 0; micBtn.classList.remove('wait'); } }, 5200);
@@ -9018,6 +9031,7 @@ function startRec() {
 }
 function stopRec() {
   if (!recOn) return;
+  dgLog('stop (engine=' + recEngine + ')');
   recOn = false; micBtn.classList.remove('rec');
   if (recEngine === 'dg') dgStop(); else { try { rec.stop(); } catch {} }
   recEngine = null;
