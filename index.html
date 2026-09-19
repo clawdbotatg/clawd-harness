@@ -624,6 +624,7 @@
      (pointercancel kills dictation mid-sentence) or pop a long-press callout */
   #micBtn { touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
   #micBtn.rec { border-color:var(--err); background:#1c0c0a; animation:vpulse 1s infinite; }
+  #micBtn.wait { opacity:.45; }   /* asked the box for its Deepgram key; starts on its own when it lands */
   @keyframes vpulse { 0%,100%{opacity:1} 50%{opacity:.45} }
   button { background:var(--accent); color:#000; border:0; padding:10px 16px;
            font-family:var(--mono); font-weight:600; cursor:pointer; }
@@ -2576,6 +2577,7 @@ function connect() {
     clearResumeReload();            // live again → no need for the resume backstop reload
     streamCid = null;               // fresh socket = fresh server-side link, bound to nothing yet
     dot.classList.add('up');
+    if (sttWanted && !sttCredsOk()) setTimeout(sttAsk, 800);   // 🎤 the ask that found no socket (cold launch) goes now
     if (!FLEET) {
       // A fresh socket is unsubscribed server-side: re-bind the session so the PTY
       // stream resumes AND sends can resolve their target again. (First boot has no
@@ -8800,6 +8802,8 @@ const STT_BASE_TERMS = [
   'Devcon', 'ZKNox', 'picowallet', 'centipico', 'Omarchy', 'eli5',
 ];
 let sttCreds = null, sttMachine = null, sttReqT = null;
+let sttWanted = false;     // an ask that found no socket — re-asked on open (a cold 📱 launch subscribes before the socket is up, 09-18)
+let sttStartAt = 0;        // a 🎤 tap that found no creds and no Web Speech: start as soon as they land (until this time)
 const sttPending = new Map();
 function sttWords() { try { return localStorage.getItem(STT_WORDS_KEY) || ''; } catch { return ''; } }
 // The ⚙️ box, parsed: plain lines are words; `from => to` (or → / ->) lines are rules.
@@ -8881,15 +8885,21 @@ function sttCredsOk() {
   return !!(sttCreds && sttMachine === sttHere() && (!sttCreds.exp || sttCreds.exp - Date.now() > 15000));
 }
 function sttAsk() {
-  if (!ws || ws.readyState !== 1 || !sttHere()) return;
+  if (!ws || ws.readyState !== 1 || !sttHere()) { sttWanted = true; return; }
+  sttWanted = false;
   const id = Math.random().toString(36).slice(2), here = sttHere();
   const timer = setTimeout(() => sttPending.delete(id), 15000);
   sttPending.set(id, (m) => {
     clearTimeout(timer);
-    if (!m.secret) { if (sttMachine === here) sttCreds = null; return; }   // no key on that box → Web Speech
+    if (!m.secret) {   // no key on that box → Web Speech (none in the 📱 app: say so instead of a dead button)
+      if (sttMachine === here) sttCreds = null;
+      if (sttStartAt) { sttStartAt = 0; micBtn.classList.remove('wait'); if (!SR) micBtn.title = 'no Deepgram key on this box'; }
+      return;
+    }
     sttCreds = { proto: m.proto || 'token', secret: m.secret, model: m.model || 'nova-3',
                  exp: m.ttl ? Date.now() + m.ttl * 1000 : 0 };
     sttMachine = here;
+    if (sttStartAt) { const late = Date.now() > sttStartAt; sttStartAt = 0; micBtn.classList.remove('wait'); if (!late && !recOn) startRec(); }
     clearTimeout(sttReqT);
     if (m.ttl) sttReqT = setTimeout(sttAsk, Math.max(5000, (m.ttl - 60) * 1000));
     micBtn.title = 'Hold to dictate (Deepgram — knows your words, see ⚙️) — or hold Space in the box';
@@ -8990,7 +9000,11 @@ function dgStop() {
 function startRec() {
   if (recOn) return;
   const creds = sttCredsOk() ? sttCreds : null;
-  if (!creds && !SR) return;
+  if (!creds && !SR) {                        // the 📱 harness app has no Web Speech: a tap before the key landed used to do NOTHING (09-18)
+    sttStartAt = Date.now() + 5000; micBtn.classList.add('wait'); sttAsk();
+    setTimeout(() => { if (sttStartAt && Date.now() >= sttStartAt) { sttStartAt = 0; micBtn.classList.remove('wait'); } }, 5200);
+    return;
+  }
   if (synth) synth.cancel();                  // barge-in: don't read replies back into the mic
   recPre = box.value; recPost = ''; recWrote = box.value; recCtx = activeDraftId; recTail = '';
   recOn = true;
