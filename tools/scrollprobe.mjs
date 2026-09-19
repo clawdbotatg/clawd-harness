@@ -98,8 +98,26 @@ await page.evaluate(() => clearInterval(window.__burst));
 const heldOK = held.viewportY <= idle.viewportY + 1;
 console.log('held  ', JSON.stringify(held), heldOK ? 'OK: bursts did not yank' : 'FAIL: yanked back down');
 
+// ↓ #ttyDown: scrolled up → the pill is showing; a REAL tap on it lands the viewport
+// at the bottom and the pill goes away (the follow re-arms on its own).
+const pill = await page.evaluate(() => {
+  const el = document.getElementById('ttyDown');
+  const r = el.getBoundingClientRect();
+  return { hidden: el.hidden, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), w: r.width };
+});
+const pillOK = !pill.hidden && pill.w > 0;
+console.log('pill  ', JSON.stringify(pill), pillOK ? 'OK: ↓ shown while scrolled up' : 'FAIL: ↓ not shown');
 await page.screenshot({ path: join(HERE, 'scrollprobe.png') });
+await page.touchscreen.tap(pill.x, pill.y);
+await page.waitForTimeout(400);
+const after = await page.evaluate(() => {
+  const b = term.buffer.active;
+  return { viewportY: b.viewportY, baseY: b.baseY, hidden: document.getElementById('ttyDown').hidden };
+});
+const tapOK = after.viewportY >= after.baseY - 1 && after.hidden;
+console.log('tap   ', JSON.stringify(after), tapOK ? 'OK: ↓ tap reached the bottom and hid' : 'FAIL: ↓ tap did not land at the bottom');
+
 await browser.close();
-const ok = idleOK && heldOK;
+const ok = idleOK && heldOK && pillOK && tapOK;
 console.log(ok ? 'PASS' : 'FAIL');
 process.exit(ok ? 0 : 1);

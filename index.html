@@ -608,6 +608,18 @@
   #tldr > div { flex:0 0 auto; margin:auto 0; }   /* row-rounding slack splits above/below (half the top gap) */
   #tldr[hidden] { display:none; }
   #tldr.empty { color:var(--dim); cursor:default; }
+  /* ↓ back to the bottom: a pill in the terminal's bottom-right corner, shown only
+     while the viewport is scrolled up off the live end (codex now and then lands the
+     view at the very TOP of the scrollback — a slide all the way down was the only
+     way back, Austin 09-18). Tap = ttyBottom(), which respects the 🟦 hold. Sits
+     above the #tldr overlay (z 12) so it stays reachable while a summary shows. */
+  #ttyDown { position:absolute; right:14px; bottom:12px; z-index:13; width:40px; height:40px;
+             border-radius:50%; border:1px solid var(--accent); background:var(--bg);
+             color:var(--accent); font-size:20px; line-height:38px; text-align:center; padding:0;
+             cursor:pointer; opacity:.85; box-shadow:0 4px 18px rgba(0,0,0,.6);
+             user-select:none; -webkit-user-select:none; touch-action:manipulation; }
+  #ttyDown:hover { opacity:1; background:var(--accent-bg); }
+  #ttyDown[hidden] { display:none; }
   /* annealing: a sentence that survived a pass unchanged is settled (solid); the rest
      is still forming (70%). Settled is also what the 🔊 voice may speak. */
   #tldrText .form { opacity:.7; }
@@ -1444,6 +1456,8 @@
       <!-- 🟦 live TLDR: the rolling plain-English summary of the turn in flight. An
            overlay over claude's bottom chrome, flush under the thinking line (#tldr CSS) -->
       <div id="tldr" hidden><button id="tldrX" title="Dismiss — marks this much as read; the next summary covers only new text">✕</button><div id="tldrInner"><span class="tag">tldr</span><span id="tldrText"></span></div></div>
+      <!-- ↓ jump back to the live end of the terminal; only shown while scrolled up (#ttyDown CSS) -->
+      <button id="ttyDown" hidden title="Scroll to the bottom" aria-label="Scroll to the bottom">↓</button>
       <div id="splash" hidden></div>
       <div id="deadveil" hidden></div>
     </section>
@@ -1812,7 +1826,29 @@ function applyTldrHold() {
   if (h !== tldrHoldLast) { tldrHoldLast = h; ttyBottom(); bottomJustifyTTY(); }
   positionTldr();
 }
-term.onRender(() => { bottomJustifyTTY(); positionTldr(); });
+// ↓ #ttyDown: visible exactly while the viewport sits above the live end (the 🟦
+// held rows count as the end, like ttyAtBottom — but no touch-hold veto here: the
+// pill is ABOUT the position, not about whether bursts may yank). Buffer reads only,
+// toggled on change, so it's free to call from every render and every scroll event.
+function updateTtyDown() {
+  const el = document.getElementById('ttyDown');
+  const b = term.buffer && term.buffer.active;
+  const hold = tldrHold();
+  const up = !!b && b.baseY > 0 && (b.baseY - b.viewportY) > 1 + (hold ? hold + tldrTrailing() : 0);
+  if (el.hidden !== !up) el.hidden = !up;
+  if (!up) return;
+  // clear the 🟦 overlay while it shows (the summary covers the corner); one layout
+  // read, only in that regime, applied only on change
+  const t = document.getElementById('tldr');
+  const want = (!t.hidden && t.offsetHeight ? t.offsetHeight + 10 : 12) + 'px';
+  if (el.style.bottom !== want) el.style.bottom = want;
+}
+(() => {
+  const el = document.getElementById('ttyDown');
+  el.addEventListener('mousedown', e => e.preventDefault());   // don't steal focus from the tty's textarea
+  el.addEventListener('click', () => { ttyBottom(); updateTtyDown(); });
+})();
+term.onRender(() => { bottomJustifyTTY(); positionTldr(); updateTtyDown(); });
 
 // 🟦 place the summary overlay (see the #tldr CSS): over claude's bottom chrome while
 // the live TLDR is on — the TTY_COVER_ROWS rows ENDING AT THE LAST NON-BLANK ROW (the
@@ -1890,7 +1926,7 @@ function tldrPlace(tries) {
   const vp = term.element && term.element.querySelector('.xterm-viewport');
   if (!vp) return;
   let raf = 0;
-  const repaint = () => { raf = 0; term.refresh(0, term.rows - 1); };
+  const repaint = () => { raf = 0; term.refresh(0, term.rows - 1); updateTtyDown(); };
   vp.addEventListener('scroll', () => {
     if (raf) return;                       // coalesce multiple scroll events into one redraw per frame
     raf = requestAnimationFrame(repaint);
