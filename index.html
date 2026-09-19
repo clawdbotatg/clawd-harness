@@ -2063,6 +2063,7 @@ function isMachineActive(id) { return !fleetInactive.has(id); }
 // through here — that's what makes "off" mean off everywhere.
 function machineIsLive(m) { return m && m.online && m.kind !== 'relay' && isMachineActive(m.id); }
 function liveMachines() { return machineList.filter(machineIsLive); }
+let lastLiveIds = new Set();      // renderMachines: which machines were live on the previous roster
 function cacheInactive() { try { localStorage.setItem(INACTIVE_KEY, JSON.stringify([...fleetInactive])); } catch {} }
 // Apply a set from the relay (its `prefs` frame). Returns the ids whose state
 // actually changed, so the caller can tear down / wake exactly those.
@@ -4020,9 +4021,18 @@ function renderMachines(list) {
     // now it's a single select on the ⚙️ settings page, see renderSettings.)
     machinesEl.appendChild(card);
   });
-  // Roster changed: connect any newly-online machine and re-merge (online flags
-  // gate which entries are selectable in the unified list).
-  fleetBootstrap();
+  // Roster changed: connect any NEWLY-live machine and re-merge (online flags
+  // gate which entries are selectable in the unified list). Only the machines
+  // that just became live get listed: this roster is also the relay's pulse —
+  // one per worker stats report, ~1/s fleet-wide — and listing EVERY machine
+  // on every pulse was ~150-250KB (sessions + projects + the whole closed
+  // history) × 7 machines × every open viewer, every second, through one
+  // pure-Python relay: worker send queues full, e2e replies stuck behind list
+  // traffic, "resuming clawd-x…" forever, everything slow (2026-09-18).
+  const liveNow = new Set(liveMachines().map(m => m.id));
+  const gained = [...liveNow].filter(id => !lastLiveIds.has(id));
+  lastLiveIds = liveNow;
+  if (gained.length) fleetBootstrap(new Set(gained));
   mergeProjects();
   renderProjectRung();
   refreshBreadcrumb();
@@ -4689,14 +4699,16 @@ function selectedProjectId() { return FLEET ? currentProjectKey : currentPid; }
 // so concurrent handshakes would fight over it — silent resumes are fast, fresh
 // passkeys go one machine at a time.
 let bootstrapping = false;
-async function fleetBootstrap() {
+async function fleetBootstrap(only) {
   if (!FLEET || bootstrapping) return;
   bootstrapping = true;
   try {
     // Switched-off machines are skipped outright — no channel, no passkey. This
     // one filter is the feature: everything else below is bookkeeping so an
-    // off machine doesn't leave ghosts in the rungs.
-    const live = liveMachines();
+    // off machine doesn't leave ghosts in the rungs. `only` (a Set of ids)
+    // narrows it further — renderMachines passes the machines that JUST became
+    // live, so a roster pulse doesn't re-list the whole fleet.
+    const live = liveMachines().filter(m => !only || only.has(m.id));
     // Resumable machines first: they re-attach with no passkey, so the common case
     // (everything seen within the resume TTL) loads instantly and silently. Machines
     // needing a fresh safe-word come last and one at a time, so a pending prompt

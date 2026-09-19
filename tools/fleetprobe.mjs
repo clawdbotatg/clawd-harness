@@ -229,6 +229,36 @@ await page.locator('#passkeybtn').tap();
 await page.waitForTimeout(100);
 check('unlock button still retries the passkey', await page.evaluate(() => window.__edgePrompts) === 2);
 
+// -- 6. the roster pulse must NOT re-list the fleet ---------------------------
+// The relay broadcasts this same `machines` frame on every worker stats report
+// (~1/s fleet-wide) and every 20s heartbeat. Each `list` answer is 150-250KB
+// (sessions + projects + the whole closed history); re-listing every machine on
+// every pulse × every open viewer drowned the relay (2026-09-18: send queues
+// full, e2e replies stuck behind list traffic, "resuming clawd-x…" forever).
+// Only a machine that JUST became live may be listed.
+await page.evaluate(() => {
+  window.__lists = [];
+  window.e2eSendFrame = (m, f) => { if (f && f.type === 'list') window.__lists.push(m); };
+  for (const m of ['clawd-atg', 'clawd-head', 'clawd-heart']) e2eChans[m] = { status: 'open', inst: 0, queue: [], sendChain: Promise.resolve(), recvChain: Promise.resolve() };
+});
+await rx({ type: 'prefs', inactive: [] });
+await rx(ROSTER);                         // the live set changes here (head/heart back on) — lists allowed
+await page.waitForTimeout(300);
+await page.evaluate(() => { window.__lists = []; });
+for (let i = 0; i < 10; i++) { await rx(ROSTER); await page.waitForTimeout(40); }   // ten pulses, nothing changed
+await page.waitForTimeout(300);
+let lists = await page.evaluate(() => window.__lists);
+check('ten roster pulses with no change → zero lists', lists.length === 0, JSON.stringify(lists));
+const flap = JSON.parse(JSON.stringify(ROSTER));
+flap.machines.find(m => m.id === 'clawd-head').online = false;
+await rx(flap);                           // head drops…
+await page.waitForTimeout(100);
+await page.evaluate(() => { window.__lists = []; });
+await rx(ROSTER);                         // …and comes back: only head is listed
+await page.waitForTimeout(300);
+lists = await page.evaluate(() => window.__lists);
+check('a machine coming back online lists only itself', lists.join() === 'clawd-head', JSON.stringify(lists));
+
 check('no uncaught page errors', errors.length === 0, errors.join(' | '));
 
 const shot = join(HERE, 'fleetprobe.png');
