@@ -51,7 +51,9 @@ exposing publicly.
 
 Run:  python3 relay.py            # binds 0.0.0.0:8788
 """
+import array
 import base64
+import fcntl
 import hashlib
 import hmac
 import json
@@ -61,6 +63,7 @@ import secrets
 import shutil
 import socket
 import sys
+import termios
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
@@ -624,6 +627,29 @@ def session_valid(tok):
     return exp if (exp and time.time() < exp) else None
 
 
+# A peer that stops READING fills its kernel send queue; the next write to it
+# then parks the CALLING thread for up to the socket timeout (90 s). When that
+# caller is a worker's reader thread routing the worker's reply to a mobile,
+# the worker goes unread for as long as the write hangs — long enough for the
+# staleness reaper to drop it. 2026-09-18: one browser tab stopped draining at
+# 08:52 and sat there ten hours with 2.8 MB unread; every reply to it stalled
+# sat's reader thread, the relay reaped sat "78 s silent", and every page on
+# sat rebuilt its channel every 10 s all day (e2e-timeout, black tty). A peer
+# this far behind is not reading: drop it before the write, never block on it.
+SEND_BACKLOG_MAX = int(os.environ.get("FLEET_SEND_BACKLOG_MAX", str(1 << 20)))
+
+
+def _outq_bytes(sock):
+    """Bytes queued in the kernel for this socket that the peer hasn't taken
+    yet (TIOCOUTQ). 0 when unknown — the check then never fires."""
+    try:
+        buf = array.array("i", [0])
+        fcntl.ioctl(sock.fileno(), termios.TIOCOUTQ, buf)
+        return max(0, buf[0])
+    except Exception:
+        return 0
+
+
 class Conn:
     """One connected peer (worker or mobile). Owns a send lock for thread-safe
     fan-out from any thread."""
@@ -669,8 +695,22 @@ class Conn:
             cls._seq += 1
             return f"m{cls._seq}"
 
+    def _backlogged(self):
+        """True (and the conn is dropped) when the peer has stopped reading —
+        more than SEND_BACKLOG_MAX bytes sit unsent in the kernel. Checked
+        before every write so a dead reader can't park the writer's thread."""
+        if self.sock is None:
+            return False
+        n = _outq_bytes(self.sock)
+        if n <= SEND_BACKLOG_MAX:
+            return False
+        print(f"[relay] {self.role} {self.ident} stopped reading "
+              f"({n} bytes unsent), dropping", flush=True)
+        self._mark_dead()
+        return True
+
     def send_json(self, obj):
-        if self.dead:
+        if self.dead or self._backlogged():
             return
         try:
             fleet_ws.ws_send(self.wfile, self.lock, json.dumps(obj), opcode=0x1)
@@ -679,7 +719,7 @@ class Conn:
 
     def send_binary(self, data):
         """Forward a raw binary frame (PTY bytes) unchanged. Servers MUST NOT mask."""
-        if self.dead:
+        if self.dead or self._backlogged():
             return
         try:
             fleet_ws.ws_send(self.wfile, self.lock, data, opcode=0x2)
@@ -687,7 +727,7 @@ class Conn:
             self._mark_dead()
 
     def ping(self):
-        if self.dead:
+        if self.dead or self._backlogged():
             return
         try:
             fleet_ws.ws_send(self.wfile, self.lock, b"", opcode=0x9)
