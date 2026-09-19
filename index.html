@@ -8744,7 +8744,18 @@ let recEngine = null;                          // 'dg' | 'sr' while a hold is li
 // typed after the live text kept the interim in the base and every later
 // result (interims repeat, then the final) appended the same words once more:
 // "Explain this to me." ×3 around one pasted sentence.
-let recWrote = null, recCtx = null, recTail = '', recPre = '', recPost = '';
+// 2026-09-19 ("click into the text or delete something and it doubles, then
+// it's all of the text ×3"): an edit INSIDE the live interim — a backspace at
+// the end of the box while the last words are still live is the common one —
+// left no verbatim interim to find, so the whole interim became "the user's"
+// and the recognizer re-delivered every word of it (interims repeat, then the
+// final) once more; deleting the dup while the next interim was live tripled
+// it. Now the words already shown for that segment are SKIPPED for the rest of
+// it (recSkip): its later interims and its final only add words beyond them,
+// and the segment's final resets the skip.
+let recWrote = null, recCtx = null, recTail = '', recPre = '', recPost = '', recSkip = 0;
+function recWords(s) { return (s.match(/\S+/g) || []).length; }
+function recDrop(s, n) { for (; n > 0 && s; n--) s = s.replace(/^\s*\S+/, ''); return s.replace(/^\s+/, ''); }
 // a + b with one space at the seam — never a doubled one, none before
 // punctuation, and the user's own newlines are left alone (never collapsed)
 function recGlue(a, b) {
@@ -8753,26 +8764,29 @@ function recGlue(a, b) {
   return (/\s$/.test(a) || /^[\s.,;:!?]/.test(b)) ? a + b : a + ' ' + b;
 }
 // One result, either engine: finals append to the dictated stretch, the
-// interim trails it, recPost stays after both.
-function recApply(finalT, interim) {
+// interim trails it, recPost stays after both. segEnd = this result closes the
+// segment the interim belonged to (a final, empty or not).
+function recApply(finalT, interim, segEnd) {
   if (activeDraftId !== recCtx) { stopRec(); return false; }
   if (recWrote !== null && box.value !== recWrote) {
     if (!recOn) return false;                 // mic off, box moved: typing won, drop the straggler
     // re-base on the user's edit: find the interim we were showing wherever the
     // edit left it and take it out — its final replaces it IN PLACE, the user's
     // text before and after it stays. Gone or edited → it's the user's now;
-    // dictation carries on at the end.
+    // its words are skipped for the rest of the segment (they'd come back
+    // otherwise, see recSkip above) and dictation carries on at the end.
     const v = box.value;
     const i = !recTail ? -1 : v.startsWith(recTail, recPre.length) ? recPre.length : v.lastIndexOf(recTail);
     if (i >= 0) { recPre = v.slice(0, i); recPost = v.slice(i + recTail.length); }
-    else { recPre = v; recPost = ''; }
+    else { recSkip += recWords(recTail); recPre = v; recPost = ''; }
   }
   const v0 = box.value, pre0 = recPre.length, post0 = recPost.length;
-  if (finalT) {                               // a final closes the stretch: what was typed after it folds in, new speech goes to the end
-    recPre = recGlue(recGlue(recPre, sttFix(finalT).trim()), recPost); recPost = '';
+  if (finalT || segEnd) {                     // a final closes the stretch: what was typed after it folds in, new speech goes to the end
+    const f = finalT ? recDrop(sttFix(finalT).trim(), recSkip) : '';
+    recPre = recGlue(recGlue(recPre, f), recPost); recPost = ''; recSkip = 0;
   }
   let w = recPre; recTail = '';
-  const it = interim ? sttFix(interim).trim() : '';
+  const it = interim ? recDrop(sttFix(interim).trim(), recSkip) : '';
   if (it) { w = recGlue(recPre, it); recTail = w.slice(recPre.length); }
   recWrote = recGlue(w, recPost);
   // keep the caret where the user is editing: fixed before the dictated
@@ -8793,12 +8807,12 @@ function buildRec() {
   const r = new SR();
   r.continuous = true; r.interimResults = true; r.lang = 'en-US';
   r.onresult = (e) => {
-    let finalT = '', interim = '';
+    let finalT = '', interim = '', segEnd = false;
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const tr = e.results[i];
-      if (tr.isFinal) finalT += tr[0].transcript; else interim += tr[0].transcript;
+      if (tr.isFinal) { finalT += tr[0].transcript; segEnd = true; } else interim += tr[0].transcript;
     }
-    recApply(finalT, interim);
+    recApply(finalT, interim, segEnd);
   };
   r.onend = () => {
     if (recOn && recEngine === 'sr') { try { r.start(); } catch {} return; }   // Chrome auto-stops; keep alive while on
@@ -9047,7 +9061,7 @@ function dgOpen(d) {
     if (!d.got) dgLog('first result: "' + ((((m.channel || {}).alternatives || [])[0] || {}).transcript || '').slice(0, 30) + '"');
     d.got = true;
     const t = (((m.channel || {}).alternatives || [])[0] || {}).transcript || '';
-    if (m.is_final) { if (t) recApply(t, ''); }
+    if (m.is_final) recApply(t, '', true);     // an empty final still closes the segment (resets recSkip)
     else recApply('', t);
   };
   w.onclose = (e) => {
@@ -9084,7 +9098,7 @@ function startRec() {
     return;
   }
   if (synth) synth.cancel();                  // barge-in: don't read replies back into the mic
-  recPre = box.value; recPost = ''; recWrote = box.value; recCtx = activeDraftId; recTail = '';
+  recPre = box.value; recPost = ''; recWrote = box.value; recCtx = activeDraftId; recTail = ''; recSkip = 0;
   recOn = true;
   micBtn.classList.add('rec'); box.focus();
   if (creds) { recEngine = 'dg'; dgStart(creds); }

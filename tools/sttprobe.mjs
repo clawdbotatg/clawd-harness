@@ -268,6 +268,54 @@ await page.evaluate(()=>window.__dgResult('spoken', true));
 check("the user's newline survives a result", await page.evaluate(()=>box.value.endsWith('XY control panel. next.\nline two spoken')), await page.evaluate(()=>JSON.stringify(box.value.slice(-40))));
 await releaseMic();
 
+// 11d. 09-19 "click into the text or delete something and it doubles, then it's
+// all of the text ×3": an edit INSIDE the live interim. Backspace at the end of
+// the box while the last words are still live is the everyday one.
+await page.evaluate(()=>{ box.value=''; saveDraft(); });
+await holdMic();
+await page.waitForTimeout(150);
+await page.evaluate(()=>window.__dgResult('the state files moved', false));
+await page.evaluate(()=>{ box.focus(); box.setSelectionRange(box.value.length, box.value.length); });
+await page.keyboard.press('Backspace');                                        // "moved" → "move"
+await page.evaluate(()=>window.__dgResult('the state files moved', false));   // the interim repeats…
+await page.evaluate(()=>window.__dgResult('the state files moved', false));
+check('backspace at the end of a live interim: no word comes back', await page.evaluate(()=>box.value==='the state files move'), await page.evaluate(()=>box.value));
+await page.evaluate(()=>window.__dgResult('the state files moved and why', false));   // …then grows: only the new words land
+check('…speech after the edit lands once, after the edit', await page.evaluate(()=>box.value==='the state files move and why'), await page.evaluate(()=>box.value));
+await page.evaluate(()=>window.__dgResult('The state files moved and why.', true));
+check("…the segment's final does not re-deliver the edited words", await page.evaluate(()=>box.value==='the state files move and why.'), await page.evaluate(()=>box.value));
+await page.evaluate(()=>window.__dgResult('next sentence', false));
+await page.evaluate(()=>window.__dgResult('Next sentence.', true));
+check('…and the next segment lands whole', await page.evaluate(()=>box.value==='the state files move and why. Next sentence.'), await page.evaluate(()=>box.value));
+// a misheard word fixed INSIDE the live interim, then a second edit while the
+// next interim is live (the "delete the dup" gesture that used to make ×3)
+await page.evaluate(()=>window.__dgResult('tell eddy about it', false));
+await page.evaluate(()=>{ box.focus(); const i=box.value.indexOf('eddy'); box.setSelectionRange(i, i+4); });
+await page.keyboard.type('Eddie');
+await page.evaluate(()=>window.__dgResult('tell eddy about it', false));
+await page.evaluate(()=>window.__dgResult('tell eddy about it today', false));
+check('a word fixed inside the live interim stays fixed, new words follow', await page.evaluate(()=>box.value.endsWith('Next sentence. tell Eddie about it today')), await page.evaluate(()=>JSON.stringify(box.value.slice(-50))));
+await page.evaluate(()=>{ box.focus(); box.setSelectionRange(box.value.length, box.value.length); });
+await page.keyboard.press('Backspace');                                        // "today" → "toda" while still live
+await page.evaluate(()=>window.__dgResult('tell eddy about it today', false));
+await page.evaluate(()=>window.__dgResult('Tell Eddy about it today.', true));
+check('a second edit inside the same live segment: still nothing doubles', await page.evaluate(()=>box.value.endsWith('Next sentence. tell Eddie about it toda')), await page.evaluate(()=>JSON.stringify(box.value.slice(-50))));
+await page.evaluate(()=>window.__dgResult('done', true));
+check('…and the next final lands', await page.evaluate(()=>box.value.endsWith('toda done')), await page.evaluate(()=>JSON.stringify(box.value.slice(-50))));
+await releaseMic();
+// Web Speech has the same shape: a long live interim, a backspace at its end
+await page.evaluate(()=>{ sttCreds=null; box.value=''; saveDraft(); });
+await holdMic();
+check('(Web Speech engine for this act)', await page.evaluate(()=>recOn && recEngine==='sr'));
+await page.evaluate(()=>window.__emit([],'one long sentence still live'));
+await page.evaluate(()=>{ box.focus(); box.setSelectionRange(box.value.length, box.value.length); });
+await page.keyboard.press('Backspace');
+await page.evaluate(()=>window.__emit([],'one long sentence still live'));
+await page.evaluate(()=>window.__emit(['one long sentence still live here'],'and more'));
+check('Web Speech: edited live interim is not re-delivered by its final; the next interim follows', await page.evaluate(()=>box.value==='one long sentence still liv here and more'), await page.evaluate(()=>box.value));
+await releaseMic();
+await page.evaluate(()=>{ sttCreds={proto:'token',secret:'k-here',model:'nova-3',exp:0}; sttMachine=currentMachine; });
+
 // 09-18: the phone's 100 project keyterms exceeded Deepgram's 500-token limit.
 const vocabularyBudget = await page.evaluate(() => {
   const oldWords = sttWords(), oldRows = projectRows;
