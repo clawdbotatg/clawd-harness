@@ -8863,14 +8863,20 @@ function sttSyncPush() {
   }, 800);
 }
 // The keyterm list: your words first, then the harness's own, then every project
-// name (plus its de-hyphenated form: "clawd harness"). Deepgram caps it at 100
-// terms / ~500 tokens; case is kept, so proper nouns go in capitalized.
+// name (plus its de-hyphenated form: "clawd harness"). Deepgram caps the TOTAL
+// at 500 tokens, not 100 entries: short project names can tokenize expensively.
+// Without its tokenizer, budget UTF-8 bytes plus per-term overhead conservatively.
+// Custom words/rule targets take priority; replacement rules themselves are uncapped.
 function sttTerms() {
-  const out = [], seen = new Set();
+  const out = [], seen = new Set(), encoder = new TextEncoder();
+  let budget = 450; // headroom below Deepgram's 500-token rejection threshold
   const add = (t) => {
     t = String(t || '').trim();
     if (!t || t.length > 40) return;
     const k = t.toLowerCase(); if (seen.has(k)) return;
+    const cost = encoder.encode(t).length + 3;
+    if (cost > budget || out.length >= 100) return;
+    budget -= cost;
     seen.add(k); out.push(t);
   };
   const mine = sttUserEntries();
@@ -8940,7 +8946,7 @@ function micSay(msg) {
 function dgFallback(d) {
   // this hold lost its Deepgram path (mic denied, socket refused) → Web Speech
   // finishes the hold, the creds are dropped and re-asked for next time
-  if (d && dg === d) dg = null;
+  if (d && dg === d) { dgStop(); dg = null; }
   dgLog('fallback: recOn=' + recOn + ' engine=' + recEngine + ' SR=' + !!SR);
   if (!recOn || recEngine !== 'dg') return;
   sttCreds = null; sttAsk();
@@ -8961,8 +8967,8 @@ function dgStart(creds) {
     dgOpen(d);
   } catch (e) { dgLog('start threw: ' + (e && e.message)); dgFallback(d); return; }
   streamP.then(stream => {
-    dgLog('mic stream ok (' + stream.getTracks().map(t => t.label + ':' + t.readyState).join(',') + ') ctx=' + dgCtx.state + (dg !== d || d.done ? ' — hold already over' : ''));
     if (dg !== d || d.done) { stream.getTracks().forEach(t => t.stop()); return; }
+    dgLog('mic stream ok (' + stream.getTracks().map(t => t.label + ':' + t.readyState).join(',') + ') ctx=' + dgCtx.state);
     d.stream = stream;
     d.src = dgCtx.createMediaStreamSource(stream);
     d.proc = dgCtx.createScriptProcessor(4096, 1, 1);

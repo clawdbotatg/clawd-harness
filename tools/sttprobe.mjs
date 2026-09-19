@@ -268,6 +268,32 @@ await page.evaluate(()=>window.__dgResult('spoken', true));
 check("the user's newline survives a result", await page.evaluate(()=>box.value.endsWith('XY control panel. next.\nline two spoken')), await page.evaluate(()=>JSON.stringify(box.value.slice(-40))));
 await releaseMic();
 
+// 09-18: the phone's 100 project keyterms exceeded Deepgram's 500-token limit.
+const vocabularyBudget = await page.evaluate(() => {
+  const oldWords = sttWords(), oldRows = projectRows;
+  try {
+    localStorage.setItem(STT_WORDS_KEY, 'MyPriorityWord\nmy phrase => MyReplacement');
+    projectRows = () => Array.from({length: 150}, (_, i) => ({name: 'project-cryptography-' + i}));
+    const terms = sttTerms();
+    localStorage.setItem(STT_WORDS_KEY, Array.from({length: 100}, (_, i) => '語彙' + i).join('\n') + '\nmy phrase => MyReplacement');
+    const unicodeTerms = sttTerms();
+    return {terms, cost: terms.reduce((n,t) => n + new TextEncoder().encode(t).length + 3, 0),
+      unicodeCost: unicodeTerms.reduce((n,t) => n + new TextEncoder().encode(t).length + 3, 0),
+      rewritten: sttFix('my phrase')};
+  } finally { localStorage.setItem(STT_WORDS_KEY, oldWords); projectRows = oldRows; }
+});
+check('large project vocabulary stays below the token budget and keeps custom words first',
+  vocabularyBudget.cost <= 450 && vocabularyBudget.terms.length < 100 &&
+  vocabularyBudget.terms.slice(0,2).join('|') === 'MyPriorityWord|MyReplacement', JSON.stringify(vocabularyBudget));
+check('UTF-8 vocabulary is bounded; replacement rules still apply beyond the keyterm budget',
+  vocabularyBudget.unicodeCost <= 450 && vocabularyBudget.rewritten === 'MyReplacement', JSON.stringify(vocabularyBudget));
+// Exhausting retries releases the real capture even when fallback is unavailable.
+await holdMic();
+await page.waitForTimeout(150);
+await page.evaluate(() => { dg.tries = DG_TRIES; dg.ws.onclose({code:1006}); });
+check('Deepgram failure releases all captured mic tracks', await page.evaluate(() => window.__tracks.every(t => t.stopped)));
+await releaseMic();
+
 // ---- desktop page: SPACE-HOLD push-to-talk ---------------------------------
 // A fresh non-emulated page: fine pointer → isTouch=false, real key events via
 // CDP (keyboard.down twice = held key with repeat, exactly what a hold sends).
