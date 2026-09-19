@@ -37,7 +37,18 @@ const context = await browser.newContext({ viewport: { width: 1100, height: 800 
 // stub the wire in EVERY page of this context (the popup included) before the app boots
 await context.addInitScript(() => {
   window.addEventListener('DOMContentLoaded', () => {
-    const arm = () => { if (typeof hsend === 'function' && !window.__stubbed) { window.__sent = []; hsend = (f) => { window.__sent.push(f); return true; }; window.__stubbed = true; } };
+    const arm = () => { if (typeof hsend === 'function' && !window.__stubbed) {
+      window.__sent = []; hsend = (f) => { window.__sent.push(f); return true; };
+      // Live roster refreshes must retain the fixture for the whole heartbeat
+      // test, just as the server would retain a real session after popup close.
+      const receive = handleJson;
+      handleJson = m => {
+        const fixture = window.__breakoutFixture;
+        if (fixture && m.type === 'sessions') m = {...m, sessions: [...(m.sessions || []).filter(s => s.cid !== fixture.cid), fixture]};
+        return receive(m);
+      };
+      window.__stubbed = true;
+    } };
     arm(); setTimeout(arm, 50); setTimeout(arm, 300);
   });
 });
@@ -57,6 +68,7 @@ const r1 = await page.evaluate(({ CID, fake }) => {
   const realOpen = window.open; window.__opened = [];
   window.open = (u, n, f) => { window.__opened.push({ u, n, f }); return realOpen.call(window, u, n, f); };
   out.hiddenOnRung = !btn.classList.contains('show');
+  window.__breakoutFixture = fake;
   sessionList.push(fake);
   focusSession(sessionList.find(s => s.cid === CID));
   out.inTty = currentView() === 'tty' && currentCid === CID;
@@ -92,6 +104,7 @@ if (popup) {
     const gone = (sel) => getComputedStyle(document.querySelector(sel)).display === 'none';
     out.headerGone = gone('header'); out.barGone = gone('#sessionbar'); out.ironGone = gone('#ironrow'); out.needsGone = gone('#needsbar');
     // land on the (fake) session in here too, the way the boot resolve would with a real cid
+    window.__breakoutFixture = fake;
     sessionList.push(fake);
     focusSession(sessionList.find(s => s.cid === CID));
     out.inTty = currentView() === 'tty' && currentCid === CID;
@@ -146,6 +159,7 @@ if (popup) {
 console.log('POPUP:', JSON.stringify(r2));
 
 const r3 = await page.evaluate((CID) => {
+  window.__breakoutFixture = null;
   const i = sessionList.findIndex(s => s.cid === CID); if (i !== -1) sessionList.splice(i, 1);
   currentCid = null; setView('sessions'); renderSessionBar();
   return { nothingSent: !(window.__sent || []).some(f => f && (f.type === 'send' || f.type === 'input' || f.type === 'close')) };
