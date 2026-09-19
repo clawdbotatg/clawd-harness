@@ -851,6 +851,15 @@
                   font-size:11px; cursor:pointer; padding:3px 8px; line-height:1.3; }
   .scard .sfire:hover { color:var(--accent); border-color:var(--accent-dim); background:var(--raised); }
   .scard .sfire.sfire2 { right:44px; }               /* a ⏏ already owns the corner */
+  /* project cards only: the name gets the whole first line (big, wraps rather
+     than ellipsizes, corner kept clear of the 🔥/⏏ buttons); the badges live on
+     a second line that WRAPS — nothing on a card is ever covered or squeezed. */
+  #projcards .scard .row.ptop { padding-right:44px; }
+  #projcards .scard.local .row.ptop { padding-right:82px; }   /* ⏏ + 🔥 side by side */
+  #projcards .scard .row.pchips { flex-wrap:wrap; gap:6px 7px; padding-right:0; }
+  #projcards .scard .stitle { font-size:16px; font-weight:700; white-space:normal;
+                              overflow-wrap:anywhere; line-height:1.25; }
+  @media (pointer:coarse) { #projcards .scard .stitle { font-size:18px; } }
   .scount.siron { color:var(--accent); cursor:pointer; }
   /* the assign picker + the ＋ add-project picker + the ✎ iron edit form —
      small centered modals, so a rung repaint can't close them */
@@ -5781,7 +5790,11 @@ function fillProjectCard(card, p, selId) {
   card.onclick = (!busyP && !errP && !offline) ? () => selectProject(p.id) : null;
 
   const frag = document.createDocumentFragment();
-  const row = document.createElement('div'); row.className = 'row';
+  // Two lines: the NAME alone on top (big, full width, nothing else competing
+  // for it — on a phone the badges used to squeeze it down to "cl…" and the
+  // corner 🔥 sat on top of the last chip; Austin, 09-18), then the badge row,
+  // which wraps instead of overflowing under the corner buttons.
+  const top = document.createElement('div'); top.className = 'row ptop';
   const sdot = document.createElement('span');
   sdot.className = 'sdot' + (busyP ? ' cloning' : errP ? ' err' : offline ? ' dead' : '');
   const title = document.createElement('span');
@@ -5789,7 +5802,9 @@ function fillProjectCard(card, p, selId) {
   const pem = shortEmoji(p.emoji);     // display form — same trimmed badge as this project's tabs
   title.textContent = (pem ? pem + ' ' : '') + p.name;
   if (p.emoji && p.emoji !== pem) title.title = p.emoji;
-  row.appendChild(sdot); row.appendChild(title);
+  top.appendChild(sdot); top.appendChild(title);
+  frag.appendChild(top);
+  const row = document.createElement('div'); row.className = 'row pchips';
   if (p.pinned) {
     const tag = document.createElement('span');
     tag.className = 'scount'; tag.textContent = 'this app'; tag.title = 'the running harness — live-editable';

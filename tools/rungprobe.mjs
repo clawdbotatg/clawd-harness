@@ -99,6 +99,44 @@ ok('clearing the filter shows everything again', filt.shown);
 ok('setProjectFilter() drives the box', filt.set === 'xyz' && filt.cleared === '');
 ok('no uncaught page errors', errs.length === 0, errs.join(' | '));
 
+// Phone geometry (Austin, 09-18: "cl…" titles and a 🔥 sitting on top of the
+// "3 sess" chip). On an iPhone-width touch viewport every card's name must be
+// on a line of its own, unclipped, and no badge may sit under the corner
+// buttons.
+const ph = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+await ph.goto(`http://127.0.0.1:${PORT}/?t=${token}#/`);
+await ph.waitForTimeout(2500);
+await ph.evaluate(() => setView('projects'));
+await ph.waitForTimeout(300);
+const geo = await ph.evaluate(() => {
+  const out = { cards: 0, clipped: [], covered: [], small: [], sharedLine: [] };
+  document.querySelectorAll('#projcards .scard').forEach(c => {
+    if (c.style.display === 'none') return;
+    out.cards++;
+    const t = c.querySelector('.stitle'), name = t.textContent;
+    if (t.scrollWidth > t.clientWidth + 1) out.clipped.push(name);
+    if (parseFloat(getComputedStyle(t).fontSize) < 16) out.small.push(name);
+    const tr = t.getBoundingClientRect();
+    const btns = [...c.querySelectorAll('.sfire, .sclose')].map(b => b.getBoundingClientRect());
+    c.querySelectorAll('.scount').forEach(ch => {
+      const r = ch.getBoundingClientRect();
+      if (r.top < tr.bottom && r.bottom > tr.top) out.sharedLine.push(name + ':' + ch.textContent);
+      if (btns.some(b => r.left < b.right && r.right > b.left && r.top < b.bottom && r.bottom > b.top))
+        out.covered.push(name + ':' + ch.textContent);
+    });
+    if (btns.some(b => tr.left < b.right && tr.right > b.left && tr.top < b.bottom && tr.bottom > b.top))
+      out.covered.push(name + ':title');
+  });
+  return out;
+});
+ok('phone: the rung renders', geo.cards > 0, `cards=${geo.cards}`);
+ok('phone: no project name is clipped to "…"', geo.clipped.length === 0, geo.clipped.join(', '));
+ok('phone: the name is big (≥16px)', geo.small.length === 0, geo.small.join(', '));
+ok('phone: the name has its line to itself', geo.sharedLine.length === 0, geo.sharedLine.join(', '));
+ok('phone: nothing sits under the corner 🔥/⏏ buttons', geo.covered.length === 0, geo.covered.join(', '));
+await ph.screenshot({ path: join(HERE, 'rungprobe-phone.png'), fullPage: false });
+await ph.close();
+
 await page.screenshot({ path: join(HERE, 'rungprobe.png') });
 await browser.close();
 console.log(bad ? `\nFAILED (${bad})` : '\nPASS — the projects rung holds still while it repaints.');
