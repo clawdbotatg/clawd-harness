@@ -8768,7 +8768,7 @@ function buildRec() {
     if (recOn && recEngine === 'sr') { try { r.start(); } catch {} return; }   // Chrome auto-stops; keep alive while on
     const h = recEndHook; recEndHook = null; if (h) setTimeout(h, 150);        // the stop's last final lands just after onend
   };
-  r.onerror = (ev) => { if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') stopRec(); };
+  r.onerror = (ev) => { if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') { micSay('no speech service here (' + ev.error + ')'); stopRec(); } };
   return r;
 }
 
@@ -8930,6 +8930,13 @@ function dgUrl(creds) {
   sttTerms().forEach(t => q.append('keyterm', t));
   return u.toString();
 }
+// A failure the user can see: the composer's placeholder for a few seconds. In the
+// 📱 app there is no other surface — before 09-18 a dead mic just did nothing.
+function micSay(msg) {
+  dgLog('user sees: ' + msg);
+  const was = box.placeholder; box.placeholder = '🎤 ' + msg;
+  setTimeout(() => { if (box.placeholder === '🎤 ' + msg) box.placeholder = was; }, 6000);
+}
 function dgFallback(d) {
   // this hold lost its Deepgram path (mic denied, socket refused) → Web Speech
   // finishes the hold, the creds are dropped and re-asked for next time
@@ -8937,11 +8944,12 @@ function dgFallback(d) {
   dgLog('fallback: recOn=' + recOn + ' engine=' + recEngine + ' SR=' + !!SR);
   if (!recOn || recEngine !== 'dg') return;
   sttCreds = null; sttAsk();
+  micSay('Deepgram socket refused ' + (d ? d.tries : 0) + '×' + (SR ? ' — trying the browser' : ''));
   if (!SR) { stopRec(); return; }
   recEngine = 'sr'; rec = rec || buildRec(); try { rec.start(); } catch {}
 }
 function dgStart(creds) {
-  const d = { ws: null, src: null, proc: null, stream: null, q: [], open: false, done: false, got: false };
+  const d = { ws: null, src: null, proc: null, stream: null, q: [], open: false, done: false, got: false, tries: 0, creds };
   dg = d;
   let streamP;
   try {
@@ -8950,17 +8958,48 @@ function dgStart(creds) {
     if (!dgCtx || dgCtx.state === 'closed') dgCtx = new AC();   // a NEW context in the gesture: the one path iOS always honors
     if (dgCtx.state !== 'running') { try { dgCtx.resume(); } catch {} }
     dgLog('start: ctx=' + dgCtx.state + ' ' + dgCtx.sampleRate + 'Hz mediaDevices=' + !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) + ' proto=' + creds.proto);
-    d.ws = new WebSocket(dgUrl(creds), [creds.proto, creds.secret]);
+    dgOpen(d);
   } catch (e) { dgLog('start threw: ' + (e && e.message)); dgFallback(d); return; }
-  const w = d.ws;
+  streamP.then(stream => {
+    dgLog('mic stream ok (' + stream.getTracks().map(t => t.label + ':' + t.readyState).join(',') + ') ctx=' + dgCtx.state + (dg !== d || d.done ? ' — hold already over' : ''));
+    if (dg !== d || d.done) { stream.getTracks().forEach(t => t.stop()); return; }
+    d.stream = stream;
+    d.src = dgCtx.createMediaStreamSource(stream);
+    d.proc = dgCtx.createScriptProcessor(4096, 1, 1);
+    const ratio = dgCtx.sampleRate / 16000;
+    let ticks = 0; const t0 = Date.now();
+    d.proc.onaudioprocess = (ev) => {
+      if (d.done) return;
+      ticks++;
+      const inp = ev.inputBuffer.getChannelData(0), n = Math.floor(inp.length / ratio);
+      const out = new Int16Array(n);
+      for (let i = 0; i < n; i++) { const v = Math.max(-1, Math.min(1, inp[Math.floor(i * ratio)])); out[i] = v < 0 ? v * 0x8000 : v * 0x7FFF; }
+      if (d.open) { try { d.ws.send(out.buffer); } catch {} }
+      else if (d.q.length < 400) d.q.push(out.buffer);   // ≤ ~50 s queued while connecting (or reconnecting)
+    };
+    d.src.connect(d.proc); d.proc.connect(dgCtx.destination);   // a processor only ticks when wired to the sink
+    const tickLog = setInterval(() => { if (d.done) { clearInterval(tickLog); return; } dgLog('audio: ' + ticks + ' buffers in ' + (Date.now() - t0) + ' ms, ctx=' + dgCtx.state + ' open=' + d.open); if (Date.now() - t0 > 6000) clearInterval(tickLog); }, 2000);
+  }).catch((e) => { dgLog('mic stream FAILED: ' + (e && (e.name + ' ' + e.message))); dgFallback(d); });
+}
+// One socket attempt for hold `d`. A socket that dies before the first result is
+// reopened up to DG_TRIES times (0.3 / 0.6 / 1.2 s) with the mic kept and the
+// audio queued — the 📱 app's first socket dropped (1006) the instant the mic
+// stream came up, and one failure used to end the hold (09-18). Same policy as
+// the dictate app (`socketTries`).
+const DG_TRIES = 4;
+function dgOpen(d) {
+  d.tries++;
+  const w = new WebSocket(dgUrl(d.creds), [d.creds.proto, d.creds.secret]);
+  d.ws = w; d.open = false;
   w.onopen = () => {
+    if (d.ws !== w) return;
     d.open = true;
-    dgLog('socket open, ' + d.q.length + ' queued buffers');
+    dgLog('socket open (try ' + d.tries + '), ' + d.q.length + ' queued buffers');
     d.q.forEach(b => { try { w.send(b); } catch {} }); d.q = [];
     if (d.done) { try { w.send(JSON.stringify({ type: 'CloseStream' })); } catch {} }   // released before we connected
   };
   w.onmessage = (e) => {
-    if (dg !== d) return;                      // a newer hold owns the box now
+    if (dg !== d || d.ws !== w) return;        // a newer hold owns the box now
     let m; try { m = JSON.parse(e.data); } catch { return; }
     if (m.type !== 'Results') return;
     if (!d.got) dgLog('first result: "' + ((((m.channel || {}).alternatives || [])[0] || {}).transcript || '').slice(0, 30) + '"');
@@ -8970,32 +9009,16 @@ function dgStart(creds) {
     else recApply('', t);
   };
   w.onclose = (e) => {
+    if (d.ws !== w) return;
     d.open = false;
-    dgLog('socket closed code=' + (e && e.code) + ' got=' + d.got + ' done=' + d.done);
-    if (dg === d && !d.done && !d.got) dgFallback(d);   // refused before a single result → finish with Web Speech
+    dgLog('socket closed code=' + (e && e.code) + ' got=' + d.got + ' done=' + d.done + ' try=' + d.tries);
+    if (dg === d && !d.done && !d.got) {
+      if (d.tries < DG_TRIES) { setTimeout(() => { if (dg === d && !d.done) { try { dgOpen(d); } catch (err) { dgLog('reopen threw: ' + err); dgFallback(d); } } }, 300 * Math.pow(2, d.tries - 1)); return; }
+      dgFallback(d);                           // refused every time → finish with Web Speech (where there is one)
+    }
     const h = d.onDone; d.onDone = null; if (h) h();      // the flush is over: a waiting send may go
   };
   w.onerror = () => {};
-  streamP.then(stream => {
-    dgLog('mic stream ok (' + stream.getTracks().map(t => t.label + ':' + t.readyState).join(',') + ') ctx=' + dgCtx.state + (dg !== d || d.done ? ' — hold already over' : ''));
-    if (dg !== d || d.done) { stream.getTracks().forEach(t => t.stop()); return; }
-    d.stream = stream;
-    d.src = dgCtx.createMediaStreamSource(stream);
-    d.proc = dgCtx.createScriptProcessor(4096, 1, 1);
-    const ratio = dgCtx.sampleRate / 16000;
-    d.proc.onaudioprocess = (ev) => {
-      if (d.done) return;
-      const inp = ev.inputBuffer.getChannelData(0), n = Math.floor(inp.length / ratio);
-      const out = new Int16Array(n);
-      for (let i = 0; i < n; i++) { const v = Math.max(-1, Math.min(1, inp[Math.floor(i * ratio)])); out[i] = v < 0 ? v * 0x8000 : v * 0x7FFF; }
-      if (d.open) { try { w.send(out.buffer); } catch {} }
-      else if (d.q.length < 400) d.q.push(out.buffer);   // ≤ ~50 s queued while connecting
-    };
-    d.src.connect(d.proc); d.proc.connect(dgCtx.destination);   // a processor only ticks when wired to the sink
-    let ticks = 0; const t0 = Date.now();
-    const tickLog = setInterval(() => { if (d.done) { clearInterval(tickLog); return; } dgLog('audio: ' + ticks + ' buffers in ' + (Date.now() - t0) + ' ms, ctx=' + dgCtx.state + ' open=' + d.open); if (Date.now() - t0 > 6000) clearInterval(tickLog); }, 2000);
-    const proc0 = d.proc.onaudioprocess; d.proc.onaudioprocess = (ev) => { ticks++; proc0(ev); };
-  }).catch((e) => { dgLog('mic stream FAILED: ' + (e && (e.name + ' ' + e.message))); dgFallback(d); });
 }
 function dgStop() {
   const d = dg; if (!d || d.done) return;
