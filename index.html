@@ -8903,7 +8903,11 @@ function sttAsk() {
 // can read) → the page's own socket to api.deepgram.com, keyterm-biased. Audio
 // captured before the socket opens is queued so the first word isn't lost; the
 // AudioContext is made IN the press gesture (iOS won't resume one made later)
-// and kept for the page's life. Results land through recApply like Web Speech's.
+// and kept for the page's life — but SUSPENDED between holds: a running context
+// keeps WebKit's audio session active, and in the 📱 clawd harness app that
+// session interrupts the clawd dictate app's background mic every time the
+// harness comes to the front (the phone keyboard's "error: wake" flip-flop,
+// 09-18). Results land through recApply like Web Speech's.
 let dg = null, dgCtx = null;
 function dgUrl(creds) {
   const u = new URL('wss://api.deepgram.com/v1/listen'), q = u.searchParams;
@@ -8976,6 +8980,7 @@ function dgStop() {
   d.done = true;                               // dg stays = d: trailing finals still land (guarded)
   try { if (d.proc) d.proc.disconnect(); if (d.src) d.src.disconnect(); } catch {}
   if (d.stream) d.stream.getTracks().forEach(t => t.stop());
+  if (dgCtx && dgCtx.state === 'running') { try { dgCtx.suspend(); } catch {} }   // let WebKit drop its audio session (see above)
   const w = d.ws;
   if (!w) return;
   if (d.open) { try { w.send(JSON.stringify({ type: 'CloseStream' })); } catch {} }   // flush → finals → server closes
