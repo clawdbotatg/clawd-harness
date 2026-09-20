@@ -47,6 +47,8 @@ class FakeSession:
         self.last_handoff = 0.0
         self.last_active = 0.0
         self.eng = FakeEng()
+        self.hook_count = self.hooks_at_prompt = 0   # nothing eaten → no redelivery
+        self.last_prompt = ""
 
 
 class FakeAccount:
@@ -78,6 +80,7 @@ class FakeMgr:
         return None                           # no optional moves unless a test says so
 
     sweep = server.SessionManager._handoff_sweep
+    _finish_rescue = server.SessionManager._finish_rescue
 
 
 def build(n_drained=10, batch=None):

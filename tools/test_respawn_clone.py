@@ -72,6 +72,12 @@ def main():
     diff = {k: (a[k], b.get(k)) for k in a if a[k] != b.get(k)}
     assert not diff, f"respawn clone dropped/changed persisted fields: {diff}"
 
+    # Live state that must ride too: the 📑 wrap arm (2026-09-20).
+    old.wrap_arm()
+    armed = old.clone_for_respawn()
+    assert armed.wrap_armed() and armed.wrap_turns_left == old.wrap_turns_left, \
+        "the wrap arm did not survive the respawn clone"
+
     # Overrides apply — and don't bleed into anything else.
     c2 = old.clone_for_respawn(account="elsewhere", resuming=True)
     assert c2.account == "elsewhere" and c2.resuming is True

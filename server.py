@@ -3469,6 +3469,13 @@ class ClaudeSession:
         fresh = ClaudeSession(self.manager, **kw)
         fresh.last_handoff = self.last_handoff
         fresh._onboard_rescues = self._onboard_rescues
+        # The 📑 wrap arm too: a session handed off between the arm and its
+        # close must still be allowed to close itself (2026-09-20: the wrap
+        # prompt bounced off a wall; the replacement's harness-close would
+        # otherwise be refused as unarmed).
+        fresh.wrap_armed_at = self.wrap_armed_at
+        fresh.wrap_turns_left = self.wrap_turns_left
+        fresh.wrap_closing = self.wrap_closing
         # Live (non-persisted) state the respawn must also keep: the PTY
         # geometry. Not a ctor param — it belongs to whoever is viewing, not
         # to the session — but the replacement must open at the same dims
@@ -6275,16 +6282,38 @@ class SessionManager:
         if not acct:
             return 0.0
         now = time.time()
-        weekly = kind == "weekly"
-        resets = []
+        # The snapshot's own windows outrank the banner's wording: the wall
+        # is whichever window is FULL, and the pool is back only when every
+        # full window has reset. 2026-09-20: austinmax painted "weekly
+        # limit" (5h 3%, 7d 98%) yet was quarantined as a session wall for
+        # five hours — two days early. Only a snapshot with no full window
+        # (the 09-03 stale-47% case) falls back to the kind the scan read.
+        full, resets, seen = [], [], []
         for w in (acct.usage or {}).get("windows") or []:
             label = str(w.get("label", "")).lower()
-            if (weekly and label.startswith("7d")) or (not weekly and label == "5h"):
-                reset = _parse_reset(w.get("resets"))
-                if reset and reset > now:
-                    resets.append(reset)
-        fallback = WALL_WEEKLY_FALLBACK if weekly else WALL_SESSION_FALLBACK
-        until = (min(resets) + WALL_RESET_GRACE) if resets else (now + fallback)
+            reset = _parse_reset(w.get("resets"))
+            try:
+                used = float(w.get("used"))
+            except (TypeError, ValueError):
+                used = None
+            if used is not None:
+                seen.append(f"{label} {used:.0f}%")
+            if not reset or reset <= now:
+                continue
+            if used is not None and used >= SUB_HOT:
+                full.append((reset, label))
+            if (kind == "weekly" and label.startswith("7d")) \
+                    or (kind != "weekly" and label == "5h"):
+                resets.append(reset)
+        if full:
+            reset, label = max(full)
+            kind = "weekly" if label.startswith("7d") else "session"
+            until = reset + WALL_RESET_GRACE
+        elif resets:
+            until = min(resets) + WALL_RESET_GRACE
+        else:
+            until = now + (WALL_WEEKLY_FALLBACK if kind == "weekly"
+                           else WALL_SESSION_FALLBACK)
         pool = acct.org or ("\x00solo:" + acct.name)
         with self.lock:
             members = [a for a in self.accounts.values()
@@ -6295,8 +6324,8 @@ class SessionManager:
                     a.wall_kind = kind
         print(f"[accounts] {acct.name} pool quarantined after a confirmed "
               f"{kind} wall until "
-              f"{time.strftime('%m-%d %H:%M:%S', time.localtime(until))}",
-              flush=True)
+              f"{time.strftime('%m-%d %H:%M:%S', time.localtime(until))}"
+              + (f" ({' · '.join(seen)})" if seen else ""), flush=True)
         self.save_registry()
         return until
 
@@ -6940,6 +6969,7 @@ class SessionManager:
                     and now - s.last_handoff >= HANDOFF_COOLDOWN):
                 continue
             if s.account in drained:
+                stuck = False
                 if s.busy:
                     # `busy` with silent hooks on a dead plan = the limit screen ate
                     # the turn (no Stop ever comes) — stuck, not working. Reclaim it.
@@ -6949,6 +6979,7 @@ class SessionManager:
                           f"{int(now - s.last_active)}s on dead plan {s.account} — "
                           "treating as stuck", flush=True)
                     s.busy = False
+                    stuck = True
                 if blind:
                     cur = self.accounts.get(s.account)
                     if cur and cur.org and cur.org == best.org and not cur.broken:
@@ -6958,7 +6989,15 @@ class SessionManager:
                     continue
                 if blind:
                     self._blind_log(s, best, "stuck on a drained plan")
+                # What the dead plan ate rides along (2026-09-20: a wrap
+                # prompt bounced, rescue_limit_wall found nowhere to go, and
+                # this later move resumed the session with the prompt gone):
+                # a prompt that never got a hook is retyped, a turn the wall
+                # cut is continued — the tripwire's own heal.
+                bounced = (s.hook_count == s.hooks_at_prompt
+                           and bool(s.last_prompt.strip()))
                 self._handoff(s, best)
+                self._finish_rescue(s, bounced, stuck and not bounced)
                 continue
             if s.busy or blind:
                 continue                         # blind best: rescues only, no optional moves
@@ -7011,6 +7050,34 @@ class SessionManager:
                   f"{best.name}, {cap_left} still queued (batch cap "
                   f"{SUB_CAP_EVAC_BATCH}) — the rest follow next sweep",
                   flush=True)
+
+    def _finish_rescue(self, s, bounced, cut):
+        """After a sweep handoff of a session the wall stopped: retype the
+        prompt it ate (`bounced`) or 'continue' the turn it cut (`cut`), in
+        the background — the sweep runs on the poller thread and the fresh
+        claude takes up to ~20 s to come up. No-op when nothing was eaten or
+        the handoff declined."""
+        if not (bounced or (cut and LIMIT_CONTINUE)):
+            return
+        fresh = self.sessions.get(s.cid)
+        if fresh is s or not fresh or not fresh.alive:
+            return
+
+        def go():
+            fresh._started_evt.wait(20)
+            time.sleep(2)
+            if not fresh.alive:
+                return
+            if bounced:
+                print(f"[handoff {s.cid[:8]}] redelivering the prompt the dead "
+                      f"plan ate ({len(s.last_prompt)} chars) under "
+                      f"{fresh.account}", flush=True)
+                fresh.send_message(s.last_prompt)
+            else:
+                print(f"[handoff {s.cid[:8]}] turn was cut by the wall — "
+                      f"auto-continuing under {fresh.account}", flush=True)
+                fresh.send_message("continue")
+        threading.Thread(target=go, daemon=True).start()
 
     def _rebalance_win(self, name, best):
         """Reason string when an idle session on healthy pool `name` should

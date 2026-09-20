@@ -137,6 +137,80 @@ check("the eaten question is reposted exactly once on the replacement",
 check("a zero-turn wall requests a fresh replacement, not broken --resume",
       m.moved and m.moved[0][1] is True)
 
+print("\nthe wall is whichever window is full (2026-09-20):")
+am = acct("austinmax", 98.0, "ATG", 5 * 3600, 2 * 86400)
+am.usage["windows"][0]["used"] = 3.0        # 5h has room; the weekly is the wall
+m = manager(am, sub4)
+until = m._mark_pool_walled(am, "session")  # the scan misread the banner
+weekly_reset = server._parse_reset(am.usage["windows"][1]["resets"])
+check("quarantine runs to the WEEKLY reset, not the 5h one",
+      abs(until - (weekly_reset + server.WALL_RESET_GRACE)) < 1,
+      f"until={until - NOW:.0f}s")
+check("the recorded kind follows the full window", am.wall_kind == "weekly")
+both = acct("both", 100.0, "B", 30 * 60, 3 * 86400)   # 5h AND 7d full
+m = manager(both, sub4)
+until = m._mark_pool_walled(both, "session")
+check("every full window must reset — the later one wins",
+      abs(until - (server._parse_reset(both.usage["windows"][1]["resets"])
+                   + server.WALL_RESET_GRACE)) < 1)
+check("a snapshot with no full window keeps the scan's kind (the 09-03 case)",
+      ef.wall_kind == "session")
+
+print("\nthe sweep's rescue retypes what the dead plan ate:")
+dead = acct("austinmax", 98.0, "ATG", 5 * 3600, 2 * 86400)
+dead.walled_until = NOW + 3600
+good = acct("sub4b", 16.0, "OTHER2", 40 * 60, 4 * 86400)
+m = manager(dead, good)
+for name in ("_handoff_sweep", "_finish_rescue"):
+    setattr(m, name, getattr(server.SessionManager, name).__get__(m))
+m._rebalance_win = lambda name, best: None
+m._blind_log = lambda *args: None
+m._blind_alternative = lambda *args, **kwargs: None
+
+
+class Eng2:
+    routes_accounts = True
+
+    def bg_probe(self, s):
+        return False
+
+
+def parked(cid, hook_count, hooks_at_prompt, last_prompt):
+    return types.SimpleNamespace(
+        cid=cid, account="austinmax", alive=True, busy=False, bg=False,
+        ceremony=False, last_handoff=0.0, last_active=0.0, eng=Eng2(),
+        hook_count=hook_count, hooks_at_prompt=hooks_at_prompt,
+        last_prompt=last_prompt)
+
+
+eaten = parked("eaten", 5, 5, "write the handoff")   # no hook since the send
+ran = parked("ran", 6, 5, "already answered")        # a Stop came — it ran
+m.sessions = {eaten.cid: eaten, ran.cid: ran}
+sent2 = []
+
+
+def handoff2(old, target, why=None, fresh_if_empty=False):
+    fresh = types.SimpleNamespace(
+        cid=old.cid, account=target.name, alive=True, _started_evt=Ready(),
+        send_message=lambda text: sent2.append((old.cid, text)))
+    m.sessions[old.cid] = fresh
+
+
+m._handoff = handoff2
+old_sleep = server.time.sleep
+try:
+    server.time.sleep = lambda _seconds: None
+    m._handoff_sweep()
+finally:
+    server.time.sleep = old_sleep
+deadline = time.time() + 3
+while time.time() < deadline and not sent2:
+    time.sleep(0.05)
+check("both parked sessions were moved",
+      all(m.sessions[c].account == "sub4b" for c in ("eaten", "ran")))
+check("the eaten prompt is retyped on the replacement",
+      sent2 == [("eaten", "write the handoff")], f"sent={sent2}")
+
 print()
 if FAILED:
     print(f"FAILED: {len(FAILED)} — {FAILED}")
