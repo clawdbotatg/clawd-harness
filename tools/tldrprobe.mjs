@@ -95,7 +95,19 @@ await page.evaluate(()=>new Promise(res=>term.write('\x1b[2J\x1b[H* Churned for 
 await page.waitForTimeout(150);
 const h0 = await page.evaluate(()=>{ positionTldr(); return {hidden:tldrEl.hidden, h:tldrEl.getBoundingClientRect().height, footer:document.querySelector('footer').getBoundingClientRect().height, term:document.getElementById('term').getBoundingClientRect().height}; });
 check('mode on but no summary yet: no overlay', h0.hidden, JSON.stringify(h0));
-// …and no chrome either: the hold slides claude's bottom rows past #term's clip edge (short regime)
+// …but a session with NO prompt yet shows everything: a startup dialog (bypass accept,
+// "continue?") sits in the rows the hold would hide, and nothing flags it as waiting
+const fresh = await page.evaluate((CID)=>{ handleMachineJson('clawd-atg',{type:'sessions',sessions:[
+    {cid:CID,pid:'p1',title:'probe tldr',desc:'',promptCount:0,alive:true,busy:false,autopilot:false,pilotStatus:'',pilotRounds:0,lastActive:Date.now()/1000,promptedAt:0}]});
+  applyTldrHold(); const rowsEl=term.element.querySelector('.xterm-rows');
+  let last=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) last=i;
+  const tb=document.getElementById('term').getBoundingClientRect().bottom;
+  return {hold:tldrHold(), statusBottom:rowsEl.children[last].getBoundingClientRect().bottom, promptBottom:rowsEl.children[last-2].getBoundingClientRect().bottom, termBottom:tb}; }, CID);
+check('no prompt yet: no hold — the ❯ box and status line stay on screen', fresh.hold===0 && fresh.statusBottom<=fresh.termBottom && fresh.promptBottom<=fresh.termBottom, JSON.stringify(fresh));
+await page.evaluate((CID)=>{ handleMachineJson('clawd-atg',{type:'sessions',sessions:[
+    {cid:CID,pid:'p1',title:'probe tldr',desc:'',promptCount:2,alive:true,busy:true,autopilot:false,pilotStatus:'',pilotRounds:0,lastActive:Date.now()/1000,promptedAt:Date.now()/1000}]}); }, CID);
+await page.waitForTimeout(100);
+// …and no chrome either once it has taken a prompt: the hold slides claude's bottom rows past #term's clip edge (short regime)
 const hold0 = await page.evaluate(()=>{ applyTldrHold(); const rowsEl=term.element.querySelector('.xterm-rows');
   let last=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) last=i;
   const tb=document.getElementById('term').getBoundingClientRect().bottom;

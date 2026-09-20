@@ -1759,6 +1759,12 @@ function tldrHold() {
   if (typeof tldrOn === 'undefined' || !tldrOn || currentView() !== 'tty') return 0;
   const s = currentCid && allSessions().find(x => x.cid === currentCid);
   if (!s || s.waiting) return 0;
+  // A session that hasn't taken a prompt yet shows ALL of itself: claude's startup
+  // dialogs (the bypass-permissions accept, "continue?" after an update…) render in
+  // exactly the rows the hold would hide, and none of them flags `waiting` — the
+  // reader saw a session that looked idle and couldn't see the question (Austin,
+  // 09-20). The chrome goes below the fold once the session is doing work.
+  if (!s.promptCount) return 0;
   // No summary: hide all the chrome rows. With one: hide the rows the text doesn't
   // need, so the box is only as tall as its text and the content above comes down
   // to meet it — no black under the summary (2026-09-05, complaint #3).
