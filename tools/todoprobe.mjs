@@ -4,10 +4,11 @@
 //   cd tools && node todoprobe.mjs
 //
 // What has to hold (fleet mode, iPhone emulation, REAL taps at natural pace):
-//   1. IDLE STATE: no overlay anywhere until an iron is scoped AND toggled on;
-//      the iron page's inline list is hidden off the iron page
-//   2. the iron row carries a ☑ button with the open count; a real tap opens
-//      the overlay (a bottom sheet on touch), remembered per iron
+//   1. IDLE STATE: no overlay anywhere until an iron is scoped; the iron page's
+//      inline list is hidden off the iron page
+//   2. scoped, the list is UP BY DEFAULT (bottom sheet on touch); the iron
+//      row's ☑ (open count) toggles it, remembered per iron; ➤ session seeds
+//      the composer with where the list is + the harness-todo pointer
 //   3. adding sends an item-level `todo` frame (add, iron, text, the session's
 //      projectKey) — never the whole list — and the `todos` snapshot renders it
 //   4. repaint, don't rebuild: a snapshot mid-typing keeps the box's text and
@@ -91,9 +92,11 @@ await page.evaluate(()=>openIron('ix1'));
 await page.waitForTimeout(400);
 const scoped = await page.evaluate(()=>{ const b=document.getElementById('ironrow').querySelector('.irtodo');
   return { view: currentView(), scope: ironScope, btn: b && b.textContent.trim(), lit: b && b.classList.contains('on'), overlay: document.getElementById('irontodo').hidden }; });
-check('scoped: the row carries ☑ (no count yet), overlay still hidden by default', scoped.view==='tty' && scoped.scope==='ix1' && scoped.btn==='☑' && !scoped.lit && scoped.overlay, JSON.stringify(scoped));
+check('scoped: the row carries ☑ (no count yet), lit, and the list is UP BY DEFAULT', scoped.view==='tty' && scoped.scope==='ix1' && scoped.btn==='☑' && scoped.lit && !scoped.overlay, JSON.stringify(scoped));
 
-// 2. a real tap opens the sheet
+// 2. a real tap on ☑ closes it, a second one brings it back
+await tapEl(page, '#ironrow .irtodo');
+check('☑ tap hides the sheet', await page.evaluate(()=>document.getElementById('irontodo').hidden && !todoOpenPref('ix1')));
 await tapEl(page, '#ironrow .irtodo');
 const opened = await page.evaluate(()=>{ const el=document.getElementById('irontodo'), r=el.getBoundingClientRect(), L=document.getElementById('left').getBoundingClientRect();
   return { hidden: el.hidden, lit: document.getElementById('ironrow').querySelector('.irtodo').classList.contains('on'), pref: todoOpenPref('ix1'),
@@ -148,6 +151,9 @@ check('the echo strikes it, sinks it under the open ones, updates counts, shows 
       after.order.join()==='t2,t1' && after.done && after.chk==='☑' && after.count==='1 open · 1 done' && after.btn==='☑ 1' && !after.foot, JSON.stringify(after));
 await tapEl(page, '#irontodo .tdi[data-id="t2"] .tdtext');
 check('tapping the words seeds the composer', await page.evaluate(()=>document.getElementById('box').value==='left by claude at wrap'));
+await tapEl(page, '#irontodo .tdtell');
+const tell = await page.evaluate(()=>document.getElementById('box').value);
+check('➤ session seeds the composer with where the list is + the harness-todo pointer', /"voice" iron/.test(tell) && /harness-todo add/.test(tell) && /still open/.test(tell), tell);
 await page.evaluate(()=>{ box.value=''; box.dispatchEvent(new Event('input',{bubbles:true})); window.__sent.length=0; });
 await tapEl(page, '#irontodo .tdfoot button');
 check('clear done sends clear', await page.evaluate(()=>{ const f=window.__frames().find(x=>x.type==='todo'); return f && f.op==='clear' && f.iron==='ix1'; }));
@@ -166,7 +172,7 @@ check('leaving the scope hides the sheet but keeps the preference', !left.open &
 await page.evaluate(()=>openIron('ix1'));
 await page.waitForTimeout(300);
 check('re-entering the iron brings the sheet straight back', await page.evaluate(()=>!document.getElementById('irontodo').hidden));
-await tapEl(page, '#irontodo .tdhead button');
+await tapEl(page, '#irontodo .tdhead button:not(.tdtell)');
 const closed = await page.evaluate(()=>({ open: !document.getElementById('irontodo').hidden, lit: document.querySelector('#ironrow .irtodo').classList.contains('on'), pref: todoOpenPref('ix1') }));
 check('✕ closes it and un-lights ☑ (remembered off)', !closed.open && !closed.lit && !closed.pref, JSON.stringify(closed));
 
@@ -197,9 +203,7 @@ const dpage = await newPage(fleetHtml, 'https://fleet.probe/', { viewport:{width
 await seedFleet(dpage);
 await dpage.evaluate(t=>window.__relayRx({type:'todos',todos:t}), T2);
 await dpage.evaluate(()=>{ openIron('ix1'); });
-await dpage.waitForTimeout(400);
-await dpage.click('#ironrow .irtodo');
-await dpage.waitForTimeout(300);
+await dpage.waitForTimeout(400);                       // up by default — no tap needed
 const desk = await dpage.evaluate(()=>{ const el=document.getElementById('irontodo'), r=el.getBoundingClientRect(), L=document.getElementById('left').getBoundingClientRect();
   return { hidden: el.hidden, column: Math.abs(r.right-L.right)<2 && Math.abs(r.top-L.top)<2 && Math.abs(r.bottom-L.bottom)<2 && Math.round(r.width)===300,
            tldrRight: getComputedStyle(document.getElementById('tldr')).right, rows: document.querySelectorAll('#irontodo .tdi').length }; });
@@ -219,8 +223,6 @@ await xpage.evaluate(()=>{
 await xpage.waitForTimeout(300);
 await xpage.evaluate(()=>{ openIron('i9'); });
 await xpage.waitForTimeout(300);
-await xpage.click('#ironrow .irtodo');
-await xpage.waitForTimeout(200);
 await xpage.evaluate(()=>{ window.__sent.length=0; });
 await xpage.fill('#irontodo .tdadd input', 'direct add');
 await xpage.press('#irontodo .tdadd input', 'Enter');

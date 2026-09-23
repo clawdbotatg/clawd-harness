@@ -178,7 +178,9 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   `/self/todo` → the local irons, or on a fleet box the relay's
   `/todo/agent`, which folds the project's key against the irons'
   member keys via `fleet/projkey.py` — the one Python copy of `projectKey`,
-  the worker uses it too). Agent writes are opt-in: when asked, and the 📑
+  the worker uses it too); the `share/skills/iron-todo` skill (kit-installed
+  on every box, re-synced on any `share/` pull) tells a session when to use
+  it. Agent writes are opt-in: when asked, and the 📑
   wrap prompt says to check off / add what's still open. `test_todo.py`,
   `fleet/test_todo_store.py`, `fleet/test_relay_todos.py`, `tools/todoprobe.mjs`.
 

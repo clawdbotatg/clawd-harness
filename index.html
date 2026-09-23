@@ -657,6 +657,8 @@
   .tdhead button, .tdfoot button { background:transparent; border:1px solid var(--edge); border-radius:6px;
                      color:var(--dim); font:inherit; font-size:12px; padding:3px 8px; cursor:pointer; }
   .tdhead button:hover, .tdfoot button:hover { color:var(--ink); border-color:var(--edge-hi); }
+  .tdhead .tdtell { color:var(--accent); font-family:var(--mono); font-size:11px; white-space:nowrap; }
+  .tdhead .tdtell[hidden] { display:none; }
   .tdadd { display:flex; gap:6px; padding:4px 10px 8px; flex:0 0 auto; }
   .tdadd input { flex:1 1 auto; min-width:0; background:var(--bg); color:var(--ink); border:1px solid var(--edge);
                  border-radius:6px; padding:6px 8px; font:inherit; font-size:13px; }
@@ -9295,9 +9297,9 @@ function todoSend(op, iid, extra) {
   const f = Object.assign({ type: 'todo', op, iron: iid }, extra || {});
   if (FLEET) relaySend(f); else hsend(f);
 }
-// the panel's open/closed state is remembered PER IRON on this device — it
-// stays up as you hop between the iron's sessions, and comes back tomorrow
-function todoOpenPref(iid) { try { return localStorage.getItem('cc_todo_open_' + iid) === '1'; } catch { return false; } }
+// the panel is UP BY DEFAULT (Austin, 09-23) and its state is remembered PER
+// IRON on this device — ✕ keeps it down for that iron until ☑ brings it back
+function todoOpenPref(iid) { try { return localStorage.getItem('cc_todo_open_' + iid) !== '0'; } catch { return true; } }
 function todoSetOpen(iid, on) { try { localStorage.setItem('cc_todo_open_' + iid, on ? '1' : '0'); } catch {} }
 function todoToggle(iid) { todoSetOpen(iid, !todoOpenPref(iid)); renderTodoPanel(); }
 function todoCurrentKey() {           // the open session's project → the item remembers where it came from
@@ -9313,6 +9315,11 @@ function todoProjName(key) {          // a short project label for an item's chi
   const k = key.startsWith('name:') ? key.slice(5) : key;
   return k.split('/').pop().split(':').pop();
 }
+function todoTellText(iron) {
+  return 'This project is in the "' + iron.title + '" iron. That iron has a shared to-do list, reachable from here with ' +
+    'the `harness-todo` CLI on your PATH (the iron-todo skill): `harness-todo` shows it, `harness-todo add <text>` adds one item, ' +
+    '`harness-todo done <words>` checks one off. Add everything still open from this session to it, one short item per task.';
+}
 // One structure for both hosts (the overlay + the iron page), built once.
 function todoBuild(root, closable) {
   if (root._todoBuilt) return;
@@ -9321,6 +9328,16 @@ function todoBuild(root, closable) {
   const title = document.createElement('span'); title.className = 'tdtitle'; head.appendChild(title);
   const count = document.createElement('span'); count.className = 'tdcount'; head.appendChild(count);
   if (closable) {
+    // ➤ hand the OPEN SESSION the pointer: claude inside the tty doesn't know
+    // it's in an iron, so this seeds the composer with where the list is and
+    // how to write to it (the harness-todo CLI / iron-todo skill) plus the
+    // usual ask — edit or dictate more, then send
+    const tell = document.createElement('button'); tell.className = 'tdtell'; tell.textContent = '➤ session';
+    tell.title = 'put a note in the composer telling this session where this list is and how to add to it';
+    tell.onclick = () => { const iron = root._iid && ironById(root._iid); if (!iron || !currentCid) return;
+      box.value = todoTellText(iron); box.dispatchEvent(new Event('input', { bubbles: true }));
+      if (!isTouch) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); } };
+    head.appendChild(tell);
     const x = document.createElement('button'); x.textContent = '✕'; x.title = 'hide the list (☑ in the iron row brings it back)';
     x.onclick = () => { if (root._iid) { todoSetOpen(root._iid, false); renderTodoPanel(); } };
     head.appendChild(x);
@@ -9359,6 +9376,7 @@ function todoBuild(root, closable) {
 function renderTodoInto(root, iron) {
   const d = root._td; root._iid = iron.id;
   d.title.textContent = '☑ ' + iron.title;
+  const tell = root.querySelector('.tdtell'); if (tell) tell.hidden = !(currentView() === 'tty' && currentCid);
   const items = todoItems(iron.id);
   const open = items.filter(i => !i.done), done = items.filter(i => i.done);
   d.count.textContent = open.length ? (open.length + ' open' + (done.length ? ' · ' + done.length + ' done' : '')) : (done.length ? done.length + ' done' : '');

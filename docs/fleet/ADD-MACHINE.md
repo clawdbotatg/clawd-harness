@@ -122,9 +122,10 @@ cd ~/clawd/clawd-harness && python3 -c "import server; print('naming on:', bool(
 ### Step 1c — place the todo token (`~/.clawd-todo.env`)
 
 The harness ships a machine-level agent kit from the repo's `share/` dir at
-every boot: the **todo skill** (Austin's shared list at `todo.atg.link`) into
-`~/.claude/skills/` (fanned into every account dir by the shared-paths
-symlink) and the **`todo` CLI** into `~/bin/`. Those arrive with the clone —
+every boot (and again whenever a pull changes `share/`): the **todo skill**
+(Austin's shared list at `todo.atg.link`) and the **iron-todo skill** (the
+☑ per-iron list, `harness-todo`) into `~/.claude/skills/` (fanned into every
+account dir by the shared-paths symlink) and the **`todo` CLI** into `~/bin/`. Those arrive with the clone —
 but the **token does not** (the repo is public). Until you place it, every
 session on this machine knows *about* the list but can't reach it, and the
 boot log warns: `[kit] ⚠ todo skill is installed but ~/.clawd-todo.env is

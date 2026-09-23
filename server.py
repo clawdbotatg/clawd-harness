@@ -10264,9 +10264,22 @@ class _RestartGate:
         return f"{self.path.name} changed"
 
 
+def _share_sig():
+    """Fingerprint of share/ (paths + mtimes): a pull that only touches the
+    agent kit must land on this box without a restart — the kit synced at
+    boot only, so a new skill sat in the checkout unread until the next
+    server.py change (2026-09-23, the iron-todo skill)."""
+    try:
+        return tuple(sorted((str(f.relative_to(SHARE_DIR)), f.stat().st_mtime)
+                            for f in SHARE_DIR.rglob("*") if f.is_file()))
+    except OSError:
+        return ()
+
+
 def watch_ui():
     last = {}
     gate = _RestartGate(RESTART_FILES[0])        # server.py: committed + compiles, or wait
+    share_sig = _share_sig()
     for f in WATCH_FILES + RESTART_FILES:
         try: last[f] = f.stat().st_mtime
         except OSError: last[f] = 0
@@ -10286,6 +10299,10 @@ def watch_ui():
                 last[f] = m
                 print(f"[watch] {f.name} changed → reloading browsers", flush=True)
                 MGR.broadcast_all({"type": "reload"})
+        sig = _share_sig()
+        if sig != share_sig:                     # share/ pulled → re-sync the kit, no restart
+            share_sig = sig
+            _sync_shared_kit()
         for f in RESTART_FILES:
             try: m = f.stat().st_mtime
             except OSError: continue
