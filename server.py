@@ -1012,6 +1012,16 @@ SUB_LOGIN_HORIZON = float(os.environ.get("SUB_LOGIN_HORIZON", "1800"))
 # assistant transcript lines (CLI-generated text, not a model) and
 # confirm-gated on the credential store, so quoting it is harmless.
 _LOGIN_EXPIRED_RE = re.compile(r"login expired|please run /login", re.I)
+# The CLI's reply when a limit (incl. a MODEL-scoped one: "You've reached your
+# Fable limit. Run /usage-credits to continue or switch models with /model.")
+# eats a prompt — also a <synthetic> assistant line with ordinary hooks, so the
+# send watchdog sees a healthy turn and only the PTY scan was left, which the
+# ink paint can defeat (2026-09-23: two head sessions sat on it on sub4, 7d
+# fable 100%, with the EF pool at 36% on the same box). Transcript text is the
+# CLI's own words, not a rendering — matched on <synthetic> lines only and
+# confirm-gated by rescue_limit_wall, so quoting it is harmless.
+_LIMIT_SYNTH_RE = re.compile(
+    r"you.?ve (?:hit|reached) your [a-z0-9 .-]{0,32}limit", re.I)
 # Send watchdog: every delivered message must produce a UserPromptSubmit hook
 # within seconds. A hard-walled CLI answers with its limit line and fires NO
 # hook at all (proven live 2026-07-12 03:2x: send → hook-silent 881s → only
@@ -3494,6 +3504,14 @@ class ClaudeSession:
         self.hooks_at_prompt = 0                  # hook_count when it landed — "did that turn ever progress?"
         self._limit_raw = b""                     # rolling RAW PTY bytes, for the limit banner/modal scan
         self._limit_seen_at = 0.0                 # cooldown anchor for banner-triggered rescues
+        # The PTY limit scan arms on the first Enter into THIS process: a
+        # --resume repaints the old conversation, and a limit line in that
+        # history is not a wall now — worse, its confirm meets the resume
+        # stampede's 429s, and a 429 is believed ("the banner is the
+        # evidence"), which quarantines a healthy pool. A real wall answers
+        # a prompt, and every prompt arrives through write().
+        self._limit_armed = False
+        self._launched_at = time.time()           # transcript lines older than this are history, not live
         self._login_gone_seen = 0.0               # cooldown anchor for the login-expired rescue
         self._onboard_tail = ""                   # rolling de-ANSI'd PTY text, for the onboarding-screen scan
         self._onboard_deadline = 0.0              # scan window end; start() arms it, a match disarms it
@@ -3854,6 +3872,7 @@ class ClaudeSession:
         return True
 
     def start(self):
+        self._launched_at = time.time()          # _live_line: older transcript lines are history
         master, slave = pty.openpty()
         # Open at the geometry this session already has — an in-place respawn
         # (handoff / onboarding heal) carries the viewer's dims across in
@@ -4330,6 +4349,9 @@ class ClaudeSession:
         # is also how the scan's own answering CR flips the event.
         self._gate_deadline = 0.0
         self._gate_resolved_evt.set()
+        if not self._limit_armed and b"\r" in data:
+            self._limit_armed = True             # a prompt is going in — walls from here are live
+            self._limit_raw = b""                # drop the resume repaint already buffered
         try:
             # Loop: os.write may return short (signal wakeup) even on a
             # blocking fd, and a silently dropped tail is a truncated prompt.
@@ -4596,6 +4618,8 @@ class ClaudeSession:
         the terminal's weird text': a needle match, not a parse."""
         if self.ceremony:
             return                               # sign-in ceremony: never rescued
+        if not self._limit_armed:
+            return                               # resume repaint — history, not a wall (ctor)
         # Buffer RAW bytes and re-strip the whole window each read (the
         # resume-gate lesson: a chunk boundary inside an escape sequence leaks
         # junk like "38;5;246m" into per-chunk flattened text). Two needles
@@ -4800,6 +4824,37 @@ class ClaudeSession:
                     # confirms against the store, so a quote is a no-op.
                     if '"<synthetic>"' in raw and _LOGIN_EXPIRED_RE.search(raw):
                         self._on_login_expired()
+                    elif '"<synthetic>"' in raw and _LIMIT_SYNTH_RE.search(raw) \
+                            and self._live_line(ev, raw):
+                        self._on_limit_transcript(raw)
+
+    def _live_line(self, ev, raw):
+        """True unless this transcript line predates this process — the
+        tailer streams a (re)attached file from the top, and a limit reply
+        from before the last respawn is history, not a wall now."""
+        try:
+            ts = _parse_reset(json.loads(raw).get("timestamp"))
+        except (ValueError, AttributeError):
+            ts = None
+        return ts is None or ts >= self._launched_at - 5
+
+    def _on_limit_transcript(self, raw):
+        """The transcript just showed the CLI's limit reply (_LIMIT_SYNTH_RE).
+        Same rescue as the PTY banner — confirm against the endpoint, then
+        quarantine + move — but the turn RAN (ordinary hooks), so the
+        hook-count bounce test would drop the eaten prompt: pass it along."""
+        if self.ceremony or not self.eng.routes_accounts:
+            return
+        now = time.time()
+        if now - self._limit_seen_at < BOUNCE_COOLDOWN:
+            return
+        self._limit_seen_at = now
+        self._limit_kind = ("weekly" if re.search(r"weekly|fable|opus|sonnet|model",
+                                                  raw, re.I) else "session")
+        print(f"[session {self.cid[:8]}] limit reply in the transcript on "
+              f"{self.account} — confirming against the endpoint", flush=True)
+        threading.Thread(target=self.manager.rescue_limit_wall,
+                         args=(self, self.last_prompt), daemon=True).start()
 
     def _on_login_expired(self):
         """The transcript just showed the CLI's 'Login expired · Please run
@@ -7387,7 +7442,7 @@ class SessionManager:
               f"{', '.join(map(fmt, fresh)) or '-'}; stale-cool: "
               f"{', '.join(map(fmt, stale)) or '-'})", flush=True)
 
-    def rescue_limit_wall(self, s):
+    def rescue_limit_wall(self, s, prompt=None):
         """The CLI just painted its limit banner in this session's terminal
         (_scan_for_limit). That's the zero-lag wall signal — hooks are silent
         from here and the sweep is BUSY_STUCK away — but PTY text alone is
@@ -7438,6 +7493,15 @@ class SessionManager:
                 return                           # nowhere better to go — stay put
             self._blind_log(s, alt, "limit banner confirmed")
             best = alt
+        if prompt is not None:
+            # The transcript trip: the CLI ANSWERED the prompt with its limit
+            # line (hooks and all), so hook counts say "it ran" — it didn't.
+            s.busy = False
+            self.broadcast_accounts()
+            self._handoff(s, best, why="limit reply in the transcript; resuming under the fresh pool",
+                          fresh_if_empty=True)
+            self._redeliver(s, prompt)
+            return
         bounced = s.hook_count == s.hooks_at_prompt and s.last_prompt.strip()
         cut_midturn = s.busy and not bounced
         self.broadcast_accounts()

@@ -82,7 +82,7 @@ def fake_session(ceremony=False):
     rescued = []
     s = types.SimpleNamespace(
         cid="deadbeef-cafe", account="sub3", ceremony=ceremony,
-        _limit_raw=b"", _limit_seen_at=0.0, rescued=rescued,
+        _limit_raw=b"", _limit_seen_at=0.0, _limit_armed=True, rescued=rescued,
         manager=types.SimpleNamespace(rescue_limit_wall=rescued.append),
     )
     return s
