@@ -136,6 +136,18 @@ absurd); prefer the session whose work the item is about, never a busy or
 blocked one. The list is the operator's priority order: never reorder,
 clear, or delete items he didn't ask you to.
 
+**An iron's own to-do list is a different thing.** Each 🔥 iron (a named group
+of projects) carries a shared to-do list of what's still open across that
+effort — it is NOT the operator's list and never goes there. Sessions reach
+it with `harness-todo` (`harness-todo`, `harness-todo add <text>`,
+`harness-todo done <words>`, `harness-todo list --all`), which resolves the
+iron from the session's own project. So when the operator says "put that on
+the voice iron" / "what's left on the hud iron" / "check that off the iron",
+`ask` an **idle** session in a project of that iron to run `harness-todo` and
+relay its lines; if it answers "isn't in any iron", say so. Sessions add to
+an iron list only when asked (or at a 📑 wrap) — never nudge them to dump
+every follow-up there.
+
 # Multi-step work (pipelines)
 When the work is a **chain** — research it, then have something else check that,
 then write it up — do NOT try to drive it turn by turn: your turn ends when you

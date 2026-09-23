@@ -1,0 +1,38 @@
+#!/bin/sh
+# harness-todo — THIS session's iron to-do list (the shared list of the iron
+# — "irons in the fire", a named group of projects — that this project sits
+# in). Not the operator's personal list (that's `todo`). Use it only when the
+# operator asks, or at a 📑 wrap: check off what you finished, add what is
+# still open. The harness resolves the iron from this session's project; if
+# the project isn't in any iron it says so and there is nothing to do.
+#
+#   harness-todo                 list open items   ([ ] <id>  <text>)
+#   harness-todo list --all      include done items
+#   harness-todo add <text>      add one short imperative item (no quotes needed)
+#   harness-todo done <id|words> check off (a unique few words of the item work)
+#   harness-todo undone <id>     reopen
+#   harness-todo rm <id|words>   delete
+#   harness-todo clear           purge done items
+if [ -z "$HARNESS_TODO_URL" ]; then
+  echo "harness-todo: not running under the harness (HARNESS_TODO_URL unset)" >&2
+  exit 2
+fi
+cmd=${1:-list}; [ $# -gt 0 ] && shift
+case "$cmd" in
+  list|ls)
+    all=0; [ "${1:-}" = "--all" ] || [ "${1:-}" = "-a" ] && all=1
+    out=$(curl -sS -m 15 -X POST "$HARNESS_TODO_URL" --data-urlencode "op=list" --data-urlencode "all=$all" -w '\n%{http_code}') ;;
+  add)
+    [ $# -gt 0 ] || { echo "harness-todo add <text>" >&2; exit 2; }
+    out=$(curl -sS -m 15 -X POST "$HARNESS_TODO_URL" --data-urlencode "op=add" --data-urlencode "text=$*" -w '\n%{http_code}') ;;
+  done|undone|rm)
+    [ $# -gt 0 ] || { echo "harness-todo $cmd <id|words>" >&2; exit 2; }
+    out=$(curl -sS -m 15 -X POST "$HARNESS_TODO_URL" --data-urlencode "op=$cmd" --data-urlencode "ref=$*" -w '\n%{http_code}') ;;
+  clear)
+    out=$(curl -sS -m 15 -X POST "$HARNESS_TODO_URL" --data-urlencode "op=clear" -w '\n%{http_code}') ;;
+  *)
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac || { echo "harness-todo: could not reach the harness" >&2; exit 3; }
+code=$(printf '%s\n' "$out" | tail -n 1)
+printf '%s\n' "$out" | sed '$d'
+[ "$code" = "200" ] || exit 1

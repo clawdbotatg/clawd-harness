@@ -48,6 +48,7 @@ from urllib.parse import quote
 
 import buildinfo
 import fleet_ws
+import projkey
 import sysstats
 
 HERE = Path(__file__).resolve().parent
@@ -659,26 +660,15 @@ class Worker:
 
     @staticmethod
     def _norm_repo(url):
-        """Mirror of index.html normRepo(): canonicalize a git remote so the same
-        repo unifies across machines. MUST stay byte-identical to the JS or the
-        deep-link projectKey won't match the UI's."""
-        s = (url or "").strip()
-        if not s:
-            return ""
-        s = re.sub(r"^git@([^:]+):", r"\1/", s)            # git@host:owner/repo → host/owner/repo
-        s = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", s)  # strip scheme
-        s = re.sub(r"\.git$", "", s, flags=re.I)            # drop trailing .git
-        s = re.sub(r"/+$", "", s)                           # drop trailing slash
-        return s.lower()
+        """index.html normRepo(), via the shared fleet/projkey.py (one copy for
+        the worker's push deep links and the relay's iron resolution)."""
+        return projkey.norm_repo(url)
 
     def _project_key(self, pid):
         """The unified projectKey the fleet UI routes on: local (private
         folder) projects are machine-qualified `local:<machine>:<path>`, else
         normalized repo, else name:<name> (mirror of index.html projectKey())."""
-        p = self._projects_meta.get(pid) or {}
-        if p.get("kind") == "local":
-            return f"local:{self.machine}:{p.get('path') or p.get('name') or ''}"
-        return self._norm_repo(p.get("repoUrl")) or ("name:" + (p.get("name") or ""))
+        return projkey.project_key(self.machine, self._projects_meta.get(pid) or {})
 
     def _push_payload(self, cid):
         """Build the encrypted-push body: a friendly title + a deep link to the

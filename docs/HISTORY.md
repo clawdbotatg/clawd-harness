@@ -11,6 +11,47 @@
 New war stories since the 2026-08-29 reset land HERE, newest first. The
 archived original continues below under "orientation for Claude".
 
+## 2026-09-23 — ☑ a to-do list per iron
+
+Austin: "I have my overall to do list, which is more like my life to do
+list. And I don't want eight issues from one project to go on to my life to
+do list. But I'm wondering if we could have a to do list per iron in the
+fire… floated to the right over the TTY." So: one shared list per iron,
+harness-native, the life list on todo.atg.link untouched.
+
+- **Storage is item-level.** `fleet/todo_store.py` applies one op at a time
+  (add / done / undone / rm / clear / order) and the owner broadcasts the
+  whole `todos` snapshot as the ack. The relay owns it in fleet mode (own
+  file `.clawd-fleet.todos.json`, own lock — a checkbox tap must never
+  re-push the irons blob, whose prefs write is whole-field last-writer-wins
+  and whose echo fingerprint must stay byte-identical in Python and JS); the
+  registry owns it in direct mode. A deleted iron takes its list with it.
+- **Overlay, not split.** Splitting the frame changes the terminal's column
+  count — a geometry claim on the shared PTY (`claim_resize`) that reflows
+  every viewer. The list rides the 🟦 pattern: absolute over `#left`. Desktop:
+  a 300px column down the right edge (the tldr block and the corner pills
+  yield that width — the first screenshot had ✕ 📌 ⏏ sitting over the panel
+  header). Touch: a bottom sheet. Toggle = ☑ in the iron row with the open
+  count; state remembered per iron in localStorage so it stays up across the
+  iron's sessions. The sessionless iron page shows the same list inline.
+  Tapping an item's words seeds the composer.
+- **Sessions write only when asked.** `bin/harness-todo` (list/add/done/
+  undone/rm/clear; `order` is refused for agents) hits `/self/todo` on its
+  own harness. A session doesn't know its iron and the relay doesn't know
+  projects, so the harness sends the project's identity (name/repoUrl/kind/
+  path + machine) and the relay's `/todo/agent` folds it against the irons'
+  member keys — `fleet/projkey.py`, now the ONE Python copy of the JS
+  `projectKey` (the worker's push deep links use it too). The wrap prompt
+  tells a session to check off what it finished and add what's still open
+  there; "not in any iron" means skip. No PM verb: the PM asks an idle
+  session to run the CLI, same as the life list.
+- Guards: `fleet/test_todo_store.py` (ops), `test_todo.py` (direct half +
+  `/self/todo`), `fleet/test_relay_todos.py` (snapshot after prefs, cross-
+  device echo, disk, refusals, prune, every key fold on `/todo/agent`),
+  `tools/todoprobe.mjs` (real taps on iPhone: idle state, open, add frame
+  shape, repaint survival, done/echo/sink, sticky across sessions, ✕, iron
+  page inline, desktop column, direct mode).
+
 ## 2026-09-15 — 📑 wrap: one handoff file per wrap
 
 Austin: "Why are you calling it handoff.md? Why doesn't it have a unique name

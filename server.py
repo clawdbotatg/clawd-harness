@@ -63,6 +63,35 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+import importlib.util as _ilu
+
+_FLEET_MODS = {}
+
+
+def _fleet_mod(name):
+    """fleet/<name>.py as a module, loaded LAZILY on first use (server.py has
+    no package; the fleet dir is a sibling — and the test sandboxes copy
+    server.py alone into a temp dir, so nothing at import time may need it).
+    Sibling first, then the repo this box runs from (`~/clawd-harness`)."""
+    mod = _FLEET_MODS.get(name)
+    if mod is None:
+        here = Path(__file__).resolve().parent
+        for d in (here / "fleet", Path.home() / "clawd-harness" / "fleet"):
+            f = d / f"{name}.py"
+            if f.is_file():
+                spec = _ilu.spec_from_file_location(name, f)
+                mod = _ilu.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                break
+        if mod is None:
+            raise ImportError(f"fleet/{name}.py not found beside {here}")
+        _FLEET_MODS[name] = mod
+    return mod
+
+
+def _ts():
+    """☑ the shared to-do op engine (fleet/todo_store.py)."""
+    return _fleet_mod("todo_store")
 from socketserver import ThreadingMixIn, TCPServer
 
 # Snapshot at process start, never hash the possibly newer file on a request.
@@ -168,6 +197,10 @@ WRAP_PROMPT = (      # `{file}` → handoff_file_name() at the arm (manager.wrap
     "NOT push them, and do NOT add them to .gitignore or any tracked file. "
     "Only if this project's own instructions say handoffs belong in a tracked "
     "log (a HISTORY / docs file) write there instead and commit as they say. "
+    "If this project is in an iron with a to-do list, `harness-todo` (on your "
+    "PATH) prints it: check off what you finished (`harness-todo done <id>`) "
+    "and add what is still open (`harness-todo add <one short item>`), one "
+    "item per task; if it says the project isn't in any iron, skip this. "
     "Your actual work is separate from the handoff: if code changes are still "
     "uncommitted, commit and push them as usual. Then run `harness-close` (on "
     "your PATH) — it closes this session once the turn ends. If something is "
@@ -2314,6 +2347,81 @@ def serve_skills_lib(client, frame):
                           "error": f"relay unreachable: {e}"})
 
 
+def self_todo(cid, op, text="", ref="", want_all=False):
+    """(http code, plain text) for /self/todo — see _handle_self_todo."""
+    s = MGR.get(cid)
+    if not s:
+        return 404, "no such session."
+    proj = MGR.projects.get(s.pid)
+    if not proj:
+        return 404, "this session's project is gone."
+    if op == "order":
+        return 403, "order is the operator's, not an agent's."
+    if op not in ("list",) + _ts().OPS:
+        return 400, f"unknown op {op!r} (list, add, done, undone, rm, clear)."
+    base, token = _skills_relay_cfg()
+    if base:
+        # fleet box: the relay owns irons + lists
+        import urllib.parse
+        import urllib.request
+        payload = json.dumps({"op": op, "text": text, "ref": ref, "all": want_all,
+                              "machine": FLEET_MACHINE_ID(),
+                              "project": {"name": proj.name, "repoUrl": proj.repo_url,
+                                          "kind": proj.kind, "path": proj.path}}).encode()
+        req = urllib.request.Request(f"{base}/todo/agent?t={urllib.parse.quote(token)}",
+                                     data=payload, method="POST",
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                rep = json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            try:
+                rep = json.loads(e.read().decode())
+            except Exception:
+                rep = {"ok": False, "msg": f"relay refused ({e.code})"}
+        except Exception as e:
+            return 502, f"relay unreachable: {e}"
+        head = f"☑ {rep['iron']['title']}: " if rep.get("iron") and op != "list" else ""
+        if op == "list" and rep.get("iron"):
+            head = f"☑ {rep['iron']['title']} — iron to-do list\n"
+        return (200 if rep.get("ok") else 409), head + str(rep.get("msg") or "")
+    iron = MGR.iron_for_pid(s.pid)
+    if not iron:
+        return 409, f"{proj.name} isn't in any iron — no iron to-do list to write to."
+    if op == "list":
+        with MGR.lock:
+            items = [dict(i) for i in MGR.todos.get(iron["id"]) or []]
+        return 200, f"☑ {iron['title']} — iron to-do list\n" + _ts().render(items, all_=want_all)
+    changed, msg, _ = MGR.todo_apply(iron["id"], op, text=text, ref=ref, key=s.pid, via="agent")
+    return (200 if changed else 409), f"☑ {iron['title']}: {msg}"
+
+
+def FLEET_MACHINE_ID():
+    """This box's fleet machine id — what the worker registers as (the key an
+    iron stores for a LOCAL project is machine-qualified). The worker's
+    persisted id file first, then FLEET_MACHINE (env / fleet/fleet.env), else
+    the hostname (worker.default_machine_id's own fallback)."""
+    try:
+        v = (HERE / "fleet" / ".clawd-fleet.machine").read_text().strip()
+        if v:
+            return v
+    except OSError:
+        pass
+    v = os.environ.get("FLEET_MACHINE") or ""
+    if not v:
+        try:
+            for line in (HERE / "fleet" / "fleet.env").read_text().splitlines():
+                line = line.strip()
+                if line.startswith("FLEET_MACHINE="):
+                    v = line.partition("=")[2].strip().strip('"').strip("'")
+        except OSError:
+            pass
+    if not v:
+        import socket
+        v = socket.gethostname().split(".")[0]
+    return v
+
+
 def _share_projects(config_dir):
     """Point <account>/projects at the shared ~/.claude/projects store so
     EVERY account sees EVERY session transcript: --resume works under any
@@ -3762,6 +3870,8 @@ class ClaudeSession:
         # 📑 wrap: `harness-close` (bin/) asks the harness to close THIS
         # session; the URL carries the cid, the endpoint carries the gates.
         env["HARNESS_CLOSE_URL"] = f"http://127.0.0.1:{PORT}/self/close?t={TOKEN}&cid={self.cid}"
+        # ☑ `harness-todo`: this session's iron to-do list (bin/harness-todo)
+        env["HARNESS_TODO_URL"] = f"http://127.0.0.1:{PORT}/self/todo?t={TOKEN}&cid={self.cid}"
         env["PATH"] = f"{HERE / 'bin'}:{env.get('PATH', '')}"
         for k in SCRUB_ENV:                      # pristine top-level + subscription auth
             env.pop(k, None)
@@ -5333,6 +5443,7 @@ class SessionManager:
         self.clients_lock = threading.Lock()
         self._projects_sig = None                # last broadcast projects payload (see broadcast_projects)
         self.irons = {}                          # iid -> iron dict (named group of projects; see iron_create)
+        self.todos = {}                          # ☑ iid -> [item,…] (direct mode; fleet keeps these relay-side)
         self.closed = []                         # 🗃️ closed-session rows, newest first (see _record_closed)
         # Graceful self-restart: when a boot-time file (server.py / .env) changes,
         # we flag a pending restart, surface it in every browser, and wait until
@@ -5543,6 +5654,9 @@ class SessionManager:
                 # its old created-ascending order.
                 "rank": e["rank"] if isinstance(e.get("rank"), (int, float))
                         else e.get("created", 0.0)}
+        self.todos = ({k: v for k, v in _ts().clean_todos(reg.get("todos")).items()
+                       if k in self.irons}          # ☑ a list outlives no iron
+                      if reg.get("todos") else {})
 
         for e in reg.get("accounts", []):
             if not e.get("name"):
@@ -5957,6 +6071,7 @@ class SessionManager:
                     "active_account": self.active_account,
                     "last_switch_at": self.last_switch_at,
                     "irons": [dict(i) for i in self.irons.values()],
+                    "todos": {k: [dict(i) for i in v] for k, v in self.todos.items()},
                     "closed": [dict(r) for r in self.closed]}
         # Atomic write: a crash/power-cut mid-write must never leave a
         # truncated registry — _read_registry would fall back to {} and the
@@ -7913,6 +8028,36 @@ class SessionManager:
     def broadcast_irons(self):
         self.broadcast_all(self.irons_meta())
 
+    # ☑ per-iron to-do lists (direct mode). One op at a time through the
+    # shared fleet/todo_store.py; the snapshot broadcast is the ack. In fleet
+    # mode the page talks to the relay instead and a session's `harness-todo`
+    # is forwarded there by /self/todo (this harness never sees fleet irons).
+    def todos_meta(self):
+        with self.lock:
+            return {"type": "todos", "todos": {k: [dict(i) for i in v]
+                                               for k, v in self.todos.items()}}
+
+    def broadcast_todos(self):
+        self.broadcast_all(self.todos_meta())
+
+    def todo_apply(self, iron, op, text="", ref="", ids=None, key="", via=""):
+        with self.lock:
+            if iron not in self.irons:
+                return False, "no such iron", None
+            changed, msg, item = _ts().apply_op(self.todos, iron, op, text=text, ref=ref,
+                                                ids=ids, key=key, via=via)
+        if changed:
+            self.save_registry()
+            self.broadcast_todos()
+        return changed, msg, item
+
+    def iron_for_pid(self, pid):
+        with self.lock:
+            for iron in self.irons.values():
+                if pid in iron.get("pids", []):
+                    return dict(iron)
+        return None
+
     def iron_create(self, title, desc="", tags=None):
         title = (title or "").strip()[:80]
         if not title:
@@ -7967,8 +8112,11 @@ class SessionManager:
         with self.lock:
             if self.irons.pop(iid, None) is None:
                 return False
+            had_todos = self.todos.pop(iid, None) is not None   # ☑ the list goes with it
         self.save_registry()
         self.broadcast_irons()
+        if had_todos:
+            self.broadcast_todos()
         return True
 
     def iron_assign(self, pid, iid):
@@ -8733,6 +8881,7 @@ class SessionManager:
                           "current": self.default_cid()})
         client.send_json(self.accounts_meta())
         client.send_json(self.irons_meta())
+        client.send_json(self.todos_meta())
         if self.restart_pending:                 # a late joiner still sees the banner
             client.send_json(self.restart_state())
 
@@ -9441,6 +9590,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_file(HERE / path.lstrip("/"), "image/png")
         if path == "/pm" or path.startswith("/pm/"):
             return self._proxy_pm("GET")
+        if path == "/self/todo":
+            return self._handle_self_todo()
         if path == "/config":
             # Token-gated: it leaks workdir / lanIp / sessionId, which a malicious
             # site could grab via DNS-rebinding if this were open. The page sends
@@ -9470,6 +9621,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_hook()
         if path == "/self/close":
             return self._handle_self_close()
+        if path == "/self/todo":
+            return self._handle_self_todo()
         if path == "/upload":
             return self._handle_upload()
         if path == "/tts":
@@ -9580,6 +9733,37 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def _handle_self_todo(self):
+        """☑ `harness-todo` from inside a session (bin/harness-todo, URL from
+        HARNESS_TODO_URL): GET lists this session's iron to-do list, POST
+        applies one op (form fields op/text/ref/all). Plain-text reply, the
+        lines claude reads in its tool output. Resolution: the session's
+        project → on a fleet box (relay configured in fleet/fleet.env) the
+        relay owns irons, so forward with the project's identity and let its
+        key fold find the iron; else the local registry's irons."""
+        if not self._token_ok():
+            return self.send_error(403, "bad token")
+        cid = self._query().get("cid", [""])[0]
+        form = {}
+        if self.command == "POST":
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+            except Exception:
+                body = ""
+            form = {k: v[0] for k, v in urllib.parse.parse_qs(body).items()}
+        op = (form.get("op") or "list").strip()
+        text = (form.get("text") or "")[:_ts().TEXT_MAX]
+        ref = (form.get("ref") or "")[:80]
+        want_all = form.get("all") in ("1", "true", "yes")
+        code, msg = self_todo(cid, op, text, ref, want_all)
+        out = msg.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
 
     def _handle_self_close(self):
         """📑 `harness-close` from inside a session (bin/harness-close, URL
@@ -9779,6 +9963,7 @@ class Handler(BaseHTTPRequestHandler):
                               "sessions": MGR.sessions_meta(),
                               "current": MGR.default_cid()})
             client.send_json(MGR.irons_meta())
+            client.send_json(MGR.todos_meta())
             client.send_json(MGR.closed_meta())
         elif t == "reopen":
             s = MGR.reopen(str(frame.get("cid") or ""))
@@ -9890,6 +10075,16 @@ class Handler(BaseHTTPRequestHandler):
             MGR.iron_order(frame.get("ids") or [])
         elif t == "ironAssign":
             MGR.iron_assign(frame.get("pid"), frame.get("iron") or "")
+        elif t == "todo":
+            # ☑ one op on one iron's to-do list (direct mode); the `todos`
+            # broadcast is the ack, a refused op answers this client only.
+            changed, msg, _ = MGR.todo_apply(
+                str(frame.get("iron") or ""), str(frame.get("op") or ""),
+                text=frame.get("text") or "", ref=str(frame.get("id") or ""),
+                ids=frame.get("ids") if isinstance(frame.get("ids"), list) else None,
+                key=str(frame.get("key") or ""), via="page")
+            if not changed and frame.get("op") not in ("clear", "order"):
+                client.send_json({"type": "error", "error": f"todo: {msg}"})
         elif t == "restart":
             # force=True is the banner's "restart now" — a deliberate human act
             # that accepts cutting whatever the banner just told them is running.

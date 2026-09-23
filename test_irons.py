@@ -52,6 +52,7 @@ class FakeMgr:
     def __init__(self):
         self.lock = threading.RLock()
         self.irons = {}
+        self.todos = {}                       # ☑ iron_delete drops the iron's list too
         self.projects = {"p1": object(), "p2": object()}
         self.saved = 0
         self.broadcasts = []
@@ -61,6 +62,9 @@ class FakeMgr:
 
     def broadcast_irons(self):
         self.broadcasts.append(self.irons_meta())
+
+    def broadcast_todos(self):
+        pass
 
 
 def test_crud():

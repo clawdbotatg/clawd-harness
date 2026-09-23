@@ -165,6 +165,22 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   is a tab nobody reads (Austin, 09-14). The reviewer's `check_of` /
   `check_file` / `check_pending` are ctor params + registry fields.
   `test_check.py` + `tools/checkprobe.mjs`; WS verbs `check`/`checkCancel`.
+  **☑ iron to-do list** = one shared list PER IRON (what's still open across
+  the whole effort; NOT the life list on todo.atg.link — an iron's eight
+  follow-ups stay on the iron). Engine `fleet/todo_store.py` (item-level ops,
+  never a whole-list write); owner = the relay in fleet mode
+  (`.clawd-fleet.todos.json`, WS verb `todo`, `todos` snapshot right behind
+  every `prefs`) / the registry in direct mode. UI: the ☑ button in the iron
+  row toggles an OVERLAY over the tty (right column on desktop, bottom sheet
+  on touch; never a split — a split is a PTY geometry claim), remembered per
+  iron; the sessionless iron page shows it inline; tap the words → composer.
+  Sessions write with **`bin/harness-todo`** (`HARNESS_TODO_URL` →
+  `/self/todo` → the local irons, or on a fleet box the relay's
+  `/todo/agent`, which folds the project's key against the irons'
+  member keys via `fleet/projkey.py` — the one Python copy of `projectKey`,
+  the worker uses it too). Agent writes are opt-in: when asked, and the 📑
+  wrap prompt says to check off / add what's still open. `test_todo.py`,
+  `fleet/test_todo_store.py`, `fleet/test_relay_todos.py`, `tools/todoprobe.mjs`.
 
 ## Landmines (don't regress; stories in HISTORY.md)
 

@@ -58,7 +58,7 @@ events, not from scraping the terminal.
 - **Per-subscription** streams (only the subscribed client gets these): binary PTY
   bytes, `hello`, `transcript`.
 - **Broadcast** streams (every connected client gets these): `projects`,
-  `sessions`, `hook`, `exit`, `reload`, `restart`, `irons`.
+  `sessions`, `hook`, `exit`, `reload`, `restart`, `irons`, `todos`.
 
 ➡ For the fleet, this means: to let two phones watch two different sessions on the
 same machine, the proxy worker opens **one harness WS connection per remote
@@ -71,7 +71,8 @@ viewer** (each with its own `client.cid`).
 | `type` | Fields | Effect |
 |---|---|---|
 | `subscribe` | `cid` | Attach to that session's live stream. Server immediately sends a `hello`, then a ring-buffer byte snapshot, then replays recent `transcript` history (see "On `subscribe`" below, incl. the unknown-cid error reply). |
-| `list` | — | Server replies with `projects`, `sessions`, then `irons` snapshots. |
+| `list` | — | Server replies with `projects`, `sessions`, then `irons` and `todos` snapshots. |
+| `todo` | `iron`, `op`, `text?`, `id?`, `ids?`, `key?` | ☑ ONE op on one iron's shared to-do list (`op` = `add` text · `done`/`undone`/`rm` by `id` (an exact item id, else a unique substring of its text) · `clear` (drop done items) · `order` ids (open items, top first)). Item-level on purpose: nothing ever writes the whole list, so two devices and a session never clobber each other. `key` = the projectKey/pid the item came from (the open session's project; `""` from the iron page). The `todos` broadcast is the ack; a refused op (unknown iron, empty text, full list) answers `{type:"error", error:"todo: …"}` to this client only. DIRECT mode only — in fleet mode the browser sends the same frame to the RELAY (the lists live there, like irons) and a session's `harness-todo` is forwarded by its harness to the relay's worker-token `POST /todo/agent`. Engine: `fleet/todo_store.py` (both modes). |
 | `skillsLib` | — | 📚 skill library (DIRECT mode only — in fleet mode the browser sends this to the relay itself, not through a machine): the harness proxies to the relay's worker-token HTTP (`/skills/lib`, config from env / `fleet/fleet.env`) and replies (this client only) `{type:"skillsLib", skills:[{name, description, body}], error?}` — the user-written skill files stored on the relay, `body` the full SKILL.md text a tap pastes into the session. The library is deliberately decoupled from `~/.claude/skills` on any machine. Unconfigured/unreachable relay → empty list + explanatory `error`. `docs/fleet/SKILLS.md`. |
 | `skillsRm` | `name` | 📚 ✕ (direct mode; same proxy): remove one skill from the library — trashed relay-side (`.clawd-fleet.skills/.trash/`), so recoverable by an admin — then replies the same fresh `skillsLib` frame. |
 | `new` | `pid`, `account?`, `engine?`, `resume?`, `title?` | Create a session in project `pid`, spawned under the ACTIVE subscription account (or the named `account` override). Server replies `{type:"focus", cid}` with the new id, and broadcasts `sessions`. `engine` picks the agent CLI — `"claude"` (default, and what an omitted field means) or `"codex"`; an unknown value falls back to claude. A non-claude engine ignores `account`: only claude participates in the subscription router. See docs/CODEX-ENGINE.md. `resume` = an engine session id to reopen (`claude --resume <id>`, or a codex rollout id) — the way back for a session whose tab was closed; if its transcript is gone the session starts fresh (logged). `title` seeds the tab name until the namer runs. |
@@ -243,6 +244,17 @@ no-op that would leave the previous session's stream flowing (that's how
 // title ≤80, desc ≤400, tags ≤8×24, keys ≤256×512, all code-point clipped) and
 // the browser mirrors that sanitizer exactly (index.html [irons-sanitizer]) —
 // its echo-ack depends on the two agreeing (fleet/test_irons_parity.py).
+```
+
+### todo item (the `todos` snapshot, both modes)
+```jsonc
+{ "type":"todos", "todos": { "<ironId>": [ item, … ] } }     // whole map, after every change + on connect
+item = { "id":"8 hex", "text":"≤300 cp", "done":bool, "created":float, "doneAt":float,
+         "key":"projectKey (fleet) | pid (direct) | \"\"", "via":"page | agent" }
+// ≤200 items per iron; open items in list order, done ones wherever they were
+// (the page sinks them). A deleted iron takes its list with it. Direct: the
+// registry's `todos`; fleet: the relay's `.clawd-fleet.todos.json` (own file,
+// own lock — never inside the prefs blob). Sanitizer: todo_store.clean_todos.
 ```
 
 ### projectMeta

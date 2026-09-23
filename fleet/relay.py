@@ -73,6 +73,8 @@ from urllib.parse import parse_qs, urlparse
 
 import fleet_ws
 import docs_store
+import projkey
+import todo_store
 import webauthn
 
 HERE = Path(__file__).resolve().parent
@@ -253,6 +255,12 @@ PREFS_FILE = Path(os.environ.get("FLEET_PREFS_FILE") or (HERE / ".clawd-fleet.pr
 # running without a passkey. Aggregate counts + build info only, never content.
 ROSTER_FILE = Path(os.environ.get("FLEET_ROSTER_FILE") or (HERE / ".clawd-fleet.roster.json"))
 _prefs_lock = threading.Lock()
+# ☑ per-iron to-do lists: item-level ops applied HERE (fleet/todo_store.py —
+# the same module the direct-mode harness applies to its registry), snapshot
+# broadcast to every authed mobile after each. Own file, own lock: a checkbox
+# tap must never rewrite the irons blob (prefs is whole-field, last-writer-wins).
+TODOS_FILE = Path(os.environ.get("FLEET_TODOS_FILE") or (HERE / ".clawd-fleet.todos.json"))
+_todos_lock = threading.Lock()
 MAX_INACTIVE = 128       # a fleet is tens of boxes; this is a disk-abuse bound
 MAX_MACHINE_ID = 64
 
@@ -346,6 +354,28 @@ def save_prefs(prefs):
         except OSError as e:
             print(f"[relay] prefs SAVE FAILED ({e}) — irons/deny-list edits "
                   f"not persisted", flush=True)
+
+
+def load_todos():
+    try:
+        return todo_store.clean_todos(json.loads(TODOS_FILE.read_text()))
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"[relay] TODOS FILE UNREADABLE ({e}) — starting empty; inspect "
+              f"{TODOS_FILE} before the next write paves it over", flush=True)
+        return {}
+
+
+def save_todos(todos):
+    with _todos_lock:
+        try:
+            tmp = TODOS_FILE.with_name(TODOS_FILE.name + f".tmp{os.getpid()}")
+            tmp.write_text(json.dumps(todos))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, TODOS_FILE)
+        except OSError as e:
+            print(f"[relay] todos SAVE FAILED ({e}) — to-do edits not persisted", flush=True)
 
 
 # ── fleet skills library ─────────────────────────────────────────────────────
@@ -773,6 +803,7 @@ class Relay:
         self.upload_seq = 0
         self.push_subs = load_push_subs()   # phone Web Push subscriptions (opaque)
         self.prefs = load_prefs()           # {"inactive":[machineId,…]} — see load_prefs
+        self.todos = load_todos()           # ☑ {ironId: [item,…]} — see todo_apply
 
     # ── image upload bridge (HTTP POST → worker over WS → harness → back) ─────
     def upload_quota_ok(self, key, nbytes):
@@ -834,6 +865,50 @@ class Relay:
 
     def _send_prefs(self, conn):
         conn.send_json(self._prefs_msg())
+        conn.send_json(self._todos_msg())   # ☑ right behind the irons it belongs to
+
+    # ── ☑ per-iron to-do lists ───────────────────────────────────────────────
+    def _todos_msg(self):
+        with self.lock:
+            return {"type": "todos", "todos": {k: [dict(i) for i in v]
+                                               for k, v in self.todos.items()}}
+
+    def broadcast_todos(self):
+        msg = self._todos_msg()
+        with self.lock:
+            mobiles = list(self.mobiles.values())
+        for m in mobiles:
+            if m.authed():
+                m.send_json(msg)
+
+    def todo_apply(self, iron, op, text="", ref="", ids=None, key="", via=""):
+        """One op on one iron's list (fleet/todo_store.apply_op), persisted and
+        fanned out. The iron must exist in prefs — a list for a deleted iron
+        is refused, not created."""
+        with self.lock:
+            known = {i["id"] for i in (self.prefs.get("irons") or [])}
+            if iron not in known:
+                return False, "no such iron", None
+            changed, msg, item = todo_store.apply_op(self.todos, iron, op, text=text, ref=ref,
+                                                     ids=ids, key=key, via=via)
+            snapshot = {k: [dict(i) for i in v] for k, v in self.todos.items()}
+        if changed:
+            save_todos(snapshot)
+            self.broadcast_todos()
+        return changed, msg, item
+
+    def todo_items(self, iron):
+        with self.lock:
+            return [dict(i) for i in self.todos.get(iron) or []]
+
+    def _todos_prune(self):
+        """Called under self.lock after an irons write: a deleted iron takes
+        its list with it (the page can't show it and nothing can add to it)."""
+        known = {i["id"] for i in (self.prefs.get("irons") or [])}
+        gone = [k for k in self.todos if k not in known]
+        for k in gone:
+            self.todos.pop(k, None)
+        return bool(gone)
 
     def broadcast_prefs(self):
         """Fan the set to every authed mobile so unchecking on the phone lands on
@@ -1052,13 +1127,32 @@ class Relay:
                 if isinstance(frame.get("inactive"), list):
                     self.prefs["inactive"] = clean_inactive(frame.get("inactive"))
                     parts.append(f"{len(self.prefs['inactive'])} machine(s) switched off")
+                pruned = False
                 if isinstance(frame.get("irons"), list):
                     self.prefs["irons"] = clean_irons(frame.get("irons"))
                     parts.append(f"{len(self.prefs['irons'])} iron(s)")
+                    pruned = self._todos_prune()
+                    todos_snap = {k: [dict(i) for i in v] for k, v in self.todos.items()}
                 snapshot = dict(self.prefs)
             save_prefs(snapshot)
             self.broadcast_prefs()
+            if pruned:
+                save_todos(todos_snap)
+                self.broadcast_todos()
             print(f"[relay] prefs: {'; '.join(parts) or 'no-op write'}", flush=True)
+            return
+        if t == "todo":
+            # ☑ one op on one iron's to-do list from the page (fleet mode). The
+            # snapshot broadcast is the ack — same stance as prefs: a write
+            # that never reached disk never silently looks applied. A refused
+            # op (unknown iron, empty text, full list) gets an `error` frame.
+            changed, msg, _ = self.todo_apply(
+                str(frame.get("iron") or ""), str(frame.get("op") or ""),
+                text=frame.get("text") or "", ref=str(frame.get("id") or ""),
+                ids=frame.get("ids") if isinstance(frame.get("ids"), list) else None,
+                key=str(frame.get("key") or ""), via="page")
+            if not changed and frame.get("op") not in ("clear", "order"):
+                mobile.send_json({"type": "error", "error": f"todo: {msg}"})
             return
         if t == "skillsLib":
             # 📚 picker (fleet mode): the library straight from the store — one
@@ -1293,6 +1387,53 @@ class Handler(BaseHTTPRequestHandler):
             sess = q.get("s", [""])[0]
             return bool(sess and session_valid(sess))
         return _token_ok(q.get("t", [""])[0], MOBILE_TOKEN)
+
+    def _todo_agent(self, q):
+        """☑ a SESSION writing to (or reading) its iron's to-do list —
+        `harness-todo` → its harness `/self/todo` → here, worker-token gated
+        like /skills/put (fleet machines only; the page never calls this).
+        The body names the project (name/repoUrl/kind/path + machine) because
+        a session doesn't know its iron and the relay doesn't know projects:
+        the key fold in fleet/projkey.py resolves it against the stored iron
+        member keys. JSON reply: {ok, msg, iron:{id,title}?, list?}."""
+        if not _token_ok(q.get("t", [""])[0], WORKER_TOKEN):
+            self.close_connection = True
+            return self.send_error(403, "denied")
+        try:
+            n = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            n = 0
+        if n <= 0 or n > 64 * 1024:
+            self.close_connection = True
+            return self.send_error(413, "bad size")
+        try:
+            frame = json.loads(self.rfile.read(n).decode("utf-8"))
+            assert isinstance(frame, dict)
+        except Exception:
+            return self._send_json({"ok": False, "msg": "bad request"}, 400)
+        proj = frame.get("project") if isinstance(frame.get("project"), dict) else {}
+        machine = str(frame.get("machine") or "")
+        with RELAY.lock:
+            irons = [dict(i) for i in (RELAY.prefs.get("irons") or [])]
+        iron = projkey.iron_for_project(irons, machine, proj)
+        if not iron:
+            return self._send_json({"ok": False, "iron": None,
+                                    "msg": f"{proj.get('name') or 'this project'} isn't in any iron — "
+                                           "no iron to-do list to write to"})
+        op = str(frame.get("op") or "list")
+        if op == "list":
+            items = RELAY.todo_items(iron["id"])
+            return self._send_json({"ok": True, "iron": {"id": iron["id"], "title": iron["title"]},
+                                    "msg": todo_store.render(items, all_=bool(frame.get("all"))),
+                                    "list": items})
+        if op == "order":
+            return self._send_json({"ok": False, "msg": "order is the operator's, not an agent's"}, 403)
+        key = projkey.project_key(machine, proj)
+        changed, msg, item = RELAY.todo_apply(iron["id"], op, text=frame.get("text") or "",
+                                              ref=str(frame.get("ref") or ""), key=key, via="agent")
+        print(f"[relay] todo {op} on {iron['title']!r} by {machine or '?'}: {msg[:80]}", flush=True)
+        return self._send_json({"ok": changed, "iron": {"id": iron["id"], "title": iron["title"]},
+                                "msg": msg, "item": item})
 
     def _stt_words(self, method, q):
         """🎤 the shared dictation word list — ONE file (`stt-words.txt` on the doc
@@ -1620,6 +1761,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._docs_request("POST", path, q)
         if path == "/stt/words":
             return self._stt_words("POST", q)
+        if path == "/todo/agent":
+            return self._todo_agent(q)
         if path != "/upload":
             self.close_connection = True
             return self.send_error(404, "denied")
