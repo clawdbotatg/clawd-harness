@@ -635,20 +635,32 @@
      right edge (the 🟦 block yields that width); touch: a sheet up from the
      bottom (the terminal is read-only there anyway). Shown only while an iron
      is scoped AND that iron's list was toggled on (remembered per iron). */
-  #irontodo { position:absolute; top:0; right:0; bottom:0; width:300px; max-width:60%; z-index:14;
+  #left { --todo-w:300px; --todo-h:48%; }   /* the ☑ panel's size — dragged via .tdgrip, remembered per device */
+  #irontodo { position:absolute; top:0; right:0; bottom:0; width:var(--todo-w); max-width:70%; z-index:14;
               background:var(--panel); border-left:1px solid var(--edge);
               display:flex; flex-direction:column; min-height:0; }
   #irontodo[hidden] { display:none; }
-  #left.todoOpen #tldr { right:300px; }
+  #left.todoOpen #tldr { right:var(--todo-w); }
+  /* the drag bar between the tty and the list: a thin strip on the panel's
+     tty-side edge (left on desktop, top on touch), fat enough to grab */
+  #irontodo .tdgrip { position:absolute; left:-4px; top:0; bottom:0; width:9px; cursor:col-resize; z-index:2;
+                      touch-action:none; }
+  #irontodo .tdgrip::after { content:""; position:absolute; left:3px; top:0; bottom:0; width:2px; background:transparent; }
+  #irontodo .tdgrip:hover::after, #irontodo.dragging .tdgrip::after { background:var(--accent-dim); }
+  #irontodo.dragging { user-select:none; }
   /* the tty's corner pills (✕ 📌 ⏏ + the machine tag) float over the same
      corner — slide them left of the column so it never covers them */
   @media (pointer: fine) {
-    main.todoOpen #closeBtn, main.todoOpen #pinBtn, main.todoOpen #ejectBtn, main.todoOpen #machineTag { transform:translateX(-300px); }
+    main.todoOpen #closeBtn, main.todoOpen #pinBtn, main.todoOpen #ejectBtn, main.todoOpen #machineTag { transform:translateX(calc(-1 * var(--todo-w))); }
   }
+  main { --todo-w:300px; }
   @media (pointer: coarse) {
-    #irontodo { top:auto; left:0; width:auto; max-width:none; max-height:48%;
+    #irontodo { top:auto; left:0; width:auto; max-width:none; height:var(--todo-h); max-height:85%;
                 border-left:0; border-top:1px solid var(--edge); border-radius:12px 12px 0 0; }
     #left.todoOpen #tldr { display:none; }   /* the sheet covers the rows it would sit in */
+    #irontodo .tdgrip { left:0; right:0; top:-6px; bottom:auto; width:auto; height:22px; cursor:row-resize; }
+    #irontodo .tdgrip::after { left:50%; top:9px; bottom:auto; width:36px; height:4px; margin-left:-18px; border-radius:2px;
+                               background:var(--edge-hi); }   /* the sheet's grab pill, always visible on touch */
   }
   .tdhead { display:flex; align-items:center; gap:8px; padding:8px 10px 4px; flex:0 0 auto; }
   .tdhead .tdtitle { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
@@ -9321,9 +9333,44 @@ function todoTellText(iron) {
     '`harness-todo done <words>` checks one off. Add everything still open from this session to it, one short item per task.';
 }
 // One structure for both hosts (the overlay + the iron page), built once.
+// the panel's size is the user's (drag the bar between the tty and the list —
+// Austin, 09-23): width on desktop, sheet height on touch; per device
+const TODO_W_MIN = 200, TODO_H_MIN = 120;
+function todoSizeLoad() {
+  try {
+    const w = parseInt(localStorage.getItem('cc_todo_w') || '', 10), h = parseInt(localStorage.getItem('cc_todo_h') || '', 10);
+    if (w >= TODO_W_MIN) { document.getElementById('left').style.setProperty('--todo-w', w + 'px'); document.querySelector('main').style.setProperty('--todo-w', w + 'px'); }
+    if (h >= TODO_H_MIN) document.getElementById('left').style.setProperty('--todo-h', h + 'px');
+  } catch {}
+}
+function todoSizeSet(px) {
+  const left = document.getElementById('left');
+  if (isTouch) { left.style.setProperty('--todo-h', px + 'px'); try { localStorage.setItem('cc_todo_h', String(px)); } catch {} }
+  else { left.style.setProperty('--todo-w', px + 'px'); document.querySelector('main').style.setProperty('--todo-w', px + 'px');
+         try { localStorage.setItem('cc_todo_w', String(px)); } catch {} }
+}
+function todoGrip(root) {
+  const g = document.createElement('div'); g.className = 'tdgrip'; g.title = 'drag to resize';
+  let start = null;
+  g.addEventListener('pointerdown', (e) => {
+    const L = document.getElementById('left').getBoundingClientRect();
+    start = { x: e.clientX, y: e.clientY, w: root.getBoundingClientRect().width, h: root.getBoundingClientRect().height, L };
+    root.classList.add('dragging'); g.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  g.addEventListener('pointermove', (e) => {
+    if (!start) return;
+    if (isTouch) todoSizeSet(Math.round(Math.max(TODO_H_MIN, Math.min(start.L.height * 0.85, start.h + (start.y - e.clientY)))));
+    else todoSizeSet(Math.round(Math.max(TODO_W_MIN, Math.min(start.L.width * 0.7, start.w + (start.x - e.clientX)))));
+  });
+  const end = () => { start = null; root.classList.remove('dragging'); };
+  g.addEventListener('pointerup', end); g.addEventListener('pointercancel', end);
+  return g;
+}
+// One structure for both hosts (the overlay + the iron page), built once.
 function todoBuild(root, closable) {
   if (root._todoBuilt) return;
   root._todoBuilt = true;
+  if (closable) root.appendChild(todoGrip(root));   // the overlay resizes; the iron page's inline copy is page-width
   const head = document.createElement('div'); head.className = 'tdhead';
   const title = document.createElement('span'); title.className = 'tdtitle'; head.appendChild(title);
   const count = document.createElement('span'); count.className = 'tdcount'; head.appendChild(count);
@@ -9425,6 +9472,7 @@ function renderTodoPanel() {
     btn.classList.toggle('on', todoOpenPref(iron.id));
   }
   const show = !!iron && todoOpenPref(iron.id);
+  if (show && !renderTodoPanel._sized) { renderTodoPanel._sized = true; todoSizeLoad(); }
   document.getElementById('left').classList.toggle('todoOpen', show);
   document.querySelector('main').classList.toggle('todoOpen', show);   // the corner pills slide out of the column's way
   if (!show) { el.hidden = true; return; }

@@ -104,6 +104,18 @@ const opened = await page.evaluate(()=>{ const el=document.getElementById('iront
 check('☑ tap opens a bottom sheet, lights the button, remembers the choice', !opened.hidden && opened.lit && opened.pref && opened.sheet && opened.title==='☑ voice' && opened.empty, JSON.stringify(opened));
 await page.screenshot({path:join(HERE,'todoprobe-open.png')});   // eyeball frame: the empty sheet over the tty
 
+// 2b. the sheet's grab pill: a real drag up makes it taller, remembered
+{ const g = await page.locator('#irontodo .tdgrip').boundingBox(); const h0 = (await page.locator('#irontodo').boundingBox()).height;
+  const cx=g.x+g.width/2, cy=g.y+g.height/2;
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:cx,y:cy}]});
+  for (let i=1;i<=6;i++) await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:cx,y:cy-i*25}]});
+  await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+  await page.waitForTimeout(200);
+  const h1 = (await page.locator('#irontodo').boundingBox()).height;
+  check('touch: dragging the sheet’s grab pill up makes it ~150px taller, remembered',
+        Math.abs((h1-h0)-150) < 12 && await page.evaluate(()=>!!localStorage.getItem('cc_todo_h')), JSON.stringify({h0,h1})); }
+
 // 3. add: real tap into the box, type, Enter
 await page.evaluate(()=>{ window.__sent.length=0; });
 await tapEl(page, '#irontodo .tdadd input');
@@ -208,6 +220,16 @@ const desk = await dpage.evaluate(()=>{ const el=document.getElementById('ironto
   return { hidden: el.hidden, column: Math.abs(r.right-L.right)<2 && Math.abs(r.top-L.top)<2 && Math.abs(r.bottom-L.bottom)<2 && Math.round(r.width)===300,
            tldrRight: getComputedStyle(document.getElementById('tldr')).right, rows: document.querySelectorAll('#irontodo .tdi').length }; });
 check('desktop: a 300px column down the tty’s right edge; the 🟦 block yields that width', !desk.hidden && desk.column && desk.tldrRight==='300px' && desk.rows===2, JSON.stringify(desk));
+// drag the bar between the tty and the list 120px left → wider panel, remembered; the 🟦 block + corner pills follow
+{ const g = await dpage.locator('#irontodo .tdgrip').boundingBox();
+  await dpage.mouse.move(g.x+g.width/2, g.y+200); await dpage.mouse.down();
+  await dpage.mouse.move(g.x+g.width/2-60, g.y+200, {steps:4}); await dpage.mouse.move(g.x+g.width/2-120, g.y+200, {steps:4}); await dpage.mouse.up();
+  await dpage.waitForTimeout(150);
+  const w = await dpage.evaluate(()=>({ w: Math.round(document.getElementById('irontodo').getBoundingClientRect().width),
+    tldr: getComputedStyle(document.getElementById('tldr')).right, saved: localStorage.getItem('cc_todo_w'),
+    pill: getComputedStyle(document.getElementById('closeBtn')).transform }));
+  check('dragging the bar widens the list to 420px, the 🟦 block + corner pills follow, size remembered',
+        w.w===420 && w.tldr==='420px' && w.saved==='420' && /-420/.test(w.pill), JSON.stringify(w)); }
 await dpage.screenshot({path:join(HERE,'todoprobe-desktop.png')});   // eyeball frame: the column beside the tty
 await dpage.close();
 
