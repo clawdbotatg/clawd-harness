@@ -109,7 +109,9 @@ await page.screenshot({path:join(HERE,'todoprobe-open.png')});   // eyeball fram
   const cx=g.x+g.width/2, cy=g.y+g.height/2;
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:cx,y:cy}]});
-  for (let i=1;i<=6;i++) await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:cx,y:cy-i*25}]});
+  // natural pace: zero-delay moves leave Chromium's gesture recognizer mid-fling and it EATS the next tap (the add's
+  // input never focused; 09-24 on the Linux box) — a finger can't move 150px in 0ms
+  for (let i=1;i<=6;i++) { await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:cx,y:cy-i*25}]}); await page.waitForTimeout(40); }
   await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
   await page.waitForTimeout(200);
   const h1 = (await page.locator('#irontodo').boundingBox()).height;

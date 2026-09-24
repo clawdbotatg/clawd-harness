@@ -99,6 +99,15 @@ const copied = await page.evaluate(() => window.__copied);
 const cmdOK = copied.length === 1 && copied[0] === seen;
 console.log('cmd+c', JSON.stringify(copied), cmdOK ? 'OK: copied what was seen' : 'FAIL: copied drifted text');
 
+// Plain Ctrl+C with a selection → copy too, but NOT on a Mac (Linux: Omarchy's
+// Super+C arrives as Ctrl+C; the old Shift-only rule sent every Linux copy
+// keystroke to the PTY. Mac: Cmd+C copies, Ctrl+C stays interrupt).
+const isMacHere = await page.evaluate(() => TERM_IS_MAC);
+await page.keyboard.press('Control+c');
+await page.waitForTimeout(100);
+const copied2 = await page.evaluate(() => window.__copied);
+const ctrlOK = isMacHere ? copied2.length === 1 : (copied2.length === 2 && copied2[1] === seen);
+console.log('ctrl+c', JSON.stringify(copied2.slice(1)), ctrlOK ? (isMacHere ? 'OK: Mac — plain Ctrl+C left alone' : 'OK: plain Ctrl+C copied the selection') : 'FAIL: plain Ctrl+C wrong for this platform');
 // Native copy event (Edit ▸ Copy / right-click ▸ Copy) → same snapshot.
 const native = await page.evaluate(() => {
   const ev = new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: new DataTransfer() });
@@ -108,13 +117,43 @@ const native = await page.evaluate(() => {
 const nativeOK = native.prevented && native.text === seen;
 console.log('native', JSON.stringify(native), nativeOK ? 'OK: native copy carries the snapshot' : 'FAIL');
 
+// Force the Mac rule regardless of host: with a selection, plain Ctrl+C must NOT
+// copy — it reaches xterm as ^C (interrupt), which also clears the selection.
+const macRes = await page.evaluate(async () => {
+  window.__realIsMac = TERM_IS_MAC; TERM_IS_MAC = true;
+  window.__copied.length = 0;
+  let got = ''; const d = term.onData(x => { got += x; });
+  window.__macProbe = { get: () => got, dispose: () => d.dispose() };
+  return term.hasSelection();
+});
+await page.keyboard.press('Control+c');
+await page.waitForTimeout(100);
+const mac = await page.evaluate(() => { const p = window.__macProbe; const r = { copies: window.__copied.length, data: p.get() }; p.dispose(); TERM_IS_MAC = window.__realIsMac; return r; });
+const macOK = macRes && mac.copies === 0 && mac.data === '\x03';
+console.log('mac rule', JSON.stringify(mac), macOK ? 'OK: on a Mac plain Ctrl+C stays interrupt' : 'FAIL: Mac rule broken');
+
 // Clearing the selection drops the snapshot: a later Cmd+C must NOT copy stale text.
 const cleared = await page.evaluate(() => { term.clearSelection(); return { has: term.hasSelection(), snap: selSnap }; });
 const clearOK = !cleared.has && cleared.snap === '';
 console.log('cleared', JSON.stringify(cleared), clearOK ? 'OK: snapshot follows the selection' : 'FAIL: stale snapshot');
 
+// No selection → a bare Ctrl+C is SIGINT: it must reach xterm (→ PTY), not copy.
+const sigint = await page.evaluate(async () => {
+  const before = window.__copied.length;
+  let got = '';
+  const d = term.onData(s => { got += s; });
+  await new Promise(r => setTimeout(r, 50));
+  window.__sigintProbe = { before, get: () => got, dispose: () => d.dispose() };
+  return true;
+});
+await page.keyboard.press('Control+c');
+await page.waitForTimeout(100);
+const sig = await page.evaluate(() => { const p = window.__sigintProbe; const r = { copies: window.__copied.length - p.before, data: p.get() }; p.dispose(); return r; });
+const sigOK = sig.copies === 0 && sig.data === '\x03';
+console.log('bare ctrl+c', JSON.stringify(sig), sigOK ? 'OK: no selection → ^C to the PTY' : 'FAIL: bare Ctrl+C was swallowed or copied');
+
 await page.screenshot({ path: join(HERE, 'copyprobe.png') });
 await browser.close();
-const ok = seenOK && driftOK && cmdOK && nativeOK && clearOK;
+const ok = seenOK && driftOK && cmdOK && ctrlOK && macOK && nativeOK && clearOK && sigOK;
 console.log(ok ? 'PASS' : 'FAIL');
 process.exit(ok ? 0 : 1);

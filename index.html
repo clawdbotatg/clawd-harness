@@ -8507,6 +8507,9 @@ term.onData(d => sendKeys(d));
 // We must preventDefault() ourselves: returning false makes xterm bail without
 // preventing the browser's default Enter action, which would otherwise insert a
 // newline into xterm's helper textarea and get forwarded to the PTY as a submit.
+// `let`, not const: tools/copyprobe.mjs flips it to exercise the Mac rule on a Linux host.
+let TERM_IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || '') ||
+  /Mac/.test((navigator.userAgentData && navigator.userAgentData.platform) || '');
 term.attachCustomKeyEventHandler((e) => {
   if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey) {
     e.preventDefault();
@@ -8516,11 +8519,17 @@ term.attachCustomKeyEventHandler((e) => {
   }
   // Copy the selection. xterm renders its selection internally — it's NOT a DOM
   // selection — so the browser's native Cmd/Ctrl+C copies nothing. Wire it up
-  // ourselves: Cmd+C (mac) and Ctrl+Shift+C (the terminal-standard copy combo
-  // that doesn't collide with Ctrl+C = SIGINT). Only when something's selected,
-  // so a bare Cmd/Ctrl+C with no selection still reaches the PTY.
+  // ourselves: Cmd+C (mac), Ctrl+Shift+C everywhere, and — NOT on a Mac — plain
+  // Ctrl+C, all ONLY when something is selected, so a bare Ctrl+C with no
+  // selection still reaches the PTY as SIGINT (the VS Code terminal rule).
+  // Plain Ctrl+C matters on Linux/Windows: Omarchy's Super+C is rewritten to
+  // Ctrl+C before it reaches the browser, so the Shift-only rule left every
+  // Linux copy keystroke going to the PTY (Austin, 09-24: "control c does not
+  // copy"). On a Mac Cmd+C is the copy and Ctrl+C stays interrupt, selection
+  // or not — Austin, same day: "not making changes that will fuck up my Mac".
+  const plainCtrlCopies = e.ctrlKey && !e.metaKey && (e.shiftKey || !TERM_IS_MAC);
   if (e.type === 'keydown' && e.key.toLowerCase() === 'c' && term.hasSelection() &&
-      ((e.metaKey && !e.ctrlKey) || (e.ctrlKey && e.shiftKey))) {
+      ((e.metaKey && !e.ctrlKey) || plainCtrlCopies)) {
     e.preventDefault();
     e.stopPropagation();
     copyToClipboard(selectedText());
