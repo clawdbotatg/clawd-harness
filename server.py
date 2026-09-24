@@ -2408,15 +2408,11 @@ def self_todo(cid, op, text="", ref="", want_all=False):
 
 def FLEET_MACHINE_ID():
     """This box's fleet machine id — what the worker registers as (the key an
-    iron stores for a LOCAL project is machine-qualified). The worker's
-    persisted id file first, then FLEET_MACHINE (env / fleet/fleet.env), else
-    the hostname (worker.default_machine_id's own fallback)."""
-    try:
-        v = (HERE / "fleet" / ".clawd-fleet.machine").read_text().strip()
-        if v:
-            return v
-    except OSError:
-        pass
+    iron stores for a LOCAL project is machine-qualified). Same order as
+    worker.py: FLEET_MACHINE (env / fleet/fleet.env) first, then the worker's
+    persisted id file, else the hostname. (Until 2026-09-23 the file came
+    first, so a box with FLEET_MACHINE set and a stale id file sent a
+    different machine than it registered as and `harness-todo` found no iron.)"""
     v = os.environ.get("FLEET_MACHINE") or ""
     if not v:
         try:
@@ -2424,6 +2420,11 @@ def FLEET_MACHINE_ID():
                 line = line.strip()
                 if line.startswith("FLEET_MACHINE="):
                     v = line.partition("=")[2].strip().strip('"').strip("'")
+        except OSError:
+            pass
+    if not v:
+        try:
+            v = (HERE / "fleet" / ".clawd-fleet.machine").read_text().strip()
         except OSError:
             pass
     if not v:
