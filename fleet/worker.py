@@ -1007,7 +1007,7 @@ class Worker:
                 with self.e2e_lock:
                     self.e2e_sessions.pop(frm, None)
                 self.drop_mobile(frm)
-                self.reply(frm, {"t": "e2e.err", "error": "expired"})
+                self.reply(frm, {"t": "e2e.err", "error": self._expiry_word(sess)})
             return                                  # drop bad/replayed frame silently
         except Exception:
             return                                  # malformed record → drop, keep link up
@@ -1020,10 +1020,19 @@ class Worker:
             if link is not None:
                 link.send_text(frame)
 
+    @staticmethod
+    def _expiry_word(sess):
+        """An IDLE lapse is not a passkey event — resume stays valid until the hard
+        deadline — so say "no session" (the page rebuilds silently off its stored
+        material). Only a HARD lapse says "expired". Pages before 2026-09-24 burned
+        their resume material on any "expired", which on a 10-min idle box cost a
+        Face ID per pocketing (clawd-omen, Austin: "five times tonight")."""
+        return "expired" if time.time() > sess.hard_deadline else "no session"
+
     def _expire(self, to):
         with self.e2e_lock:
-            self.e2e_sessions.pop(to, None)
-        self.reply(to, {"t": "e2e.err", "error": "expired"})
+            sess = self.e2e_sessions.pop(to, None)
+        self.reply(to, {"t": "e2e.err", "error": self._expiry_word(sess) if sess else "expired"})
         self.drop_mobile(to)
 
     def reply_enc(self, to, frame):

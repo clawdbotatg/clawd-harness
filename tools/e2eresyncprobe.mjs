@@ -183,14 +183,22 @@ await page.evaluate(m => { for (let i = 0; i < 3; i++) e2eSendFrame(m, { type: '
 await page.waitForTimeout(900);
 check('…but at most once a minute (no churn on a quiet link)', (await chan()).inst === instRate && (await ctl('e2e.resume')).length === 0);
 
-// -- 4. "expired" with dead material: drop the channel, no uninvited passkey ------
+// -- 4. "expired" = an IDLE lapse too: resume silently, KEEP the material --------
+// (Burning it here was the 09-24 omen bug: 10-min idle → a Face ID per pocketing.)
 await ageChan();
 await clearSent();
 await rx({ type: 'machineMsg', machine: M, msg: { t: 'e2e.err', error: 'expired' } });
 await page.waitForTimeout(500);
+let mat = await page.evaluate(m => localStorage.getItem('cc_e2e_rs_' + m), M);
+check('"expired" → material KEPT and a silent resume goes out', !!mat && (await ctl('e2e.resume')).length === 1, JSON.stringify({ mat: !!mat }));
+check('…with no handshake / passkey prompt', (await ctl('e2e.hello')).length === 0 && await page.$eval('#passkey', e => e.hidden));
+
+// -- 5. past the HARD deadline the resume is refused: clear, drop, still no passkey --
+await rx({ type: 'machineMsg', machine: M, msg: { t: 'e2e.err', error: 'resume', for: (await ctl('e2e.resume'))[0].id } });
+await page.waitForTimeout(500);
 const gone = await page.evaluate(m => !e2eChans[m] || e2eChans[m].status !== 'open', M);
-const mat = await page.evaluate(m => localStorage.getItem('cc_e2e_rs_' + m), M);
-check('"expired" → material cleared, channel dropped', gone && !mat, JSON.stringify({ gone, mat }));
+mat = await page.evaluate(m => localStorage.getItem('cc_e2e_rs_' + m), M);
+check('resume refused → material cleared, channel dropped', gone && !mat, JSON.stringify({ gone, mat }));
 check('…and no background handshake / passkey prompt', (await ctl('e2e.hello')).length === 0 && await page.$eval('#passkey', e => e.hidden));
 
 check('no page errors', errors.length === 0, errors.join(' | '));

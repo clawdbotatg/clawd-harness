@@ -3321,8 +3321,13 @@ function e2eOnCtl(machine, msg) {
       // channel 'open' all night. Rebuild silently; replies to records that
       // predate this channel are ignored for a moment after it opened.
       if (Date.now() - (ch.openedAt || 0) < 1500) return;
+      // "expired" is NOT a reason to burn the resume material: the worker says it
+      // when a channel idles past FLEET_E2E_IDLE_TTL (10 min on a box with no
+      // fleet.env override), and resume is valid until the 7-day HARD deadline.
+      // Clearing here made every 10 min of phone-in-pocket cost a Face ID on
+      // clawd-omen (Austin, 09-24: "five times tonight"). A resume past the hard
+      // deadline is refused with 'resume', which clears the material below.
       e2eLog(machine, '#' + ch.inst, 'worker says "' + era + '" on an open channel → rebuilding');
-      if (era === 'expired') e2eClearResume(machine);
       e2eRebuild(machine, ch, 'worker-' + era.replace(' ', '-'));
       return;
     }
