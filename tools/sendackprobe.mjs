@@ -7,10 +7,11 @@
 //   3. a RELOAD keeps that ✓ box and leaves the composer EMPTY (was: the text
 //      came back into the box, photo-less, looking unsent);
 //   4. the prompt landing in the transcript clears the box + the receipt;
-//   5. no receipt in SEND_ACK_MS → "⚠ not delivered" + resend; resend sends a
+//   5. no receipt in SEND_ACK_MS (from a box that HAS sent receipts before) → "⚠ not delivered" + resend; resend sends a
 //      fresh id; a late receipt for the first try doesn't mark the new box;
 //   6. an error receipt (unknown session) → "⚠ not delivered" at once;
 //   6b. a send that lands while you view another session leaves no ghost box;
+//   8. a box that never sent a receipt (pre-receipt server) stays ⏳ — no false ⚠;
 //   7. before any receipt, a reload still puts the text back in the box.
 // Fleet mode + stubbed relay WebSocket + stubbed hsend (uploadwaitprobe pattern).
 //   cd tools && node sendackprobe.mjs
@@ -44,7 +45,7 @@ await page.addInitScript(() => {
   };
   window.__finishUpload = (ok, path) => { const r = window.__uploads.shift(); if (!r) return false;
     r(ok ? { ok:true, status:200, json: async()=>({ path, name:'shot.png' }) } : { ok:false, status:413 }); return true; };
-  try{localStorage.clear();}catch{}
+  if (!sessionStorage.getItem('__booted')) { try{localStorage.clear();}catch{} sessionStorage.setItem('__booted','1'); }   // first load only — a reload must keep what the page saved
   for (const m of ['clawd-atg'])
     try{localStorage.setItem('cc_e2e_rs_'+m, JSON.stringify({id:'p-'+m,master:'AAAA',exp:Date.now()+3600e3}));}catch{}
 });
@@ -76,7 +77,6 @@ check('composer visible', await page.evaluate(()=>!!box && box.offsetParent !== 
   await page.waitForTimeout(600);
   await page.evaluate((CID)=>{ currentCid=CID; currentMachine='clawd-atg'; }, CID);
 }
-await page.addInitScript(() => { if (!sessionStorage.getItem('__booted')) { try{localStorage.clear();}catch{} sessionStorage.setItem('__booted','1'); } });
 await boot();
 check('landed in the tty view', await page.evaluate(()=>currentView()==='tty'));
 
@@ -148,6 +148,13 @@ await type('unconfirmed');
 await page.reload({waitUntil:'domcontentloaded'}); await page.waitForTimeout(300);
 await boot(); await page.waitForTimeout(200);
 check('7. no receipt + reload → text back in the composer', await page.evaluate(()=>box.value==='unconfirmed'), await page.evaluate(()=>box.value));
+
+// ── 8. a box that never acked (old server) → no false ⚠ ─────────────────────
+await page.evaluate(()=>{ localStorage.removeItem('cc_ackers'); window.__frames=[]; });
+await type('old server');
+await page.waitForTimeout(12400);
+let b8 = await boxes();
+check('8. never-acked box → stays ⏳ sending, no ⚠', b8.length===1 && /sending/.test(b8[0].tag) && !b8[0].resend, JSON.stringify(b8));
 
 check('no page errors', errors.length===0, errors.join(' | '));
 await browser.close();

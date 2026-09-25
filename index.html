@@ -7700,12 +7700,21 @@ function addPending(key, display) {
 const SEND_ACK_MS = 12000;
 const sendWait = {};   // id → { cid, full, recover, via, machine, state: 'sending'|'ok'|'lost', timer }
 const outackKey = (cid) => 'cc_outack:' + (cid || '_');
+// Only a machine that has EVER sent a receipt can be judged for a missing one:
+// a box still on the pre-receipt server (it restarts only when idle) never
+// answers, and every send to it would read "not delivered". Remembered per box.
+const ACKERS_KEY = 'cc_ackers';
+function ackers() { try { return JSON.parse(localStorage.getItem(ACKERS_KEY)) || {}; } catch { return {}; } }
+function noteAcker(m) { const a = ackers(); if (a[m]) return; a[m] = 1; try { localStorage.setItem(ACKERS_KEY, JSON.stringify(a)); } catch {} }
 function armSendAck(cid, full, recover, via) {
   const id = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   try { sessionStorage.removeItem(outackKey(cid)); } catch {}
   const w = sendWait[id] = { cid, full, recover, via, machine: FLEET ? (machineForCid(cid) || currentMachine) : null,
                              state: 'sending', timer: null };
-  w.timer = setTimeout(() => { if (w.state === 'sending') { w.state = 'lost'; paintSend(w); } }, SEND_ACK_MS);
+  w.timer = setTimeout(() => {
+    if (w.state !== 'sending' || !ackers()[w.machine || '_direct']) return;   // an old server: stay ⏳, as before receipts
+    w.state = 'lost'; paintSend(w);
+  }, SEND_ACK_MS);
   return id;
 }
 function onSendAck(machine, m) {
@@ -7714,6 +7723,7 @@ function onSendAck(machine, m) {
   clearTimeout(w.timer);
   if (w.state === 'retried') { delete sendWait[m.id]; return; }   // the resend's own receipt paints its box
   if (machine) w.machine = machine;
+  noteAcker(w.machine || '_direct');
   if (m.error) { w.state = 'lost'; paintSend(w); return; }
   w.state = 'ok';
   try { sessionStorage.setItem(outackKey(w.cid), w.machine || '1'); } catch {}
