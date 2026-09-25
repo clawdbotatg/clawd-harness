@@ -555,6 +555,13 @@
   .pending-msg.hold button { background:transparent; border:0; color:var(--dim); cursor:pointer; padding:0 2px; }
   .pending-msg.hold button:hover { color:var(--err); }
   @keyframes holdpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+  /* ✓ receipts: the machine has it (green tag) / it never arrived (red + resend) */
+  .pending-msg.ok .tag { color:var(--ok, #7bd88f); }
+  .pending-msg.lost { border-color:var(--err); }
+  .pending-msg.lost .tag { color:var(--err); }
+  .pending-msg > div { flex:1 1 auto; }
+  .pending-msg button.resend { background:transparent; border:1px solid var(--err); color:var(--err);
+                               border-radius:6px; padding:2px 9px; font-size:12px; cursor:pointer; }
   .chip { display:flex; align-items:center; gap:6px; background:var(--raised); border:1px solid var(--edge);
           padding:4px 8px; font-size:12px; color:var(--ink); }
   .chip img { width:30px; height:30px; object-fit:cover; border:1px solid var(--edge); }
@@ -2516,7 +2523,7 @@ function flushOutbound() {
     // back in the composer when that session is next opened (no cross-session
     // misfire, no stale command detonating hours later).
     if (it.cid && it.cid !== currentCid) continue;
-    if (!hsend({ type: 'send', text: it.full, via: it.via })) outbound.push(it);
+    if (!hsend({ type: 'send', text: it.full, via: it.via, id: it.id })) outbound.push(it);
   }
 }
 // Send now if the link is live; if it's down, queue + kick a reconnect so the
@@ -2530,7 +2537,8 @@ function deliverSend(cid, full, recover, via) {
   clearTldr();                                 // 🟦 sending = done reading (typing keeps it)
   stashOutbox(cid, recover);
   if (via !== 'quick') recordSent(cid, full);   // chips are canned one-liners — nothing to recover
-  if (!hsend({ type: 'send', text: full, via })) { outbound.push({ cid, full, via }); scheduleReconnect(0); return; }
+  const id = armSendAck(cid, full, recover, via);   // ✓ receipt: the machine says it has it
+  if (!hsend({ type: 'send', text: full, via, id })) { outbound.push({ cid, full, via, id }); scheduleReconnect(0); return; }
   // hsend "succeeded" — but a socket killed during sleep still reads OPEN and
   // eats the bytes without an error. If the server has been silent a while,
   // verify with a ping: no pong → assume the send died with the socket, requeue
@@ -2542,7 +2550,7 @@ function deliverSend(cid, full, recover, via) {
   const pathReady = !FLEET || (e2eChans[currentMachine] && e2eChans[currentMachine].status === 'open');
   if (pathReady && Date.now() - lastRx > 5000 && !liveProbe) {
     probeLiveness((alive) => {
-      if (!alive) { outbound.push({ cid, full }); teardownAndReconnect(); }
+      if (!alive) { outbound.push({ cid, full, via, id }); teardownAndReconnect(); }
     }, 4000);
   }
 }
@@ -3547,6 +3555,7 @@ function handleMachineJson(machine, m) {
     confirmCreateLocal(machine, m.path);
     return;
   }
+  if (m.type === 'sendAck') { onSendAck(machine, m); return; }   // ✓ whichever machine took the send
   if (m.type === 'ironDesc') {
     // likewise: the describe request goes to whichever live machine can run
     // the LLM call, which need not be the machine we're viewing.
@@ -3801,6 +3810,8 @@ function handleJson(m) {
     if (!FLEET) applyTodos(m.todos);      // ☑ same split: fleet lists live on the relay
   } else if (m.type === 'closed') {
     onClosedFrame(null, m.closed || []);   // 🗃️ direct mode (fleet frames are caught per machine upstream)
+  } else if (m.type === 'sendAck') {
+    onSendAck(null, m);                   // ✓ the harness has the send (direct mode)
   } else if (m.type === 'ironDesc') {
     onIronDesc(m);                        // haiku's take on an iron — store + repaint
   } else if (m.type === 'skillsLib') {
@@ -6213,6 +6224,7 @@ function subscribe(cid, opts) {
   feed.innerHTML = '';
   if (switching) clearTldr();  // 🟦 the summary belongs to the session we're leaving (the new one re-sends its own)
   clearPending();              // queued boxes belong to the session we're leaving
+  restorePending(cid);         // …but this session's own in-flight sends come back (✓ receipts)
   hideThinking();
   if (activeType) { activeType.finish(); activeType = null; }
   highlightCard(cid);
@@ -7659,15 +7671,88 @@ imgInput.addEventListener('change', () => {
 // above the input so you know the message is on its way, even while claude is
 // busy on a prior turn. Each entry is removed once its `user` event lands in the
 // transcript (mirrors how the TUI drops your text below the loader).
-let pendingMsgs = [];   // [{ key, el }] — `key` is the full sent text, matched on landing
+let pendingMsgs = [];   // [{ key, el, tag }] — `key` is the full sent text, matched on landing
 function addPending(key, display) {
   const d = document.createElement('div');
   d.className = 'pending-msg';
-  const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = '⏳ queued';
+  const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = '⏳ sending';
   const body = document.createElement('div'); body.textContent = display;
   d.appendChild(tag); d.appendChild(body);
   pendingEl.appendChild(d);
-  pendingMsgs.push({ key, el: d });
+  const p = { key, el: d, tag };
+  pendingMsgs.push(p);
+  const w = Object.values(sendWait).find(w => w.full === key && w.cid === currentCid);
+  if (w) paintPending(p, w);           // a receipt that already landed (or already went missing)
+  return p;
+}
+
+// ── ✓ send receipts ─────────────────────────────────────────────────────────
+// A send the machine has but the CLI hasn't taken yet looks exactly like a send
+// that died on the way: codex takes a message only BETWEEN steps (a minute+
+// mid-tool) and shows nothing meanwhile, and a reload used to put the text back
+// in the box (outbox) as if unsent — so a delivered photo got sent twice
+// (Austin, 09-25). Every send now carries an id; the harness answers `sendAck`
+// the moment the frame arrives. The queued box says which it is:
+//   ⏳ sending → ✓ on <machine> · waiting (just be patient) → gone once it lands
+//   ⚠ not delivered + resend, when no receipt comes in SEND_ACK_MS.
+// The receipt survives a reload of this tab (cc_outack, next to the outbox): a
+// received send comes back as its ✓ box, never as text in the composer.
+const SEND_ACK_MS = 12000;
+const sendWait = {};   // id → { cid, full, recover, via, machine, state: 'sending'|'ok'|'lost', timer }
+const outackKey = (cid) => 'cc_outack:' + (cid || '_');
+function armSendAck(cid, full, recover, via) {
+  const id = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  try { sessionStorage.removeItem(outackKey(cid)); } catch {}
+  const w = sendWait[id] = { cid, full, recover, via, machine: FLEET ? (machineForCid(cid) || currentMachine) : null,
+                             state: 'sending', timer: null };
+  w.timer = setTimeout(() => { if (w.state === 'sending') { w.state = 'lost'; paintSend(w); } }, SEND_ACK_MS);
+  return id;
+}
+function onSendAck(machine, m) {
+  const w = sendWait[m.id];
+  if (!w) return;
+  clearTimeout(w.timer);
+  if (w.state === 'retried') { delete sendWait[m.id]; return; }   // the resend's own receipt paints its box
+  if (machine) w.machine = machine;
+  if (m.error) { w.state = 'lost'; paintSend(w); return; }
+  w.state = 'ok';
+  try { sessionStorage.setItem(outackKey(w.cid), w.machine || '1'); } catch {}
+  paintSend(w);
+}
+function paintSend(w) {
+  if (w.cid !== currentCid) return;
+  for (let i = pendingMsgs.length - 1; i >= 0; i--)
+    if (pendingMsgs[i].key === w.full) { paintPending(pendingMsgs[i], w); return; }
+}
+function paintPending(p, w) {
+  p.el.classList.toggle('ok', w.state === 'ok');
+  p.el.classList.toggle('lost', w.state === 'lost');
+  const old = p.el.querySelector('button.resend'); if (old) old.remove();
+  if (w.state === 'ok') {
+    p.tag.textContent = '✓ on ' + (w.machine && w.machine !== '1' ? shortMachine(w.machine) : 'the machine') + ' · waiting';
+  } else if (w.state === 'lost') {
+    p.tag.textContent = '⚠ not delivered';
+    const b = document.createElement('button'); b.className = 'resend'; b.textContent = 'resend';
+    b.onclick = () => {
+      w.state = 'retried';             // a late receipt for the first try must not flip the new box
+      p.el.remove(); pendingMsgs = pendingMsgs.filter(x => x !== p);
+      deliverSend(w.cid, w.full, w.recover, w.via);
+      addPending(w.full, w.recover || w.full);
+    };
+    p.el.appendChild(b);
+  } else p.tag.textContent = '⏳ sending';
+}
+// Re-show this session's in-flight sends after a (re)subscribe wiped the boxes:
+// this tab's live ones from memory, else a received-but-not-landed send a
+// reload left behind (outbox text + receipt). Their landing clears them as usual.
+function restorePending(cid) {
+  const live = Object.values(sendWait).filter(w => w.cid === cid && w.state !== 'retried');
+  if (live.length) { for (const w of live) addPending(w.full, w.recover || w.full); return; }
+  let stash = '', ack = '';
+  try { stash = sessionStorage.getItem(outboxKey(cid)) || ''; ack = sessionStorage.getItem(outackKey(cid)) || ''; } catch {}
+  if (!stash || !ack) return;
+  const p = addPending(stash, stash);
+  paintPending(p, { state: 'ok', machine: ack });
 }
 // A user event landed in the transcript — drop the matching queued box. Exact
 // (trimmed) match first; fall back to the oldest, since messages land in order
@@ -7679,6 +7764,7 @@ function landPending(landed) {
   if (i < 0) i = 0;
   const [p] = pendingMsgs.splice(i, 1);
   p.el.remove();
+  for (const [id, w] of Object.entries(sendWait)) if (w.full === p.key && w.cid === currentCid) { clearTimeout(w.timer); delete sendWait[id]; }
 }
 function clearPending() { pendingMsgs = []; pendingEl.innerHTML = ''; }
 // Deliver the message typed on the sessions list, once the new session is up.
@@ -7727,7 +7813,7 @@ function currentDraftId() {
 // crosses to another one.
 const outboxKey = (cid) => 'cc_outbox:' + (cid || '_');
 function stashOutbox(cid, text) { try { if (cid && text) sessionStorage.setItem(outboxKey(cid), text); } catch {} }
-function clearOutbox(cid) { try { sessionStorage.removeItem(outboxKey(cid)); } catch {} }
+function clearOutbox(cid) { try { sessionStorage.removeItem(outboxKey(cid)); sessionStorage.removeItem(outackKey(cid)); } catch {} }
 // The prompt for `cid` is confirmed inside claude: drop the outbox copy, and if it
 // had already been restored into the composer (a reload or a quick view-hop raced
 // the confirmation), take it back out of the box and the per-cid draft too — but
@@ -7736,8 +7822,12 @@ function outboxDelivered(cid) {
   let stash = '';
   try { stash = sessionStorage.getItem(outboxKey(cid)) || ''; } catch {}
   clearOutbox(cid);
+  // It's in: drop this session's receipts too — even when it landed while you
+  // were viewing another session, or restorePending would bring back a ghost box.
+  for (const [id, w] of Object.entries(sendWait)) if (w.cid === cid) { clearTimeout(w.timer); delete sendWait[id]; }
   if (!stash) return;
   const st = stash.trim();
+  if (cid === currentCid) landPending(stash);   // its ✓ box (restored after a reload) goes too
   try {  // a context switch may have promoted the restored stash into the draft — scrub the exact copy
     if ((localStorage.getItem(draftKey(cid)) || '').trim() === st) localStorage.removeItem(draftKey(cid));
   } catch {}
@@ -8210,7 +8300,8 @@ function syncComposer() {
         v = takePending();
         if (!v) { v = localStorage.getItem(draftKey('new:_')) || ''; if (v) localStorage.removeItem(draftKey('new:_')); }
       }
-    } else if (!v) v = sessionStorage.getItem(outboxKey(id)) || '';   // session recovers an unconfirmed send (per-tab)
+    } else if (!v && !sessionStorage.getItem(outackKey(id)))   // a RECEIVED send shows as its ✓ box instead
+      v = sessionStorage.getItem(outboxKey(id)) || '';         // session recovers an unconfirmed send (per-tab)
   } catch {}
   box.value = v;
   autosizeBox();                             // size to the restored draft (or shrink back if empty)
@@ -8289,7 +8380,7 @@ function dispatchSend(text, ready) {
     setTimeout(flushPendingSend, 8000);
     return true;
   }
-  deliverSend(currentCid, full, text || full);  // send now if live; if the link is down, queue + reconnect so you never re-hit-enter (also kept in the outbox for a reload)
+  deliverSend(currentCid, full, ready.length ? full : (text || full));  // (a photo's recovery copy keeps its path) send now if live; if the link is down, queue + reconnect so you never re-hit-enter (also kept in the outbox for a reload)
   viewBeforeQuestion = null;          // you're acting here on purpose — don't auto-return
   addPending(full, text || ready.map(a => a.label || a.name).join(', ') || full);
   return true;

@@ -10168,6 +10168,9 @@ class Handler(BaseHTTPRequestHandler):
         elif t in ("input", "send", "resize"):
             s = MGR.get(frame.get("cid") or client.cid)
             if not s:
+                if t == "send" and frame.get("id"):
+                    client.send_json({"type": "sendAck", "id": frame["id"],
+                                      "error": "no session"})
                 return
             if t == "input":
                 s.bump_owner(client)             # driving a session claims its size
@@ -10177,6 +10180,13 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"[ws {s.cid[:8]}] send: {txt[:60]!r}", flush=True)
                 s.bump_owner(client)
                 log_prompt(s, txt, frame.get("via", ""))
+                # The machine has it. The page shows "✓ on <machine>" off this,
+                # so a send the CLI holds (codex takes a message only between
+                # steps, a minute+ mid-tool) reads as "wait", and a send that
+                # never arrives reads as "resend" (Austin, 09-25).
+                if frame.get("id"):
+                    client.send_json({"type": "sendAck", "id": frame["id"],
+                                      "cid": s.cid})
                 # A browser send always carries a `via` tag ('typed'/'quick');
                 # controller/pipeline sends never do — that asymmetry is the
                 # whole arming gate for AUTO_TLDR. Asking for a tldr yourself

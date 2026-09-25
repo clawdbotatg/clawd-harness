@@ -188,7 +188,8 @@ await page.keyboard.type('ok');
 check('typing keeps it on screen', await page.evaluate(()=>tldrTextEl.textContent==='read me' && box.value==='ok'));
 await page.evaluate((CID)=>deliverSend(CID, 'ok', null, 'typed'), CID);
 check('sending clears it', await gone());
-await page.evaluate(()=>{ box.value=''; });
+// …and it lands (a real send always does, or its ✓ box would come back on the next subscribe and shift the footer)
+await page.evaluate((CID)=>{ box.value=''; handleJson({type:'hook',cid:CID,event:'UserPromptSubmit',busy:true,waiting:false,tool:null,data:{prompt:'ok'}}); }, CID);
 
 // 7b. switching to another session blanks it — the summary must not follow you
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'stay here',final:true}), CID);
