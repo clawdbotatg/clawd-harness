@@ -242,7 +242,10 @@ per token) rather than the ChatGPT plan. Add `OPENAI_API_KEY`, `CODEX_*`,
 `SEND_SETTLE` / `SEND_SETTLE_MIN` (gotcha #2) are empirical constants for
 claude's paste heuristic. Codex's TUI has its own bracketed-paste and
 Enter-to-submit handling; the numbers will differ and must be measured, not
-guessed. Same for the **key bar** escape sequences — codex's menus, approval
+guessed. **Measured 2026-09-25:** sends must be bracketed
+(`CodexEngine.bracketed_paste = True`) — unbracketed, a long send on Linux
+split at 1024 bytes and the submitting CR was swallowed. Settle constants
+are shared with claude and work. Same for the **key bar** escape sequences — codex's menus, approval
 prompts and slash commands (`/status`, `/usage`) are its own.
 
 ### 7. The subscription router does not port

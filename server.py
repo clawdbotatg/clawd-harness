@@ -2858,8 +2858,8 @@ class Engine:
     # front of every long dictated prompt. Real terminals (xterm.js included)
     # bracket every paste, so this is also just fidelity: claude enables mode
     # 2004 in its first paint. Per-engine because sending the markers to a TUI
-    # that never enabled 2004 would deliver them as literal text; codex stays
-    # opted out until someone verifies its TUI the same way.
+    # that never enabled 2004 would deliver them as literal text. Codex is
+    # verified too (see CodexEngine).
     bracketed_paste = False
     # The keystroke that answers this CLI's resume gate (see _RESUME_GATE_RE) —
     # a bare CR, because option 1 ("Resume from summary") is the one already
@@ -2971,6 +2971,14 @@ class CodexEngine(Engine):
     # instead of the ChatGPT subscription — the exact shape of SCRUB_ENV's
     # nested-claude trap (gotcha #1), different name. Strip it.
     scrub_extra = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY")
+    # Verified 2026-09-25 (codex 0.156.1 on omen/Linux, 0.157.0 on macOS):
+    # codex enables 2004, and an UNBRACKETED long send breaks its paste-burst
+    # detection on Linux — the PTY hands it over in 1024-byte reads, codex
+    # folds the first read into "[Pasted Content 1024 chars]", types the rest,
+    # and the submitting CR is swallowed. The message sits in the composer
+    # until the NEXT send's CR posts both (Austin, 09-25). Bracketed, 1.5k
+    # chars submit on both boxes at either settle.
+    bracketed_paste = True
 
     def argv(self, s):
         # No --session-id analogue: codex assigns its own id, so the cid↔sid
