@@ -51,6 +51,7 @@ import secrets
 import select
 import signal
 import struct
+import shutil
 import subprocess
 import tempfile
 import termios
@@ -2991,6 +2992,16 @@ class CodexEngine(Engine):
         argv += ["--no-alt-screen",              # inline mode; see slim note below
                  "-a", CODEX_APPROVAL,
                  "-s", CODEX_SANDBOX]
+        if _codex_has_flag("--no-daemon"):
+            # 0.157 runs the TUI against a SHARED background app-server by
+            # default. Its startup goes async, and a prompt submitted before
+            # the thread is up is QUEUED — then held until some later turn
+            # ends. The 🔍 reviewer's brief (typed at SessionStart) sat until
+            # Austin typed "test" (clawd-head, 09-26). A shared daemon also
+            # outlives our process tree and restarts on its own updates. One
+            # codex process per session is the model everything here assumes.
+            # Gated: 0.154 doesn't know the flag and would refuse to start.
+            argv += ["--no-daemon"]
         if CODEX_BYPASS_HOOK_TRUST:
             # Without this, codex opens on a blocking "Hooks need review — N
             # hooks are new or changed" screen and, until a human answers it,
@@ -3045,6 +3056,30 @@ class CodexEngine(Engine):
 
 
 ENGINES = {"claude": ClaudeEngine(), "codex": CodexEngine()}
+
+
+_codex_help_cache = {}
+
+
+def _codex_has_flag(flag):
+    """Does the installed codex's `--help` list `flag`? Keyed on the resolved
+    binary's path + mtime, so a `npm i -g @openai/codex` under a running
+    harness is noticed at the next spawn without a restart. Any failure reads
+    as "no" — passing an unknown flag would stop codex from starting at all."""
+    try:
+        path = os.path.realpath(shutil.which(CODEX_BIN) or CODEX_BIN)
+        key = (path, os.stat(path).st_mtime)
+    except (OSError, TypeError):
+        return False
+    if key not in _codex_help_cache:
+        try:
+            out = subprocess.run([CODEX_BIN, "--help"], capture_output=True,
+                                 text=True, timeout=10).stdout
+        except Exception:
+            return False                         # not cached: retry next spawn
+        _codex_help_cache.clear()
+        _codex_help_cache[key] = out
+    return flag in _codex_help_cache[key]
 
 
 _EXT_DOC_MARK = "<!-- clawd-harness external-project rule; regenerated each spawn -->"
