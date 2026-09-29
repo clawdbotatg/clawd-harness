@@ -154,6 +154,12 @@
   #sessionbar .tfilter .fclear { flex:0 0 auto; color:var(--dim); cursor:pointer; font-size:11px;
                                  padding:0 2px; user-select:none; }
   #sessionbar .tfilter .fclear:hover { color:var(--err); }
+  /* "+N more" — how many tabs are off the visible strip (either side), so the
+     total stays in view as you close them down. Tap = scroll to the next ones. */
+  #sessionbar .tfilter .tmore { flex:0 0 auto; font-size:10px; color:var(--dim); cursor:pointer;
+                                user-select:none; padding:0 2px; font-family:var(--mono); }
+  #sessionbar .tfilter .tmore:hover { color:var(--ink); }
+  #sessionbar .tfilter .tmore[hidden] { display:none; }
   /* Touch: the strip is the whole screen width, so an always-open box would eat a
      fifth of it. Collapse to the 🔎 alone until you tap it (or a filter is live). */
   @media (pointer: coarse) {
@@ -4440,6 +4446,7 @@ function renderSessionBar(view) {
   paintTabFilter(q, shown, sorted.length);
   bar.hidden = false;
   if (wasHidden) refitTTY();
+  paintTabMore();
 }
 
 // 🔥 the iron scope row — while a session is open INSIDE an iron, the whole
@@ -4598,8 +4605,14 @@ function ensureTabFilter(bar) {
     const x = document.createElement('span');
     x.className = 'fclear'; x.textContent = '✕'; x.title = 'clear filter';
     x.onclick = () => clearTabFilter();
+    const more = document.createElement('span');
+    more.className = 'tmore'; more.hidden = true;
+    more.onclick = () => tabMoreJump();
+    wrap.appendChild(more);
     wrap.appendChild(ico); wrap.appendChild(inp); wrap.appendChild(x);
     tabFilterEl = wrap; tabFilterInp = inp;
+    bar.addEventListener('scroll', paintTabMore, { passive: true });
+    window.addEventListener('resize', paintTabMore);
   }
   if (tabFilterEl.parentNode !== bar) bar.appendChild(tabFilterEl);   // PM view wipes the strip
   return tabFilterEl;
@@ -4615,6 +4628,42 @@ function setTabFilter(v) {
   tabFilter = v;
   if (tabFilterInp && tabFilterInp.value !== v) tabFilterInp.value = v;
   renderSessionBar();
+}
+// "+N more": tabs less than half on screen — scrolled off the left, or under
+// the filter box on the right. Measured, not computed from counts: the strip
+// is one scrolling row whose fit depends on the width and every tab's label.
+function tabMoreHidden() {
+  const bar = document.getElementById('sessionbar');
+  const more = tabFilterEl && tabFilterEl.querySelector('.tmore');
+  if (!bar || bar.hidden || !more) return { left: [], right: [], total: 0 };
+  const br = bar.getBoundingClientRect();
+  const cut = (more.hidden ? tabFilterEl.querySelector('.ficon') : more).getBoundingClientRect().left;
+  const left = [], right = [];
+  let total = 0;
+  bar.querySelectorAll('.stab:not(.fhide)').forEach(t => {
+    total++;
+    const r = t.getBoundingClientRect(), mid = r.left + r.width / 2;
+    if (mid > cut) right.push(t); else if (mid < br.left) left.push(t);
+  });
+  return { left, right, total };
+}
+function paintTabMore() {
+  const more = tabFilterEl && tabFilterEl.querySelector('.tmore');
+  if (!more) return;
+  // twice: showing the counter widens the box and can cover one more tab
+  for (let i = 0; i < 2; i++) {
+    const h = tabMoreHidden(), n = h.left.length + h.right.length;
+    more.hidden = !n;
+    more.textContent = n ? `…${n} more` : '';
+    more.title = n ? `${h.total} sessions — ${h.left.length ? h.left.length + ' off the left, ' : ''}${h.right.length} off the right` : '';
+  }
+}
+// Tap: bring the next hidden tabs into view (the far end wraps back to the start).
+function tabMoreJump() {
+  const bar = document.getElementById('sessionbar');
+  const h = tabMoreHidden();
+  if (h.right.length) bar.scrollBy({ left: bar.clientWidth * 0.7, behavior: 'smooth' });
+  else bar.scrollTo({ left: 0, behavior: 'smooth' });
 }
 function paintTabFilter(terms, shown, total) {
   if (!tabFilterEl) return;

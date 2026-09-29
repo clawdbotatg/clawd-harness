@@ -179,6 +179,42 @@ if (geom.ok && geom.tabs > 0) {
 await page.setViewportSize({ width: 380, height: 760 });
 await page.waitForTimeout(600);
 checkGeom(await page.evaluate(GEOM_FN), ' phone');
+// ---- 6: "…N more" counts the tabs you can't see (2026-09-29) --------------
+// N must equal the tabs less than half on screen; hidden when everything fits;
+// it must follow a scroll; and a tap must scroll the strip.
+{
+  const r = await page.evaluate(async () => {
+    const bar = document.getElementById('sessionbar');
+    const more = bar && bar.querySelector('.tfilter .tmore');
+    if (!more) return { has: false };
+    const settle = () => new Promise(r => setTimeout(r, 450));
+    const truth = () => {
+      const br = bar.getBoundingClientRect();
+      const cut = (more.hidden ? bar.querySelector('.tfilter .ficon') : more).getBoundingClientRect().left;
+      return [...bar.querySelectorAll('.stab:not(.fhide)')].filter(t => {
+        const q = t.getBoundingClientRect(), m = q.left + q.width / 2;
+        return m > cut || m < br.left; }).length;
+    };
+    const shown = () => more.hidden ? 0 : parseInt(more.textContent.replace(/\D+/g, ''), 10);
+    const overflow = bar.scrollWidth - bar.clientWidth > 20;
+    const a = { shown: shown(), truth: truth() };
+    const x0 = bar.scrollLeft; more.hidden || more.click(); await settle();
+    const moved = bar.scrollLeft !== x0;
+    const b = { shown: shown(), truth: truth() };
+    bar.scrollLeft = 0; await settle();
+    return { has: true, overflow, a, b, moved };
+  });
+  console.log('MORE', JSON.stringify(r));
+  if (!r.has) fail('no .tmore counter in the filter box');
+  else {
+    if (r.a.shown !== r.a.truth) fail(`counter says ${r.a.shown} hidden, ${r.a.truth} actually are`);
+    else pass(`counter shows ${r.a.shown} hidden tab(s), matching the strip`);
+    if (r.overflow && !r.a.shown) fail('strip overflows but the counter is hidden');
+    if (r.a.shown && !r.moved) fail('tapping the counter did not scroll the strip');
+    if (r.b.shown !== r.b.truth) fail(`after a scroll the counter says ${r.b.shown}, truth ${r.b.truth}`);
+    else if (r.a.shown) pass('counter follows a scroll; tap scrolls the strip');
+  }
+}
 await page.screenshot({ path: join(HERE, 'tabfilterprobe-phone.png') });
 await page.setViewportSize({ width: 900, height: 800 });
 await page.waitForTimeout(400);
