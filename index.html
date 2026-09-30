@@ -256,7 +256,7 @@
   #machineTag.show { display:flex; }
   #machineTag .model { color:var(--accent); }
   #machineTag .ctx { color:var(--dim); }
-  #machineTag .ctx.warn { color:var(--accent); }
+  #machineTag .ctx.fresh { color:var(--ok); }
   #machineTag .ctx.crit { color:var(--err); }
   #machineTag .acct, #machineTag .mach { color:var(--ink); }
   /* 🔑 sign-in call to action: a signed-out login beats the pool this session
@@ -6378,6 +6378,17 @@ function sessionState(s) {
                                                           : 'background · agents running' };
   return { key: 'idle', word: 'idle' };
 }
+// How full the context window is. Claude 5-family sessions run the 1M
+// window (the logins' settings say opus[1m]; /model to Fable keeps it) — the
+// old flat 200k made every long session read 100% at a fifth full (Austin,
+// 09-30). Codex states its own window (ctxWindow). A count past 200k proves
+// the bigger window whatever the model string says.
+function ctxWindow(s) {
+  if (s.ctxWindow > 0) return s.ctxWindow;
+  if (/^claude-(opus|fable|sonnet)-5/.test(s.model || '') || s.ctxTokens > 200000) return 1000000;
+  return 200000;
+}
+function ctxPct(s) { return Math.min(100, Math.round(100 * s.ctxTokens / ctxWindow(s))); }
 function prettyModel(m) {
   // 'claude-sonnet-4-5-20250929' → 'sonnet 4.5'
   return (m || '').replace(/^claude-/, '').replace(/-\d{8}$/, '')
@@ -6485,8 +6496,7 @@ function maybeSplash(cid) {
   const bits = [];
   const model = prettyModel(s.model);
   if (model) bits.push(model);
-  if (s.ctxTokens > 0)                                   // 200k window assumed
-    bits.push('ctx ' + Math.min(100, Math.round(s.ctxTokens / 2000)) + '%');
+  if (s.ctxTokens > 0) bits.push('ctx ' + ctxPct(s) + '%');
   if (s.account && s.account !== 'default')
     bits.push('🔑 ' + acctDisplay(machine || 'local', s.account));
   const age = fmtAge(s.promptedAt || s.lastActive);
@@ -10662,8 +10672,7 @@ function refreshSessionTag() {
     acct = acctDisplay(FLEET ? currentMachine : 'local', s.account);
   const mach = (FLEET && currentMachine) ? shortMachine(currentMachine) : '';
   const model = s ? prettyModel(s.model) : '';
-  const pct = (s && s.ctxTokens > 0)                     // 200k window assumed
-    ? Math.min(100, Math.round(s.ctxTokens / 2000)) : 0;
+  const pct = (s && s.ctxTokens > 0) ? ctxPct(s) : 0;
   machineTag.textContent = '';
   const add = (cls, text) => {
     const el = document.createElement('span');
@@ -10679,7 +10688,11 @@ function refreshSessionTag() {
   const cta = s && s.loginCta && s.loginCta.name && ctaStillTrue(s) ? s.loginCta : null;
   const room = !(cta && isTouch);
   if (model && room) add('model', model);
-  if (pct > 0 && room) add('ctx' + (pct >= 90 ? ' crit' : pct >= 70 ? ' warn' : ''), 'ctx ' + pct + '%');
+  // Colour by tokens, not percent (Austin, 09-30): green under 100k, grey
+  // to 400k, red from 400k — where a long session gets less sharp and
+  // burns the plan fast, well before a 1M window is full.
+  const tk = (s && s.ctxTokens) || 0;
+  if (pct > 0 && room) add('ctx' + (tk >= 400000 ? ' crit' : tk < 100000 ? ' fresh' : ''), 'ctx ' + pct + '%');
   if (acct && room) add('acct', '🔑 ' + acct);
   if (mach && room) add('mach', mach);
   if (cta) {

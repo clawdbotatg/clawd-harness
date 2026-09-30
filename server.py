@@ -3511,6 +3511,7 @@ class ClaudeSession:
         # input-side token total — "how full is the context window".
         self.model = model
         self.ctx_tokens = ctx_tokens
+        self.ctx_window = 0                      # codex states its window; 0 = the page guesses from the model
         self.prompt_count = prompt_count
         self.first_prompt = first_prompt
         self.last_active = last_active or self.created   # warmth: drives project sort
@@ -3731,6 +3732,7 @@ class ClaudeSession:
                 "pilotRounds": self.pilot_rounds,
                 "model": self.model,
                 "ctxTokens": self.ctx_tokens,
+                "ctxWindow": self.ctx_window,       # 0 = unknown; the page guesses from the model
                 "wrapArmed": self.wrap_armed(),     # 📑 may close itself (badge + cancel line)
                 "wrapClosing": self.wrap_closing,   # 📑 harness-close accepted; closes at turn end
                 "checkArmed": self.check_armed(),   # 🔍 writing the brief; a reviewer spawns at its Stop
@@ -5070,6 +5072,9 @@ class ClaudeSession:
             tok = usage.get("input_tokens") or 0
             if tok:
                 self.ctx_tokens = tok
+            win = info.get("model_context_window") or 0
+            if win:
+                self.ctx_window = win
             return None
 
         if ptype in ("message", "user_message", "agent_message"):
