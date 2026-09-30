@@ -849,6 +849,7 @@ EMOJI_SYS_PROMPT = ("You assign a short emoji code to a software project — a v
                     "duplicate any of them. No letters, digits or words — emoji only.")
 EMOJI_REFRESH_S    = float(os.environ.get("EMOJI_REFRESH_S", str(7 * 86400)))  # re-badge cadence (projects evolve)
 EMOJI_SCAN_EVERY   = float(os.environ.get("EMOJI_SCAN_EVERY", "60"))     # sweep throttle on the ~1s watch loop
+EMOJI_REROLL_S     = float(os.environ.get("EMOJI_REROLL_S", "600"))      # cross-box collision re-roll: at most this often per project
 EMOJI_RETRY_S      = float(os.environ.get("EMOJI_RETRY_S", "1800"))      # immature/failed → back off before retrying
 EMOJI_MIN_FILES    = int(os.environ.get("EMOJI_MIN_FILES", "3"))         # maturity: this many tracked files…
 EMOJI_MIN_README   = int(os.environ.get("EMOJI_MIN_README", "120"))      # …or a README with this many bytes
@@ -2756,6 +2757,8 @@ class Project:
         self.emoji = emoji                       # AI-picked 1–3 emoji identity badge
         self.emoji_at = emoji_at                 # when it was last generated (drives refresh)
         self.emoji_retry_at = 0.0                # backoff anchor after immature/failed generation (in-memory only)
+        self.emoji_reroll = False                # a viewer saw this code on another box's project (in-memory only)
+        self.emoji_reroll_at = 0.0               # throttle for those asks (in-memory only)
 
     def to_registry(self):
         return {"pid": self.pid, "name": self.name, "path": self.path,
@@ -6096,14 +6099,20 @@ class SessionManager:
             return
         self._emoji_scan_at = now
         with self.lock:
-            cand = next((p for p in self._ordered_projects()
-                         if p.status == "ready" and now >= p.emoji_retry_at
-                         and (not p.emoji or now - p.emoji_at > EMOJI_REFRESH_S)),
-                        None)
+            ready = [p for p in self._ordered_projects()
+                     if p.status == "ready" and now >= p.emoji_retry_at]
+            cand = (next((p for p in ready if p.emoji_reroll), None)
+                    or next((p for p in ready if not p.emoji
+                             or now - p.emoji_at > EMOJI_REFRESH_S), None))
             if not cand:
                 return
             taken = [p.emoji for p in self.projects.values()
                      if p.emoji and p.pid != cand.pid]
+            # Codes worn on OTHER boxes (the last emojiReroll told us). A normal
+            # refresh keeps its own current code eligible; a re-roll must drop it.
+            own = _emoji_norm(cand.emoji) if not cand.emoji_reroll else None
+            taken += [c for c in getattr(self, "_fleet_emoji_taken", ())
+                      if _emoji_norm(c) != own]
             titles = [s.title for s in self._ordered()
                       if s.pid == cand.pid and s.title]
         self._emoji_busy = True
@@ -6121,10 +6130,37 @@ class SessionManager:
                 print(f"[emoji] {project.name} → {code}", flush=True)
             project.emoji, project.emoji_at = code, time.time()
             project.emoji_retry_at = 0.0
+            project.emoji_reroll = False
             self.save_registry()
             self.broadcast_projects()
         finally:
             self._emoji_busy = False
+
+    def emoji_reroll(self, pid, taken):
+        """A viewer saw this project's code on a DIFFERENT project. Each box
+        badges only against its own projects, so two boxes can pick the same
+        code on their own (bambu-lab on clawd-bambu and clawd-pico-case on
+        clawd-omen both drew 🖨️, 09-29) — and identical codes can't be told
+        apart by trimming. The page sees every box, so it names the loser and
+        sends every code worn elsewhere; we re-roll against those, and keep the
+        list so later refreshes don't walk back into a collision. Ignored when
+        our code already differs, and at most once per EMOJI_REROLL_S."""
+        if not isinstance(taken, list):
+            return
+        codes = [c for c in taken if isinstance(c, str) and c][:500]
+        with self.lock:
+            p = self.projects.get(pid)
+            if not p or not p.emoji:
+                return
+            self._fleet_emoji_taken = codes
+            now = time.time()
+            if (_emoji_norm(p.emoji) not in {_emoji_norm(c) for c in codes}
+                    or now - p.emoji_reroll_at < EMOJI_REROLL_S):
+                return
+            p.emoji_reroll, p.emoji_reroll_at = True, now
+            p.emoji_retry_at = 0.0
+            self._emoji_scan_at = 0.0            # next watch tick picks it up
+        print(f"[emoji] {p.name}: {p.emoji} is worn elsewhere — re-rolling", flush=True)
 
     def _ensure_self_project(self):
         """Always present the harness's own repo as a pinned project so you can
@@ -9187,6 +9223,11 @@ def serve_iron_describe(client, frame):
 
 
 # ── project emoji codes (1–3 emoji identity badge via the same gateway) ───────
+def _emoji_norm(code):
+    """Comparison form: 🖨 and 🖨️ (with/without VS16) render identically."""
+    return (code or "").replace("\ufe0f", "")
+
+
 def _clean_emoji(raw):
     """Sanitize a model-emitted emoji code: strip anything that isn't emoji
     machinery (letters, digits, punctuation, whitespace — models love to add
@@ -9267,7 +9308,8 @@ def generate_project_emoji(context_text, taken=()):
     unconfigured / the call fails / nothing usable comes back. `taken` = codes
     already worn by sibling projects; the model is told to avoid them and a
     collision gets one stricter retry."""
-    avoid = [t for t in taken if t]
+    avoid = list(dict.fromkeys(t for t in taken if t))
+    avoid_n = {_emoji_norm(t) for t in avoid}
     for attempt in (0, 1):
         text = context_text
         if avoid:
@@ -9277,7 +9319,7 @@ def generate_project_emoji(context_text, taken=()):
             text += "\nYour previous answer collided with a taken code — pick something clearly different."
         parsed = _llm_json(EMOJI_SYS_PROMPT, text)
         code = _clean_emoji((parsed or {}).get("emoji", ""))
-        if code and code not in avoid:
+        if code and _emoji_norm(code) not in avoid_n:
             return code
         if not code:
             return ""                            # gateway off / junk reply — don't burn a retry
@@ -10169,6 +10211,8 @@ class Handler(BaseHTTPRequestHandler):
                                   "error": f"addExternalProject: {xerr}"})
         elif t == "removeProject":
             MGR.remove_project(frame.get("pid"))
+        elif t == "emojiReroll":
+            MGR.emoji_reroll(frame.get("pid"), frame.get("taken"))
         elif t == "ironCreate":
             it = MGR.iron_create(frame.get("title", ""), frame.get("desc", ""),
                                  frame.get("tags") or [])

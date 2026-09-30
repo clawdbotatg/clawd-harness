@@ -3790,6 +3790,7 @@ function handleJson(m) {
       serverBoot = m.boot;
     }
     renderProjects(m.projects || []);
+    if (!FLEET) emojiCollisionCheck();
     refreshBreadcrumb();                  // project name resolves once the list lands
     renderIronLive();                     // 🔥 member names/counts follow the list
     resolvePendingNav();                  // a URL we restored from may name a project
@@ -4207,9 +4208,10 @@ function emojiGraphemes(e) {
   try { return [...new Intl.Segmenter().segment(e || '')].map(x => x.segment); }
   catch { return Array.from(e || ''); }
 }
+const emojiNorm = c => (c || '').replace(/\uFE0F/g, '');   // 🖨 and 🖨️ look identical
 function emojiPrefixMap(codes) {
   const split = new Map();
-  for (const c of new Set(codes.filter(Boolean))) split.set(c, emojiGraphemes(c));
+  for (const c of new Set(codes.filter(Boolean))) split.set(c, emojiGraphemes(c).map(emojiNorm));
   const out = new Map();
   for (const [c, g] of split) {
     let need = 1;
@@ -4219,9 +4221,51 @@ function emojiPrefixMap(codes) {
       while (common < g.length && common < g2.length && g[common] === g2[common]) common++;
       need = Math.max(need, Math.min(common + 1, g.length));
     }
-    out.set(c, g.slice(0, need).join(''));
+    out.set(c, emojiGraphemes(c).slice(0, need).join(''));
   }
   return out;
+}
+// Trimming can't split two projects wearing the SAME code, and each box badges
+// only against its own projects — so two boxes can each draw 🖨️ (bambu-lab on
+// clawd-bambu, clawd-pico-case on clawd-omen, 09-29). The page is the one place
+// that sees every box: per shared code the lowest project key keeps it, and
+// every box holding another project with it is asked to re-roll against all the
+// codes worn elsewhere (`emojiReroll`; the box throttles, we ask once per load).
+const _emojiRerollAsked = new Set();
+function emojiCollisionCheck() {
+  const holders = new Map();           // norm code -> [{ key, targets:[{machineId,pid}] }]
+  const add = (code, key, targets) => {
+    const n = emojiNorm(code);
+    if (!n || !targets.length) return;
+    if (!holders.has(n)) holders.set(n, []);
+    holders.get(n).push({ key, targets });
+  };
+  if (FLEET) {
+    for (const g of unifiedProjects.values()) {
+      // only the copies actually wearing the elected code — a box whose own
+      // pick lost the election isn't the one colliding
+      const mids = new Set(g.emojiVotes.filter(([, c]) => emojiNorm(c) === emojiNorm(g.emoji)).map(([m]) => m));
+      add(g.emoji, g.key, g.machines.filter(m => m.online && mids.has(m.machineId))
+        .map(m => ({ machineId: m.machineId, pid: m.pid })));
+    }
+  } else {
+    for (const p of (projectList || [])) add(p.emoji, p.pid, [{ machineId: null, pid: p.pid }]);
+  }
+  const all = [...new Set(allProjectEmojiCodes().filter(Boolean))];
+  for (const [n, hs] of holders) {
+    if (hs.length < 2) continue;
+    hs.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    for (const h of hs.slice(1)) for (const t of h.targets) {
+      const ask = (t.machineId || '') + '|' + t.pid + '|' + n;
+      if (_emojiRerollAsked.has(ask)) continue;
+      const frame = { type: 'emojiReroll', pid: t.pid, taken: all };
+      // fleet: only over a channel that's already open — housekeeping must never
+      // start a handshake (a passkey prompt) on its own
+      const sent = FLEET ? (e2eChans[t.machineId] && e2eChans[t.machineId].status === 'open' && hsendTo(t.machineId, frame))
+                         : hsend(frame);
+      if (sent) _emojiRerollAsked.add(ask);
+    }
+  }
 }
 // Every project's code, both modes. Fleet reads the ELECTED per-group code, so
 // the same repo on N machines contributes one entry, not N rival ones.
@@ -4784,6 +4828,7 @@ function mergeProjects() {
   for (const g of map.values()) g.emoji = electEmoji(g.emojiVotes);
   unifiedProjects = map;
   projectKeyAlias = alias;
+  if (FLEET) emojiCollisionCheck();
 }
 function electEmoji(votes) {
   const tally = new Map();             // emoji -> { n, first: lowest machineId that picked it }
