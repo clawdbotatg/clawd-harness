@@ -4443,6 +4443,13 @@ class ClaudeSession:
             # eat a fresh session's very first prompt and emit no hook at all.
             self.last_prompt = text
             self.hooks_at_prompt = pre_hooks
+        if not control and text.endswith("\\"):
+            # claude's input reads `\` + Enter as "insert a newline", so a
+            # message ending in a backslash (it sits right above Enter — a
+            # typo's favourite key) was typed in, receipted ✓, and never
+            # submitted (Austin, 09-30). A trailing space keeps the text and
+            # makes the CR a submit again.
+            text += " "
         data = text.encode("utf-8")
         # Messages ride as a bracketed paste (see Engine.bracketed_paste — an
         # unbracketed burst loses its HEAD in claude's TUI). Control sends stay
