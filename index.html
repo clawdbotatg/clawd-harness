@@ -257,6 +257,8 @@
   #machineTag .model { color:var(--accent); }
   #machineTag .ctx { color:var(--dim); }
   #machineTag .ctx.fresh { color:var(--ok); }
+  #machineTag .ctx.warm { color:#d8c24a; }
+  #machineTag .ctx.hot { color:var(--accent); }
   #machineTag .ctx.crit { color:var(--err); }
   #machineTag .acct, #machineTag .mach { color:var(--ink); }
   /* 🔑 sign-in call to action: a signed-out login beats the pool this session
@@ -10690,10 +10692,11 @@ function refreshSessionTag() {
   if (model && room) add('model', model);
   // Colour by tokens, not percent (Austin, 09-30): green under 200k (the
   // old full window — a session opens at ~60k of system prompt + memory),
-  // grey to 400k, red from 400k — where a long session gets less sharp and
-  // burns the plan fast, well before a 1M window is full.
+  // yellow to 300k, orange to 400k, red from 400k — where a long session
+  // gets less sharp and burns the plan fast, well before a 1M window is full.
   const tk = (s && s.ctxTokens) || 0;
-  if (pct > 0 && room) add('ctx' + (tk >= 400000 ? ' crit' : tk < 200000 ? ' fresh' : ''), 'ctx ' + pct + '%');
+  const heat = tk >= 400000 ? 'crit' : tk >= 300000 ? 'hot' : tk >= 200000 ? 'warm' : 'fresh';
+  if (pct > 0 && room) add('ctx ' + heat, 'ctx ' + pct + '%');
   if (acct && room) add('acct', '🔑 ' + acct);
   if (mach && room) add('mach', mach);
   if (cta) {
