@@ -30,6 +30,10 @@
 //      append, typing still wins and a late result can't clobber;
 //  12. release sends CloseStream (finals may trail) and stops the mic tracks;
 //  13. no creds (or another box's creds) → Web Speech, decided at the press.
+//  14. 📱 harness app (UA 'clawd-harness-app'): iOS 26 WKWebView exposes
+//      webkitSpeechRecognition but refuses it (service-not-allowed), so SR is
+//      treated as absent there — a tap before creds WAITS, starts Deepgram the
+//      moment the stt frame lands, never touches SR; a box with no key says so.
 //
 // Fleet mode + stubbed relay WebSocket (tapprobe pattern): no real server, no
 // real session, no mic. Real touch gestures via CDP, not element.click().
@@ -341,6 +345,36 @@ await page.waitForTimeout(150);
 await page.evaluate(() => { dg.tries = DG_TRIES; dg.ws.onclose({code:1006}); });
 check('Deepgram failure releases all captured mic tracks', await page.evaluate(() => window.__tracks.every(t => t.stopped)));
 await releaseMic();
+
+// ---- 14. 📱 harness app: SR present but unusable → a creds-less tap waits for Deepgram ----
+const apage = await browser.newPage({ ...iphone, userAgent: iphone.userAgent + ' clawd-harness-app', viewport:{width:390,height:844} });
+await apage.addInitScript(initStub);
+apage.on('pageerror',e=>errors.push('app: '+String(e)));
+await bootPage(apage);
+const acdp = await apage.context().newCDPSession(apage);
+const aXY = await apage.evaluate(()=>{ const r=micBtn.getBoundingClientRect(); return {x:r.x+r.width/2, y:r.y+r.height/2}; });
+const aTap = async ()=>{ await acdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:aXY.x,y:aXY.y}]}); await apage.waitForTimeout(60);
+  await acdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]}); await apage.waitForTimeout(120); };
+// capture the stt asks the page makes (the relay/e2e path is stubbed out here)
+await apage.evaluate(()=>{ sttCreds=null; window.__sttAsks=[]; const orig=hsend; hsend=(f)=>{ if (f.type==='stt') { window.__sttAsks.push(f.id); return true; } return orig(f); }; });
+check('app: SR is treated as absent even though the browser exposes it', await apage.evaluate(()=>SR===null && typeof window.SpeechRecognition==='function'));
+await aTap();
+const aw = await apage.evaluate(()=>({on:recOn, wait:micBtn.classList.contains('wait'), srs:window.__srs.length, asks:window.__sttAsks.length, dgs:window.__dgs.length}));
+check('app: a tap with no creds waits (mic ⏳), asks the box, never builds SR', !aw.on && aw.wait && aw.srs===0 && aw.asks>=1 && aw.dgs===0, JSON.stringify(aw));
+await apage.evaluate(()=>{ const id=window.__sttAsks[window.__sttAsks.length-1]; handleJson({type:'stt', id, proto:'token', secret:'k-app', model:'nova-3'}); });
+await apage.waitForTimeout(150);
+const ad = await apage.evaluate(()=>({on:recOn, eng:recEngine, wait:micBtn.classList.contains('wait'), dgs:window.__dgs.length, srs:window.__srs.length}));
+check('app: the stt frame lands → Deepgram starts on its own, still no SR', ad.on && ad.eng==='dg' && !ad.wait && ad.dgs===1 && ad.srs===0, JSON.stringify(ad));
+await aTap();
+check('app: the next tap stops it', await apage.evaluate(()=>!recOn));
+// a box with no Deepgram key: the tap waits, the keyless answer is SAID in the composer
+await apage.evaluate(()=>{ sttCreds=null; window.__sttAsks=[]; });
+await aTap();
+await apage.evaluate(()=>{ const id=window.__sttAsks[window.__sttAsks.length-1]; handleJson({type:'stt', id}); });
+await apage.waitForTimeout(100);
+const an = await apage.evaluate(()=>({on:recOn, wait:micBtn.classList.contains('wait'), ph:box.placeholder, srs:window.__srs.length}));
+check('app: a box with no key → "no Deepgram key on this box" in the composer, no SR', !an.on && !an.wait && an.ph.includes('no Deepgram key on this box') && an.srs===0, JSON.stringify(an));
+await apage.close();
 
 // ---- desktop page: SPACE-HOLD push-to-talk ---------------------------------
 // A fresh non-emulated page: fine pointer → isTouch=false, real key events via
