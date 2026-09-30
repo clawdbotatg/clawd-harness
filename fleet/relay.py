@@ -699,6 +699,12 @@ class Conn:
         # folded into the roster as a display hint (relay = the hub box itself).
         self.kind = kind
         self.dead = False
+        # Bytes of upload frames sent to this worker and not yet answered: a
+        # backlog that size is the upload in flight, not a peer that stopped
+        # reading. 2026-09-30: nine photos at once (~1 MB frame each) tripped
+        # the 1 MB cap, dropped clawd-head's link, and every upload 502'd.
+        self.bulk_credit = 0
+        self.credit_lock = threading.Lock()
         self.last_seen = time.time()
         self.connected_at = time.monotonic()
         # Passkey second factor (mobiles). Workers are gated by their token at the
@@ -732,7 +738,7 @@ class Conn:
         if self.sock is None:
             return False
         n = _outq_bytes(self.sock)
-        if n <= SEND_BACKLOG_MAX:
+        if n <= SEND_BACKLOG_MAX + self.bulk_credit:
             return False
         print(f"[relay] {self.role} {self.ident} stopped reading "
               f"({n} bytes unsent), dropping", flush=True)
@@ -740,10 +746,13 @@ class Conn:
         return True
 
     def send_json(self, obj):
+        self.send_text(json.dumps(obj))
+
+    def send_text(self, text):
         if self.dead or self._backlogged():
             return
         try:
-            fleet_ws.ws_send(self.wfile, self.lock, json.dumps(obj), opcode=0x1)
+            fleet_ws.ws_send(self.wfile, self.lock, text, opcode=0x1)
         except Exception:
             self._mark_dead()
 
@@ -1805,9 +1814,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(400, "empty body")
         ctype = self.headers.get("Content-Type", "application/octet-stream")
         uid, ev = RELAY.new_upload()
-        w.send_json({"type": "upload", "id": uid, "ctype": ctype,
-                     "data": base64.b64encode(body).decode()})
-        ok = ev.wait(timeout=35)
+        frame = json.dumps({"type": "upload", "id": uid, "ctype": ctype,
+                            "data": base64.b64encode(body).decode()})
+        # Credit the frame against the backlog cap until the worker answers
+        # (it read it) or the wait lapses (then a stalled worker trips as before).
+        with w.credit_lock:
+            w.bulk_credit += len(frame)
+        try:
+            w.send_text(frame)
+            ok = ev.wait(timeout=35)
+        finally:
+            with w.credit_lock:
+                w.bulk_credit -= len(frame)
         slot = RELAY.take_upload(uid)
         result = slot["result"] if slot else None
         if not ok or not result or not result.get("ok"):

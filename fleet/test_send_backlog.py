@@ -85,6 +85,24 @@ for label, send in (("send_binary", lambda c: c.send_binary(b"\x00")),
     with_outq(relay.SEND_BACKLOG_MAX + 1, lambda: send(c))
     check(f"{label} drops a backlogged peer", c.dead and c.wfile.getvalue() == b"")
 
+# 3b. an upload in flight is credited: nine ~1 MB photos at once used to trip
+# the cap and drop the worker's whole link (2026-09-30, every upload 502'd)
+c = conn()
+c.bulk_credit = 9 * relay.SEND_BACKLOG_MAX
+with_outq(9 * relay.SEND_BACKLOG_MAX, lambda: c.send_json({"type": "pong"}))
+check("upload backlog within its credit keeps the worker", not c.dead)
+c.bulk_credit = 0
+with_outq(relay.SEND_BACKLOG_MAX + 1, lambda: c.send_json({"type": "pong"}))
+check("credit released → a stalled worker still trips", c.dead)
+
+# 3c. the /upload handler credits its frame for exactly the wait, then releases
+src = Path(relay.__file__).read_text()
+up = src[src.index('uid, ev = RELAY.new_upload()'):src.index('slot = RELAY.take_upload(uid)')]
+check("/upload credits the frame before sending it",
+      up.index("bulk_credit += len(frame)") < up.index("send_text(frame)"))
+check("/upload releases the credit in a finally",
+      "finally:" in up and "bulk_credit -= len(frame)" in up.split("finally:")[1])
+
 # 4. no sock → no-op
 c = conn(sock=None)
 c.send_json({"type": "pong"})
