@@ -10688,11 +10688,12 @@ function refreshSessionTag() {
   const cta = s && s.loginCta && s.loginCta.name && ctaStillTrue(s) ? s.loginCta : null;
   const room = !(cta && isTouch);
   if (model && room) add('model', model);
-  // Colour by tokens, not percent (Austin, 09-30): green under 100k, grey
-  // to 400k, red from 400k — where a long session gets less sharp and
+  // Colour by tokens, not percent (Austin, 09-30): green under 200k (the
+  // old full window — a session opens at ~60k of system prompt + memory),
+  // grey to 400k, red from 400k — where a long session gets less sharp and
   // burns the plan fast, well before a 1M window is full.
   const tk = (s && s.ctxTokens) || 0;
-  if (pct > 0 && room) add('ctx' + (tk >= 400000 ? ' crit' : tk < 100000 ? ' fresh' : ''), 'ctx ' + pct + '%');
+  if (pct > 0 && room) add('ctx' + (tk >= 400000 ? ' crit' : tk < 200000 ? ' fresh' : ''), 'ctx ' + pct + '%');
   if (acct && room) add('acct', '🔑 ' + acct);
   if (mach && room) add('mach', mach);
   if (cta) {
