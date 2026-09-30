@@ -4439,6 +4439,12 @@ function renderSessionBar(view) {
   Array.from(bar.children).forEach(c => { if (c !== fbox) c.remove(); });
   const q = tabFilterTerms();
   let shown = 0;
+  // The strip trims badges against ITS OWN tabs, not every project fleet-wide:
+  // a tab whose code shares no leading emoji with any other tab here shows one
+  // glyph, however many projects elsewhere start the same way (Austin, 09-30:
+  // "mic bug" wore 🎤✅📱 with no other 🎤 tab in sight). All tabs, not just the
+  // filter's matches, so typing in the filter never reshapes a badge.
+  const stripEm = emojiPrefixMap(sorted.map(sessionEmojiFull));
   sorted.forEach(s => {
     const tab = document.createElement('button');
     const mOff = FLEET && s._machine && !isMachineOnline(s._machine);   // cached tab — host not on the roster right now
@@ -4454,11 +4460,11 @@ function renderSessionBar(view) {
     const dot = document.createElement('span');
     dot.className = 'sdot' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '');
     tab.appendChild(dot);
-    const em = sessionEmoji(s);          // project badge: which project this tab belongs to
+    const full = sessionEmojiFull(s);
+    const em = full ? (stripEm.get(full) || full) : '';   // project badge: which project this tab belongs to
     if (em) {
       const pe = document.createElement('span');
       pe.className = 'pemoji'; pe.textContent = em;
-      const full = sessionEmojiFull(s);
       if (full !== em) pe.title = full;  // hover shows the project's whole code
       tab.appendChild(pe);
     }
@@ -9024,7 +9030,13 @@ function speak(text) {
 // shared and everything sttprobe pins about typing/navigation winning holds
 // for either. The engine is decided AT THE PRESS from creds already in hand —
 // the mic must light up at once, never wait on the network.
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+// In the 📱 clawd harness app there is NO usable Web Speech: iOS 26's WKWebView
+// exposes webkitSpeechRecognition but refuses it ('service-not-allowed'), so a
+// tap before the box's Deepgram creds landed (cold launch, reconnect, machine
+// switch) went to SR and failed instead of waiting for creds (09-30). Treat it
+// as absent there so that tap takes the sttStartAt wait path.
+const IN_HARNESS_APP = /clawd-harness-app/.test(navigator.userAgent || '');
+const SR = IN_HARNESS_APP ? null : (window.SpeechRecognition || window.webkitSpeechRecognition || null);
 let rec = null, recOn = false;
 let recEngine = null;                          // 'dg' | 'sr' while a hold is live
 // The box is three stretches while dictating: recPre (everything before the
@@ -9252,7 +9264,7 @@ function sttAsk() {
     clearTimeout(timer);
     if (!m.secret) {   // no key on that box → Web Speech (none in the 📱 app: say so instead of a dead button)
       if (sttMachine === here) sttCreds = null;
-      if (sttStartAt) { sttStartAt = 0; micBtn.classList.remove('wait'); if (!SR) micBtn.title = 'no Deepgram key on this box'; }
+      if (sttStartAt) { sttStartAt = 0; micBtn.classList.remove('wait'); if (!SR) { micBtn.title = 'no Deepgram key on this box'; micSay('no Deepgram key on this box'); } }
       return;
     }
     sttCreds = { proto: m.proto || 'token', secret: m.secret, model: m.model || 'nova-3',
@@ -9395,9 +9407,9 @@ function startRec() {
   if (recOn) return;
   const creds = sttCredsOk() ? sttCreds : null;
   dgLog('tap: creds=' + !!creds + ' SR=' + !!SR + ' ws=' + (ws ? ws.readyState : 'none') + ' machine=' + sttHere());
-  if (!creds && !SR) {                        // the 📱 harness app has no Web Speech: a tap before the key landed used to do NOTHING (09-18)
+  if (!creds && !SR) {                        // the 📱 harness app has no (usable) Web Speech: a tap before the key landed used to do NOTHING (09-18)
     sttStartAt = Date.now() + 5000; micBtn.classList.add('wait'); sttAsk();
-    setTimeout(() => { if (sttStartAt && Date.now() >= sttStartAt) { sttStartAt = 0; micBtn.classList.remove('wait'); } }, 5200);
+    setTimeout(() => { if (sttStartAt && Date.now() >= sttStartAt) { sttStartAt = 0; micBtn.classList.remove('wait'); micSay('no answer from this box yet — tap again'); } }, 5200);
     return;
   }
   if (synth) synth.cancel();                  // barge-in: don't read replies back into the mic
