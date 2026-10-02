@@ -163,8 +163,15 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   the review file and prompts the SOURCE to act on it (`CHECK_ACT_PROMPT`:
   think critically, fix what's right, say why not). A review nobody acts on
   is a tab nobody reads (Austin, 09-14). The reviewer's `check_of` /
-  `check_file` / `check_pending` are ctor params + registry fields.
-  `test_check.py` + `tools/checkprobe.mjs`; WS verbs `check`/`checkCancel`.
+  `check_file` / `check_pending` are ctor params + registry fields. **One
+  tab, not two** (Austin, 10-02): the reviewer never gets a tab while its
+  source is open — it's a live terminal pane STACKED under the source's
+  (`syncPeek`; stacked, never side by side: width changes re-wrap the TUI),
+  streamed over the same socket by the `peek` verb (`_PeekClient`: base64
+  `peekPty` JSON, its own size claim via `peekResize`). Pane ✕ closes the
+  reviewer only; after the hand-back it closes itself and the pane goes.
+  `test_check.py` + `test_peek.py` + `tools/checkprobe.mjs`; WS verbs
+  `check`/`checkCancel`/`peek`/`peekResize`.
   **☑ iron to-do list** = one shared list PER IRON (what's still open across
   the whole effort; NOT the life list on todo.atg.link — an iron's eight
   follow-ups stay on the iron). Engine `fleet/todo_store.py` (item-level ops,

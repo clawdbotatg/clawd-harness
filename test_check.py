@@ -142,6 +142,11 @@ class FakeMgr:
         self.spawn = None
         self.broadcasts = 0
         self.saves = 0
+        self.closed = []
+
+    def close(self, cid, _broadcast=True, reason="closed"):
+        self.closed.append((cid, reason))
+        self.broadcasts += 1
 
     def save_registry(self):
         self.saves += 1
@@ -343,6 +348,8 @@ check("…and types CHECK_ACT_PROMPT into the SOURCE via 'check': the file, thin
       and all(k in m9.sent[0][1] for k in ("REVIEW-z.md", "codex", "think", "critically", "why not", "do NOT commit")),
       str(m9.sent))
 check("…the reviewer's tab says where the findings went", "sent back to T src9" in rev9.desc and m9.broadcasts >= 1, rev9.desc)
+check("…and the reviewer closes itself, filed as 'reviewed' (its pane under the source goes away)",
+      m9.closed == [("rev9", "reviewed")], str(m9.closed))
 rev9.transcript_text = "FROM TRANSCRIPT"
 m9.check_back(rev9, "")
 body = open(os.path.join(repo, "REVIEW-z.md")).read()
@@ -355,6 +362,8 @@ check("a gone source → findings written, nothing typed, a note on the reviewer
 dead = FakeSession(m9, "dead"); dead.alive = False
 dr = FakeSession(m9, "dr", engine="codex", check_of="dead", check_file="REVIEW-d.md", check_pending=True)
 check("a dead source (not alive) is treated as gone", m9.check_back(dr, "v") is False and len(m9.sent) == n_sent)
+check("…a reviewer with no source to hand to stays open (it's a tab of its own again)",
+      ("gone", "reviewed") not in m9.closed and ("dr", "reviewed") not in m9.closed, str(m9.closed))
 srcp = FakeSession(m9, "srcp"); srcp.title = ""
 rp = FakeSession(m9, "rp", engine="codex", check_of="srcp", check_file="", check_pending=True)
 check("no file on the reviewer row (pre-feature) → a fresh REVIEW-<stamp>.md, still handed back",

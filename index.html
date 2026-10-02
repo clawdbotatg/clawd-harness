@@ -656,6 +656,25 @@
              user-select:none; -webkit-user-select:none; touch-action:manipulation; }
   #ttyDown:hover { opacity:1; background:var(--accent-bg); }
   #ttyDown[hidden] { display:none; }
+  /* 🔍 the reviewer pane: the codex (or claude) double-checking THIS session, stacked
+     under its terminal — one tab, not two. Stacked, never side by side: the source
+     keeps its full width (a narrower PTY re-wraps claude's whole screen on every
+     device watching), it only loses rows. The overlays anchored to #left's bottom
+     ride up with it. Built by syncPeek(). */
+  #left { --peek-h:40%; }
+  #peek { flex:0 0 var(--peek-h); min-height:0; display:flex; flex-direction:column;
+          border-top:1px solid var(--accent-dim); background:#000; }
+  #peek[hidden] { display:none; }
+  #peekbar { display:flex; align-items:center; gap:8px; flex:0 0 auto; padding:3px 6px 3px 10px;
+             font-size:12px; color:var(--dim); background:var(--bg); }
+  #peekbar .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }
+  #peekbar .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
+  #peeklbl { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #peekX { background:none; border:0; color:var(--dim); font-size:14px; line-height:1; padding:4px 6px; cursor:pointer; }
+  #peekX:hover { color:var(--err); }
+  #peekterm { flex:1; min-height:0; padding:4px 4px 0 8px; overflow:hidden; touch-action:pan-y; }
+  #left.peekOpen #tldr, #left.peekOpen #irontodo { bottom:var(--peek-h); }
+  #left.peekOpen #ttyDown { bottom:calc(12px + var(--peek-h)); }
   /* annealing: a sentence that survived a pass unchanged is settled (solid); the rest
      is still forming (70%). Settled is also what the 🔊 voice may speak. */
   #tldrText .form { opacity:.7; }
@@ -1569,6 +1588,8 @@
     </section>
     <section class="col" id="left">
       <div id="term"></div>
+      <!-- 🔍 the reviewer's live terminal, under the session it double-checks (#peek CSS) -->
+      <div id="peek" hidden><div id="peekbar"><span class="sdot"></span><span id="peeklbl"></span><button id="peekX" title="Stop the double-check — closes the reviewer only, this session stays">✕</button></div><div id="peekterm"></div></div>
       <!-- 🟦 live TLDR: the rolling plain-English summary of the turn in flight. An
            overlay over claude's bottom chrome, flush under the thinking line (#tldr CSS) -->
       <div id="tldr" hidden><button id="tldrX" title="Dismiss — marks this much as read; the next summary covers only new text">✕</button><div id="tldrInner"><span class="tag">tldr</span><span id="tldrText"></span></div></div>
@@ -1955,6 +1976,17 @@ term.loadAddon(new WebLinksAddon.WebLinksAddon(
   }));
 term.open(document.getElementById('term'));
 fit.fit();
+// 🔍 the reviewer pane's terminal (syncPeek, next to noteCheckSpawned). Built here,
+// beside the main one, because frames can repaint the strip (→ syncPeek) early.
+const peekEl = document.getElementById('peek');
+const peekTerm = new Terminal({
+  fontFamily: term.options.fontFamily, fontSize: 12, cursorBlink: false,
+  theme: term.options.theme, scrollback: 2000, disableStdin: isTouch,
+});
+const peekFitter = new FitAddon.FitAddon();
+peekTerm.loadAddon(peekFitter);
+peekTerm.open(document.getElementById('peekterm'));
+let peekCid = null;   // the reviewer streaming into the pane (what we last asked the server for)
 
 // Bottom-justify the TTY: claude prints into the top rows of a full-height grid and leaves
 // the rest blank. Translate the rendered screen down by the unused height so content anchors
@@ -3937,6 +3969,7 @@ rebootNow.onclick = () => {
 
 function handleJson(m) {
   if (m.type === 'pong') { onPong(m.id); return; }   // liveness probe came back → chain is alive (see wake())
+  if (m.type === 'peekPty') { onPeekPty(m); return; }   // 🔍 the reviewer pane's own stream   // liveness probe came back → chain is alive (see wake())
   if (m.type === 'reload') {        // server saw index.html change on disk → live-reload
     // Direct mode only: this page IS the harness's served HTML, so a disk edit
     // means reload. In fleet mode the page comes from the RELAY (its own copy) —
@@ -4602,6 +4635,7 @@ function refreshBreadcrumb(view) {
 // page, with the open session highlighted. Hidden on the projects rung.
 function renderSessionBar(view) {
   const bar = document.getElementById('sessionbar');
+  syncPeek();                                                   // 🔍 reviewer arrived / closed / view changed
   if (tabDrag) return;                                          // 🍳 a live drag owns the strip; tabDragEnd repaints
   renderIsland();
   const wasHidden = bar.hidden;
@@ -4652,7 +4686,7 @@ function renderSessionBar(view) {
     const lbl = document.createElement('span');
     // the AI's 1-2 word tab handle when it exists; full title until then
     // 🔍 a source writing its brief, or a reviewer whose namer dropped the seeded 🔍
-    const chk = (s.checkArmed || (s.checkOf && !/^🔍/.test(s.tab || s.title || ''))) ? '🔍 ' : '';
+    const chk = (s.checkArmed || reviewerOf(s.cid) || (s.checkOf && !/^🔍/.test(s.tab || s.title || ''))) ? '🔍 ' : '';   // 🔍 also while its reviewer runs in the pane
     lbl.className = 'lbl'; lbl.textContent = (s.pinned ? '📌 ' : '') + ((s.wrapArmed || s.wrapClosing) ? '📑 ' : '') + chk + (s.tab || s.title || 'new session');
     tab.appendChild(lbl);
     const eb = engineBadge(s);           // only renders for non-claude engines
@@ -6469,6 +6503,7 @@ function subscribe(cid, opts) {
     if (ds && ds.alive === false) showDeadVeil(cid, false); else hideDeadVeil(); }
   syncComposer();              // load this session's own draft (bring back text from before a reload)
   hsend({ type: 'subscribe', cid });
+  syncPeek(true);              // 🔍 this session's reviewer pane (re-asked: a fresh link has none)
   tldrHello(cid);              // 🟦 tell the server whether this viewer wants the live summary
   if (!sttCredsOk()) sttAsk(); // 🎤 Deepgram creds for THIS box, ready before the first hold (after the subscribe + tldr frames)
   armHelloWatch(cid);          // hello = the subscribe ACK; re-send if it never lands
@@ -6857,7 +6892,9 @@ function sortedSessions() {
   // board only, so the tab strip, rail cycling and the boot landing all skip them.
   // ⏏ ejected ones are in their own window (isEjected) — same treatment.
   // 🍳 back-burner ones sit on the #island, 📑 wrapping ones on #outbound — same treatment.
-  return allSessions().filter(s => !s.pinned && !isEjected(s.cid) && !isBurner(s.cid) && !isOutbound(s)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
+  // 🔍 a reviewer rides in its source's tab (the pane under its terminal) — same treatment.
+  const folded = foldedReviewers();
+  return allSessions().filter(s => !s.pinned && !isEjected(s.cid) && !isBurner(s.cid) && !isOutbound(s) && !folded(s)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
 }
 
 // The rail the strip/cycling/close-hop actually flip through. Normally the full
@@ -6876,7 +6913,8 @@ function railSessions() {
 // in strip order, parked at the end. Shared by railSessions (scope active) and
 // openIron (deciding whether there is anything to dive into yet).
 function ironRail(iron) {
-  const all = ironSessions(iron);
+  const folded = foldedReviewers();
+  const all = ironSessions(iron).filter(s => !folded(s));
   const rank = s => !s.alive ? 4 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : s.bg ? 2 : 3;
   const warmth = s => s.promptedAt || s.lastActive || 0;
   const live = all.filter(s => !s.pinned && !isEjected(s.cid) && !isBurner(s.cid) && !isOutbound(s)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
@@ -8363,9 +8401,10 @@ document.getElementById('forkBtn').onclick = forkSession;
 // verdict back to the source, which is prompted to act on it — server-side,
 // nothing for the client to do; the reviewer's desc says so.
 // We stay on the source while it writes — no blank terminal, nothing to wait
-// for — and jump to the reviewer when it appears IF we are still watching the
-// source (noteCheckSpawned). A refusal comes back as an `error` carrying
-// `check: <source cid>`.
+// for — and the reviewer, when it appears, opens as a pane UNDER the source's
+// terminal instead of a tab of its own (syncPeek; Austin, 10-02: one tab per
+// job). It closes itself once its verdict is handed back, and the pane goes
+// with it. A refusal comes back as an `error` carrying `check: <source cid>`.
 let checkSrcCid = null;
 function checkSession() {
   const src = currentCid;
@@ -8400,10 +8439,87 @@ function noteCheckSpawned(prev, next) {
   const rev = next.find(n => n.checkOf === checkSrcCid && !seen.has(n.cid));
   if (!rev) return;
   const src = checkSrcCid; checkSrcCid = null;
-  if (currentCid !== src || !inSessionView()) return;   // the viewer moved on — the tab is in the strip
-  const live = allSessions().find(x => x.cid === rev.cid) || rev;
-  focusSession(live);
-  meta.textContent = 'the reviewer is reading the brief';
+  if (currentCid !== src || !inSessionView()) return;   // the viewer moved on — the pane waits on that tab
+  meta.textContent = 'the reviewer is reading the brief — below';
+}
+
+// ── 🔍 the reviewer pane ─────────────────────────────────────────────────────
+// A second, smaller live terminal stacked under the source's: the session
+// whose checkOf is the one we're viewing (same machine). It streams over the
+// SAME connection as `peekPty` frames (server: _PeekClient, WS verb `peek`) and
+// claims the reviewer's PTY at its own size (`peekResize`) — the main
+// terminal's claim is untouched. Desktop can type into it; touch stays
+// read-only like the main terminal. ✕ closes the reviewer only. A reviewer
+// whose source is gone is a normal tab again (foldedReviewers).
+// A predicate over one allSessions() pass: is `s` a reviewer whose source is
+// still open on its machine? Those ride in the source's tab, not the strip.
+function foldedReviewers() {
+  const all = allSessions();
+  if (!all.some(s => s.checkOf)) return () => false;
+  const live = new Set(all.filter(s => s.alive !== false).map(s => (s._machine || '') + '|' + s.cid));
+  return s => !BREAKOUT && !!s.checkOf && s.alive !== false && live.has((s._machine || '') + '|' + s.checkOf);
+}
+function reviewerOf(cid) {
+  if (!cid || BREAKOUT) return null;
+  const all = allSessions(), src = all.find(s => s.cid === cid);
+  if (!src) return null;
+  return all.find(s => s.checkOf === cid && s.alive !== false && (s._machine || '') === (src._machine || '')) || null;
+}
+// Open / switch / close the pane to match what's on screen. `force` re-asks the
+// server for the stream (a (re)subscribe: the link may be fresh).
+function syncPeek(force) {
+  const r = currentView() === 'tty' ? reviewerOf(currentCid) : null;
+  const cid = r ? r.cid : null;
+  if (r) paintPeekBar(r);
+  if (cid === peekCid && !force) return;
+  const had = peekCid;
+  peekCid = cid;
+  if (cid) { peekTerm.reset(); hsend({ type: 'peek', cid }); }
+  else if (had) hsend({ type: 'peek', cid: '' });
+  const open = !!cid, wasOpen = !peekEl.hidden;
+  peekEl.hidden = !open;
+  document.getElementById('left').classList.toggle('peekOpen', open);
+  if (open !== wasOpen) refitTTY();                 // the source's terminal gained/lost rows
+  if (open) requestAnimationFrame(() => requestAnimationFrame(() => peekRefit(true)));
+}
+function paintPeekBar(r) {
+  const eng = r.engine === 'codex' ? 'codex' : 'claude';
+  peekEl.querySelector('.sdot').classList.toggle('busy', !!r.busy);
+  document.getElementById('peeklbl').textContent = `🔍 ${eng} — ${r.desc || 'double-checking this session'}`;
+}
+function onPeekPty(m) {
+  if (!m.cid || m.cid !== peekCid) return;          // a stream we've since let go of
+  const bin = atob(m.d || ''), u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  peekTerm.write(u);
+}
+// Fit the pane and tell the reviewer's PTY. `claim` = a deliberate act on this
+// device (opening the pane, coming back to the tab); a refit only applies if
+// we already own its size — the same law as the main terminal.
+function peekRefit(claim) {
+  if (!peekCid || peekEl.hidden || currentView() !== 'tty') return;
+  const el = document.getElementById('peekterm');
+  if (!el.clientHeight) return;
+  try { peekFitter.fit(); } catch { return; }
+  hsend({ type: 'peekResize', cols: peekTerm.cols, rows: peekTerm.rows,
+          claim: !!claim && document.visibilityState === 'visible' });
+}
+{
+  let t = 0;
+  new ResizeObserver(() => { clearTimeout(t); t = setTimeout(() => peekRefit(false), 80); })
+    .observe(document.getElementById('peekterm'));
+}
+document.addEventListener('visibilitychange', () => {
+  if (!peekCid) return;
+  if (document.visibilityState === 'visible') setTimeout(() => peekRefit(true), 160);
+  else hsend({ type: 'peekResize', cols: 0, rows: 0 });   // pocketed: hand its size back
+});
+peekTerm.onData(d => { if (peekCid) hsend({ type: 'input', cid: peekCid, data: d }); });
+document.getElementById('peekX').onclick = () => {
+  const cid = peekCid;
+  if (!cid) return;
+  hsend({ type: 'close', cid });                    // same machine as the source we're on
+  meta.textContent = 'double-check stopped — this session carries on';
 }
 document.getElementById('closedlogclose').onclick = () => { closedlogEl.hidden = true; };
 closedFilterEl.addEventListener('input', renderClosedLog);
@@ -11752,7 +11868,7 @@ window.addEventListener('keydown', (e) => {
   if (!machinesModal.hidden) { machinesModal.hidden = true; e.preventDefault(); return; }
   if (!settingsModal.hidden) { settingsModal.hidden = true; e.preventDefault(); return; }
   const el = document.activeElement;
-  if (el && el.closest && el.closest('#term')) return;      // live terminal owns Esc (claude's TUI)
+  if (el && el.closest && el.closest('#term, #peekterm')) return;   // live terminal owns Esc (claude's TUI)
   if (currentView() === 'projects') return;                 // already home
   e.preventDefault();
   navTo('projects');

@@ -1,6 +1,6 @@
 // checkprobe — 🔍 double-check: the OTHER engine reviews a session's work
 // (2026-09-13). The harness ARMS the source (check frame), it writes a local
-// REVIEW-<stamp>.md, the Stop hook spawns a reviewer tab (checkOf = source)
+// REVIEW-<stamp>.md, the Stop hook spawns a reviewer (checkOf = source)
 // briefed with the file + the diff; the reviewer's Stop hands the verdict back
 // to the source (server-side). Guards the client half, on emulated touch with
 // REAL taps (three production bugs were invisible to element.click()):
@@ -8,13 +8,18 @@
 //      terminal, no pending focus) — the meta line says the brief is coming;
 //   2. checkArmed in a sessions frame → the row above the composer names the
 //      reviewer engine + 🔍 on the source's tab;
-//   3. the reviewer arriving (checkOf = source) while we still watch the
-//      source → we land on it; its seeded 🔍 title is not doubled;
-//   4. a reviewer arriving after the viewer moved on → no jump (tab in strip);
+//   3. the reviewer arriving (checkOf = source) → NO tab of its own: it opens
+//      as the pane under the source's terminal (peek + a size claim), its
+//      peekPty bytes paint the pane, the source tab wears 🔍; a REAL tap on
+//      the pane's ✕ closes the reviewer only; the reviewer vanishing (it
+//      closes itself after the hand-back) drops the pane + the stream;
+//   4. a reviewer arriving after the viewer moved on → no jump, no tab, and
+//      the pane is there on that source when you come back;
 //   5. a tap on cancel sends checkCancel, drops the row, and a reviewer
 //      arriving afterwards never jumps;
 //   6. a refusal (error carrying check: cid) → meta says why, view untouched;
-//   7. a renamed reviewer (namer dropped the 🔍) still wears 🔍 on its tab.
+//   7. a reviewer whose source is gone is a tab again, and a renamed one
+//      (namer dropped the 🔍) still wears 🔍 on it.
 // Safe: the page is served from memory at a fake origin with WebSocket
 // stubbed — nothing reaches the real harness, no session is touched.
 import { chromium } from 'playwright-core';
@@ -89,14 +94,44 @@ st = await state(); let t = await tabs();
 check('checkArmed → the 🔍 row names the reviewer engine', st.row && /codex reviewer/.test(st.text), JSON.stringify(st));
 check('…and the source tab wears 🔍', t.some(x => x.startsWith('🔍 alpha')), JSON.stringify(t));
 
-// 3. the reviewer arrives while we watch the source → land on it
+// 3. the reviewer arrives while we watch the source → the pane under it, no tab
+const pane = () => page.evaluate(() => ({ open: !document.getElementById('peek').hidden, cid: peekCid,
+  cls: document.getElementById('left').classList.contains('peekOpen'), lbl: document.getElementById('peeklbl').textContent,
+  termH: document.getElementById('term').clientHeight, peekH: document.getElementById('peekterm').clientHeight,
+  text: (() => { const b = peekTerm.buffer.active; let o = ''; for (let i = 0; i < b.length; i++) o += b.getLine(i).translateToString(true); return o; })() }));
+await page.evaluate(() => { window.__sent.length = 0; });
+const termH0 = (await pane()).termH;
 await rx([{ ...A, checkArmed: false }, B, R]);
-await page.waitForTimeout(400);
-st = await state(); t = await tabs();
-check('reviewer (checkOf = source) arrived → we land on it', st.cid === 'cr' && st.view === 'tty' && st.src === null, JSON.stringify(st));
-check('…the row is gone on the reviewer', !st.row);
-check('…its seeded 🔍 title is not doubled', t.some(x => x === '🔍 alpha build') && !t.some(x => /^🔍 🔍/.test(x)), JSON.stringify(t));
+await page.waitForTimeout(500);
+st = await state(); t = await tabs(); let pn = await pane(); f = await sent();
+check('reviewer (checkOf = source) arrived → we stay on the source', st.cid === 'ca' && st.view === 'tty' && st.src === null, JSON.stringify(st));
+check('…no tab of its own; the source tab wears 🔍', !t.some(x => /alpha build/.test(x) && x !== '🔍 alpha') && t.includes('🔍 alpha') && t.length === 2, JSON.stringify(t));
+check('…the pane opens under the terminal, stacked (source keeps its width, loses rows)',
+      pn.open && pn.cls && pn.cid === 'cr' && pn.peekH > 100 && pn.termH < termH0, JSON.stringify(pn) + ' was ' + termH0);
+check('…names the engine', /codex/.test(pn.lbl), pn.lbl);
+const termOpen = pn.termH;
+check('…asks for the stream (peek cr) and claims its size', f.some(x => x.type === 'peek' && x.cid === 'cr')
+      && f.some(x => x.type === 'peekResize' && x.claim === true && x.cols > 20 && x.rows > 3), JSON.stringify(f.filter(x => /^peek/.test(x.type))));
+check('…and never re-subscribes the main terminal to the reviewer', !f.some(x => x.type === 'subscribe' && x.cid === 'cr'));
+await page.evaluate(() => { window.__rx({ type: 'peekPty', cid: 'cr', d: btoa('codex is reading REVIEW.md') });
+                            window.__rx({ type: 'peekPty', cid: 'zz', d: btoa('STRAY') }); });
+await page.waitForTimeout(200);
+pn = await pane();
+check('peekPty bytes for the reviewer paint the pane; a stray cid never does', /codex is reading REVIEW\.md/.test(pn.text) && !/STRAY/.test(pn.text), pn.text.slice(0, 80));
+check('…and never the main terminal', await page.evaluate(() => { const b = term.buffer.active; let o = ''; for (let i = 0; i < b.length; i++) o += b.getLine(i).translateToString(true); return !/codex is reading/.test(o); }));
 await page.screenshot({ path: join(HERE, 'checkprobe.png') });
+await page.evaluate(() => { window.__sent.length = 0; });
+await page.locator('#peekX').tap();
+await page.waitForTimeout(200);
+f = await sent(); st = await state();
+check('a REAL tap on the pane ✕ closes the reviewer only — the source stays open', f.some(x => x.type === 'close' && x.cid === 'cr')
+      && !f.some(x => x.type === 'close' && x.cid === 'ca') && st.cid === 'ca', JSON.stringify(f));
+await page.evaluate(() => { window.__sent.length = 0; });
+await rx([A, B]);                                   // the reviewer closed (✕, or by itself after the hand-back)
+await page.waitForTimeout(300);
+pn = await pane(); f = await sent();
+check('the reviewer gone → the pane closes, the stream is released, the terminal gets its rows back',
+      !pn.open && !pn.cls && pn.cid === null && f.some(x => x.type === 'peek' && x.cid === '') && pn.termH > termOpen + 100, JSON.stringify(pn) + ' open ' + termOpen + ' ' + JSON.stringify(f.map(x => x.type + ':' + (x.cid || ''))));
 
 // 4. the viewer moved on before the reviewer arrived → no jump
 await page.evaluate(() => { focusSession(allSessions().find(s => s.cid === 'cb')); window.__sent.length = 0; });
@@ -110,9 +145,14 @@ await page.waitForTimeout(300);
 const R2 = { ...R, cid: 'cr2', title: '🔍 beta work', checkOf: 'cb' };
 await rx([A, B, R, R2]);
 await page.waitForTimeout(400);
-st = await state();
-check('reviewer for beta arrives after we moved to alpha → no jump, tab in the strip',
-      st.cid === 'ca' && st.src === null && (await tabs()).some(x => x === '🔍 beta work'), JSON.stringify(st));
+st = await state(); t = await tabs();
+check('reviewer for beta arrives after we moved to alpha → no jump, no tab',
+      st.cid === 'ca' && st.src === null && t.length === 2 && !t.some(x => /beta work/.test(x)), JSON.stringify({ st, t }));
+check('…alpha shows ITS reviewer in the pane', (await pane()).cid === 'cr');
+await page.evaluate(() => { window.__sent.length = 0; focusSession(allSessions().find(s => s.cid === 'cb')); });
+await page.waitForTimeout(400);
+pn = await pane(); f = await sent();
+check('…switching to beta swaps the pane to beta\'s reviewer', pn.open && pn.cid === 'cr2' && f.some(x => x.type === 'peek' && x.cid === 'cr2'), JSON.stringify(pn));
 
 // 5. cancel
 await page.evaluate(() => { focusSession(allSessions().find(s => s.cid === 'cb')); window.__sent.length = 0; });
@@ -143,13 +183,13 @@ st = await state();
 check('a refusal → meta says why, view untouched, arm forgotten',
       /nothing to check yet/.test(st.meta) && st.cid === 'cb' && st.view === 'tty' && st.src === null, JSON.stringify(st));
 
-// 7. a renamed reviewer still wears 🔍
-await rx([A, B, { ...R, title: 'alpha review', tab: 'review' }]);
+// 7. source gone → the reviewer is a tab again; a renamed one still wears 🔍
+await rx([B, { ...R, title: 'alpha review', tab: 'review' }]);
 await page.waitForTimeout(200);
 t = await tabs();
-check('a reviewer the namer renamed still wears 🔍 on its tab', t.some(x => x === '🔍 review'), JSON.stringify(t));
+check('a reviewer whose source is gone is a tab again, renamed still wears 🔍', t.some(x => x === '🔍 review'), JSON.stringify(t));
 
 check('no page errors', errors.length === 0, errors.join(' | '));
 await browser.close();
-console.log(failed ? 'FAIL' : 'PASS — 🔍 sends check + stays put, armed row + badge, reviewer lands, moved-on/cancel never jump, refusal, renamed badge');
+console.log(failed ? 'FAIL' : 'PASS — 🔍 sends check + stays put, armed row + badge, reviewer pane under the source (no tab, own stream + size, ✕ = reviewer only, closes with it), moved-on/cancel never jump, refusal, orphan tab badge');
 process.exit(failed ? 1 : 0);

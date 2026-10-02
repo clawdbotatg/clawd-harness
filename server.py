@@ -8831,7 +8831,10 @@ class SessionManager:
             self.send_prompt(src.cid, txt, via="check")
             rev.desc = f"reviewed \u2192 findings sent back to {src_title}"[:120]
             print(f"[check {rev.cid[:8]}] \U0001f50d verdict \u2192 {src.cid[:8]} ({file})", flush=True)
-            self.broadcast_sessions()
+            # Its job is done: the verdict is in the file and the source has
+            # it. Close the reviewer (🗃️ row, reopenable) so its pane under
+            # the source goes away by itself (Austin, 10-02).
+            self.close(rev.cid, reason="reviewed")
             return True
         except Exception as e:
             print(f"[check {rev.cid[:8]}] hand-back to {rev.check_of[:8]} failed: {e!r}", flush=True)
@@ -9086,6 +9089,22 @@ class SessionManager:
             s = self.get(client.cid)
             if s:
                 s.unsubscribe(client)
+        self.peek_client(client, "")
+
+    def peek_client(self, client, cid):
+        """🔍 Point `client`'s second terminal at `cid` ("" = none). The old
+        peek detaches first (and hands its size claim back)."""
+        old = client.peek                    # (the same cid again = a fresh replay: reconnect)
+        client.peek = None
+        if old:
+            o = self.get(old.cid)
+            if o:
+                o.unsubscribe(old)
+        s = self.get(cid) if cid else None
+        if not s:
+            return
+        client.peek = _PeekClient(client, cid)
+        s.subscribe(client.peek)
 
     def subscribe_client(self, client, cid):
         s = self.get(cid)
@@ -9494,6 +9513,7 @@ class _Client:
         self.cid = None
         self.tty_size = None    # (cols, rows) this viewer last fit to — its size claim
         self.tty_ts = 0.0       # when; recency picks the fallback owner
+        self.peek = None        # 🔍 _PeekClient: a second session shown under the first
 
     def send_bytes(self, data: bytes):
         if self.dead:
@@ -9510,6 +9530,34 @@ class _Client:
             ws_send(self.wfile, self.lock, json.dumps(obj), opcode=0x1)
         except Exception:
             self.dead = True
+
+
+class _PeekClient:
+    """🔍 A browser's SECOND live terminal: the reviewer pane stacked under
+    the source it double-checks (`peek` verb, docs/WS-PROTOCOL.md). It joins
+    the reviewer's `clients` like any viewer — replay, size ownership
+    (claim_resize) and respawn adoption all just work — but its PTY bytes
+    ride as `peekPty` JSON frames (base64) so they can never paint into the
+    main terminal, and the session's other JSON (hello, transcript, tldr…)
+    is dropped: the pane is a terminal, nothing more. Its size claim is its
+    own, never the main subscription's."""
+    def __init__(self, client, cid):
+        self.client = client
+        self.cid = cid
+        self.tty_size = None
+        self.tty_ts = 0.0
+
+    @property
+    def dead(self):
+        return self.client.dead or self.client.peek is not self
+
+    def send_bytes(self, data: bytes):
+        if not self.dead:
+            self.client.send_json({"type": "peekPty", "cid": self.cid,
+                                   "d": base64.b64encode(data).decode("ascii")})
+
+    def send_json(self, obj):
+        pass
 
 
 # ── HTTP + WS handler ──────────────────────────────────────────────────────────
@@ -10193,6 +10241,16 @@ class Handler(BaseHTTPRequestHandler):
                                   "check": src_cid, "error": f"can't double-check: {why}"})
         elif t == "checkCancel":
             MGR.check_cancel(str(frame.get("cid") or ""))
+        elif t == "peek":
+            # 🔍 the reviewer pane under the source's terminal: a second live
+            # stream on this connection (peekPty frames), "" = stop
+            MGR.peek_client(client, str(frame.get("cid") or ""))
+        elif t == "peekResize":
+            pk = client.peek
+            s = MGR.get(pk.cid) if pk else None
+            if s:
+                s.claim_resize(pk, frame.get("cols"), frame.get("rows"),
+                               bool(frame.get("claim")))
         elif t == "closedForget":
             MGR.closed_forget(frame.get("cid") or None)
         elif t in ("skillsLib", "skillsRm"):
