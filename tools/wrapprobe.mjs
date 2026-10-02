@@ -3,9 +3,11 @@
 // `harness-close`, the Stop hook closes it, and the tab vanishes ON PURPOSE.
 // Guards the client half, on emulated touch with REAL taps (three production
 // bugs were invisible to element.click()):
-//   1. a tap on 📑 sends {type:'wrap', cid, text} (not a plain send) + a pending chip;
-//   2. wrapArmed in a sessions frame → the row above the composer + 📑 on the tab;
-//   3. a tap on cancel sends wrapCancel and drops the row;
+//   1. a tap on 📑 sends {type:'wrap', cid, text} (not a plain send) and hops to
+//      the rail neighbour — the tab flies up to the 📑 #outbound island (10-02);
+//   2. wrapArmed in a sessions frame → it stays on #outbound, off the strip; a
+//      tap on its chip opens it and the row above the composer shows;
+//   3. a tap on cancel sends wrapCancel, drops the row, and it's a tab again;
 //   4. wrapClosing → the row says so;
 //   5. the closing cid vanishing from the roster → land on the rail neighbour
 //      (no dead veil, no black tty) + the "wrapped up · ↩" toast;
@@ -69,16 +71,23 @@ const wrap = f.find(x => x.type === 'wrap');
 check('📑 sends a wrap frame for the open session with the handoff text',
       !!wrap && wrap.cid === 'wa' && /harness-close/.test(wrap.text) && /do NOT close/.test(wrap.text), JSON.stringify(f.map(x => x.type)));
 check('…and NOT a plain send', !f.some(x => x.type === 'send'));
-check('…with a pending chip in the composer', await page.evaluate(() => [...document.querySelectorAll('.pending-msg')].some(d => /wrapping this session up/.test(d.textContent))));
+const hop = await page.evaluate(() => ({ cid: currentCid, view: currentView(),
+  tabs: [...document.querySelectorAll('#sessionbar .stab')].map(t => t.querySelector('.lbl').textContent),
+  out: [...document.querySelectorAll('#outbound .bchip')].map(n => n.dataset.cid) }));
+check('…hops to the rail neighbour, alpha off the strip and on #outbound',
+      hop.cid === 'wb' && hop.view === 'tty' && !hop.tabs.some(t => /alpha/.test(t)) && hop.out.join() === 'wa', JSON.stringify(hop));
 
-// 2. armed → the row + the tab badge
+// 2. armed (server truth) → still on #outbound; a REAL tap on its chip opens it + the row
 await page.evaluate(({ A, B }) => { window.__rx({ type: 'sessions', sessions: [{ ...A, wrapArmed: true }, B] }); }, { A, B });
 await page.waitForTimeout(200);
-const armed = await page.evaluate(() => ({
+await page.locator('#outbound .bchip[data-cid="wa"]').tap();
+await page.waitForTimeout(300);
+const armed = await page.evaluate(() => ({ cid: currentCid,
   row: !document.getElementById('wraprow').hidden, text: document.getElementById('wraptext').textContent,
-  tab: [...document.querySelectorAll('#sessionbar .stab')].map(t => t.querySelector('.lbl').textContent) }));
-check('wrapArmed → the 📑 row above the composer says it will close itself', armed.row && /closes itself/.test(armed.text), JSON.stringify(armed));
-check('…and the tab wears 📑', armed.tab.some(t => t.startsWith('📑 alpha')), JSON.stringify(armed.tab));
+  tabs: [...document.querySelectorAll('#sessionbar .stab')].map(t => t.querySelector('.lbl').textContent) }));
+check('wrapArmed → tapping the #outbound chip opens it, the 📑 row says it will close itself',
+      armed.cid === 'wa' && armed.row && /closes itself/.test(armed.text), JSON.stringify(armed));
+check('…and it is still off the strip', !armed.tabs.some(t => /alpha/.test(t)), JSON.stringify(armed.tabs));
 
 // 3. a REAL tap on cancel
 await page.evaluate(() => { window.__sent.length = 0; });
@@ -87,6 +96,8 @@ await page.waitForTimeout(200);
 f = await sent();
 check('cancel sends wrapCancel for the open session and drops the row',
       f.some(x => x.type === 'wrapCancel' && x.cid === 'wa') && await page.evaluate(() => document.getElementById('wraprow').hidden), JSON.stringify(f));
+check('…and alpha is a tab again, off #outbound', await page.evaluate(() =>
+      [...document.querySelectorAll('#sessionbar .stab')].some(t => /alpha/.test(t.textContent)) && !document.querySelector('#outbound .bchip')));
 
 // 4. closing → the row says so
 await page.evaluate(({ A, B }) => { window.__rx({ type: 'sessions', sessions: [{ ...A, wrapArmed: true, wrapClosing: true }, B] }); }, { A, B });
@@ -122,5 +133,5 @@ check('a session that was NOT wrapping vanishes → no toast (the dead veil owns
 
 check('no page errors', errors.length === 0, errors.join(' | '));
 await browser.close();
-console.log(failed ? 'FAIL' : 'PASS — 📑 sends wrap, armed row + badge, cancel, vanish lands + toast, ↩ reopens, plain close silent');
+console.log(failed ? 'FAIL' : 'PASS — 📑 sends wrap + hops, #outbound chip + armed row, cancel, vanish lands + toast, ↩ reopens, plain close silent');
 process.exit(failed ? 1 : 0);

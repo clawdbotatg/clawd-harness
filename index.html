@@ -69,14 +69,14 @@
      and it parks as just its emoji — off the strip, not pinned. Desktop only. */
   #island { flex:1 1 0; min-width:0; display:flex; align-items:center; justify-content:center;
             gap:4px; align-self:stretch; overflow:hidden; border:1px dashed transparent; }
-  #island .bchip { flex:0 0 auto; position:relative; font-size:15px; line-height:1; padding:3px 4px;
+  .isle .bchip { flex:0 0 auto; position:relative; font-size:15px; line-height:1; padding:3px 4px;
                    background:none; border:1px solid transparent; cursor:pointer; }
-  #island .bchip:hover { border-color:var(--edge-hi); background:var(--raised); }
-  #island .bchip.active { border-color:var(--accent); background:var(--accent-bg); }
-  #island .bchip .bd { position:absolute; right:1px; bottom:1px; width:5px; height:5px; }
-  #island .bchip .bd.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
-  #island .bchip .bd.blocked { background:var(--err); animation:pulse 1.1s ease-in-out infinite; }
-  #island .bchip .bd.dead { background:var(--err); }
+  .isle .bchip:hover { border-color:var(--edge-hi); background:var(--raised); }
+  .isle .bchip.active { border-color:var(--accent); background:var(--accent-bg); }
+  .isle .bchip .bd { position:absolute; right:1px; bottom:1px; width:5px; height:5px; }
+  .isle .bchip .bd.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
+  .isle .bchip .bd.blocked { background:var(--err); animation:pulse 1.1s ease-in-out infinite; }
+  .isle .bchip .bd.dead { background:var(--err); }
   #island .bhint { display:none; font-size:11px; color:var(--dim); font-family:var(--mono); white-space:nowrap; }
   body.tabdrag-strip #island { border-color:var(--edge-hi); }
   body.tabdrag-strip #island.empty .bhint { display:inline; }
@@ -84,6 +84,21 @@
   body.tabdrag-island #sessionbar { outline:1px dashed var(--edge-hi); outline-offset:-1px; }
   body.tabdrag-island #sessionbar.over { outline-color:var(--accent); }
   @media (pointer: coarse) { #island { display:none; } }
+  /* 📑 on-the-way-out island: right after the title + breadcrumb. A session
+     whose 📑 wrap is armed/closing leaves the strip and waits here as its emoji
+     until it closes itself (then the chip just goes). Drag a tab here = 📑 it;
+     drag a chip back to the strip = cancel the wrap. */
+  #outbound { flex:0 0 auto; display:flex; align-items:center; gap:2px; align-self:stretch;
+              border:1px dashed transparent; padding:0 2px; }
+  #outbound .bchip { opacity:.75; }
+  #outbound .bchip:hover { opacity:1; }
+  #outbound .bhint { display:none; font-size:11px; color:var(--dim); font-family:var(--mono); white-space:nowrap; }
+  #outbound.empty:not(.over) { padding:0; }
+  body.tabdrag-strip #outbound, body.tabdrag-island #outbound { border-color:var(--edge-hi); padding:0 6px; }
+  body.tabdrag-strip #outbound.empty .bhint, body.tabdrag-island #outbound.empty .bhint { display:inline; }
+  #outbound.over { border-color:var(--accent) !important; background:var(--accent-bg); }
+  body.tabdrag-outbound #sessionbar { outline:1px dashed var(--edge-hi); outline-offset:-1px; }
+  body.tabdrag-outbound #sessionbar.over { outline-color:var(--accent); }
   #dot { width:8px; height:8px; background:var(--err); flex:0 0 auto; }   /* square status LED */
   #dot.up { background:var(--ok); }
   /* 🔥 iron scope row: the iron compressed to one line while one of its
@@ -1372,8 +1387,9 @@
       <div id="dot"></div>
       <h1 id="brand" title="All sessions">clawd-harness</h1>
       <span class="meta" id="meta">connecting…</span>
+      <div id="outbound" class="isle empty" title="on the way out — 📑 wrapping up, each closes itself once its handoff is written; drag a tab here to 📑 it, drag a chip back to the tabs to cancel"><span class="bhint">drop here · 📑 wrap it up</span></div>
     </div>
-    <div id="island" class="empty" title="back burner — drag a tab here to park it; drag it back to the tabs to resume"><span class="bhint">drop here · back burner</span></div>
+    <div id="island" class="isle empty" title="back burner — drag a tab here to park it; drag it back to the tabs to resume"><span class="bhint">drop here · back burner</span></div>
     <!-- one control strip, left→right: projects · sessions · machines · subscriptions
          · PM · pins · settings · reload. All the same square emoji chip (.hbtn);
          only 📌 carries a count. -->
@@ -1786,10 +1802,51 @@ window.addEventListener('storage', e => {
   burner = burnerLoad();
   try { renderSessionBar(); } catch {}
 });
-// Drag: strip tab → island parks it, island chip → strip brings it back. While
-// a drag is live the strip and island DON'T repaint (frames land several times
-// a second; a rebuilt source node kills the drag) — the end repaints once.
-let tabDrag = null;                           // { cid, from: 'strip' | 'island' }
+// 📑 on the way out: a session whose wrap is armed or closing (the server's
+// wrapArmed / wrapClosing) leaves the strip, the rail and the 🍳 island and
+// sits on #outbound as its emoji until it closes itself — then it's simply
+// gone from the roster and its chip goes with it. Server state, so every
+// device agrees; an arm that lapses or is cancelled drops it back on the strip.
+// `wrapLocal` is the optimistic bridge between our own wrap/cancel frame and
+// the sessions frame that confirms it (so the tab moves at the gesture).
+const wrapLocal = new Map();                 // cid → { on, until }
+const WRAP_LOCAL_MS = 10000;
+function isOutbound(s) {
+  if (BREAKOUT || !s) return false;
+  const l = wrapLocal.get(s.cid);
+  if (l && l.until > Date.now() && l.on !== !!(s.wrapArmed || s.wrapClosing)) return l.on;
+  if (l) wrapLocal.delete(s.cid);            // confirmed (or lapsed) — the frame is truth again
+  return !!(s.wrapArmed || s.wrapClosing);
+}
+function wrapPrompt() { return (QUICK_PROMPTS.find(q => q.wrap) || {}).text; }
+// Arm + type the 📑 prompt into `cid` (the chip, or a tab dropped on #outbound).
+function wrapSession(cid) {
+  const text = wrapPrompt();
+  if (!cid || !text) return false;
+  const f = { type: 'wrap', cid, text, via: 'quick' };
+  const mid = FLEET ? machineForCid(cid) : null;
+  if (!(mid ? hsendTo(mid, f) : hsend(f))) return false;
+  const v = currentView();
+  // the open session steps along the rail (before the cid leaves it), like 📌
+  if (!BREAKOUT && cid === currentCid && (v === 'tty' || v === 'transcript')) hopAfterPin(cid);
+  burnerSet(cid, false);                     // one island at a time
+  wrapLocal.set(cid, { on: true, until: Date.now() + WRAP_LOCAL_MS });
+  renderSessionBar();
+  return true;
+}
+function wrapCancelSession(cid) {
+  if (!cid) return;
+  const f = { type: 'wrapCancel', cid };
+  const mid = FLEET ? machineForCid(cid) : null;
+  if (mid) hsendTo(mid, f); else hsend(f);
+  wrapLocal.set(cid, { on: false, until: Date.now() + WRAP_LOCAL_MS });
+  renderSessionBar();
+}
+// Drag: strip tab → 🍳 island parks it / → #outbound wraps it; a chip dragged
+// back to the strip un-parks / cancels. While a drag is live the strip and
+// islands DON'T repaint (frames land several times a second; a rebuilt source
+// node kills the drag) — the end repaints once.
+let tabDrag = null;                           // { cid, from: 'strip' | 'island' | 'outbound' }
 const TAB_DND = !isTouch && !BREAKOUT;
 function tabDragStart(e, cid, from) {
   tabDrag = { cid, from };
@@ -1800,36 +1857,34 @@ function tabDragStart(e, cid, from) {
 function tabDragEnd() {
   if (!tabDrag) return;
   tabDrag = null;
-  document.body.classList.remove('tabdrag-strip', 'tabdrag-island');
-  document.querySelectorAll('#island.over, #sessionbar.over').forEach(n => n.classList.remove('over'));
+  document.body.classList.remove('tabdrag-strip', 'tabdrag-island', 'tabdrag-outbound');
+  document.querySelectorAll('#island.over, #outbound.over, #sessionbar.over').forEach(n => n.classList.remove('over'));
   renderSessionBar();
 }
 // A mousemove with no button down means the drag is over even if dragend got lost.
 document.addEventListener('mousemove', e => { if (tabDrag && !e.buttons) tabDragEnd(); });
-function tabDropZone(el, from, on) {
+// `drops` maps the drag's source ('strip' | 'island' | 'outbound') → what a drop here does
+function tabDropZone(el, drops) {
   el.addEventListener('dragover', e => {
-    if (!tabDrag || tabDrag.from !== from) return;
+    if (!tabDrag || !drops[tabDrag.from]) return;
     e.preventDefault(); e.dataTransfer.dropEffect = 'move';
     el.classList.add('over');
   });
   el.addEventListener('dragleave', e => { if (!el.contains(e.relatedTarget)) el.classList.remove('over'); });
   el.addEventListener('drop', e => {
-    if (!tabDrag || tabDrag.from !== from) return;
+    if (!tabDrag || !drops[tabDrag.from]) return;
     e.preventDefault();
-    const cid = tabDrag.cid;
+    const { cid, from } = tabDrag;
     tabDragEnd();
-    burnerSet(cid, on);
+    drops[from](cid);
   });
 }
-function renderIsland() {
-  const el = document.getElementById('island');
-  if (!el || tabDrag) return;
-  const byCid = new Map(allSessions().map(s => [s.cid, s]));
-  const items = burner.map(c => byCid.get(c)).filter(Boolean);
-  // reconcile by cid — never wipe (a wipe eats the chip under the cursor)
+// Paint one island's chips — reconciled by cid, never wiped (a wipe eats the
+// chip under the cursor). Emoji trimmed against the island's own chips, like the strip.
+function paintIsle(el, items, from, tip) {
   const have = new Map([...el.querySelectorAll('.bchip')].map(n => [n.dataset.cid, n]));
   const hint = el.querySelector('.bhint');
-  const em = emojiPrefixMap(items.map(sessionEmojiFull));   // trimmed against the island's own chips, like the strip
+  const em = emojiPrefixMap(items.map(sessionEmojiFull));
   items.forEach((s, i) => {
     let n = have.get(s.cid);
     have.delete(s.cid);
@@ -1839,22 +1894,38 @@ function renderIsland() {
       n.appendChild(document.createElement('span')).className = 'be';
       n.appendChild(document.createElement('span')).className = 'bd';
       n.onclick = () => { const x = allSessions().find(q => q.cid === n.dataset.cid); if (x) focusSession(x); };
-      if (TAB_DND) { n.draggable = true; n.ondragstart = e => tabDragStart(e, s.cid, 'island'); n.ondragend = tabDragEnd; }
+      if (TAB_DND) { n.draggable = true; n.ondragstart = e => tabDragStart(e, s.cid, from); n.ondragend = tabDragEnd; }
     }
     n.classList.toggle('active', s.cid === currentCid);
     const full = sessionEmojiFull(s);
     n.querySelector('.be').textContent = (full && (em.get(full) || full)) || '💬';
     n.querySelector('.bd').className = 'bd' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : '');
-    n.title = '🍳 ' + (s.tab || s.title || 'new session') + ' — click to open, drag to the tabs to bring it back';
+    n.title = tip(s);
     const at = el.children[i];
     if (at !== n) el.insertBefore(n, at || hint);
   });
   have.forEach(n => n.remove());
   el.classList.toggle('empty', !items.length);
 }
+function renderIsland() {
+  if (tabDrag) return;
+  const all = allSessions(), byCid = new Map(all.map(s => [s.cid, s]));
+  const name = s => s.tab || s.title || 'new session';
+  const isl = document.getElementById('island');
+  if (isl) paintIsle(isl, burner.map(c => byCid.get(c)).filter(s => s && !isOutbound(s)), 'island',
+    s => '🍳 ' + name(s) + ' — click to open, drag to the tabs to bring it back');
+  const out = document.getElementById('outbound');
+  if (out) paintIsle(out, all.filter(isOutbound), 'outbound',
+    s => '📑 ' + name(s) + (s.wrapClosing ? ' — closing when its turn ends' : ' — wrapping up, closes itself when done') +
+         ' · click to watch, drag to the tabs to cancel');
+}
 if (TAB_DND) {
-  tabDropZone(document.getElementById('island'), 'strip', true);       // tab → back burner
-  tabDropZone(document.getElementById('sessionbar'), 'island', false); // chip → a tab again
+  tabDropZone(document.getElementById('island'), { strip: cid => burnerSet(cid, true) });   // tab → back burner
+  tabDropZone(document.getElementById('outbound'), { strip: wrapSession, island: wrapSession });   // tab → 📑 wrap it
+  tabDropZone(document.getElementById('sessionbar'), {                                       // chip → a tab again
+    island: cid => burnerSet(cid, false),
+    outbound: wrapCancelSession,
+  });
 }
 
 // Preferred deep view when you dive into a session: desktop drives the live
@@ -6785,8 +6856,8 @@ function sortedSessions() {
   // 📌 pinned sessions are parked to-dos, not active work — they live on the pin
   // board only, so the tab strip, rail cycling and the boot landing all skip them.
   // ⏏ ejected ones are in their own window (isEjected) — same treatment.
-  // 🍳 back-burner ones sit on the #island, same treatment.
-  return allSessions().filter(s => !s.pinned && !isEjected(s.cid) && !isBurner(s.cid)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
+  // 🍳 back-burner ones sit on the #island, 📑 wrapping ones on #outbound — same treatment.
+  return allSessions().filter(s => !s.pinned && !isEjected(s.cid) && !isBurner(s.cid) && !isOutbound(s)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
 }
 
 // The rail the strip/cycling/close-hop actually flip through. Normally the full
@@ -6808,8 +6879,8 @@ function ironRail(iron) {
   const all = ironSessions(iron);
   const rank = s => !s.alive ? 4 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : s.bg ? 2 : 3;
   const warmth = s => s.promptedAt || s.lastActive || 0;
-  const live = all.filter(s => !s.pinned && !isEjected(s.cid) && !isBurner(s.cid)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
-  const parked = all.filter(s => s.pinned && !isEjected(s.cid) && !isBurner(s.cid)).sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
+  const live = all.filter(s => !s.pinned && !isEjected(s.cid) && !isBurner(s.cid) && !isOutbound(s)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
+  const parked = all.filter(s => s.pinned && !isEjected(s.cid) && !isBurner(s.cid) && !isOutbound(s)).sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
   return live.concat(parked);
 }
 
@@ -8678,11 +8749,12 @@ function sendQuick(text, q) {
   if (!currentCid || (v !== 'tty' && v !== 'transcript')) return;
   if (q && q.wrap) {
     // 📑 the arm rides WITH the prompt: one frame, the owning machine arms the
-    // session and types the text (the server logs it via:"quick" like any chip)
-    const f = { type: 'wrap', cid: currentCid, text, via: 'quick' };
-    const mid = FLEET ? machineForCid(currentCid) : null;
-    if (!(mid ? hsendTo(mid, f) : hsend(f))) return;
-    addPending(text, text);
+    // session and types the text (the server logs it via:"quick" like any chip).
+    // The tab flies up to #outbound and we land on the next one (wrapSession);
+    // in ⏏ breakout there's no island, so it stays put with its pending bubble.
+    const cid = currentCid;
+    if (!wrapSession(cid)) return;
+    if (cid === currentCid) addPending(text, text);
     return;
   }
   deliverSend(currentCid, text, text, 'quick');   // 'quick' tags the server's prompt log
@@ -8706,9 +8778,7 @@ function renderWrapRow(s, show) {
 }
 document.getElementById('wrapCancel').onclick = () => {
   if (!currentCid) return;
-  const f = { type: 'wrapCancel', cid: currentCid };
-  const mid = FLEET ? machineForCid(currentCid) : null;
-  if (mid) hsendTo(mid, f); else hsend(f);
+  wrapCancelSession(currentCid);               // back onto the strip
   wrapRow.hidden = true;                       // optimistic; the next sessions frame confirms
 };
 function noteWrapVanished(prev, next, machine) {
