@@ -1,21 +1,18 @@
 #!/usr/bin/env node
-// tabfilterprobe — guards the 🔎 filter box that hovers over the right edge of the
-// #sessionbar tab strip (2026-08-09). Same idea as uiprobe/rungprobe: drive the
-// *running* app from a LOCAL headless Chromium and read the real DOM.
+// tabfilterprobe — guards the 🔎 that hovers over the right edge of the
+// #sessionbar tab strip. It began as an inline filter box (2026-08-09); since
+// 2026-10-01 it is just the icon, and a tap opens the spotlight in SESSIONS
+// mode (same modal as Ctrl+Super+Space). Drives the *running* app from a LOCAL
+// headless Chromium and reads the real DOM.
 //
-// It lands on the SESSIONS rung (`#/p/<pid>`), never on a session — the strip is
-// already rendered there, so this probe subscribes to nothing, claims no PTY size
-// and cannot touch a live claude.
+// It lands on the SESSIONS rung (`#/p/<pid>`), never on a session, and stubs
+// focusSession before Enter — it subscribes to nothing and cannot touch a live
+// claude.
 //
-// What it asserts — the four ways this widget can be broken:
-//   1. it exists and sits at the FAR RIGHT of the strip (its whole point);
-//   2. it stays pinned there when the strip is scrolled (position:sticky, so the
-//      tabs pass underneath it instead of carrying it off-screen);
-//   3. typing actually narrows the strip — a nonsense word hides every tab but
-//      the open one, a word from a real tab keeps that tab;
-//   4. a repaint doesn't eat it. renderSessionBar() runs on every `sessions`
-//      frame (a couple per tool call); if it rebuilt the box, focus and the
-//      half-typed word would vanish mid-sentence. Same rule as the projects rung.
+// Asserts: the 🔎 sits at the FAR RIGHT and stays pinned while the strip
+// scrolls (desktop + phone); a real click/tap opens the sessions spotlight,
+// focused, listing every tab; typing narrows it and Enter opens the top match
+// and closes the modal; a repaint never replaces the 🔎 node; "…N more" counts.
 //
 // Usage (server must be running on :8787):  cd tools && node tabfilterprobe.mjs
 
@@ -91,87 +88,60 @@ function checkGeom(g, where) {
 const geom = await page.evaluate(GEOM_FN);
 checkGeom(geom, ' desktop');
 
-// ---- 3: typing narrows the strip -------------------------------------------
+// ---- 3: the 🔎 opens the sessions spotlight; typing narrows; Enter opens ---
+// A REAL mouse click on the icon (not element.click()). focusSession is
+// stubbed before Enter so the probe never subscribes to a real session.
 if (geom.ok && geom.tabs > 0) {
-  const r = await page.evaluate(async () => {
-    const bar = document.getElementById('sessionbar');
-    const inp = bar.querySelector('.tfilter input');
-    const settle = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-    const vis = () => [...bar.querySelectorAll('.stab')].filter(t => t.offsetParent !== null);
-    const type = async v => { inp.value = v; inp.dispatchEvent(new Event('input', { bubbles: true })); await settle(); };
-    const all = vis().length;
-    // a word lifted off a real tab must keep that tab
-    const word = (vis().find(t => (t.querySelector('.lbl') || {}).textContent)
-                  ?.querySelector('.lbl').textContent || '').split(/\s+/).filter(w => w.length > 3)[0] || '';
-    await type('zzqqxx-no-such-session');
-    const none = vis().length;
-    const noneCls = bar.querySelector('.tfilter').classList.contains('none');
-    let hit = null;
-    if (word) { await type(word); hit = vis().some(t => (t.querySelector('.lbl') || {}).textContent === undefined
-                                                        || t.textContent.toLowerCase().includes(word.toLowerCase())); }
-    await type('');
-    const back = vis().length;
-    return { all, none, back, word, hit, noneCls, active: !!bar.querySelector('.stab.active') };
-  });
-  console.log('FILTER', JSON.stringify(r));
-  // a nonsense word leaves at most the open session (which is never filtered away)
-  if (r.none > (r.active ? 1 : 0)) fail(`nonsense filter left ${r.none} tabs visible`);
-  else pass('a non-matching word empties the strip (bar the open session)');
-  if (r.word && !r.hit) fail(`filtering by "${r.word}" hid the tab it came from`);
-  else if (r.word) pass(`filtering by "${r.word}" keeps its own tab`);
-  if (r.back !== r.all) fail(`clearing the filter restored ${r.back}/${r.all} tabs`);
-  else pass('clearing the filter restores every tab');
+  const ico = await page.$('#sessionbar .tfilter .ficon');
+  await ico.click();
+  await page.waitForTimeout(150);
+  const opened = await page.evaluate(() => ({ up: !spotEl.hidden, mode: spotMode,
+    focused: document.activeElement === spotInput,
+    rows: spotListEl.querySelectorAll('.spotrow').length,
+    tabs: document.querySelectorAll('#sessionbar .stab').length }));
+  console.log('OPEN', JSON.stringify(opened));
+  if (!opened.up || opened.mode !== 'sess') fail('clicking 🔎 did not open the sessions spotlight');
+  else if (!opened.focused) fail('the spotlight opened without focusing its input');
+  else if (opened.rows !== opened.tabs) fail(`empty query lists ${opened.rows} rows for ${opened.tabs} tabs`);
+  else pass('🔎 opens the sessions spotlight, focused, listing every tab');
+
+  await page.keyboard.type('zzqqxx-no-such-session', { delay: 5 });
+  const none = await page.evaluate(() => spotListEl.querySelectorAll('.spotrow').length);
+  if (none) fail(`nonsense query left ${none} rows`); else pass('a non-matching word empties the list');
+  await page.fill('#spotinput', '');
+  const word = await page.evaluate(() => ((document.querySelector('#sessionbar .stab .lbl') || {}).textContent || '')
+    .split(/\s+/).filter(w => w.length > 3)[0] || '');
+  if (word) {
+    await page.keyboard.type(word, { delay: 5 });
+    await page.evaluate(() => { window.__fs = window.focusSession; window.__picked = null;
+                                window.focusSession = s => { window.__picked = s; }; });
+    const top = await page.evaluate(() => spotMatches()[0]?.cid);
+    await page.keyboard.press('Enter');
+    const r = await page.evaluate(() => { const p = window.__picked; window.focusSession = window.__fs;
+      return { picked: p && p.cid, closed: spotEl.hidden }; });
+    console.log('PICK', JSON.stringify({ word, top, ...r }));
+    if (!top) fail(`typing "${word}" (from a real tab) matched nothing`);
+    else if (r.picked !== top || !r.closed) fail('Enter did not open the highlighted session and close the modal');
+    else pass(`typing "${word}" + Enter opens the matching session and closes the modal`);
+  }
+  if (await page.evaluate(() => !spotEl.hidden)) await page.keyboard.press('Escape');
 }
 
-// ---- 4: a repaint must not eat the box, its focus, or the half-typed word ---
+// ---- 4: a repaint must not replace the 🔎 node, and it stays the last child --
 if (geom.ok) {
   const r = await page.evaluate(async () => {
     const bar = document.getElementById('sessionbar');
-    const inp = bar.querySelector('.tfilter input');
-    const settle = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-    inp.focus();
-    inp.value = 'harn';                       // typed, but the `input` event hasn't fired yet
+    const before = bar.querySelector('.tfilter');
     renderSessionBar();                       // literally what a `sessions` frame does
-    await settle();
-    const now = bar.querySelector('.tfilter input');
-    return { sameNode: now === inp, focused: document.activeElement === now,
-             value: now ? now.value : null, lastChild: bar.lastElementChild === now.closest('.tfilter') };
+    const now = bar.querySelector('.tfilter');
+    return { sameNode: now === before, lastChild: bar.lastElementChild === now,
+             noInput: !bar.querySelector('.tfilter input') };
   });
   console.log('REPAINT', JSON.stringify(r));
-  if (!r.sameNode) fail('the repaint replaced the filter <input> node');
-  else if (!r.focused) fail('the repaint stole focus from the filter box');
-  else if (r.value !== 'harn') fail(`the repaint dropped un-mirrored text (value=${JSON.stringify(r.value)})`);
-  else pass('a repaint keeps the box, its focus and its un-mirrored text');
-  if (!r.lastChild) fail('the filter is not the last child of the strip (it must never be re-appended)');
-}
-
-// ---- 5: opening a session clears the filter (2026-08-11) --------------------
-// Clicking a tab is the filter's endpoint — you found what you were narrowing
-// toward — so the strip must come back whole. focusSession is stubbed for the
-// click so the probe still never subscribes to (or resizes) a real session.
-if (geom.ok && geom.tabs > 0) {
-  const r = await page.evaluate(async () => {
-    const bar = document.getElementById('sessionbar');
-    const settle = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-    const vis = () => [...bar.querySelectorAll('.stab')].filter(t => t.offsetParent !== null);
-    const inp = bar.querySelector('.tfilter input');
-    inp.value = 'zzqqxx-no-such-session';
-    inp.dispatchEvent(new Event('input', { bubbles: true }));
-    await settle();
-    const during = vis().length;
-    const orig = window.focusSession;
-    let focused = 0;
-    window.focusSession = () => { focused++; };
-    try { bar.querySelector('.stab').click(); await settle(); }
-    finally { window.focusSession = orig; }
-    return { during, focused, value: bar.querySelector('.tfilter input').value,
-             after: vis().length, total: bar.querySelectorAll('.stab').length };
-  });
-  console.log('CLICK-CLEARS', JSON.stringify(r));
-  if (r.focused !== 1) fail(`tab click did not route through focusSession (stub saw ${r.focused})`);
-  if (r.value !== '') fail(`clicking a tab left "${r.value}" in the filter box`);
-  else if (r.after !== r.total) fail(`clicking a tab restored ${r.after}/${r.total} tabs`);
-  else pass('clicking a tab clears the filter and restores the strip');
+  if (!r.sameNode) fail('the repaint replaced the 🔎 node');
+  else if (!r.lastChild) fail('the 🔎 is not the last child of the strip');
+  else pass('a repaint keeps the 🔎 node in place');
+  if (!r.noInput) fail('the strip still carries an inline filter <input>');
 }
 
 // ---- 2b: the same, squeezed to a phone — the width where the strip actually
@@ -179,6 +149,15 @@ if (geom.ok && geom.tabs > 0) {
 await page.setViewportSize({ width: 380, height: 760 });
 await page.waitForTimeout(600);
 checkGeom(await page.evaluate(GEOM_FN), ' phone');
+{
+  await page.click('#sessionbar .tfilter .ficon');
+  await page.waitForTimeout(150);
+  const up = await page.evaluate(() => !spotEl.hidden && spotMode === 'sess');
+  if (!up) fail('phone: tapping 🔎 did not open the sessions spotlight');
+  else pass('phone: tapping 🔎 opens the sessions spotlight');
+  await page.screenshot({ path: join(HERE, 'tabfilterprobe-modal.png') });
+  await page.keyboard.press('Escape');
+}
 // ---- 6: "…N more" counts the tabs you can't see (2026-09-29) --------------
 // N must equal the tabs less than half on screen; hidden when everything fits;
 // it must follow a scroll; and a tap must scroll the strip.
@@ -191,7 +170,7 @@ checkGeom(await page.evaluate(GEOM_FN), ' phone');
     const truth = () => {
       const br = bar.getBoundingClientRect();
       const cut = (more.hidden ? bar.querySelector('.tfilter .ficon') : more).getBoundingClientRect().left;
-      return [...bar.querySelectorAll('.stab:not(.fhide)')].filter(t => {
+      return [...bar.querySelectorAll('.stab')].filter(t => {
         const q = t.getBoundingClientRect(), m = q.left + q.width / 2;
         return m > cut || m < br.left; }).length;
     };
@@ -205,7 +184,7 @@ checkGeom(await page.evaluate(GEOM_FN), ' phone');
     return { has: true, overflow, a, b, moved };
   });
   console.log('MORE', JSON.stringify(r));
-  if (!r.has) fail('no .tmore counter in the filter box');
+  if (!r.has) fail('no .tmore counter next to the 🔎');
   else {
     if (r.a.shown !== r.a.truth) fail(`counter says ${r.a.shown} hidden, ${r.a.truth} actually are`);
     else pass(`counter shows ${r.a.shown} hidden tab(s), matching the strip`);

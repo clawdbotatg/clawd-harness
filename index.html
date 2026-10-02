@@ -141,53 +141,37 @@
   /* session lives in a local (private folder) project → violet, not amber */
   #sessionbar .stab.local { border-color:var(--local-dim); }
   #sessionbar .stab.local.active { border-color:var(--local); color:var(--local); background:var(--local-bg); }
-  #sessionbar .stab .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }   /* square LED, matches sessions page */
-  #sessionbar .stab .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
-  #sessionbar .stab .sdot.bgwork { background:var(--bgwork); animation:pulse 2.4s ease-in-out infinite; }   /* slow cyan pulse: humming in the background */
-  #sessionbar .stab .sdot.blocked { background:var(--err); animation:pulse 1.1s ease-in-out infinite; }   /* needs-you: turn ended asking the human */
-  #sessionbar .stab .sdot.dead { background:var(--err); }
+  #sessionbar .stab .sdot, #spotlist .sdot { width:7px; height:7px; background:var(--ok); flex:0 0 auto; }   /* square LED, matches sessions page */
+  #sessionbar .stab .sdot.busy, #spotlist .sdot.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
+  #sessionbar .stab .sdot.bgwork, #spotlist .sdot.bgwork { background:var(--bgwork); animation:pulse 2.4s ease-in-out infinite; }   /* slow cyan pulse: humming in the background */
+  #sessionbar .stab .sdot.blocked, #spotlist .sdot.blocked { background:var(--err); animation:pulse 1.1s ease-in-out infinite; }   /* needs-you: turn ended asking the human */
+  #sessionbar .stab .sdot.dead, #spotlist .sdot.dead { background:var(--err); }
   #sessionbar .stab .lbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
                            font-size:11px; }
   #sessionbar .stab .age { flex:0 0 auto; margin-left:2px; font-size:10px; color:var(--dim); }
   #sessionbar .stab.active .age { color:inherit; opacity:.75; }
   #sessionbar .stab.moff { opacity:.5; }   /* host machine off the roster — cached tab, kept visible */
-  #sessionbar .stab.fhide { display:none; }   /* filtered out — hidden, not removed (nodes survive the repaint) */
-  /* 🔎 tab filter: parks at the far right of the strip and HOVERS over it —
-     position:sticky (not absolute) so it rides the scrollport's right edge while
-     the tabs scroll underneath, and the gradient hides them as they pass behind.
-     margin-left:auto keeps it right-aligned when the tabs don't fill the row. */
+  /* 🔎 at the far right of the strip — HOVERS over it (position:sticky, so it
+     rides the scrollport's right edge while the tabs scroll underneath; the
+     gradient hides them as they pass behind). Tap/click = the sessions
+     spotlight (same modal as Ctrl+Super+Space). It used to be an inline filter
+     box — "kind of a pain in the ass" (Austin, 10-01). */
   #sessionbar .tfilter { position:sticky; right:0; z-index:3; flex:0 0 auto; margin-left:auto;
                          display:inline-flex; align-items:center; gap:5px;
                          padding-left:26px; padding-right:0;
                          background:linear-gradient(to right, transparent 0, var(--panel) 24px); }
-  #sessionbar .tfilter .ficon { flex:0 0 auto; font-size:11px; color:var(--dim); cursor:pointer;
-                                user-select:none; }
-  #sessionbar .tfilter input { width:92px; background:var(--raised); color:var(--ink);
-                               border:1px solid var(--edge); padding:3px 7px; font:inherit;
-                               font-size:11px; }
-  #sessionbar .tfilter input::placeholder { color:var(--dim); }
-  #sessionbar .tfilter input:focus { outline:none; border-color:var(--accent); width:150px; }
-  #sessionbar .tfilter.on input { border-color:var(--accent); color:var(--accent); }
-  #sessionbar .tfilter.none input { border-color:var(--err); color:var(--err); }
-  #sessionbar .tfilter.on .ficon { color:var(--accent); }
-  #sessionbar .tfilter .fclear { flex:0 0 auto; color:var(--dim); cursor:pointer; font-size:11px;
-                                 padding:0 2px; user-select:none; }
-  #sessionbar .tfilter .fclear:hover { color:var(--err); }
+  #sessionbar .tfilter .ficon { flex:0 0 auto; font-size:12px; color:var(--dim); cursor:pointer;
+                                user-select:none; padding:0 3px; }
+  #sessionbar .tfilter .ficon:hover { color:var(--accent); }
   /* "+N more" — how many tabs are off the visible strip (either side), so the
      total stays in view as you close them down. Tap = scroll to the next ones. */
   #sessionbar .tfilter .tmore { flex:0 0 auto; font-size:10px; color:var(--dim); cursor:pointer;
                                 user-select:none; padding:0 2px; font-family:var(--mono); }
   #sessionbar .tfilter .tmore:hover { color:var(--ink); }
   #sessionbar .tfilter .tmore[hidden] { display:none; }
-  /* Touch: the strip is the whole screen width, so an always-open box would eat a
-     fifth of it. Collapse to the 🔎 alone until you tap it (or a filter is live). */
   @media (pointer: coarse) {
     #sessionbar .tfilter { padding-left:18px; }
-    #sessionbar .tfilter .ficon { font-size:13px; padding:0 2px; }
-    #sessionbar .tfilter input { font-size:16px; width:0; padding:0; border-width:0; }
-    #sessionbar .tfilter.open input, #sessionbar .tfilter.on input {
-      width:120px; padding:3px 7px; border-width:1px; }
-    #sessionbar .tfilter input:focus { width:120px; }
+    #sessionbar .tfilter .ficon { font-size:15px; padding:0 4px; }
   }
   /* project emoji badge: never shrinks — the title ellipsizes, the badge stays legible */
   .pemoji { flex:0 0 auto; white-space:nowrap; }
@@ -1353,7 +1337,8 @@
   #rebootovl .rb-row { display:flex; align-items:center; gap:10px; }
   #rebootovl .rb-sub { color:var(--dim); font-size:12px; }
   /* spotlight launcher — Ctrl+Shift+Space: type a project, Enter → new session;
-     Ctrl+Space: type an iron, Enter → dive into its warmest session */
+     Ctrl+Space: type an iron, Enter → dive into its warmest session;
+     Ctrl+Super+Space (or the strip's 🔎): type a tab, Enter → open it */
   #spotlight { position:fixed; inset:0; z-index:65; background:rgba(0,0,0,.6);
                display:flex; align-items:flex-start; justify-content:center; padding:16vh 16px 0;
                backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }
@@ -1371,6 +1356,11 @@
   .spotrow .sname { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .spotrow .smeta2 { color:var(--dim); font-size:11px; white-space:nowrap; }
   .spotrow.sel { background:var(--accent-bg); color:var(--accent); }
+  .spotrow .sdot { flex:0 0 auto; }
+  @media (pointer: coarse) {
+    #spotlight { padding-top:8vh; }
+    .spotrow { padding:13px 16px; font-size:14px; }   /* finger-sized rows */
+  }
   .spotempty { padding:12px 16px; color:var(--dim); font-size:12px; font-family:var(--mono); }
 </style>
 </head>
@@ -4555,18 +4545,14 @@ function renderSessionBar(view) {
     if (!wasHidden) refitTTY();
     return;
   }
-  // Repaint, don't rebuild — the filter box is a live <input> that must survive
-  // every frame (same rule as the projects rung): wipe the tabs around it and
-  // insert new ones BEFORE it, never move it (a re-append blurs it mid-word).
+  // The 🔎 node lives for the app's life: wipe the tabs around it and insert
+  // new ones BEFORE it, never move it.
   const fbox = ensureTabFilter(bar);
   Array.from(bar.children).forEach(c => { if (c !== fbox) c.remove(); });
-  const q = tabFilterTerms();
-  let shown = 0;
   // The strip trims badges against ITS OWN tabs, not every project fleet-wide:
   // a tab whose code shares no leading emoji with any other tab here shows one
   // glyph, however many projects elsewhere start the same way (Austin, 09-30:
-  // "mic bug" wore 🎤✅📱 with no other 🎤 tab in sight). All tabs, not just the
-  // filter's matches, so typing in the filter never reshapes a badge.
+  // "mic bug" wore 🎤✅📱 with no other 🎤 tab in sight).
   const stripEm = emojiPrefixMap(sorted.map(sessionEmojiFull));
   sorted.forEach(s => {
     const tab = document.createElement('button');
@@ -4580,7 +4566,7 @@ function renderSessionBar(view) {
                 (s.checkArmed ? ' — 🔍 writing its brief; a reviewer opens when this turn ends' : s.checkOf ? ' — 🔍 double-checking another session\'s work' : '') +
                 (mOff ? ` — ${s._machine} is offline (cached tab; opens when it returns)` : '');
     if (TAB_DND) { tab.draggable = true; tab.ondragstart = e => tabDragStart(e, s.cid, 'strip'); tab.ondragend = tabDragEnd; }   // 🍳 drag up to the island
-    tab.onclick = () => { clearTabFilter(); focusSession(s); };   // may cross project/machine; cancels any queued new-session send; picking a tab is the filter's endpoint, so it clears
+    tab.onclick = () => focusSession(s);   // may cross project/machine; cancels any queued new-session send
     const dot = document.createElement('span');
     dot.className = 'sdot' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '');
     tab.appendChild(dot);
@@ -4611,13 +4597,8 @@ function renderSessionBar(view) {
       ag.title = 'last prompted ' + age + ' ago';
       tab.appendChild(ag);
     }
-    // The open session's tab is never filtered away — losing "you are here"
-    // while narrowing the strip is more disorienting than one extra tab.
-    const hit = !q.length || s.cid === currentCid || tabFilterHit(s, q);
-    if (hit) shown++; else tab.classList.add('fhide');
     bar.insertBefore(tab, fbox);
   });
-  paintTabFilter(q, shown, sorted.length);
   bar.hidden = false;
   if (wasHidden) refitTTY();
   paintTabMore();
@@ -4724,20 +4705,14 @@ function renderIronRow(view) {
   renderTodoPanel();              // ☑ the overlay follows the scope (and the row's count follows the list)
 }
 
-// ---- 🔎 filter the tab strip ------------------------------------------------
-// A box hovering over the right edge of #sessionbar that narrows the strip to
-// sessions whose name / tldr / digest / project (and, in fleet, machine) contain
-// what you typed. Space-separated words are ANDed. Purely client-side and purely
-// cosmetic: it hides tab NODES, touches no session and sends nothing.
-let tabFilter = '';        // live text (this browser only, not persisted)
-let tabFilterEl = null;    // the sticky wrapper — one node for the app's life
-let tabFilterInp = null;
-function tabFilterTerms() {
-  return tabFilter.trim().toLowerCase().split(/\s+/).filter(Boolean);
-}
-// Everything a tab is "about" — what the tab shows plus what it doesn't (the
-// tldr, the live digest, the project it lives in) so a word you remember from
-// the work finds the session even when its 1-2 word handle doesn't say it.
+// ---- 🔎 find a tab -----------------------------------------------------------
+// The strip's 🔎 (and Ctrl+Super+Space) open the spotlight in sessions mode:
+// type, ↑/↓, Enter or tap → that tab. The match is everything a tab is "about"
+// — what the tab shows plus what it doesn't (the tldr, the live digest, the
+// project it lives in, the machine) so a word you remember from the work finds
+// the session even when its 1-2 word handle doesn't say it. Space-separated
+// words are ANDed.
+let tabFilterEl = null;    // the sticky 🔎 wrapper — one node for the app's life
 function tabFilterHit(s, terms) {
   const parts = [s.tab, s.title, s.desc, s.digest, s.blocked_on, s.engine];
   if (FLEET) {
@@ -4758,50 +4733,19 @@ function ensureTabFilter(bar) {
     wrap.className = 'tfilter';
     const ico = document.createElement('span');
     ico.className = 'ficon'; ico.textContent = '🔎';
-    // On touch the box is collapsed to this icon (see the coarse-pointer CSS) —
-    // tapping it opens the box; it folds away again on blur unless a filter is live.
-    ico.onclick = () => { wrap.classList.add('open'); tabFilterInp.focus(); };
-    const inp = document.createElement('input');
-    inp.type = 'text'; inp.placeholder = 'filter';
-    inp.value = tabFilter;
-    inp.addEventListener('input', () => { tabFilter = inp.value; renderSessionBar(); });
-    inp.addEventListener('keydown', e => {
-      if (e.key === 'Escape') { e.preventDefault(); setTabFilter(''); inp.blur(); }
-      // Enter on a filter narrowed to one session opens it
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        const terms = tabFilterTerms();
-        const hits = terms.length ? sortedSessions().filter(s => tabFilterHit(s, terms)) : [];
-        if (hits.length === 1) { clearTabFilter(); focusSession(hits[0]); }
-      }
-    });
-    inp.addEventListener('blur', () => { if (!tabFilter.trim()) wrap.classList.remove('open'); });
-    const x = document.createElement('span');
-    x.className = 'fclear'; x.textContent = '✕'; x.title = 'clear filter';
-    x.onclick = () => clearTabFilter();
+    ico.title = 'find a session (Ctrl+Super+Space)';
+    ico.onclick = () => openSpotlight('sess');
     const more = document.createElement('span');
     more.className = 'tmore'; more.hidden = true;
     more.onclick = () => tabMoreJump();
     wrap.appendChild(more);
-    wrap.appendChild(ico); wrap.appendChild(inp); wrap.appendChild(x);
-    tabFilterEl = wrap; tabFilterInp = inp;
+    wrap.appendChild(ico);
+    tabFilterEl = wrap;
     bar.addEventListener('scroll', paintTabMore, { passive: true });
     window.addEventListener('resize', paintTabMore);
   }
   if (tabFilterEl.parentNode !== bar) bar.appendChild(tabFilterEl);   // PM view wipes the strip
   return tabFilterEl;
-}
-// Opening a session is the filter's natural end — it found what you were
-// looking for — so the strip comes back whole and the box folds away (touch).
-function clearTabFilter() {
-  if (tabFilter) setTabFilter('');
-  if (tabFilterEl) tabFilterEl.classList.remove('open');
-}
-// Programmatic writes fire no `input` event — keep the box and the mirror in step.
-function setTabFilter(v) {
-  tabFilter = v;
-  if (tabFilterInp && tabFilterInp.value !== v) tabFilterInp.value = v;
-  renderSessionBar();
 }
 // "+N more": tabs less than half on screen — scrolled off the left, or under
 // the filter box on the right. Measured, not computed from counts: the strip
@@ -4814,7 +4758,7 @@ function tabMoreHidden() {
   const cut = (more.hidden ? tabFilterEl.querySelector('.ficon') : more).getBoundingClientRect().left;
   const left = [], right = [];
   let total = 0;
-  bar.querySelectorAll('.stab:not(.fhide)').forEach(t => {
+  bar.querySelectorAll('.stab').forEach(t => {
     total++;
     const r = t.getBoundingClientRect(), mid = r.left + r.width / 2;
     if (mid > cut) right.push(t); else if (mid < br.left) left.push(t);
@@ -4839,15 +4783,6 @@ function tabMoreJump() {
   if (h.right.length) bar.scrollBy({ left: bar.clientWidth * 0.7, behavior: 'smooth' });
   else bar.scrollTo({ left: 0, behavior: 'smooth' });
 }
-function paintTabFilter(terms, shown, total) {
-  if (!tabFilterEl) return;
-  const on = terms.length > 0;
-  tabFilterEl.classList.toggle('on', on);
-  tabFilterEl.classList.toggle('none', on && shown === 0);
-  tabFilterEl.querySelector('.fclear').hidden = !on;
-  tabFilterEl.querySelector('.ficon').title = on ? `${shown}/${total} sessions match` : 'filter sessions';
-}
-
 // ---- fleet: unified projects across machines -------------------------------
 // Identity: same git remote = same project (fallback to name when there's no
 // remote). A repo cloned on two boxes collapses to one entry; the harness
@@ -11331,7 +11266,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowRight') navFwd(); else navBack();
 });
 
-// -- spotlight (Ctrl+Shift+Space projects · Ctrl+Space irons) ------------------
+// -- spotlight (Ctrl+Shift+Space projects · Ctrl+Space irons · Ctrl+Super+Space tabs)
 // A launcher with two modes over the same overlay. Projects mode
 // (Ctrl+Shift+Space): type a substring of a project name, pick with ↑/↓ (or
 // click), and Enter opens that project AND spawns a fresh session in it — the
@@ -11341,14 +11276,22 @@ window.addEventListener('keydown', (e) => {
 // openIron(), which dives STRAIGHT into the iron's warmest live session with
 // the scoped strip (every member session across machines). No spawn — this is
 // the "get me back into that effort" chord, not the "start something" one.
+// Sessions mode (Ctrl+Super+Space, or the 🔎 at the end of the tab strip):
+// the strip's own tabs, matched by tabFilterHit, strip order; Enter / tap →
+// focusSession. Replaced the strip's inline filter box (Austin, 10-01).
 const spotEl = document.getElementById('spotlight');
 const spotInput = document.getElementById('spotinput');
 const spotListEl = document.getElementById('spotlist');
 const SPOT_MAX = 12;
 let spotSel = 0;
-let spotMode = 'proj';          // 'proj' | 'iron'
+let spotMode = 'proj';          // 'proj' | 'iron' | 'sess'
 function spotMatches() {
   const q = spotInput.value.trim().toLowerCase();
+  if (spotMode === 'sess') {
+    // no cap: it's the strip's own tabs, and the list scrolls
+    const terms = q.split(/\s+/).filter(Boolean);
+    return sortedSessions().filter(s => !terms.length || tabFilterHit(s, terms));
+  }
   if (spotMode === 'iron') {
     // ironList order IS the user's priority order — keep it, don't re-sort.
     return ironList
@@ -11369,7 +11312,7 @@ function renderSpotlight() {
     d.className = 'spotempty';
     d.textContent = spotMode === 'iron'
       ? (ironList.length ? 'no matching iron' : 'no irons yet — 🔥 in the header to create one')
-      : 'no matching project';
+      : spotMode === 'sess' ? 'no matching session' : 'no matching project';
     spotListEl.appendChild(d);
     return;
   }
@@ -11378,7 +11321,27 @@ function renderSpotlight() {
     r.className = 'spotrow' + (i === spotSel ? ' sel' : '');
     const nm = document.createElement('span'); nm.className = 'sname';
     const mt = document.createElement('span'); mt.className = 'smeta2';
-    if (spotMode === 'iron') {
+    if (spotMode === 'sess') {
+      const dot = document.createElement('span');
+      dot.className = 'sdot' + (!p.alive ? ' dead' : (p.waiting || p.status === 'blocked') ? ' blocked' : p.busy ? ' busy' : p.bg ? ' bgwork' : '');
+      r.appendChild(dot);
+      const em = sessionEmojiFull(p);
+      nm.textContent = (em ? em + ' ' : '') + (p.tab || p.title || 'new session');
+      nm.title = p.title || '';
+      let proj = '';
+      if (FLEET) {
+        const key = p._pkey || (p._machine ? projectKeyForSession(p._machine, p.pid) : '');
+        const g = key ? projectGroup(key) : null;
+        proj = g ? g.name : '';
+      } else {
+        const pr = (projectList || []).find(x => x.pid === p.pid);
+        proj = pr ? pr.name : '';
+      }
+      const age = fmtAge(p.promptedAt || p.lastActive);
+      mt.textContent = [p.cid === currentCid ? 'here' : '', proj,
+                        FLEET && p._machine ? String(p._machine).replace(/^clawd-/, '') : '',
+                        age].filter(Boolean).join(' · ');
+    } else if (spotMode === 'iron') {
       nm.textContent = '🔥 ' + (p.title || '');
       const st = ironStats(p);
       mt.textContent = [`${st.members.length} proj`, `${st.sessions} sess`,
@@ -11399,8 +11362,8 @@ function renderSpotlight() {
 }
 function openSpotlight(mode) {
   spotMode = mode || 'proj';
-  spotInput.placeholder = spotMode === 'iron'
-    ? 'jump to iron · Enter → its sessions'
+  spotInput.placeholder = spotMode === 'iron' ? 'jump to iron · Enter → its sessions'
+    : spotMode === 'sess' ? 'find a session · Enter → open it'
     : 'jump to project · Enter → new session';
   spotInput.value = ''; spotSel = 0;
   spotEl.hidden = false;
@@ -11411,6 +11374,7 @@ function closeSpotlight() { spotEl.hidden = true; spotInput.blur(); }
 function spotLaunch(p) {
   closeSpotlight();
   if (spotMode === 'iron') { openIron(p.id); return; }   // warmest member session (waits for frames if needed)
+  if (spotMode === 'sess') { focusSession(p); return; }   // may cross project/machine, like a tab click
   selectProject(p.id);   // fleet: resolves + attaches the host machine; direct: sets currentPid
   newSession();          // spawn — the server's focus reply drops us into the fresh terminal
 }
@@ -11447,6 +11411,16 @@ window.addEventListener('keydown', (e) => {
   }
   else handled = false;
   if (handled) { e.preventDefault(); e.stopPropagation(); }
+}, true);
+
+// Ctrl+Super+Space — sessions mode: find a tab by name / tldr / project,
+// Enter opens it. Super is metaKey on Linux/Windows (on a Mac that's ⌘, and
+// Ctrl+⌘+Space is the OS emoji picker, which never reaches the page).
+window.addEventListener('keydown', (e) => {
+  if (!e.ctrlKey || !e.metaKey || e.shiftKey || e.altKey) return;
+  if (e.code !== 'Space') return;
+  e.preventDefault(); e.stopPropagation();
+  if (spotEl.hidden || spotMode !== 'sess') openSpotlight('sess'); else closeSpotlight();
 }, true);
 
 // Ctrl+Space (no shift) — the same spotlight in irons mode: type an iron's
