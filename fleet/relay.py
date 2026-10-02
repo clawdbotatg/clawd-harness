@@ -261,6 +261,39 @@ _prefs_lock = threading.Lock()
 # tap must never rewrite the irons blob (prefs is whole-field, last-writer-wins).
 TODOS_FILE = Path(os.environ.get("FLEET_TODOS_FILE") or (HERE / ".clawd-fleet.todos.json"))
 _todos_lock = threading.Lock()
+# ☑ → todo.atg.link: the operator's life-list app (clawd-todo, same box, own
+# server) shows every iron's list under its own 🔥 tab and can tick/add/remove
+# there. It reaches the lists through /todo/bridge with THIS token — its own,
+# not the worker token: it can touch iron to-do lists and nothing else. The
+# token comes from FLEET_TODO_BRIDGE_TOKEN or is minted once into this 0600
+# file, which clawd-todo reads (same box, same user) — no hand-copied secret.
+TODO_BRIDGE_FILE = Path(os.environ.get("FLEET_TODO_BRIDGE_FILE") or (HERE / ".clawd-fleet.todo-bridge.token"))
+
+
+def _todo_bridge_token():
+    env = os.environ.get("FLEET_TODO_BRIDGE_TOKEN")
+    if env:
+        return env
+    try:
+        tok = TODO_BRIDGE_FILE.read_text().strip()
+        if tok:
+            return tok
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"[relay] todo bridge token unreadable ({e}) — /todo/bridge disabled", flush=True)
+        return ""
+    tok = secrets.token_urlsafe(32)
+    try:
+        fd = os.open(TODO_BRIDGE_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(tok + "\n")
+    except FileExistsError:
+        return TODO_BRIDGE_FILE.read_text().strip()
+    except OSError as e:
+        print(f"[relay] can't mint todo bridge token ({e}) — /todo/bridge disabled", flush=True)
+        return ""
+    return tok
 MAX_INACTIVE = 128       # a fleet is tens of boxes; this is a disk-abuse bound
 MAX_MACHINE_ID = 64
 
@@ -1444,6 +1477,44 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_json({"ok": changed, "iron": {"id": iron["id"], "title": iron["title"]},
                                 "msg": msg, "item": item})
 
+    def _todo_bridge(self, method, q):
+        """☑ todo.atg.link's window onto the iron lists (see TODO_BRIDGE_FILE).
+        GET → {irons:[{id,title,items}]} in the operator's iron order, empty
+        irons included (so an add can land on one). POST {iron, op, text?,
+        ref?, ids?} → one todo_store op, applied + broadcast exactly like a
+        page tap, via="todo". Bridge-token gated; no token → 404."""
+        tok = _todo_bridge_token()
+        if not tok:
+            self.close_connection = True
+            return self.send_error(404, "denied")
+        if not _token_ok(q.get("t", [""])[0], tok):
+            self.close_connection = True
+            return self.send_error(403, "denied")
+        if method == "GET":
+            with RELAY.lock:
+                irons = [dict(i) for i in (RELAY.prefs.get("irons") or [])]
+                lists = {k: [dict(i) for i in v] for k, v in RELAY.todos.items()}
+            return self._send_json({"irons": [{"id": i["id"], "title": i["title"],
+                                               "items": lists.get(i["id"], [])}
+                                              for i in irons]})
+        try:
+            n = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            n = 0
+        if n <= 0 or n > 64 * 1024:
+            self.close_connection = True
+            return self.send_error(413, "bad size")
+        try:
+            frame = json.loads(self.rfile.read(n).decode("utf-8"))
+            assert isinstance(frame, dict)
+        except Exception:
+            return self._send_json({"ok": False, "msg": "bad request"}, 400)
+        ids = frame.get("ids") if isinstance(frame.get("ids"), list) else None
+        changed, msg, item = RELAY.todo_apply(str(frame.get("iron") or ""), str(frame.get("op") or ""),
+                                              text=frame.get("text") or "",
+                                              ref=str(frame.get("ref") or ""), ids=ids, via="todo")
+        return self._send_json({"ok": changed, "msg": msg, "item": item})
+
     def _stt_words(self, method, q):
         """🎤 the shared dictation word list — ONE file (`stt-words.txt` on the doc
         shelf) read and written by the harness page here, and read by
@@ -1688,6 +1759,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._docs_request("GET", path, q)
         if path == "/stt/words":
             return self._stt_words("GET", q)
+        if path == "/todo/bridge":
+            return self._todo_bridge("GET", q)
         if path != "/ws":
             return self.send_error(404, "not found")
         up = (self.headers.get("Upgrade", "").lower() == "websocket")
@@ -1772,6 +1845,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._stt_words("POST", q)
         if path == "/todo/agent":
             return self._todo_agent(q)
+        if path == "/todo/bridge":
+            return self._todo_bridge("POST", q)
         if path != "/upload":
             self.close_connection = True
             return self.send_error(404, "denied")
@@ -1976,6 +2051,7 @@ def raise_fd_limit(target=10240):
 def main():
     raise_fd_limit()
     threading.Thread(target=RELAY.ping_loop, daemon=True).start()
+    _todo_bridge_token()   # mint at boot: clawd-todo reads the file before any request
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     print(f"[relay] listening on ws://{BIND}:{PORT}/ws  (token required)", flush=True)
     # Never print the token: the relay runs on a shared box and its stdout lands

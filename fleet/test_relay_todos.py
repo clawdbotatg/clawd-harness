@@ -14,6 +14,9 @@ page and `harness-todo` depend on:
      iron through the key fold: exact projectKey, the `name:` form, and the
      URL↔name basename fold; a project in no iron is told so; list/add/done
      reply the CLI lines; `order` is refused (403); a bad token is denied.
+  6. `/todo/bridge` (todo.atg.link's window, its own token from the minted
+     0600 file): GET lists every iron in order with its items; POST applies
+     an op via="todo" and the mobiles see it live; wrong/worker token denied.
 
 Run: python3 fleet/test_relay_todos.py
 """
@@ -40,6 +43,7 @@ WTOKEN = "todos-test-worker"
 TMP = Path(tempfile.gettempdir())
 PREFS = TMP / "clawd-fleet-test-todos.prefs.json"
 TODOS = TMP / "clawd-fleet-test-todos.todos.json"
+BRIDGE = TMP / "clawd-fleet-test-todos.bridge.token"
 
 ENV = {
     **os.environ,
@@ -50,6 +54,7 @@ ENV = {
     "FLEET_REQUIRE_PASSKEY": "0",
     "FLEET_PREFS_FILE": str(PREFS),
     "FLEET_TODOS_FILE": str(TODOS),
+    "FLEET_TODO_BRIDGE_FILE": str(BRIDGE),
     "FLEET_SESSIONS_FILE": str(TMP / "clawd-fleet-test-todos.sessions.json"),
     "FLEET_PUSH_SUBS_FILE": str(TMP / "clawd-fleet-test-todos.push.json"),
     "FLEET_DOCS_DIR": str(TMP / "clawd-fleet-test-todos.docs"),
@@ -114,8 +119,20 @@ def agent(body, token=WTOKEN):
             return e.code, {}
 
 
+def bridge(token, body=None):
+    req = urllib.request.Request(f"{HTTP}/todo/bridge?t={quote(token)}",
+                                 data=None if body is None else json.dumps(body).encode(),
+                                 method="GET" if body is None else "POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, {}
+
+
 def main():
-    for f in (PREFS, TODOS):
+    for f in (PREFS, TODOS, BRIDGE):
         f.unlink(missing_ok=True)
     proc = subprocess.Popen([sys.executable, "relay.py"], env=ENV, cwd=str(HERE),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -192,6 +209,24 @@ def main():
         st, rep = agent({"op": "add", "text": "seen on the phone?", "machine": "box-b", "project": {"name": "hud", "kind": "gh"}})
         fa = wait_for(a_in, lambda m: m.get("type") == "todos" and any(i["text"] == "seen on the phone?" for i in m["todos"].get("i1", [])))
         check("an agent add is broadcast to the mobiles live", fa is not None)
+        # 6. the todo.atg.link bridge
+        btok = BRIDGE.read_text().strip()
+        check("bridge token minted at boot, mode 0600", len(btok) > 20 and (BRIDGE.stat().st_mode & 0o777) == 0o600)
+        st, rep = bridge(btok)
+        ids = [i["id"] for i in rep.get("irons", [])]
+        check("bridge GET: every iron in order (empty ones too) with its items",
+              st == 200 and ids == ["i1", "i2"] and rep["irons"][0]["title"] == "voice"
+              and any(i["text"] == "wire the hud" for i in rep["irons"][0]["items"]) and rep["irons"][1]["items"] == [], str(rep))
+        a_in.clear()
+        st, rep = bridge(btok, {"iron": "i2", "op": "add", "text": "from my phone list"})
+        fa = wait_for(a_in, lambda m: m.get("type") == "todos" and m["todos"].get("i2"))
+        check("bridge POST add: applied via=todo and broadcast live",
+              st == 200 and rep["ok"] and rep["item"]["via"] == "todo" and fa is not None, str(rep))
+        st, rep = bridge(btok, {"iron": "i2", "op": "done", "ref": rep["item"]["id"]})
+        check("bridge POST done by id", st == 200 and rep["ok"], str(rep))
+        st, rep = bridge(btok, {"iron": "ghost", "op": "add", "text": "x"})
+        check("bridge POST: unknown iron refused", st == 200 and rep["ok"] is False and "no such iron" in rep["msg"], str(rep))
+        check("bridge: wrong token / the worker token denied", bridge("nope")[0] == 403 and bridge(WTOKEN)[0] == 403)
         # 4. deleting the iron prunes its list
         a_in.clear()
         a_send({"type": "prefs", "irons": [irons[1]]})

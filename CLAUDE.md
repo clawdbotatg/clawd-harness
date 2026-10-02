@@ -181,7 +181,12 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   the worker uses it too); the `share/skills/iron-todo` skill (kit-installed
   on every box, re-synced on any `share/` pull) tells a session when to use
   it. Agent writes are opt-in: when asked, and the 📑
-  wrap prompt says to check off / add what's still open. `test_todo.py`,
+  wrap prompt says to check off / add what's still open. **🔥 on
+  todo.atg.link** mirrors every iron's list (read + tick/add/rm, ops applied
+  here, `via:"todo"`) through the relay's `/todo/bridge` — its OWN token,
+  minted at relay boot into `fleet/.clawd-fleet.todo-bridge.token` (0600),
+  which clawd-todo on the same box reads; still separate lists, items never
+  move between them. `test_todo.py`,
   `fleet/test_todo_store.py`, `fleet/test_relay_todos.py`, `tools/todoprobe.mjs`.
 
 ## Landmines (don't regress; stories in HISTORY.md)

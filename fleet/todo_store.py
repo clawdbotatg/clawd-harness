@@ -4,7 +4,9 @@ An iron ("irons in the fire", a named group of projects) can carry a short
 shared to-do list: what's still open across the whole effort, left there by the
 operator from the page or by a session (`harness-todo`) when asked. It is NOT
 the operator's life list (todo.atg.link — `todo` CLI) and never feeds it: eight
-issues from one project belong on that project's iron, not on his phone.
+issues from one project belong on that project's iron, not his life list.
+todo.atg.link does SHOW every iron's list under its own 🔥 tab (relay
+`/todo/bridge`), but as these lists, ops applied here — items never move.
 
 The list is item-level: every write is one op (add / done / undone / rm / clear
 / order) applied by the owner of the store — the relay in fleet mode (the lists
