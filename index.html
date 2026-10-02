@@ -65,6 +65,25 @@
                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   @media (pointer: coarse) { header .meta { max-width:42vw; } }
   header .spacer { flex:1; }
+  /* 🍳 back-burner island: the empty middle of the top bar. Drag a tab up here
+     and it parks as just its emoji — off the strip, not pinned. Desktop only. */
+  #island { flex:1 1 0; min-width:0; display:flex; align-items:center; justify-content:center;
+            gap:4px; align-self:stretch; overflow:hidden; border:1px dashed transparent; }
+  #island .bchip { flex:0 0 auto; position:relative; font-size:15px; line-height:1; padding:3px 4px;
+                   background:none; border:1px solid transparent; cursor:pointer; }
+  #island .bchip:hover { border-color:var(--edge-hi); background:var(--raised); }
+  #island .bchip.active { border-color:var(--accent); background:var(--accent-bg); }
+  #island .bchip .bd { position:absolute; right:1px; bottom:1px; width:5px; height:5px; }
+  #island .bchip .bd.busy { background:var(--accent); animation:pulse 1.1s ease-in-out infinite; }
+  #island .bchip .bd.blocked { background:var(--err); animation:pulse 1.1s ease-in-out infinite; }
+  #island .bchip .bd.dead { background:var(--err); }
+  #island .bhint { display:none; font-size:11px; color:var(--dim); font-family:var(--mono); white-space:nowrap; }
+  body.tabdrag-strip #island { border-color:var(--edge-hi); }
+  body.tabdrag-strip #island.empty .bhint { display:inline; }
+  #island.over { border-color:var(--accent) !important; background:var(--accent-bg); }
+  body.tabdrag-island #sessionbar { outline:1px dashed var(--edge-hi); outline-offset:-1px; }
+  body.tabdrag-island #sessionbar.over { outline-color:var(--accent); }
+  @media (pointer: coarse) { #island { display:none; } }
   #dot { width:8px; height:8px; background:var(--err); flex:0 0 auto; }   /* square status LED */
   #dot.up { background:var(--ok); }
   /* 🔥 iron scope row: the iron compressed to one line while one of its
@@ -1364,6 +1383,7 @@
       <h1 id="brand" title="All sessions">clawd-harness</h1>
       <span class="meta" id="meta">connecting…</span>
     </div>
+    <div id="island" class="empty" title="back burner — drag a tab here to park it; drag it back to the tabs to resume"><span class="bhint">drop here · back burner</span></div>
     <!-- one control strip, left→right: projects · sessions · machines · subscriptions
          · PM · pins · settings · reload. All the same square emoji chip (.hbtn);
          only 📌 carries a count. -->
@@ -1748,6 +1768,105 @@ if (ejectBC) {
     ejectBC.postMessage({ who: true });
   }
 }
+// 🍳 back burner: sessions dragged off the tab strip onto the #island in the
+// middle of the top bar. Not pinned, not closed — just out of the strip (and
+// the rail cycling / boot landing, via sortedSessions / ironRail) and shown as
+// their emoji. Click = open it; drag it back onto the strip = a tab again.
+// This browser only (localStorage, synced across its tabs); desktop only.
+const BURNER_KEY = 'cc_burner';
+function burnerLoad() {
+  try { const a = JSON.parse(localStorage.getItem(BURNER_KEY) || '[]'); return Array.isArray(a) ? a.filter(c => typeof c === 'string') : []; }
+  catch { return []; }
+}
+let burner = burnerLoad();
+function isBurner(cid) { return !BREAKOUT && !!cid && burner.includes(cid); }
+function burnerSet(cid, on) {
+  if (!cid || on === burner.includes(cid)) return;
+  // parking the open session steps along the rail like 📌 does (before the
+  // cid leaves the rail, so the hop lands on its neighbour)
+  const v = currentView();
+  if (on && cid === currentCid && (v === 'tty' || v === 'transcript')) hopAfterPin(cid);
+  burner = on ? burner.concat(cid) : burner.filter(c => c !== cid);
+  try { localStorage.setItem(BURNER_KEY, JSON.stringify(burner)); } catch {}
+  renderSessionBar();
+  if (currentView() === 'sessions') renderSessions();
+}
+window.addEventListener('storage', e => {
+  if (e.key !== BURNER_KEY) return;
+  burner = burnerLoad();
+  try { renderSessionBar(); } catch {}
+});
+// Drag: strip tab → island parks it, island chip → strip brings it back. While
+// a drag is live the strip and island DON'T repaint (frames land several times
+// a second; a rebuilt source node kills the drag) — the end repaints once.
+let tabDrag = null;                           // { cid, from: 'strip' | 'island' }
+const TAB_DND = !isTouch && !BREAKOUT;
+function tabDragStart(e, cid, from) {
+  tabDrag = { cid, from };
+  e.dataTransfer.setData('application/x-harness-cid', cid);
+  e.dataTransfer.effectAllowed = 'move';
+  setTimeout(() => { if (tabDrag) document.body.classList.add('tabdrag-' + from); }, 0);
+}
+function tabDragEnd() {
+  if (!tabDrag) return;
+  tabDrag = null;
+  document.body.classList.remove('tabdrag-strip', 'tabdrag-island');
+  document.querySelectorAll('#island.over, #sessionbar.over').forEach(n => n.classList.remove('over'));
+  renderSessionBar();
+}
+// A mousemove with no button down means the drag is over even if dragend got lost.
+document.addEventListener('mousemove', e => { if (tabDrag && !e.buttons) tabDragEnd(); });
+function tabDropZone(el, from, on) {
+  el.addEventListener('dragover', e => {
+    if (!tabDrag || tabDrag.from !== from) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+    el.classList.add('over');
+  });
+  el.addEventListener('dragleave', e => { if (!el.contains(e.relatedTarget)) el.classList.remove('over'); });
+  el.addEventListener('drop', e => {
+    if (!tabDrag || tabDrag.from !== from) return;
+    e.preventDefault();
+    const cid = tabDrag.cid;
+    tabDragEnd();
+    burnerSet(cid, on);
+  });
+}
+function renderIsland() {
+  const el = document.getElementById('island');
+  if (!el || tabDrag) return;
+  const byCid = new Map(allSessions().map(s => [s.cid, s]));
+  const items = burner.map(c => byCid.get(c)).filter(Boolean);
+  // reconcile by cid — never wipe (a wipe eats the chip under the cursor)
+  const have = new Map([...el.querySelectorAll('.bchip')].map(n => [n.dataset.cid, n]));
+  const hint = el.querySelector('.bhint');
+  const em = emojiPrefixMap(items.map(sessionEmojiFull));   // trimmed against the island's own chips, like the strip
+  items.forEach((s, i) => {
+    let n = have.get(s.cid);
+    have.delete(s.cid);
+    if (!n) {
+      n = document.createElement('button');
+      n.className = 'bchip'; n.dataset.cid = s.cid;
+      n.appendChild(document.createElement('span')).className = 'be';
+      n.appendChild(document.createElement('span')).className = 'bd';
+      n.onclick = () => { const x = allSessions().find(q => q.cid === n.dataset.cid); if (x) focusSession(x); };
+      if (TAB_DND) { n.draggable = true; n.ondragstart = e => tabDragStart(e, s.cid, 'island'); n.ondragend = tabDragEnd; }
+    }
+    n.classList.toggle('active', s.cid === currentCid);
+    const full = sessionEmojiFull(s);
+    n.querySelector('.be').textContent = (full && (em.get(full) || full)) || '💬';
+    n.querySelector('.bd').className = 'bd' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : '');
+    n.title = '🍳 ' + (s.tab || s.title || 'new session') + ' — click to open, drag to the tabs to bring it back';
+    const at = el.children[i];
+    if (at !== n) el.insertBefore(n, at || hint);
+  });
+  have.forEach(n => n.remove());
+  el.classList.toggle('empty', !items.length);
+}
+if (TAB_DND) {
+  tabDropZone(document.getElementById('island'), 'strip', true);       // tab → back burner
+  tabDropZone(document.getElementById('sessionbar'), 'island', false); // chip → a tab again
+}
+
 // Preferred deep view when you dive into a session: desktop drives the live
 // terminal (full keyboard, drives the TUI directly); touch reads the transcript
 // The session view is the live terminal (tty) on every device — the transcript
@@ -4422,6 +4541,8 @@ function refreshBreadcrumb(view) {
 // page, with the open session highlighted. Hidden on the projects rung.
 function renderSessionBar(view) {
   const bar = document.getElementById('sessionbar');
+  if (tabDrag) return;                                          // 🍳 a live drag owns the strip; tabDragEnd repaints
+  renderIsland();
   const wasHidden = bar.hidden;
   view = view || currentView();
   renderIronRow(view);                                          // 🔥 one-row iron identity above the strip while scoped
@@ -4458,6 +4579,7 @@ function renderSessionBar(view) {
                 (s.wrapClosing ? ' — 📑 closing when its turn ends' : s.wrapArmed ? ' — 📑 wrapping up (will close itself)' : '') +
                 (s.checkArmed ? ' — 🔍 writing its brief; a reviewer opens when this turn ends' : s.checkOf ? ' — 🔍 double-checking another session\'s work' : '') +
                 (mOff ? ` — ${s._machine} is offline (cached tab; opens when it returns)` : '');
+    if (TAB_DND) { tab.draggable = true; tab.ondragstart = e => tabDragStart(e, s.cid, 'strip'); tab.ondragend = tabDragEnd; }   // 🍳 drag up to the island
     tab.onclick = () => { clearTabFilter(); focusSession(s); };   // may cross project/machine; cancels any queued new-session send; picking a tab is the filter's endpoint, so it clears
     const dot = document.createElement('span');
     dot.className = 'sdot' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '');
@@ -6728,7 +6850,8 @@ function sortedSessions() {
   // 📌 pinned sessions are parked to-dos, not active work — they live on the pin
   // board only, so the tab strip, rail cycling and the boot landing all skip them.
   // ⏏ ejected ones are in their own window (isEjected) — same treatment.
-  return allSessions().filter(s => !s.pinned && !isEjected(s.cid)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
+  // 🍳 back-burner ones sit on the #island, same treatment.
+  return allSessions().filter(s => !s.pinned && !isEjected(s.cid) && !isBurner(s.cid)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
 }
 
 // The rail the strip/cycling/close-hop actually flip through. Normally the full
@@ -6750,8 +6873,8 @@ function ironRail(iron) {
   const all = ironSessions(iron);
   const rank = s => !s.alive ? 4 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : s.bg ? 2 : 3;
   const warmth = s => s.promptedAt || s.lastActive || 0;
-  const live = all.filter(s => !s.pinned && !isEjected(s.cid)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
-  const parked = all.filter(s => s.pinned && !isEjected(s.cid)).sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
+  const live = all.filter(s => !s.pinned && !isEjected(s.cid) && !isBurner(s.cid)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
+  const parked = all.filter(s => s.pinned && !isEjected(s.cid) && !isBurner(s.cid)).sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
   return live.concat(parked);
 }
 
