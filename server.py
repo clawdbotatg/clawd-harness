@@ -443,14 +443,16 @@ PIN_COMPACT_WAIT = float(os.environ.get("PIN_COMPACT_WAIT", "900"))   # s to wai
 # Auto-TLDR (2026-08-16): you prompt a session from a browser, walk away, and
 # come back to a wall of text — wishing someone had tapped the "tldr" chip
 # while you were gone. So the harness does: when a turn ends with a long reply
-# and NOBODY is subscribed to the session, it sends the chip's prompt itself.
+# it sends the chip's prompt itself.
 # Three fences keep it from running away: it's armed only by a BROWSER send
 # (the frame's `via` tag — controller/pipeline prompts never carry one, so
 # PM-orchestrated sessions are untouched and pipeline chaining can't be
 # corrupted by an injected turn); the arm is CONSUMED at the next Stop, so
 # one human prompt buys at most one auto-tldr and the tldr turn itself can
-# never re-trigger; and anyone actually watching (a live subscriber, checked
-# again after a short grace) suppresses it. AUTO_TLDR=0 opts the box out.
+# never re-trigger. It fires whether or not a viewer is subscribed (10-02): a
+# forgotten desktop tab or a backgrounded phone counts as "watching", so the
+# old nobody-watching fence silently ate the tldr on the walls Austin came
+# back to. AUTO_TLDR=0 opts the box out.
 AUTO_TLDR       = os.environ.get("AUTO_TLDR", "1") != "0"
 AUTO_TLDR_TEXT  = os.environ.get("AUTO_TLDR_TEXT",
                                  "TLDR, use simple plain english and as few "
@@ -4136,13 +4138,13 @@ class ClaudeSession:
             if self.eng.routes_accounts:
                 threading.Thread(target=self.manager.maybe_handoff, args=(self,),
                                  daemon=True).start()
-            # The absent reader's chip tap: a browser-armed prompt just ended
-            # in a wall of text and nobody is subscribed — tap "tldr" for them.
+            # The reader's chip tap: a browser-armed prompt just ended in a
+            # wall of text — tap "tldr" for them (viewers or not, see AUTO_TLDR).
             # The arm is consumed HERE, hit or miss, so a stale arm can never
             # fire on some later (possibly controller-driven) turn.
             armed, self.auto_tldr_armed = self.auto_tldr_armed, False
             if (AUTO_TLDR and armed and not self.ceremony and not self.pinned
-                    and not self.autopilot and not self.clients
+                    and not self.autopilot
                     and wants_auto_tldr(data["last"])):
                 threading.Thread(target=self._auto_tldr, daemon=True).start()
             # 🤖 autopilot: the turn just ended — let the supervisor read the
@@ -4497,18 +4499,16 @@ class ClaudeSession:
     def _auto_tldr(self):
         """Deliver the AUTO_TLDR chip tap (armed + gated in on_hook's Stop).
         A short grace re-checks everything that can change at the Stop
-        boundary: a viewer arriving to read the wall themselves, a new prompt
-        (any hook moves hook_count), or the session going busy/away — all of
-        those win and the tap is dropped. Sent as a normal message on purpose:
+        boundary: a new prompt (any hook moves hook_count), or the session
+        going busy/away — those win and the tap is dropped. Sent as a normal message on purpose:
         it's a real prompt, so the bounce watchdog / limit rescues cover it
         like anything a human sends."""
         pre_hooks = self.hook_count
         time.sleep(AUTO_TLDR_DELAY)
-        if (not self.alive or self.busy or self.waiting or self.clients
+        if (not self.alive or self.busy or self.waiting
                 or self.hook_count != pre_hooks):
             return
-        print(f"[session {self.cid[:8]}] auto-tldr: long reply, nobody "
-              f"watching — sending {AUTO_TLDR_TEXT!r}", flush=True)
+        print(f"[session {self.cid[:8]}] auto-tldr: long reply — sending {AUTO_TLDR_TEXT!r}", flush=True)
         log_prompt(self, AUTO_TLDR_TEXT, "auto")
         # Through the same preflight as a human send: it's a real model prompt
         # and must not bounce off an exhausted pool (plan's Auto-TLDR section).
