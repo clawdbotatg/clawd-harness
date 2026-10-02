@@ -307,6 +307,10 @@ SEED_SCRUB_RE = re.compile(
 # re-execute it, silently overwriting the viewer's system clipboard with stale
 # text just for opening the tty view. Live bytes stay untouched (selecting in
 # claude's TUI still copies); only the catch-up snapshot is cleaned.
+# Window title (OSC 0/2) and a braille spinner glyph inside one — the
+# ready_on_title_spin signal (_scan_for_title_ready).
+_TITLE_RE = re.compile(rb"\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)")
+_SPIN_RE = re.compile("[\u2800-\u28ff]")
 OSC52_SCRUB_RE = re.compile(rb"\x1b\]52;[^\x07\x1b]*(?:\x07|\x1b\\)")
 # Settle gap between typing a message and pressing Enter. Claude's TUI treats a
 # fast text+CR burst as a multi-line *paste* (CR becomes a newline, not submit);
@@ -2867,6 +2871,11 @@ class Engine:
     # that never enabled 2004 would deliver them as literal text. Codex is
     # verified too (see CodexEngine).
     bracketed_paste = False
+    # True = this TUI spins a braille glyph in its window title (OSC 0) while
+    # it starts up and drops it once it accepts input; the first spin→plain
+    # flip counts as "the TUI is up" (sets _started_evt) when SessionStart
+    # hasn't fired yet. See CodexEngine for why codex needs it.
+    ready_on_title_spin = False
     # The keystroke that answers this CLI's resume gate (see _RESUME_GATE_RE) —
     # a bare CR, because option 1 ("Resume from summary") is the one already
     # highlighted and the modal's own footer reads "Enter to confirm". b"" opts
@@ -2985,6 +2994,13 @@ class CodexEngine(Engine):
     # until the NEXT send's CR posts both (Austin, 09-25). Bracketed, 1.5k
     # chars submit on both boxes at either settle.
     bracketed_paste = True
+    # 0.160 (2026-10-02) fires SessionStart only with the FIRST prompt, so
+    # wait_ready sat out its whole 30s on every fresh codex; a human who typed
+    # in that window started a turn, and the 🔍 brief typed behind it was
+    # QUEUED until the turn ended (Austin: blank reviewer, brief lands after
+    # "."). Startup ends ~1.6s in, when the title spinner stops; a prompt
+    # sent then is taken (3/3), one sent mid-spin is lost.
+    ready_on_title_spin = True
 
     def argv(self, s):
         # No --session-id analogue: codex assigns its own id, so the cid↔sid
@@ -3569,6 +3585,8 @@ class ClaudeSession:
         self._gate_raw = b""                      # rolling RAW PTY bytes, for the resume-gate scan
         self._gate_deadline = 0.0                 # scan window end; a resume start() arms it, a match/send disarms it
         self._started_evt = threading.Event()     # set on SessionStart — "the TUI is up"
+        self._title_raw = b""                     # rolling RAW PTY bytes, for the title-spin scan
+        self._title_spun = False                  # saw a startup spinner title (ready_on_title_spin)
         self._gate_resolved_evt = threading.Event()  # resume gate answered/expired/never-armed —
                                                      # "safe to type a prompt" (see wait_ready)
         self.last_tool = None
@@ -4651,6 +4669,8 @@ class ClaudeSession:
             # own resume_gate_key, which is empty everywhere but claude.
             if self._gate_deadline:
                 self._scan_for_resume_gate(chunk)
+            if self.eng.ready_on_title_spin and not self._started_evt.is_set():
+                self._scan_for_title_ready(chunk)
         self.alive = False
         # Stamp the account: the poller must not consume this grant for
         # SUB_REFRESH_EXIT_GRACE — the dying claude's last token rotation
@@ -4662,6 +4682,24 @@ class ClaudeSession:
         if self.manager.sessions.get(self.cid) is self:
             self.manager.broadcast_all({"type": "exit", "cid": self.cid})
             self.manager.broadcast_sessions()
+
+    def _scan_for_title_ready(self, chunk):
+        """Set _started_evt on the first window title (OSC 0/2) without a
+        braille spinner glyph after one with it — the TUI finished starting
+        up. Reads the title sequence only, never screen text. Rolling raw
+        buffer because a read can split the sequence."""
+        self._title_raw += chunk
+        end = 0
+        for m in _TITLE_RE.finditer(self._title_raw):
+            end = m.end()
+            if _SPIN_RE.search(m.group(1).decode("utf-8", "ignore")):
+                self._title_spun = True
+            elif self._title_spun:
+                print(f"[session {self.cid[:8]}] {self.engine} TUI ready "
+                      "(title spinner stopped)", flush=True)
+                self._started_evt.set()
+                break
+        self._title_raw = self._title_raw[end:][-4096:]   # tail may hold a split title
 
     def _scan_for_limit(self, chunk):
         """Watch the raw PTY stream for the CLI's own limit banner — the
