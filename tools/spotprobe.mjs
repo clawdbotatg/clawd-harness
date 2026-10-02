@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // spotprobe — guards the two-mode spotlight launcher (2026-08-28):
 //   Ctrl+Shift+Space → projects mode (Enter = open project + spawn a session)
-//   Ctrl+Super+Space → sessions mode (Enter = focusSession; see tabfilterprobe)
+//   Ctrl+Alt+Space → sessions mode (Enter = focusSession; see tabfilterprobe)
 //   Ctrl+Space       → irons mode    (Enter = openIron → dive into the iron's
 //                                     warmest live session, no spawn)
 // Asserts: each chord opens its mode (placeholder + row shape), the chords
@@ -81,12 +81,12 @@ const r = await page.evaluate(async () => {
     out.toggles = !up();
     chord(false); key('Escape');
     out.escCloses = !up();
-    // Ctrl+Super+Space → sessions mode (Super = metaKey); again toggles closed
+    // Ctrl+Alt+Space → sessions mode ; again toggles closed
     window.dispatchEvent(new KeyboardEvent('keydown',
-      { code: 'Space', key: ' ', ctrlKey: true, metaKey: true, bubbles: true, cancelable: true }));
+      { code: 'Space', key: ' ', ctrlKey: true, altKey: true, bubbles: true, cancelable: true }));
     out.sessOpens = up() && spotMode === 'sess' && spotInput.placeholder.includes('session');
     window.dispatchEvent(new KeyboardEvent('keydown',
-      { code: 'Space', key: ' ', ctrlKey: true, metaKey: true, bubbles: true, cancelable: true }));
+      { code: 'Space', key: ' ', ctrlKey: true, altKey: true, bubbles: true, cancelable: true }));
     out.sessToggles = !up();
   } finally {
     ironList = savedIrons;

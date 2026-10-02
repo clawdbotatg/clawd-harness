@@ -2,7 +2,7 @@
 // tabfilterprobe — guards the 🔎 that hovers over the right edge of the
 // #sessionbar tab strip. It began as an inline filter box (2026-08-09); since
 // 2026-10-01 it is just the icon, and a tap opens the spotlight in SESSIONS
-// mode (same modal as Ctrl+Super+Space). Drives the *running* app from a LOCAL
+// mode (same modal as Ctrl+Alt+Space). Drives the *running* app from a LOCAL
 // headless Chromium and reads the real DOM.
 //
 // It lands on the SESSIONS rung (`#/p/<pid>`), never on a session, and stubs

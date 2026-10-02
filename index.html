@@ -154,7 +154,7 @@
   /* 🔎 at the far right of the strip — HOVERS over it (position:sticky, so it
      rides the scrollport's right edge while the tabs scroll underneath; the
      gradient hides them as they pass behind). Tap/click = the sessions
-     spotlight (same modal as Ctrl+Super+Space). It used to be an inline filter
+     spotlight (same modal as Ctrl+Alt+Space). It used to be an inline filter
      box — "kind of a pain in the ass" (Austin, 10-01). */
   #sessionbar .tfilter { position:sticky; right:0; z-index:3; flex:0 0 auto; margin-left:auto;
                          display:inline-flex; align-items:center; gap:5px;
@@ -1338,7 +1338,7 @@
   #rebootovl .rb-sub { color:var(--dim); font-size:12px; }
   /* spotlight launcher — Ctrl+Shift+Space: type a project, Enter → new session;
      Ctrl+Space: type an iron, Enter → dive into its warmest session;
-     Ctrl+Super+Space (or the strip's 🔎): type a tab, Enter → open it */
+     Ctrl+Alt+Space (or the strip's 🔎): type a tab, Enter → open it */
   #spotlight { position:fixed; inset:0; z-index:65; background:rgba(0,0,0,.6);
                display:flex; align-items:flex-start; justify-content:center; padding:16vh 16px 0;
                backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }
@@ -4706,7 +4706,7 @@ function renderIronRow(view) {
 }
 
 // ---- 🔎 find a tab -----------------------------------------------------------
-// The strip's 🔎 (and Ctrl+Super+Space) open the spotlight in sessions mode:
+// The strip's 🔎 (and Ctrl+Alt+Space) open the spotlight in sessions mode:
 // type, ↑/↓, Enter or tap → that tab. The match is everything a tab is "about"
 // — what the tab shows plus what it doesn't (the tldr, the live digest, the
 // project it lives in, the machine) so a word you remember from the work finds
@@ -4733,7 +4733,7 @@ function ensureTabFilter(bar) {
     wrap.className = 'tfilter';
     const ico = document.createElement('span');
     ico.className = 'ficon'; ico.textContent = '🔎';
-    ico.title = 'find a session (Ctrl+Super+Space)';
+    ico.title = 'find a session (Ctrl+Alt+Space)';
     ico.onclick = () => openSpotlight('sess');
     const more = document.createElement('span');
     more.className = 'tmore'; more.hidden = true;
@@ -11266,7 +11266,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowRight') navFwd(); else navBack();
 });
 
-// -- spotlight (Ctrl+Shift+Space projects · Ctrl+Space irons · Ctrl+Super+Space tabs)
+// -- spotlight (Ctrl+Shift+Space projects · Ctrl+Space irons · Ctrl+Alt+Space tabs)
 // A launcher with two modes over the same overlay. Projects mode
 // (Ctrl+Shift+Space): type a substring of a project name, pick with ↑/↓ (or
 // click), and Enter opens that project AND spawns a fresh session in it — the
@@ -11276,7 +11276,7 @@ window.addEventListener('keydown', (e) => {
 // openIron(), which dives STRAIGHT into the iron's warmest live session with
 // the scoped strip (every member session across machines). No spawn — this is
 // the "get me back into that effort" chord, not the "start something" one.
-// Sessions mode (Ctrl+Super+Space, or the 🔎 at the end of the tab strip):
+// Sessions mode (Ctrl+Alt+Space, or the 🔎 at the end of the tab strip):
 // the strip's own tabs, matched by tabFilterHit, strip order; Enter / tap →
 // focusSession. Replaced the strip's inline filter box (Austin, 10-01).
 const spotEl = document.getElementById('spotlight');
@@ -11413,11 +11413,12 @@ window.addEventListener('keydown', (e) => {
   if (handled) { e.preventDefault(); e.stopPropagation(); }
 }, true);
 
-// Ctrl+Super+Space — sessions mode: find a tab by name / tldr / project,
-// Enter opens it. Super is metaKey on Linux/Windows (on a Mac that's ⌘, and
-// Ctrl+⌘+Space is the OS emoji picker, which never reaches the page).
+// Ctrl+Alt+Space — sessions mode: find a tab by name / tldr / project,
+// Enter opens it. Not Ctrl+⌘+Space: that's the macOS emoji picker and never
+// reaches the page (Austin's keyboard has Alt/Win swapped, 10-02). e.code, not
+// e.key — Option+Space types a non-breaking space on a Mac.
 window.addEventListener('keydown', (e) => {
-  if (!e.ctrlKey || !e.metaKey || e.shiftKey || e.altKey) return;
+  if (!e.ctrlKey || !e.altKey || e.shiftKey || e.metaKey) return;
   if (e.code !== 'Space') return;
   e.preventDefault(); e.stopPropagation();
   if (spotEl.hidden || spotMode !== 'sess') openSpotlight('sess'); else closeSpotlight();
