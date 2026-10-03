@@ -122,6 +122,16 @@ await page.waitForTimeout(200);
 pn = await pane();
 check('peekPty bytes for the reviewer paint the pane; a stray cid never does', /codex is reading REVIEW\.md/.test(pn.text) && !/STRAY/.test(pn.text), pn.text.slice(0, 80));
 check('…and never the main terminal', await page.evaluate(() => { const b = term.buffer.active; let o = ''; for (let i = 0; i < b.length; i++) o += b.getLine(i).translateToString(true); return !/codex is reading/.test(o); }));
+// the tab's dot covers the reviewer: codex working in the pane = the tab pulses busy
+const dotOf = (lbl) => page.evaluate((lbl) => { const b = [...document.querySelectorAll('#sessionbar .stab')].find(x => x.querySelector('.lbl')?.textContent === lbl); return b ? b.querySelector('.sdot').className : null; }, lbl);
+let dc = await dotOf('🔍 alpha');
+check('source idle + reviewer busy → the source tab\'s dot pulses busy', / busy/.test(dc || ''), dc);
+await rx([{ ...A, checkArmed: false }, B, { ...R, busy: false }]);
+await page.waitForTimeout(200);
+dc = await dotOf('🔍 alpha');
+check('…and goes back to idle when the reviewer stops', dc === 'sdot', dc);
+await rx([{ ...A, checkArmed: false }, B, R]);
+await page.waitForTimeout(200);
 await page.screenshot({ path: join(HERE, 'checkprobe.png') });
 await page.evaluate(() => { window.__sent.length = 0; });
 await page.locator('#peekX').tap();
