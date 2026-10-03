@@ -20,12 +20,13 @@ update() {
     return
   fi
   if command -v claude >/dev/null; then
-    claude update
+    # npm install in a root-owned prefix (zkllmapi): claude update can't write it.
+    claude update || sudo -n npm install -g @anthropic-ai/claude-code@latest
   fi
   if command -v codex >/dev/null; then
     real="$(readlink -f "$(command -v codex)" 2>/dev/null || true)"
     if [[ "$real" == *node_modules/@openai/codex* ]]; then
-      npm install -g @openai/codex@latest
+      npm install -g @openai/codex@latest || sudo -n npm install -g @openai/codex@latest
     elif command -v brew >/dev/null && brew list codex >/dev/null 2>&1; then
       brew upgrade codex || true
     fi
