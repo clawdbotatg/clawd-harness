@@ -97,6 +97,7 @@ def _fake(on):
     f._tldr = None
     f._voice_said = ["stale"]
     f.tldr_on = on
+    f.tldr_quiet = False
     f._tldr_timer = None
     f._tldr_deadline = 0.0
     f.frames = []
@@ -130,6 +131,29 @@ armed = f._tldr_timer is not None
 f.tee_text("tool", "")
 check("text arms the debounce and a following tool cancels it (no summarizer spawned)",
       armed and f._tldr_timer is None)
+
+print("the tldr chip's turn is invisible to the blue block (Austin, 10-03):")
+check("the auto-tldr prompt is a tldr prompt", server.is_tldr_prompt(server.AUTO_TLDR_TEXT))
+check("whitespace/case don't matter",
+      server.is_tldr_prompt("  " + server.AUTO_TLDR_TEXT.upper().replace(" ", "\n ") + "\n"))
+check("a real prompt is not", not server.is_tldr_prompt("TLDR of the auth module please"))
+check("empty is not", not server.is_tldr_prompt("") and not server.is_tldr_prompt(None))
+f = _fake(True)
+f.tee_text("text", "The real answer, being summarized and read aloud.")
+f.tldr_quiet = True                                # the tldr turn starts
+f.tee_text("tool", ""); f.tee_text("text", "Short: it works.")
+check("a quiet turn neither blanks nor appends",
+      f.tldr_turn_text == "The real answer, being summarized and read aloud."
+      and not any(fr.get("text") == "" for fr in f.frames))
+src = open(server.__file__).read()
+check("UserPromptSubmit skips the reset for a tldr prompt",
+      "if not self.tldr_quiet:\n                self.tldr_turn_reset()" in src)
+check("Stop skips the final pass for a tldr prompt",
+      "if self.tldr_quiet:" in src and "else:\n                self.tldr_turn_done()" in src)
+page = open(server.__file__.replace("server.py", "index.html")).read()
+check("the page keeps the block + voice on a tldrQuiet prompt",
+      "if (!d.tldrQuiet) { clearTldr(); stopSpeech(); }" in page)
+if f._tldr_timer: f._tldr_timer.cancel()
 
 print("tldr_budget:")
 check("short reply → floor", server.tldr_budget("a b c", False) == 15 and server.tldr_budget("a b c", True) == 12)

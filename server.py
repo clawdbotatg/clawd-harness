@@ -537,6 +537,15 @@ AUTO_TLDR_LONG  = int(os.environ.get("AUTO_TLDR_LONG", "900"))  # one-paragraph 
 AUTO_TLDR_DELAY = float(os.environ.get("AUTO_TLDR_DELAY", "3")) # grace before sending
 
 
+def is_tldr_prompt(text):
+    """The tldr chip's prompt (sent by AUTO_TLDR or tapped by hand). Its turn
+    is invisible to the 🟦/🔊 loop: the blue block keeps summarizing and
+    reading the REAL answer instead of blanking for a TLDR of it (Austin,
+    10-03: the two TLDRs tripped over each other)."""
+    return " ".join((text or "").split()).lower() == \
+        " ".join(AUTO_TLDR_TEXT.split()).lower()
+
+
 # ── 🟦 Live TLDR (2026-09-04): the blue block over the terminal ──────────────
 # "Every answer is too verbose and I always hit the tldr button." So the
 # harness keeps a rolling plain-English summary of what claude is saying,
@@ -3681,6 +3690,7 @@ class ClaudeSession:
         # 🟦 live TLDR (volatile; the viewer re-asserts its preference on subscribe)
         self.tldr_on = bool(tldr_on)              # a viewer wants the blue block (ctor param: survives respawn/restart)
         self.tldr_turn_text = ""                  # this turn's streamed assistant prose (API tee)
+        self.tldr_quiet = False                   # this turn is the tldr chip's: the tee ignores it (is_tldr_prompt)
         self.tldr_text = tldr_text or ""          # current summary (re-sent to late subscribers; persisted — a
                                                   # daemon restart or account handoff used to wipe it, 2026-09-04)
         self.tldr_read_at = 0                     # chars of tldr_turn_text the viewer marked read (tap)
@@ -4172,9 +4182,11 @@ class ClaudeSession:
         data = {}
         if ev == "UserPromptSubmit":
             self.busy = True
-            self.tldr_turn_reset()               # 🟦 new turn: blank the blue block
             prompt = obj.get("prompt", "")
-            data = {"prompt": prompt}
+            self.tldr_quiet = is_tldr_prompt(prompt)
+            if not self.tldr_quiet:
+                self.tldr_turn_reset()           # 🟦 new turn: blank the blue block
+            data = {"prompt": prompt, "tldrQuiet": self.tldr_quiet}
             self.last_prompt = prompt
             self.hooks_at_prompt = self.hook_count
             self._on_prompt(prompt)
@@ -4208,7 +4220,10 @@ class ClaudeSession:
             data = {"last": obj.get("last_assistant_message", "")}
             if data["last"]:
                 self.last_answer = data["last"][:500]
-            self.tldr_turn_done()                # 🟦 the tightening pass
+            if self.tldr_quiet:                  # 🟦 a tldr-chip turn: the block stays on the real answer
+                self.tldr_quiet = False
+            else:
+                self.tldr_turn_done()            # 🟦 the tightening pass
             self._wrap_on_stop()                 # 📑 an accepted self-close lands here
             self._check_on_stop()                # 🔍 the brief is written → spawn the reviewer
             self._check_back_on_stop(data["last"])   # 🔍 the verdict is in → hand it to the source
@@ -5487,6 +5502,8 @@ class ClaudeSession:
         it, blank the block, kill the pass in flight. Real text arms a debounce
         so a tool arriving right behind narration cancels it before a summarizer
         ever spawns (2026-09-06: don't TLDR the tool-call chatter)."""
+        if self.tldr_quiet:                      # a TLDR of the answer, not a new answer
+            return
         stop_r = None
         blank = False
         with self._tldr_lock:

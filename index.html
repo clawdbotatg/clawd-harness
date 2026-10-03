@@ -7593,7 +7593,11 @@ function handleHook(m) {
   const tool = d.tool || m.tool;
   // A fresh user prompt means you're driving the TTY yourself — cancel any pending
   // auto-return (don't yank you back to where a question pulled you from).
-  if (ev === 'UserPromptSubmit') { setBusy(true, null); viewBeforeQuestion = null; deferredView = null; clearTldr(); stopSpeech(); }
+  if (ev === 'UserPromptSubmit') {
+    setBusy(true, null); viewBeforeQuestion = null; deferredView = null;
+    // the tldr chip's turn (auto or tapped) leaves the 🟦 block + 🔊 voice on the real answer
+    if (!d.tldrQuiet) { clearTldr(); stopSpeech(); }
+  }
   else if (ev === 'PreToolUse')  {
     setBusy(true, tool);
     // these tools render an interactive prompt that only shows in the TUI

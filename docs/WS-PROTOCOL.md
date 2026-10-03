@@ -424,7 +424,7 @@ The turn-lifecycle signal that drives the working/idle/blocked pill. `busy` and
 
 | `event` | `busy` | `waiting` | `data` |
 |---|---|---|---|
-| `UserPromptSubmit` | true | false | `{ "prompt" }` |
+| `UserPromptSubmit` | true | false | `{ "prompt", "tldrQuiet" }` — `tldrQuiet`: the tldr chip's turn; the page keeps the 🟦 block + 🔊 voice on the previous answer |
 | `PreToolUse` | true | true *iff* tool ∈ {`AskUserQuestion`,`ExitPlanMode`}, else false | `{ "tool" }` |
 | `PostToolUse` | true | false | `{ "tool", "duration_ms" }` |
 | `Stop` | **false** | false | `{ "last" }` ← the last assistant message (the turn's answer) |
