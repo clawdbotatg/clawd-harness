@@ -67,7 +67,9 @@ const initStub = () => {
   navigator.mediaDevices=Object.assign(navigator.mediaDevices||{}, {getUserMedia: async()=>{ const t={stopped:false,stop(){this.stopped=true;}}; window.__tracks.push(t); return {getTracks:()=>[t]}; }});
   window.AudioContext=class{constructor(){this.sampleRate=48000;this.state='running';this.destination={};}
     resume(){return Promise.resolve();} createMediaStreamSource(){return {connect(){},disconnect(){}};}
-    createScriptProcessor(){return {connect(){},disconnect(){},onaudioprocess:null};}};
+    createScriptProcessor(){const p={connect(){},disconnect(){},onaudioprocess:null}; window.__proc=p; return p;}};
+  // one audio buffer through the newest processor = the mic is really hearing
+  window.__tick=()=>window.__proc.onaudioprocess({inputBuffer:{getChannelData:()=>new Float32Array(4096)}});
   window.__dgResult=(text,isFinal)=>{const s=window.__dgs[window.__dgs.length-1]; s.onmessage({data:JSON.stringify({type:'Results',is_final:!!isFinal,channel:{alternatives:[{transcript:text}]}})});};
   try{localStorage.clear();}catch{}
   for (const m of ['clawd-atg'])
@@ -76,7 +78,7 @@ const initStub = () => {
   window.__srs = [];
   window.SpeechRecognition = class {
     constructor(){ this.startedCount=0; this.live=false; window.__srs.push(this); window.__sr=this; }
-    start(){ this.startedCount++; this.live=true; }
+    start(){ this.startedCount++; this.live=true; setTimeout(()=>this.onaudiostart&&this.onaudiostart(),0); }
     stop(){ this.live=false; const f=this.onend; if (f) setTimeout(()=>f(),0); }
     abort(){ this.live=false; }
   };
@@ -196,6 +198,13 @@ check('nova-3 · linear16 16k · smart_format · interim', !!dgi && dgi.q.model=
 check('keyterms: your words first, then the harness names, then every project', !!dgi && dgi.terms.slice(0,3).join('|')==='Codex|ethskills|Wispr Flow' && dgi.terms.includes('clawd') && dgi.terms.includes('alpha') && dgi.terms.includes('bravo'), JSON.stringify(dgi&&dgi.terms));
 check('mic track opened', !!dgi && dgi.tracks===1);
 check('nothing went to the relay socket for a hold', await page.evaluate((n)=>window.__sent.length===n, relaySockets));
+// 10b. tap → yellow ring until audio arrives → solid red (Austin, 10-02: the
+// first words were lost when he talked before the mic was up)
+const ring = await page.evaluate(()=>({arming:micBtn.classList.contains('arming'), rec:micBtn.classList.contains('rec')}));
+check('mic shows the yellow ring, not red, before any audio', ring.arming && !ring.rec, JSON.stringify(ring));
+await page.evaluate(()=>window.__tick());
+const live = await page.evaluate(()=>({arming:micBtn.classList.contains('arming'), rec:micBtn.classList.contains('rec')}));
+check('…and turns red on the first audio buffer', !live.arming && live.rec, JSON.stringify(live));
 // 11. results through the shared guard — with the replace rules applied (built-in + the ⚙️ `=>` one)
 await page.evaluate(()=>{ setSttWords('Codex, ethskills\nWispr Flow\nwhat ever => whatever'); });
 await page.evaluate(()=>window.__dgResult('we are on chain with quad code what ever', false));
