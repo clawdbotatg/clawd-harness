@@ -36,6 +36,13 @@ daemon:
      commit of the file) into the SOURCE via 'check'; an empty Stop payload
      falls back to the transcript; a gone source leaves the findings in the
      file with a note on the reviewer's tab, nothing typed, no raise.
+ 10. the severity gauge: the review prompt asks for critical/major/minor/nit
+     tags + a final SEVERITY line; parse_severity reads it (falls back to
+     counting tags, never guesses); check_back logs each pass on the source
+     (durable check_log, capped, in meta as checkLog) and picks the act
+     prompt — critical/major/unparsed = the full one, minor/nit only = "fix
+     the cheap ones, no further pass", clean = nothing to change; pass 2+
+     tells the reviewer the earlier review files and not to re-raise them.
 Exits non-zero on any failure.
 """
 import sys, types, shutil, tempfile, os, time, subprocess, importlib.util   # (one line: gitleaks bip39)
@@ -133,6 +140,7 @@ class FakeMgr:
     check_prompt = srv.SessionManager.check_prompt
     check_spawn = srv.SessionManager.check_spawn
     check_back = srv.SessionManager.check_back
+    check_passes_note = srv.SessionManager.check_passes_note
 
     def __init__(self):
         self.sessions = {}
@@ -182,6 +190,7 @@ class FakeSession:
         self.check_file, self.check_pending = check_file, check_pending
         self.check_armed_at, self.check_after, self.check_engine = 0.0, 0, ""
         self.check_brief = ""
+        self.check_log = []
         self._wd = workdir
         self.ready = True
         self.alive = True
@@ -285,6 +294,9 @@ check("no base (pre-feature row) → the commits-since fallback", "git log --sin
 r3 = FakeSession(m6, "r3", head=sha1, workdir=TMP)
 check("not a repo → the fallback, no raise", "commits since" in m6.check_range(r3))
 p = m6.check_prompt(r0, "codex", "REVIEW-x.md")
+check("the review prompt asks for severity tags + a final SEVERITY line",
+      all(k in p for k in ("critical", "major", "minor", "nit", "SEVERITY:", "don't inflate")), p)
+check("…pass 1 says nothing about earlier passes", "review pass" not in p)
 check("the review prompt: brief file, CLAIMS, no edits, the range, the source named, final message = the verdict",
       all(k in p for k in ("REVIEW-x.md", "CLAIMS", "Do NOT edit", sha1[:12], "T r0", "claude", "FINAL message")), p)
 
@@ -370,7 +382,56 @@ check("no file on the reviewer row (pre-feature) → a fresh REVIEW-<stamp>.md, 
       m9.check_back(rp, "v") is True and fnmatch.fnmatch(m9.sent[-1][1].split(" at the repo root")[0].split()[-1], srv.REVIEW_GLOB),
       m9.sent[-1][1][:120])
 
+# --- 10. the severity gauge -------------------------------------------------------
+ps = srv.parse_severity
+r = ps("1. [major] a:1 x\n2. [nit] b\nTLDR\nSEVERITY: major critical=0 major=1 minor=0 nit=1")
+check("parse: the SEVERITY line", r == {"worst": "major", "counts": {"critical": 0, "major": 1, "minor": 0, "nit": 1}}, str(r))
+check("parse: clean", ps("No issues found.\nSEVERITY: clean critical=0 major=0 minor=0 nit=0")["worst"] == "clean")
+check("parse: the LAST severity line wins (a quoted example can't)",
+      ps("e.g. SEVERITY: critical critical=1\n...\nSEVERITY: nit critical=0 major=0 minor=0 nit=2")["worst"] == "nit")
+check("parse: markdown-wrapped line", ps("**SEVERITY: minor** critical=0 major=0 minor=2 nit=0")["counts"]["minor"] == 2)
+check("parse: no line → counts the tags (should-fix = major)",
+      ps("1. [should-fix] x\n2. [nit] y\n3. [Nit] z")["counts"] == {"critical": 0, "major": 1, "minor": 0, "nit": 2})
+check("parse: no line, no tags, 'No issues found' → clean", ps("No issues found.\nTLDR")["worst"] == "clean")
+check("parse: nothing recognizable → unknown, not guessed", ps("looks fine I guess")["worst"] == "" and ps("")["worst"] == "")
+check("severity_counts_text: non-zero, worst first",
+      srv.severity_counts_text({"critical": 0, "major": 0, "minor": 2, "nit": 5}) == "2 minor, 5 nit")
+
+m10 = FakeMgr()
+src10 = FakeSession(m10, "src10")
+def review(verdict, f="REVIEW-s.md"):
+    rv = FakeSession(m10, "rv" + str(len(m10.sent)), engine="codex", check_of="src10",
+                     check_file=f, check_pending=True)
+    m10.check_back(rv, verdict)
+    return m10.sent[-1][1]
+t1 = review("1. [critical] a:1 boom\nSEVERITY: critical critical=1 major=0 minor=0 nit=2", "REVIEW-1.md")
+check("pass 1 critical → the full act prompt, logged on the source + registry saved",
+      "think critically" in t1 and len(src10.check_log) == 1 and src10.check_log[0]["worst"] == "critical"
+      and src10.check_log[0]["file"] == "REVIEW-1.md" and m10.saves >= 1, t1)
+t2 = review("1. [nit] naming\n2. [minor] edge\nSEVERITY: minor critical=0 major=0 minor=1 nit=1", "REVIEW-2.md")
+check("pass 2 minor/nit only → the low prompt: pass number, counts, cheap fixes, no further pass, no commit of the file",
+      all(k in t2 for k in ("pass 2", "1 minor, 1 nit", "No further review", "do NOT commit", "REVIEW-2.md")), t2)
+t3 = review("No issues found.\nSEVERITY: clean critical=0 major=0 minor=0 nit=0", "REVIEW-3.md")
+check("a clean pass → nothing to change, no further pass", "found no issues" in t3 and "pass 3" in t3, t3)
+t4 = review("I looked around.", "REVIEW-4.md")
+check("an unparsed verdict → the full act prompt (never assume it's fine)", "think critically" in t4
+      and src10.check_log[-1]["worst"] == "", t4)
+note = m10.check_prompt(src10, "codex", "REVIEW-5.md")
+check("pass 5's review prompt: names the pass + earlier files, don't re-raise unless critical/major",
+      all(k in note for k in ("review pass 5", "REVIEW-4.md", "REVIEW-2.md", "do not raise", "critical or major")), note)
+s10 = srv.ClaudeSession(mgr0, cid="c10", session_id="x", resuming=False, check_log=src10.check_log)
+check("check_log: ctor + registry + clone_for_respawn", s10.to_registry()["check_log"] == src10.check_log
+      and s10.clone_for_respawn().check_log == src10.check_log)
+big = srv.ClaudeSession(mgr0, cid="c11", session_id="x", resuming=False,
+                        check_log=[{"worst": "nit", "counts": {}}] * (srv.CHECK_LOG_MAX + 5) + ["junk"])
+check("check_log capped at CHECK_LOG_MAX, junk rows dropped", len(big.check_log) == srv.CHECK_LOG_MAX)
+s10.wrap_closing = False
+mt = srv.ClaudeSession.meta(s10)
+check("meta carries checkLog (worst + counts, no file paths)",
+      mt and [x["worst"] for x in mt.get("checkLog", [])] == ["critical", "minor", "clean", ""]
+      and "file" not in mt["checkLog"][0], str(mt and mt.get("checkLog")))
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}"); [print("  -", f) for f in FAILS]; sys.exit(1)
-print("all good — 🔍 double-check: local REVIEW-<stamp>.md, arm fires past the brief, gates, range, spawn, hand-back")
+print("all good — 🔍 double-check: local REVIEW-<stamp>.md, arm fires past the brief, gates, range, spawn, hand-back, severity gauge")

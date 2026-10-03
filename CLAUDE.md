@@ -162,7 +162,11 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   first Stop (`_check_back_on_stop` → `check_back`) appends its verdict to
   the review file and prompts the SOURCE to act on it (`CHECK_ACT_PROMPT`:
   think critically, fix what's right, say why not). A review nobody acts on
-  is a tab nobody reads (Austin, 09-14). The reviewer's `check_of` /
+  is a tab nobody reads (Austin, 09-14). **Severity gauge** (Austin, 10-03: pass
+  seven still "found" six nits): the reviewer tags critical/major/minor/nit
+  + a last `SEVERITY:` line → `parse_severity` → the source's durable
+  `check_log` (dots on the 🔍 chip); a pass with no critical/major gets the
+  "fix the cheap ones, no further pass" act prompt. The reviewer's `check_of` /
   `check_file` / `check_pending` are ctor params + registry fields. **One
   tab, not two** (Austin, 10-02): the reviewer never gets a tab while its
   source is open — it's a live terminal pane STACKED under the source's

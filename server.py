@@ -259,11 +259,19 @@ CHECK_REVIEW_PROMPT = (
     "tests and checks this repo defines, and look for bugs, missed edge cases, "
     "unhandled errors, things claimed done but not done, and changes the brief "
     "does not mention. Do NOT edit, commit, or push anything — you are "
-    "reviewing, not fixing (running tests and read-only commands is fine). "
+    "reviewing, not fixing (running tests and read-only commands is fine).{passes}"
+    " Tag every issue with ONE severity, honestly — don't inflate: "
+    "critical = breaks the main path, loses data, a security hole, or the "
+    "change doesn't do what it claims; major = a real bug a user will hit on "
+    "a realistic path, or claimed done but not done; minor = an unlikely edge "
+    "case, a missing test, a small robustness gap; nit = style, naming, "
+    "wording, comments. Don't pad the list: if the work is sound, say so. "
     "Your FINAL message is handed back to that agent verbatim, so put the "
-    "whole verdict in it: a numbered list of issues, each tagged critical / "
-    "should-fix / nit with file:line and what to do about it, or 'No issues "
-    "found', and then a 3-line TLDR.")
+    "whole verdict in it: a numbered list of issues, each as "
+    "`[critical|major|minor|nit] file:line — what to do`, or 'No issues "
+    "found', then a 3-line TLDR, and as the very LAST line exactly "
+    "`SEVERITY: <worst> critical=N major=N minor=N nit=N` (worst = the "
+    "highest tag you used, or `clean` when there are no issues).")
 CHECK_ACT_PROMPT = (
     "{reviewer} has double-checked your work. Its findings are at the end of "
     "{file} at the repo root, under '## Review'. Read them and think "
@@ -273,6 +281,69 @@ CHECK_ACT_PROMPT = (
     "committed, commit and push these as usual. {file} stays local: do NOT "
     "commit it. Finish with what you changed, what you rejected and why, and "
     "a 3-line TLDR.")
+# The 🔍 severity gauge (Austin, 10-03: pass five, six, seven still "found"
+# five or six things — all nits). The reviewer tags every issue critical /
+# major / minor / nit and ends with a SEVERITY line; check_back parses it
+# (parse_severity) into the source's durable check_log, the page shows the
+# passes as a row of dots on the 🔍 button, and a pass with no critical or
+# major issue is the stop signal: the act prompt says fix the cheap ones and
+# don't ask for another review.
+SEVERITIES = ("critical", "major", "minor", "nit")       # worst first
+CHECK_LOG_MAX = 20                                       # passes kept per source session
+CHECK_ACT_LOW_PROMPT = (
+    "{reviewer} has double-checked your work (pass {n}) and found nothing "
+    "critical or major — only {counts}. The work is sound; this is the "
+    "point of diminishing returns. The findings are at the end of {file} at "
+    "the repo root, under '## Review'. Fix only the ones that are clearly "
+    "right and cheap, skip the rest without debate, run the tests if you "
+    "changed code, and commit and push as usual if the earlier work was "
+    "committed. {file} stays local: do NOT commit it. No further review "
+    "pass is needed — say so, and finish with a 3-line TLDR.")
+CHECK_ACT_CLEAN_PROMPT = (
+    "{reviewer} has double-checked your work (pass {n}) and found no issues "
+    "(its notes are at the end of {file}, under '## Review'). Nothing to "
+    "change and no further review pass needed. {file} stays local: do NOT "
+    "commit it. Reply with a one-line confirmation and a 3-line TLDR.")
+
+
+def parse_severity(verdict):
+    """{"worst": critical|major|minor|nit|clean|"", "counts": {sev: n}} from a
+    reviewer's final message. The SEVERITY line wins (the last one, so a
+    quoted example earlier can't); without it the [tag]s are counted
+    (should-fix = major, the pre-gauge wording); with neither, 'No issues
+    found' is clean and anything else is "" — unknown, never guessed."""
+    text = verdict or ""
+    counts = {k: 0 for k in SEVERITIES}
+    lines = re.findall(r"(?im)^[\s>*`_-]*SEVERITY:\s*(.+)$", text)
+    if lines:
+        line = lines[-1].lower()
+        for k in SEVERITIES:
+            m = re.search(rf"\b{k}s?\s*[=:]\s*(\d+)", line)
+            if m:
+                counts[k] = int(m.group(1))
+        worst = next((k for k in SEVERITIES if counts[k]), "")
+        if not worst:
+            head = re.match(r"[`*\s]*(\w+)", line)
+            w = head.group(1) if head else ""
+            worst = w if w in SEVERITIES + ("clean",) else ("clean" if "clean" in line else "")
+            if worst in SEVERITIES:
+                counts[worst] = max(counts[worst], 1)
+        return {"worst": worst, "counts": counts}
+    for k, pat in (("critical", r"critical"), ("major", r"major|should[- ]fix"),
+                   ("minor", r"minor"), ("nit", r"nit(?:pick)?")):
+        counts[k] = len(re.findall(rf"(?i)\[\s*(?:{pat})\s*\]", text))
+    worst = next((k for k in SEVERITIES if counts[k]), "")
+    if not worst and re.search(r"(?i)\bno (?:issues|problems) found\b", text):
+        worst = "clean"
+    return {"worst": worst, "counts": counts}
+
+
+def severity_counts_text(counts):
+    """'2 minor, 5 nit' — the non-zero counts, worst first."""
+    parts = [f"{counts.get(k, 0)} {k}" for k in SEVERITIES if counts.get(k)]
+    return ", ".join(parts) or "nothing"
+
+
 # A subscribe whose ring replay is this shallow gets the transcript rendered in
 # as seed scrollback first (see _history_seed_bytes) — the ring goes shallow
 # exactly when it can't carry history: a width-change fence (_apply_size) or a
@@ -3449,7 +3520,8 @@ class ClaudeSession:
                  engine="claude", autopilot=0.0, pilot_goal="",
                  pilot_status="", pilot_rounds=0,
                  tldr_text="", tldr_on=False, voice_on=False, fork=False,
-                 head_at_spawn="", check_of="", check_file="", check_pending=False):
+                 head_at_spawn="", check_of="", check_file="", check_pending=False,
+                 check_log=None):
         self.manager = manager
         # 🔍 double-check: the git HEAD when this session was created (""
         # for a non-repo or a pre-feature row) — the reviewer's diff base;
@@ -3462,6 +3534,10 @@ class ClaudeSession:
         self.check_of = check_of or ""
         self.check_file = check_file or ""
         self.check_pending = bool(check_pending)
+        # 🔍 severity gauge: one row per review pass of THIS session's work
+        # ({at, worst, counts, file}, oldest first) — durable so the dots on
+        # the 🔍 button and the pass count survive restarts and handoffs.
+        self.check_log = [dict(r) for r in (check_log or []) if isinstance(r, dict)][-CHECK_LOG_MAX:]
         # ⑂ this session was forked from another: its first launch is
         # `--resume <source id> --fork-session`. Persisted (ctor param +
         # registry) only until claude hands us the fork's own id — see
@@ -3643,7 +3719,8 @@ class ClaudeSession:
                 "tldr_on": self.tldr_on, "voice_on": self.voice_on,
                 "fork": self.fork,
                 "head_at_spawn": self.head_at_spawn, "check_of": self.check_of,
-                "check_file": self.check_file, "check_pending": self.check_pending}
+                "check_file": self.check_file, "check_pending": self.check_pending,
+                "check_log": self.check_log}
 
     def clone_for_respawn(self, **overrides):
         """A fresh session object for an in-place respawn under the SAME cid
@@ -3757,6 +3834,8 @@ class ClaudeSession:
                 "wrapClosing": self.wrap_closing,   # 📑 harness-close accepted; closes at turn end
                 "checkArmed": self.check_armed(),   # 🔍 writing the brief; a reviewer spawns at its Stop
                 "checkOf": self.check_of or "",     # 🔍 on a reviewer: the cid it double-checks
+                "checkLog": [{"worst": r.get("worst", ""), "counts": r.get("counts", {})}
+                             for r in self.check_log[-8:]],   # 🔍 the severity gauge, oldest first
                 "loginCta": self._login_cta()}      # 🔑 "sign in to X" — a signed-out login beats this pool
 
     # -- 📑 wrap: arm, cancel, the self-close request, the turn-end close ------
@@ -5888,7 +5967,8 @@ class SessionManager:
                     tldr_text=e.get("tldr_text", ""), tldr_on=bool(e.get("tldr_on")),
                     voice_on=bool(e.get("voice_on")), fork=bool(e.get("fork")),
                     head_at_spawn=e.get("head_at_spawn", ""), check_of=e.get("check_of", ""),
-                    check_file=e.get("check_file", ""), check_pending=bool(e.get("check_pending")))
+                    check_file=e.get("check_file", ""), check_pending=bool(e.get("check_pending")),
+                    check_log=e.get("check_log"))
                 self.sessions[s.cid] = s
                 self._park_for_boot(s)
                 continue
@@ -5968,7 +6048,8 @@ class SessionManager:
                 tldr_text=e.get("tldr_text", ""), tldr_on=bool(e.get("tldr_on")),
                 voice_on=bool(e.get("voice_on")), fork=bool(e.get("fork")),
                 head_at_spawn=e.get("head_at_spawn", ""), check_of=e.get("check_of", ""),
-                check_file=e.get("check_file", ""), check_pending=bool(e.get("check_pending")))
+                check_file=e.get("check_file", ""), check_pending=bool(e.get("check_pending")),
+                    check_log=e.get("check_log"))
             self.sessions[s.cid] = s
             self._park_for_boot(s)
         threading.Thread(target=self._boot_stagger, daemon=True).start()
@@ -8770,7 +8851,21 @@ class SessionManager:
         title = (src.title or src._fallback_title() or "the source session").strip()
         return CHECK_REVIEW_PROMPT.format(
             src_engine=src.engine, title=title.replace('"', "'"),
-            file=file, range=self.check_range(src))
+            file=file, range=self.check_range(src), passes=self.check_passes_note(src))
+
+    def check_passes_note(self, src):
+        """For pass 2+: name the earlier review files so the reviewer doesn't
+        re-raise what was already fixed or deliberately rejected — the loop
+        that kept "finding" nits forever (Austin, 10-03)."""
+        log = getattr(src, "check_log", None) or []
+        if not log:
+            return ""
+        files = [r.get("file") for r in log[-4:] if r.get("file")]
+        seen = (" Their findings are under '## Review' in " + ", ".join(files) + "."
+                if files else "")
+        return (f" This is review pass {len(log) + 1} of this work.{seen} The agent "
+                "has already fixed or deliberately rejected those — do not raise "
+                "them again unless one is critical or major and still in the code.")
 
     def check_spawn(self, src, engine, file=""):
         """Spawn the reviewer for `src` (from the Stop hook's thread) and
@@ -8826,11 +8921,24 @@ class SessionManager:
             self.broadcast_sessions()
             return False
         try:
-            txt = CHECK_ACT_PROMPT.format(reviewer=rev.engine, file=file)
+            sev = parse_severity(verdict)
+            src.check_log = (list(getattr(src, "check_log", None) or []) + [
+                {"at": time.time(), "worst": sev["worst"], "counts": sev["counts"], "file": file}
+            ])[-CHECK_LOG_MAX:]
+            self.save_registry()
+            n = len(src.check_log)
+            if sev["worst"] == "clean":
+                txt = CHECK_ACT_CLEAN_PROMPT.format(reviewer=rev.engine, file=file, n=n)
+            elif sev["worst"] in ("minor", "nit"):
+                txt = CHECK_ACT_LOW_PROMPT.format(reviewer=rev.engine, file=file, n=n,
+                                                  counts=severity_counts_text(sev["counts"]))
+            else:                                 # critical / major / unparsed → the full act prompt
+                txt = CHECK_ACT_PROMPT.format(reviewer=rev.engine, file=file)
             log_prompt(src, txt, "check")
             self.send_prompt(src.cid, txt, via="check")
             rev.desc = f"reviewed \u2192 findings sent back to {src_title}"[:120]
-            print(f"[check {rev.cid[:8]}] \U0001f50d verdict \u2192 {src.cid[:8]} ({file})", flush=True)
+            print(f"[check {rev.cid[:8]}] \U0001f50d verdict \u2192 {src.cid[:8]} ({file}) "
+                  f"pass {n}: {sev['worst'] or 'unparsed'} {severity_counts_text(sev['counts'])}", flush=True)
             # Its job is done: the verdict is in the file and the source has
             # it. Close the reviewer (🗃️ row, reopenable) so its pane under
             # the source goes away by itself (Austin, 10-02).

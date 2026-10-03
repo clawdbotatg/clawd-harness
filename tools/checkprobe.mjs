@@ -19,7 +19,10 @@
 //      arriving afterwards never jumps;
 //   6. a refusal (error carrying check: cid) → meta says why, view untouched;
 //   7. a reviewer whose source is gone is a tab again, and a renamed one
-//      (namer dropped the 🔍) still wears 🔍 on it.
+//      (namer dropped the 🔍) still wears 🔍 on it;
+//   8. the severity gauge: checkLog → one dot per pass on the 🔍 chip (last
+//      4), the tooltip lists every pass; a tap after a nits-only pass says
+//      so in the meta line but still sends the check.
 // Safe: the page is served from memory at a fake origin with WebSocket
 // stubbed — nothing reaches the real harness, no session is touched.
 import { chromium } from 'playwright-core';
@@ -189,7 +192,35 @@ await page.waitForTimeout(200);
 t = await tabs();
 check('a reviewer whose source is gone is a tab again, renamed still wears 🔍', t.some(x => x === '🔍 review'), JSON.stringify(t));
 
+// 8. the severity gauge
+await page.evaluate(() => { focusSession(allSessions().find(s => s.cid === 'cb')); });
+await page.waitForTimeout(300);
+const gauge = () => page.evaluate(() => ({ text: checkBtn.textContent, tip: checkBtn.title }));
+let g = await gauge();
+check('no passes yet → plain 🔍, plain tooltip', g.text === '🔍' && /^Double-check/.test(g.tip), JSON.stringify(g));
+const LOG = [{ worst: 'critical', counts: { critical: 1, nit: 2 } }, { worst: 'major', counts: { major: 2 } },
+             { worst: 'minor', counts: { minor: 1, nit: 3 } }, { worst: 'nit', counts: { nit: 4 } }, { worst: 'nit', counts: { nit: 2 } }];
+await rx([A, { ...B, checkLog: LOG }]);
+await page.waitForTimeout(200);
+g = await gauge();
+check('checkLog → the last 4 passes as dots on the chip', g.text === '🔍🟠🟡⚪⚪', g.text);
+check('…the tooltip lists every pass + says another pass is probably not worth it',
+      /pass 1: critical \(1 critical, 2 nit\)/.test(g.tip) && /pass 5: nit \(2 nit\)/.test(g.tip) && /not worth it/.test(g.tip), g.tip);
+await page.evaluate(() => { window.__sent.length = 0; });
+await btn.tap();
+await page.waitForTimeout(200);
+f = await sent(); st = await state();
+check('a tap after a nits-only pass still sends the check, and the meta says what the last pass found',
+      f.some(x => x.type === 'check' && x.cid === 'cb') && /pass 5 found nothing critical or major/.test(st.meta), st.meta);
+await rx([A, { ...B, checkLog: [{ worst: 'major', counts: { major: 1 } }] }]);
+await page.waitForTimeout(200);
+g = await gauge();
+check('a major pass → 🟠, tooltip says worth another pass', g.text === '🔍🟠' && /worth another pass/.test(g.tip), JSON.stringify(g));
+await page.evaluate(() => { focusSession(allSessions().find(s => s.cid === 'ca')); });
+await page.waitForTimeout(300);
+check('another session without a log → plain 🔍 again', (await gauge()).text === '🔍');
+
 check('no page errors', errors.length === 0, errors.join(' | '));
 await browser.close();
-console.log(failed ? 'FAIL' : 'PASS — 🔍 sends check + stays put, armed row + badge, reviewer pane under the source (no tab, own stream + size, ✕ = reviewer only, closes with it), moved-on/cancel never jump, refusal, orphan tab badge');
+console.log(failed ? 'FAIL' : 'PASS — 🔍 sends check + stays put, armed row + badge, reviewer pane under the source (no tab, own stream + size, ✕ = reviewer only, closes with it), moved-on/cancel never jump, refusal, orphan tab badge, severity gauge');
 process.exit(failed ? 1 : 0);

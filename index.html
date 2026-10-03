@@ -8417,11 +8417,40 @@ function checkSession() {
   const f = { type: 'check', cid: src, via: 'check' };
   if (!(mid ? hsendTo(mid, f) : hsend(f))) { meta.textContent = 'not connected — try again in a moment'; return; }
   checkSrcCid = src;
-  meta.textContent = 'asking it for a brief — the reviewer opens when this turn ends';
+  const s = allSessions().find(x => x.cid === src), log = (s && s.checkLog) || [];
+  const last = log.length ? log[log.length - 1].worst : '';
+  meta.textContent = (last === 'clean' || last === 'minor' || last === 'nit')
+    ? `pass ${log.length} found ${last === 'clean' ? 'nothing' : 'nothing critical or major'} — checking again anyway`
+    : 'asking it for a brief — the reviewer opens when this turn ends';
 }
-document.getElementById('checkBtn').onclick = checkSession;
+const checkBtn = document.getElementById('checkBtn');
+checkBtn.onclick = checkSession;
 const checkRow = document.getElementById('checkrow'), checkText = document.getElementById('checktext');
+// 🔍 severity gauge: one dot per review pass on the 🔍 chip, oldest → newest
+// (server: parse_severity → check_log → checkLog). A newest dot with no
+// critical/major is the stop signal — the reviewer is down to nits (Austin,
+// 10-03). Text only changes when the log does: the chip is a static node.
+const SEV_DOT = { critical: '🔴', major: '🟠', minor: '🟡', nit: '⚪', clean: '🟢', '': '❔' };
+const SEV_COUNTS = c => ['critical', 'major', 'minor', 'nit'].filter(k => c && c[k]).map(k => `${c[k]} ${k}`).join(', ');
+function checkGauge(s) {
+  const log = (s && s.checkLog) || [];
+  if (!log.length) return { text: '🔍', tip: '' };
+  const dots = log.slice(-4).map(r => SEV_DOT[r.worst] ?? '❔').join('');
+  const last = log[log.length - 1].worst, done = last === 'clean' || last === 'minor' || last === 'nit';
+  const lines = log.map((r, i) => `pass ${i + 1}: ${r.worst || 'unrated'}${SEV_COUNTS(r.counts) ? ' (' + SEV_COUNTS(r.counts) + ')' : ''}`);
+  return { text: '🔍' + dots, tip: lines.join('\n') + '\n' + (done
+    ? 'Last pass found nothing critical or major — another pass is probably not worth it.'
+    : 'Last pass found real issues — worth another pass once they are fixed.') };
+}
+const checkBtnTip = checkBtn.title;
+function renderCheckGauge(s, show) {
+  const g = show ? checkGauge(s) : { text: '🔍', tip: '' };
+  if (checkBtn.textContent !== g.text) checkBtn.textContent = g.text;
+  const tip = g.tip ? g.tip + '\n\n' + checkBtnTip : checkBtnTip;
+  if (checkBtn.title !== tip) checkBtn.title = tip;
+}
 function renderCheckRow(s, show) {
+  renderCheckGauge(s, show);
   const on = !!(show && s && s.checkArmed);
   checkRow.hidden = !on;
   if (!on) return;
