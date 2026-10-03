@@ -8,6 +8,7 @@ passkey only when the domain names the app there. Asserts over a real socket:
 Run: python3 fleet/test_aasa.py
 """
 import json
+import socket
 import os
 import subprocess
 import sys
@@ -50,6 +51,13 @@ def fetch(port):
         return e.code, e.headers.get("Content-Type"), e.read()
 
 
+def free_port():
+    # a fixed port collided with a stray relay and kept checkall red for days (10-03)
+    with socket.socket() as so:
+        so.bind(("127.0.0.1", 0))
+        return so.getsockname()[1]
+
+
 def run(port, apps):
     (TMP / "passkeys.json").write_text("[]")
     proc = subprocess.Popen([sys.executable, "relay.py"], env=env(port, apps), cwd=str(HERE),
@@ -72,13 +80,13 @@ def run(port, apps):
 
 
 def main():
-    code, ctype, body = run(8811, APPS)
+    code, ctype, body = run(free_port(), APPS)
     assert code == 200, (code, body)
     assert ctype and ctype.startswith("application/json"), ctype
     assert json.loads(body) == {"webcredentials": {"apps": APPS}}, body
     print("ok  1. FLEET_AASA_APPS set → 200 application/json with the app ids")
 
-    code, _, _ = run(8812, None)
+    code, _, _ = run(free_port(), None)
     assert code == 404, code
     print("ok  2. unset → 404")
     print("test_aasa: all green")

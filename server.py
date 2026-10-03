@@ -278,8 +278,9 @@ CHECK_REVIEW_PROMPT = (
     "\"{title}\") just worked in this repo. Its own account of the work is in "
     "{file} at the repo root — read it first, but treat it as CLAIMS, not "
     "facts. The truth is the code: {range} plus anything uncommitted "
-    "(`git status`, `git diff`). Verify every claim against the code, run the "
-    "tests and checks this repo defines, and look for bugs, missed edge cases, "
+    "(`git status`, `git diff`). Verify every claim against the code, run only "
+    "the tests that cover the changed files (seconds, not a full suite — "
+    "never tools/checkall.sh or anything like it), and look for bugs, missed edge cases, "
     "unhandled errors, things claimed done but not done, and changes the brief "
     "does not mention. Do NOT edit, commit, or push anything — you are "
     "reviewing, not fixing (running tests and read-only commands is fine).{passes}"
@@ -300,7 +301,8 @@ CHECK_ACT_PROMPT = (
     "{file} at the repo root, under '## Review'. Read them and think "
     "critically: the reviewer only saw your brief and the diff, and it can be "
     "wrong. For each issue decide — fix it, or say in one line why not. Make "
-    "the changes you agree with, run the tests, and if the earlier work was "
+    "the changes you agree with, run only the tests that cover them (never a "
+    "full suite), and if the earlier work was "
     "committed, commit and push these as usual. {file} stays local: do NOT "
     "commit it. Finish with what you changed, what you rejected and why, and "
     "a 3-line TLDR.")
@@ -318,8 +320,8 @@ CHECK_ACT_LOW_PROMPT = (
     "critical or major — only {counts}. The work is sound; this is the "
     "point of diminishing returns. The findings are at the end of {file} at "
     "the repo root, under '## Review'. Fix only the ones that are clearly "
-    "right and cheap, skip the rest without debate, run the tests if you "
-    "changed code, and commit and push as usual if the earlier work was "
+    "right and cheap, skip the rest without debate, run the tests that cover "
+    "what you changed (not a full suite), and commit and push as usual if the earlier work was "
     "committed. {file} stays local: do NOT commit it. No further review "
     "pass is needed — say so, and finish with a 3-line TLDR.")
 CHECK_ACT_CLEAN_PROMPT = (

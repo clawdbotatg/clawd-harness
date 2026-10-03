@@ -1,72 +1,47 @@
 # clawd-harness — orientation for Claude
 
-A web harness for driving interactive (subscription-billed) Claude Code
-sessions from a browser. `README.md` is the user-facing overview. This file is
-the **operative rulebook only** — the full feature-by-feature history, with
-dates, evidence, and war stories, lives in **[`docs/HISTORY.md`](docs/HISTORY.md)**
-(read it when you need the *why* behind a rule; don't re-litigate a rule just
-because the story isn't inline here).
+A web harness for driving interactive Claude Code sessions from a browser.
+`README.md` = overview. Why a rule exists: `docs/HISTORY.md`. Per-feature
+notes (TLDR/voice, dictation, fork, 🔍 check, iron to-dos, skills): 
+`docs/FEATURES.md` — read the part you're touching.
 
-## Definition of done
+## Shipping (Austin, 10-03: "a lean shipping machine — not 10 minutes of tests for a 2 minute fix")
 
-**Small fix (Austin, 10-03: "if you've made a small change, just push it to
-production and test it live"):** change the code, push, check it live on
-h.atg.link. No `checkall`, no probe runs, no HISTORY.md entry, no CLAUDE.md
-edit. The full list below is for big changes only. When you do run
-`checkall`, save its output to a file — never `| tail` it.
+**Push to main IS the deploy.** Boxes self-update in ~3–5 min.
 
+- **Small change:** edit, push, check it live. No `checkall`, no probe runs,
+  no HISTORY.md / CLAUDE.md edits. If it touched one feature's test, run
+  that one test (seconds), nothing more.
+- **Big change** (new feature, fleet/ or passkey/E2E code, anything that
+  broke before): the tests that cover it, then `tools/checkall.sh > file`
+  (never `| tail` it — read the FAIL lines), then shipcheck.
+- **Check it live:** `python3 tools/shipcheck.py` — UI bytes on h.atg.link
+  match HEAD. Don't sit in `--wait` for fleet boxes; a box still restarting
+  on busy sessions is normal. Fleet code changes: `--wait 2100` in the
+  background.
+- **Fleet pages don't reload on deploy.** After a UI push, tell Austin to
+  hard-refresh. Local hot-reload and `uiprobe` show the working tree, not prod.
+- **Config/env changes:** verify on the running process (`ps eww <pid>`,
+  shipcheck's fleet table), not the file.
+- A `server.py` change restarts a box only once committed and compiling
+  (`_RestartGate`). Every restart kills + `--resume`s every session on that
+  box — don't add restart triggers.
+- A dirty worktree blocks this box's auto-pull. Commit or stash.
+- Git: **clawdbotatg** / `clawd@buidlguidl.com`, HTTPS. If push asks for a
+  password: `gh auth switch --user clawdbotatg`, push with
+  `-c credential.helper='!gh auth git-credential'`, switch back.
 
-1. **`tools/checkall.sh` green** — discovers and runs every `test_*.py`
-   (root + fleet) and every probe in `tools/`. Run it before any push that
-   touches `index.html`, `server.py`, or `fleet/`. When you add a feature,
-   add/extend a guard; the gate picks it up automatically.
-2. **`python3 tools/shipcheck.py --wait` exits 0** — tree clean, HEAD pushed,
-   `h.atg.link` serving HEAD's `index.html` byte-for-byte, **and every configured
-   fleet box reporting HEAD's worker and harness code hashes + the 7-day passkey
-   TTL from its running processes** (the fleet leg, via the relay's roster dump; `fleet/`
-   changes take up to 30 min to converge — `--wait 2100`). Never say "fixed",
-   "live" or "shipped" to Austin before this exits 0; if it can't be run, say
-   *unverified*, not done.
-3. **A config/env/default change is verified on the running process**, not the
-   file: the process's env (`ps eww <pid>`), its build report in shipcheck's
-   fleet table, or the artifacts it writes. The 09-05 passkey cadence change
-   was green on every file-level check for four days while the worker still
-   enforced 24h (HISTORY 2026-09-09).
+## Run
 
-**Push to main IS the deploy.** Every box self-updates (~5 min; the relay box
-~3 min). A `server.py` change restarts a box only once it is **committed and
-compiles** (`_RestartGate`, `test_restart_gate.py`): an uncommitted edit in the
-live tree waits for its commit, so a session working on the harness no longer
-restarts the box (and kills every session on it) on every save. Boot resumes
-are staggered most-recent-first; a viewer's subscribe starts its session at
-once (`test_boot_stagger.py`). Every restart is still a kill + `--resume` of
-every session — don't add restart triggers. The standing "only commit when asked" default does not apply here.
-The trap: saving `index.html` hot-reloads browsers on *this* box in ~1s and
-`uiprobe` screenshots the working tree — every local signal says "shipped"
-while production still serves the last push. Never call a UI change live on
-local evidence; finish with shipcheck. A dirty worktree also *disables this
-box's auto-pull*, silently blocking everyone else's deploys from landing here.
+- Harness runs under launchd (`com.clawd.harness`, port 8787, token in
+  `.clawd-harness.token`). Check with `launchctl list | grep clawd.harness`.
+- Verify JS edits: extract the `<script>`, `node --check` it.
+- **Never run `server.py` from this directory for a test** — it resumes the
+  real sessions. Copy it to an isolated dir.
+- Probes (`tools/*.mjs`) run local headless Chromium with fake sessions —
+  never a real session; use real taps on emulated touch, not `.click()`.
 
-## Run / test
-
-- `python3 server.py` → tokenized URL on **port 8787** (token in
-  `.clawd-harness.token`). It's usually already running under launchd
-  (`com.clawd.harness`, KeepAlive) — check with
-  `launchctl list | grep clawd.harness`, not pgrep.
-- Saving `index.html` live-reloads local browsers; editing `server.py` or
-  `.clawd-harness.env` triggers a graceful self-restart that waits for
-  mid-turn sessions (banner + `restart now` button + 20 min ceiling).
-- Verify JS edits: extract the `<script>` and `node --check` it.
-- **Probes (`tools/*.mjs`)** drive the app in local headless Chromium — the
-  claude-in-chrome MCP browser is remote and cannot reach 127.0.0.1. Probes
-  must never touch a real session: use fake sessions + stubbed `hsend`/
-  WebSocket (splashprobe pattern), and probe **user gestures** (real taps at
-  natural pace on emulated touch), not `element.click()` — three production
-  bugs were invisible to synthetic clicks.
-- **Never test `server.py` from this directory copy-free** — it will resume
-  the real sessions. Copy it to an isolated dir first.
-
-## Architecture (the 60-second version)
+## Architecture
 
 - **server.py** — one `SessionManager`, N projects (git repos under
   `projects/`, gitignored), N sessions (each an interactive `claude` in a PTY;
@@ -108,97 +83,6 @@ box's auto-pull*, silently blocking everyone else's deploys from landing here.
   `controller/verbs.py`. **A harness feature doesn't exist to the PM until you
   update three places together: the verb, its MCP description, and the persona**
   (`controller/prompts/private.md`). Deep doc: `docs/CONTROLLER.md`.
-- Feature docs on demand: `docs/CODEX-ENGINE.md`, `docs/DEEPLINKS.md`,
-  `docs/fleet/ACCOUNTS-PANEL.md`, `docs/fleet/DOCS-STORE.md` (the shared
-  shelf: `/docs/*` on the relay, own token, the `fleet-docs` library skill), voice in `docs/CONTROLLER.md` + `docs/voice/`,
-  `docs/fleet/SKILLS.md` (the private skill library on the relay: a 📚 tap
-  ATTACHES the skill to your next message as a chip, like a dropped `.md`,
-  and Enter sends text + a one-line pointer claude Reads; `skillput`
-  publishes; no machine installs; credentials belong in skills — audited,
-  see the doc; it's the handoff doc for the whole feature). **🟦 Live TLDR** = the `API_TEE` block in `server.py`: every
-  claude session's `ANTHROPIC_BASE_URL` points at a local pass-through proxy
-  that tees the streamed reply to a rolling `claude -p haiku` summary (the
-  blue block over the terminal). Pure pass-through, never logs, must never
-  break a session; `claude -p` bills the subscription (the June-15 credit
-  pool was paused — don't "fix" that). **🔊 the voice** = `voice_pick` in the
-  same block: with 🟦 + 🔊 on, the summary is READ ALOUD as it solidifies —
-  each sentence once it survives a pass unchanged (settled = solid on
-  screen), the rest at the final pass, a reply too short for a summary as
-  is (`say` frames). What you see is what you hear; no separate model
-  decides what to say (that third loop existed for a few hours and was
-  removed). Summary + both flags persist (ctor params + registry) so
-  restarts and handoffs don't wipe them. `test_tldr.py` + `tldrprobe.mjs`;
-  the handoff doc is **`docs/TLDR-VOICE.md`** (data flow, every knob, the
-  client landmines, `tools/tldr_e2e.py` for a real isolated run,
-  `tools/tldrgeom.mjs` to measure a live session's overlay).
-  **🎤 dictation** = two recognizers behind the mic TAP (tap on; tap again,
-  Enter or ➤ stop it — a send waits ≤ `REC_TAIL_MS` for the last words) and
-  the desktop space-hold: 🎯
-  Deepgram (the page's OWN socket to api.deepgram.com, nova-3 + `keyterm`s =
-  the ⚙️ word list + harness names + every project name — this is what makes
-  it hear Codex/ethskills; creds per box via WS `stt`, `DEEPGRAM_API_KEY` in
-  `.clawd-harness.env`, JWT when the key can mint else the key itself) and
-  the browser's Web Speech fallback (live, no vocabulary). Both write through
-  one guard (`recApply`): typing and tab switches always win. The engine is
-  decided AT THE PRESS from creds in hand — never wait on the network to light
-  the mic. The ⚙️ word list is SHARED: one file on the relay (`/stt/words`,
-  `stt-words.txt` on the doc shelf, `docs/fleet/DOCS-STORE.md`) read by the
-  page, the Mac tool and the iPhone keyboard — those two live in
-  **`clawdbotatg/clawd-dictate`** (`~/clawd/clawd-dictate`; work on them
-  THERE, its CLAUDE.md + `docs/HANDOFF-2026-09-15.md` carry the story).
-  `test_stt.py` + `fleet/test_stt_words.py` + `tools/sttprobe.mjs`.
-  Wall-display boxes (clawd-sat): `tools/kiosk/README.md`. **⑂ fork** =
-  `SessionManager.fork` → `create_session(resume=<source id>, fork=True)` →
-  claude's own `--resume <id> --fork-session` (new id + transcript, source
-  untouched); the `fork` flag is a ctor param + registry field that clears on
-  the first id rotation. `test_fork.py`; WS verb `fork` in `docs/WS-PROTOCOL.md`.
-  **🔍 double-check** = `SessionManager.check` → the source writes a LOCAL
-  `REVIEW-<stamp>.md` (one per review; `REVIEW-*.md` excluded like
-  `HANDOFF-*.md`) → the first Stop past that brief (`_check_on_stop`, keyed on
-  `prompt_count`, volatile arm) → `check_spawn` opens the OTHER engine in
-  the same project with the brief + `git diff <head_at_spawn>..HEAD` (every
-  session records HEAD at spawn: ctor param + registry). Brief = claims,
-  diff = truth, the reviewer never edits. **The loop closes:** the reviewer's
-  first Stop (`_check_back_on_stop` → `check_back`) appends its verdict to
-  the review file and prompts the SOURCE to act on it (`CHECK_ACT_PROMPT`:
-  think critically, fix what's right, say why not). A review nobody acts on
-  is a tab nobody reads (Austin, 09-14). **Severity gauge** (Austin, 10-03: pass
-  seven still "found" six nits): the reviewer tags critical/major/minor/nit
-  + a last `SEVERITY:` line → `parse_severity` → the source's durable
-  `check_log` (dots on the 🔍 chip); a pass with no critical/major gets the
-  "fix the cheap ones, no further pass" act prompt. The reviewer's `check_of` /
-  `check_file` / `check_pending` are ctor params + registry fields. **One
-  tab, not two** (Austin, 10-02): the reviewer never gets a tab while its
-  source is open — it's a live terminal pane STACKED under the source's
-  (`syncPeek`; stacked, never side by side: width changes re-wrap the TUI),
-  streamed over the same socket by the `peek` verb (`_PeekClient`: base64
-  `peekPty` JSON, its own size claim via `peekResize`). Pane ✕ closes the
-  reviewer only; after the hand-back it closes itself and the pane goes.
-  `test_check.py` + `test_peek.py` + `tools/checkprobe.mjs`; WS verbs
-  `check`/`checkCancel`/`peek`/`peekResize`.
-  **☑ iron to-do list** = one shared list PER IRON (what's still open across
-  the whole effort; NOT the life list on todo.atg.link — an iron's eight
-  follow-ups stay on the iron). Engine `fleet/todo_store.py` (item-level ops,
-  never a whole-list write); owner = the relay in fleet mode
-  (`.clawd-fleet.todos.json`, WS verb `todo`, `todos` snapshot right behind
-  every `prefs`) / the registry in direct mode. UI: the ☑ button in the iron
-  row toggles an OVERLAY over the tty (right column on desktop, bottom sheet
-  on touch; never a split — a split is a PTY geometry claim), remembered per
-  iron; the sessionless iron page shows it inline; tap the words → composer.
-  Sessions write with **`bin/harness-todo`** (`HARNESS_TODO_URL` →
-  `/self/todo` → the local irons, or on a fleet box the relay's
-  `/todo/agent`, which folds the project's key against the irons'
-  member keys via `fleet/projkey.py` — the one Python copy of `projectKey`,
-  the worker uses it too); the `share/skills/iron-todo` skill (kit-installed
-  on every box, re-synced on any `share/` pull) tells a session when to use
-  it. Agent writes are opt-in: when asked, and the 📑
-  wrap prompt says to check off / add what's still open. **🔥 on
-  todo.atg.link** mirrors every iron's list (read + tick/add/rm, ops applied
-  here, `via:"todo"`) through the relay's `/todo/bridge` — its OWN token,
-  minted at relay boot into `fleet/.clawd-fleet.todo-bridge.token` (0600),
-  which clawd-todo on the same box reads; still separate lists, items never
-  move between them. `test_todo.py`,
-  `fleet/test_todo_store.py`, `fleet/test_relay_todos.py`, `tools/todoprobe.mjs`.
 
 ## Landmines (don't regress; stories in HISTORY.md)
 

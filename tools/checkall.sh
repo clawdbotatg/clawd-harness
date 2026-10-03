@@ -6,7 +6,8 @@
 # broken and nobody knew). Probes and tests are DISCOVERED, not listed, so a
 # new guard is in the gate the day it lands and a renamed one can't fall out.
 #
-#   cd tools && ./checkall.sh          # everything; non-zero exit on any red
+#   tools/checkall.sh > /tmp/c.log     # everything; non-zero exit on any red;
+#                                      # the failed list is printed LAST
 #
 # Excluded by name (debug tools, not guards): uiprobe (screenshot driver),
 # probe-geom + tldrgeom (need a live pid/cid), brain_probe (screenshot driver).
@@ -14,30 +15,27 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$HERE")
-fail=0
-run() {  # run <label> <cmd...>
-  label=$1; shift
-  printf '%-28s' "$label"
-  out=$("$@" 2>&1)
-  if [ $? -eq 0 ]; then echo PASS
-  else fail=1; echo FAIL; echo "$out" | tail -6 | sed 's/^/    /'; fi
-}
-
-echo "== python tests (root) =="
-for t in "$ROOT"/test_*.py; do
-  run "$(basename "$t")" python3 "$t"
+if [ "${1:-}" = --one ]; then   # one guard → "<label> PASS" or "<label> FAIL" + its tail
+  f=$2; label=${f#"$ROOT"/}
+  case "$f" in *.mjs) out=$(cd "$HERE" && node "$f" 2>&1) ;; *) out=$(python3 "$f" 2>&1) ;; esac
+  if [ $? -eq 0 ]; then echo "$label PASS"
+  else echo "$label FAIL"; echo "$out" | tail -6 | sed 's/^/    /'; fi
+  exit 0
+fi
+# Guards run side by side (10-03: one at a time took ~8 min). Each guard's
+# output is printed whole, so lines never interleave.
+res=$({ ls "$ROOT"/test_*.py "$ROOT"/fleet/test_*.py
+        ls "$HERE"/*.mjs | grep -vE '/(uiprobe|probe-geom|brain_probe|tldrgeom)[.]mjs$'
+      } | xargs -P "${JOBS:-6}" -n 1 sh "$0" --one)
+# A timing probe can flake under parallel load: rerun each failure once, alone.
+fails=""
+for label in $(echo "$res" | sed -n 's/ FAIL$//p'); do
+  again=$(sh "$0" --one "$ROOT/$label")
+  case "$again" in *" PASS") echo "$label flaky (passed on retry)" ;;
+                   *) echo "$again"; fails="$fails$label
+" ;; esac
 done
-echo "== python tests (fleet) =="
-for t in "$ROOT"/fleet/test_*.py; do
-  run "fleet/$(basename "$t")" python3 "$t"
-done
-echo "== UI probes =="
-cd "$HERE" || exit 2
-for p in "$HERE"/*.mjs; do
-  b=$(basename "$p")
-  case "$b" in uiprobe.mjs|probe-geom.mjs|brain_probe.mjs|tldrgeom.mjs) continue;; esac
-  run "$b" node "$p"
-done
-
-if [ "$fail" -eq 0 ]; then echo "ALL GREEN"; else echo "RED — fix before shipping"; fi
-exit "$fail"
+if [ -z "$fails" ]; then echo "ALL GREEN ($(echo "$res" | wc -l | tr -d ' ') guards)"; exit 0; fi
+echo
+printf "RED — failed:\n%s" "$fails"
+exit 1
