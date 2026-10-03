@@ -762,7 +762,10 @@
   /* push-to-talk hold: the browser must never claim the gesture for a pan
      (pointercancel kills dictation mid-sentence) or pop a long-press callout */
   #micBtn { touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
-  #micBtn.rec { border-color:var(--err); background:#1c0c0a; animation:vpulse 1s infinite; }
+  /* tap → yellow ring while the mic starts; solid red once audio is really
+     coming in (Austin, 10-02: words said before the mic was up were lost) */
+  #micBtn.arming { border-color:#f5c518; box-shadow:0 0 0 2px #f5c518; }
+  #micBtn.rec { border-color:var(--err); background:var(--err); }
   #micBtn.wait { opacity:.45; }   /* asked the box for its Deepgram key; starts on its own when it lands */
   @keyframes vpulse { 0%,100%{opacity:1} 50%{opacity:.45} }
   button { background:var(--accent); color:#000; border:0; padding:10px 16px;
@@ -1920,7 +1923,7 @@ function paintIsle(el, items, from, tip) {
     n.classList.toggle('active', s.cid === currentCid);
     const full = sessionEmojiFull(s);
     n.querySelector('.be').textContent = (full && (em.get(full) || full)) || '💬';
-    n.querySelector('.bd').className = 'bd' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : '');
+    n.querySelector('.bd').className = 'bd' + dotState(s).replace(' bgwork', '');
     n.title = tip(s);
     const at = el.children[i];
     if (at !== n) el.insertBefore(n, at || hint);
@@ -4673,7 +4676,7 @@ function renderSessionBar(view) {
     if (TAB_DND) { tab.draggable = true; tab.ondragstart = e => tabDragStart(e, s.cid, 'strip'); tab.ondragend = tabDragEnd; }   // 🍳 drag up to the island
     tab.onclick = () => focusSession(s);   // may cross project/machine; cancels any queued new-session send
     const dot = document.createElement('span');
-    dot.className = 'sdot' + (!s.alive ? ' dead' : (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '');
+    dot.className = 'sdot' + dotState(s);
     tab.appendChild(dot);
     const full = sessionEmojiFull(s);
     const em = full ? (stripEm.get(full) || full) : '';   // project badge: which project this tab belongs to
@@ -7241,7 +7244,7 @@ function renderSessions() {
 
     const row = document.createElement('div'); row.className = 'row';
     const sdot = document.createElement('span');
-    sdot.className = 'sdot' + (!s.alive ? ' dead' : s.waiting ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '');
+    sdot.className = 'sdot' + dotState(s);
     const title = document.createElement('span');
     title.className = 'stitle'; title.textContent = s.title || 'new session';
     row.appendChild(sdot);
@@ -7357,7 +7360,7 @@ function renderPinBoard() {
 
     const row = document.createElement('div'); row.className = 'row';
     const sdot = document.createElement('span');
-    sdot.className = 'sdot' + (!s.alive ? ' dead' : s.waiting ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '');
+    sdot.className = 'sdot' + dotState(s);
     row.appendChild(sdot);
     const pn = sessionProjectName(s), pe = sessionEmoji(s);
     if (pn || pe) {                       // which project this to-do belongs to
@@ -8459,6 +8462,14 @@ function foldedReviewers() {
   const live = new Set(all.filter(s => s.alive !== false).map(s => (s._machine || '') + '|' + s.cid));
   return s => !BREAKOUT && !!s.checkOf && s.alive !== false && live.has((s._machine || '') + '|' + s.checkOf);
 }
+// The tab's LED covers its 🔍 reviewer too: the pane rides in this tab, so a
+// codex reviewer mid-turn makes the tab pulse busy (Austin, 10-02: it sat green).
+function dotState(s) {
+  if (!s.alive) return ' dead';
+  const r = s.busy ? null : reviewerOf(s.cid);
+  if (r && r.busy) return ' busy';
+  return (s.waiting || s.status === 'blocked') ? ' blocked' : s.busy ? ' busy' : s.bg ? ' bgwork' : '';
+}
 function reviewerOf(cid) {
   if (!cid || BREAKOUT) return null;
   const all = allSessions(), src = all.find(s => s.cid === cid);
@@ -9383,12 +9394,13 @@ function buildRec() {
       const tr = e.results[i];
       if (tr.isFinal) { finalT += tr[0].transcript; segEnd = true; } else interim += tr[0].transcript;
     }
-    recApply(finalT, interim, segEnd);
+    micLive(); recApply(finalT, interim, segEnd);
   };
   r.onend = () => {
     if (recOn && recEngine === 'sr') { try { r.start(); } catch {} return; }   // Chrome auto-stops; keep alive while on
     const h = recEndHook; recEndHook = null; if (h) setTimeout(h, 150);        // the stop's last final lands just after onend
   };
+  r.onaudiostart = micLive;
   r.onerror = (ev) => { if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') { micSay('no speech service here (' + ev.error + ')'); stopRec(); } };
   return r;
 }
@@ -9597,6 +9609,7 @@ function dgStart(creds) {
     let ticks = 0; const t0 = Date.now();
     d.proc.onaudioprocess = (ev) => {
       if (d.done) return;
+      if (!ticks && dg === d) micLive();       // first audio in hand: the button goes red
       ticks++;
       const inp = ev.inputBuffer.getChannelData(0), n = Math.floor(inp.length / ratio);
       const out = new Int16Array(n);
@@ -9671,7 +9684,7 @@ function startRec() {
   if (synth) synth.cancel();                  // barge-in: don't read replies back into the mic
   recPre = box.value; recPost = ''; recWrote = box.value; recCtx = activeDraftId; recTail = ''; recSkip = 0;
   recOn = true;
-  micBtn.classList.add('rec'); box.focus();
+  micBtn.classList.add('arming'); box.focus();   // red only once audio arrives (micLive)
   if (creds) { recEngine = 'dg'; dgStart(creds); }
   else {
     recEngine = 'sr'; rec = rec || buildRec();
@@ -9679,10 +9692,16 @@ function startRec() {
     if (!sttCreds) sttAsk();                  // maybe this box has a key we never asked for
   }
 }
+// The mic is really hearing: ring → red. Before this, words are not recorded.
+function micLive() {
+  if (!recOn || micBtn.classList.contains('rec')) return;
+  micBtn.classList.remove('arming'); micBtn.classList.add('rec');
+  dgLog('live');
+}
 function stopRec() {
   if (!recOn) return;
   dgLog('stop (engine=' + recEngine + ')');
-  recOn = false; micBtn.classList.remove('rec');
+  recOn = false; micBtn.classList.remove('rec', 'arming');
   if (recEngine === 'dg') dgStop(); else { try { rec.stop(); } catch {} }
   recEngine = null;
   flushHeldSay();                                  // 🔊 whatever the voice held while you talked
