@@ -431,6 +431,22 @@ check("meta carries checkLog (worst + counts, no file paths)",
       mt and [x["worst"] for x in mt.get("checkLog", [])] == ["critical", "minor", "clean", ""]
       and "file" not in mt["checkLog"][0], str(mt and mt.get("checkLog")))
 
+check("each logged pass carries its absolute number n", [r["n"] for r in src10.check_log] == [1, 2, 3, 4])
+src10.check_log = [{"n": i, "worst": "nit", "counts": {"nit": 1}, "file": f"REVIEW-{i}.md"}
+                   for i in range(1, srv.CHECK_LOG_MAX + 1)]
+review("1. [nit] x\nSEVERITY: nit critical=0 major=0 minor=0 nit=1", "REVIEW-21.md")
+check("past CHECK_LOG_MAX: the trim keeps absolute numbers (pass 21, not 20)",
+      len(src10.check_log) == srv.CHECK_LOG_MAX and src10.check_log[-1]["n"] == srv.CHECK_LOG_MAX + 1
+      and src10.check_log[0]["n"] == 2 and "pass 21" in m10.sent[-1][1], m10.sent[-1][1][:80])
+check("…and the next review prompt says pass 22",
+      "review pass 22" in m10.check_prompt(src10, "codex", "REVIEW-22.md"))
+check("check_pass_no: pre-n rows count by position", srv.check_pass_no([{"worst": "nit"}] * 3) == 3
+      and srv.check_pass_no([]) == 0)
+s21 = srv.ClaudeSession(mgr0, cid="c21", session_id="x", resuming=False, check_log=src10.check_log)
+s21.wrap_closing = False
+ml = srv.ClaudeSession.meta(s21)["checkLog"]
+check("meta's last 8 carry absolute n (14..21)", [r["n"] for r in ml] == list(range(14, 22)), str([r["n"] for r in ml]))
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)}"); [print("  -", f) for f in FAILS]; sys.exit(1)

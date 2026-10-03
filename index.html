@@ -2755,9 +2755,14 @@ function flushOutbound() {
 // server's prompt log can rank chips vs typed prompts. It defaults to 'typed'
 // so EVERY browser send carries the tag — the server arms its auto-tldr on
 // exactly that (controller sends have no via, so they never arm it).
+// The 📋 tldr chip's text (server: is_tldr_prompt). Its turn is quiet on the
+// server, so clearing the 🟦 block on send would leave it blank for good.
+const TLDR_CHIP_TEXT = 'TLDR, use simple plain english and as few words as possible. NO SLOP.';
+const normPrompt = t => String(t || '').split(/\s+/).filter(Boolean).join(' ').toLowerCase();
+const isTldrPrompt = t => normPrompt(t) === normPrompt(TLDR_CHIP_TEXT);
 function deliverSend(cid, full, recover, via) {
   via = via || 'typed';
-  clearTldr();                                 // 🟦 sending = done reading (typing keeps it)
+  if (!isTldrPrompt(full)) clearTldr();        // 🟦 sending = done reading (typing keeps it); the tldr chip's turn keeps it
   stashOutbox(cid, recover);
   if (via !== 'quick') recordSent(cid, full);   // chips are canned one-liners — nothing to recover
   const id = armSendAck(cid, full, recover, via);   // ✓ receipt: the machine says it has it
@@ -8424,7 +8429,7 @@ function checkSession() {
   const s = allSessions().find(x => x.cid === src), log = (s && s.checkLog) || [];
   const last = log.length ? log[log.length - 1].worst : '';
   meta.textContent = (last === 'clean' || last === 'minor' || last === 'nit')
-    ? `pass ${log.length} found ${last === 'clean' ? 'nothing' : 'nothing critical or major'} — checking again anyway`
+    ? `pass ${log[log.length - 1].n || log.length} found ${last === 'clean' ? 'nothing' : 'nothing critical or major'} — checking again anyway`
     : 'asking it for a brief — the reviewer opens when this turn ends';
 }
 const checkBtn = document.getElementById('checkBtn');
@@ -8441,7 +8446,7 @@ function checkGauge(s) {
   if (!log.length) return { text: '🔍', tip: '' };
   const dots = log.slice(-4).map(r => SEV_DOT[r.worst] ?? '❔').join('');
   const last = log[log.length - 1].worst, done = last === 'clean' || last === 'minor' || last === 'nit';
-  const lines = log.map((r, i) => `pass ${i + 1}: ${r.worst || 'unrated'}${SEV_COUNTS(r.counts) ? ' (' + SEV_COUNTS(r.counts) + ')' : ''}`);
+  const lines = log.map((r, i) => `pass ${r.n || i + 1}: ${r.worst || 'unrated'}${SEV_COUNTS(r.counts) ? ' (' + SEV_COUNTS(r.counts) + ')' : ''}`);
   return { text: '🔍' + dots, tip: lines.join('\n') + '\n' + (done
     ? 'Last pass found nothing critical or major — another pass is probably not worth it.'
     : 'Last pass found real issues — worth another pass once they are fixed.') };
@@ -8858,7 +8863,7 @@ function holdSend(text, batch) {
 // that scrolls out of view. Re-mine the ranking every few months, and add
 // custom entries freely — it's just this array. Hover a chip for what it sends.
 const QUICK_PROMPTS = [
-  { e: '📋', label: 'tldr',      text: 'TLDR, use simple plain english and as few words as possible. NO SLOP.' },
+  { e: '📋', label: 'tldr',      text: TLDR_CHIP_TEXT },
   { e: '➡️', label: 'next?',     text: 'okay what is next?' },
   { e: '✅', label: 'go',        text: 'yes, go' },
   { e: '🔁', label: 'keep going', text: 'keep going' },

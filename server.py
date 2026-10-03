@@ -338,6 +338,15 @@ def parse_severity(verdict):
     return {"worst": worst, "counts": counts}
 
 
+def check_pass_no(log):
+    """The absolute number of the newest pass in a check_log (0 = none). Rows
+    carry their own `n` so trimming to CHECK_LOG_MAX (and meta's last 8)
+    never renumbers; a pre-`n` row counts by position."""
+    if not log:
+        return 0
+    return max(int(r.get("n") or 0) for r in log) or len(log)
+
+
 def severity_counts_text(counts):
     """'2 minor, 5 nit' — the non-zero counts, worst first."""
     parts = [f"{counts.get(k, 0)} {k}" for k in SEVERITIES if counts.get(k)]
@@ -3844,7 +3853,7 @@ class ClaudeSession:
                 "wrapClosing": self.wrap_closing,   # 📑 harness-close accepted; closes at turn end
                 "checkArmed": self.check_armed(),   # 🔍 writing the brief; a reviewer spawns at its Stop
                 "checkOf": self.check_of or "",     # 🔍 on a reviewer: the cid it double-checks
-                "checkLog": [{"worst": r.get("worst", ""), "counts": r.get("counts", {})}
+                "checkLog": [{"n": r.get("n", 0), "worst": r.get("worst", ""), "counts": r.get("counts", {})}
                              for r in self.check_log[-8:]],   # 🔍 the severity gauge, oldest first
                 "loginCta": self._login_cta()}      # 🔑 "sign in to X" — a signed-out login beats this pool
 
@@ -8880,7 +8889,7 @@ class SessionManager:
         files = [r.get("file") for r in log[-4:] if r.get("file")]
         seen = (" Their findings are under '## Review' in " + ", ".join(files) + "."
                 if files else "")
-        return (f" This is review pass {len(log) + 1} of this work.{seen} The agent "
+        return (f" This is review pass {check_pass_no(log) + 1} of this work.{seen} The agent "
                 "has already fixed or deliberately rejected those — do not raise "
                 "them again unless one is critical or major and still in the code.")
 
@@ -8939,11 +8948,11 @@ class SessionManager:
             return False
         try:
             sev = parse_severity(verdict)
-            src.check_log = (list(getattr(src, "check_log", None) or []) + [
-                {"at": time.time(), "worst": sev["worst"], "counts": sev["counts"], "file": file}
-            ])[-CHECK_LOG_MAX:]
+            log = list(getattr(src, "check_log", None) or [])
+            n = check_pass_no(log) + 1            # absolute: survives the CHECK_LOG_MAX trim
+            src.check_log = (log + [{"n": n, "at": time.time(), "worst": sev["worst"],
+                                     "counts": sev["counts"], "file": file}])[-CHECK_LOG_MAX:]
             self.save_registry()
-            n = len(src.check_log)
             if sev["worst"] == "clean":
                 txt = CHECK_ACT_CLEAN_PROMPT.format(reviewer=rev.engine, file=file, n=n)
             elif sev["worst"] in ("minor", "nit"):

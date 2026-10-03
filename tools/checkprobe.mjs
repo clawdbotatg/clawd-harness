@@ -225,6 +225,14 @@ check('a tap after a nits-only pass still sends the check, and the meta says wha
 await rx([A, { ...B, checkLog: [{ worst: 'major', counts: { major: 1 } }] }]);
 await page.waitForTimeout(200);
 g = await gauge();
+await rx([A, { ...B, checkLog: [14, 15, 16, 17, 18, 19, 20, 21].map(n => ({ n, worst: 'nit', counts: { nit: 1 } })) }]);
+await page.waitForTimeout(200);
+g = await gauge();
+check('trimmed log → the tooltip uses absolute pass numbers (14..21, not 1..8)',
+      /^pass 14: nit/.test(g.tip) && /pass 21: nit/.test(g.tip) && !/pass 1:/.test(g.tip), g.tip.slice(0, 120));
+await rx([A, { ...B, checkLog: [{ worst: 'major', counts: { major: 1 } }] }]);
+await page.waitForTimeout(200);
+g = await gauge();
 check('a major pass → 🟠, tooltip says worth another pass', g.text === '🔍🟠' && /worth another pass/.test(g.tip), JSON.stringify(g));
 await page.evaluate(() => { focusSession(allSessions().find(s => s.cid === 'ca')); });
 await page.waitForTimeout(300);

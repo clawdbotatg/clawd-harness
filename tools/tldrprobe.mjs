@@ -191,6 +191,21 @@ check('sending clears it', await gone());
 // …and it lands (a real send always does, or its ✓ box would come back on the next subscribe and shift the footer)
 await page.evaluate((CID)=>{ box.value=''; handleJson({type:'hook',cid:CID,event:'UserPromptSubmit',busy:true,waiting:false,tool:null,data:{prompt:'ok'}}); }, CID);
 
+// 7a. a REAL tap on the 📋 tldr chip keeps the summary: its turn is quiet on the
+// server (tldrQuiet), so a clear here would leave the block blank for good
+await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'the real answer',final:true}), CID);
+const tchip = page.locator('#quickchips button', { hasText: 'tldr' }).first();
+await tchip.scrollIntoViewIfNeeded();
+await page.evaluate(()=>{ window.__frames.length = 0; });
+await tchip.tap();
+await page.waitForTimeout(200);
+const tq = await page.evaluate(()=>({ text: tldrTextEl.textContent, hidden: tldrEl.hidden,
+  sent: window.__frames.some(f=>f.type==='send' && /^TLDR, use simple/.test(f.text||'')) }));
+check('a real tap on the 📋 tldr chip sends it and KEEPS the summary', tq.sent && tq.text==='the real answer' && !tq.hidden, JSON.stringify(tq));
+await page.evaluate((CID)=>handleJson({type:'hook',cid:CID,event:'UserPromptSubmit',busy:true,waiting:false,tool:null,data:{prompt:'TLDR',tldrQuiet:true}}), CID);
+check('…and its quiet UserPromptSubmit keeps it too', await page.evaluate(()=>tldrTextEl.textContent==='the real answer' && !tldrEl.hidden));
+await page.evaluate((CID)=>{ handleJson({type:'hook',cid:CID,event:'Stop',busy:false,waiting:true,tool:null,data:{tldrQuiet:true}}); }, CID);
+
 // 7b. switching to another session blanks it — the summary must not follow you
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'stay here',final:true}), CID);
 check('shown before the switch', await page.evaluate(()=>tldrTextEl.textContent==='stay here'));
