@@ -448,7 +448,7 @@ controller extension, I reviewed it red (wrong substrate, too big), codex
 conceded and posted a Settled MVP, I accepted its six corrections
 (`2f1f1b6`), and in this wrap I accepted codex's last open point: a judge
 repair is a new version and gets its own audit, votes never carry over.
-Everything is in `docs/COUNCIL-PLAN.md`; the authoritative part is the
+Everything is in `docs/archive/COUNCIL-PLAN.md`; the authoritative part is the
 **Settled MVP** section plus the two closing claude notes after it.
 
 **Shipped vs local.** Docs only. Nothing in server.py, index.html, fleet,
@@ -472,7 +472,7 @@ short spec with the old body moved under a "superseded" heading.
 
 **What changed.** Austin wants to automate the manual Claude/Codex loop:
 independent answers, peer reviews, revisions, and a judge's final synthesis.
-The discussion is in `docs/COUNCIL-PLAN.md`. Codex initially proposed a large
+The discussion is in `docs/archive/COUNCIL-PLAN.md`. Codex initially proposed a large
 controller extension; Claude challenged the scope and interactive execution.
 Codex accepted the smaller, separate headless CLI approach. Claude's final
 "Green" comment accepts all six corrections in Codex's response.
@@ -523,7 +523,7 @@ an implementer does not follow the obsolete first proposal.
 **Exact next steps.**
 
 1. Read the final Codex response and Claude closing comment in
-   `docs/COUNCIL-PLAN.md`.
+   `docs/archive/COUNCIL-PLAN.md`.
 2. Consolidate the accepted CLI MVP into one short authoritative specification;
    retain older discussion in an explicitly superseded section or archive.
 3. State the final-repair audit rule above, the three-review-pass limit, and
@@ -776,7 +776,7 @@ veil, no black tty) with a 15 s toast "📑 <tab> wrapped up · ↩ bring back"
 close"). Volatile on purpose — a restart disarms. Guards: `test_wrap.py`
 (gates, deferral, grace, lapse, the real HTTP endpoint + the script),
 `tools/wrapprobe.mjs` (real taps on emulated touch). Plan doc:
-`docs/DOC-AND-CLOSE-PLAN.md`.
+`docs/archive/DOC-AND-CLOSE-PLAN.md`.
 
 **Handoff (session wrapped 2026-09-06).** Shipped: `1956e37`, in production
 (shipcheck green). Open threads / next steps, none blocking:
@@ -796,7 +796,7 @@ close"). Volatile on purpose — a restart disarms. Guards: `test_wrap.py`
   project refuses the close with the porcelain lines. That's intended —
   claude commits or removes it — but if it ever feels wrong, the knob is
   `_worktree_dirty` (one function).
-- `docs/SESSION-HISTORY-PLAN.md` is superseded by the shipped 🗃️ (`024ea83`);
+- `docs/archive/SESSION-HISTORY-PLAN.md` is superseded by the shipped 🗃️ (`024ea83`);
   it's kept as design record only.
 
 ## 2026-09-05 — passkey cadence: 24h → 7 days

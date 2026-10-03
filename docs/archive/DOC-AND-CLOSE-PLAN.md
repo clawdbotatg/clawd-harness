@@ -2,7 +2,7 @@
 
 Status: **shipped 2026-09-06** (see `docs/HISTORY.md`). Built on the 🗃️
 closed-session history that shipped 2026-09-05 (`024ea83`), which differs
-from `SESSION-HISTORY-PLAN.md` in two ways: reopen spawns a NEW cid via
+from `docs/archive/SESSION-HISTORY-PLAN.md` in two ways: reopen spawns a NEW cid via
 `create_session(resume=…)`, and rows live in the registry (`closed` key,
 `CLOSED_MAX`), not a separate file. Deltas from the plan below: the env var
 is `HARNESS_CLOSE_URL` (one URL, cid-bound); the history reason is
@@ -52,7 +52,7 @@ Stop hook    ──► last_answer = TLDR  →  MGR.close(cid, reason="self")
   ```sh
   #!/bin/sh
   # Ask the harness to close this session when the current turn ends.
-  # Refused unless a human armed it with 📑 — see docs/DOC-AND-CLOSE-PLAN.md.
+  # Refused unless a human armed it with 📑 — see docs/archive/DOC-AND-CLOSE-PLAN.md.
   [ -n "$HARNESS_SELF" ] || { echo "harness-close: not running under the harness"; exit 2; }
   curl -fsS -m 5 -X POST "$HARNESS_SELF/close" --data-urlencode "reason=$*"
   ```

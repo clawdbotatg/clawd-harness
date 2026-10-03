@@ -3,7 +3,7 @@
 Status: **superseded 2026-09-05** — shipped as 🗃️ closed sessions (`024ea83`,
 `0e51f04`) with two deltas: rows live in the registry (`closed` key,
 `CLOSED_MAX`), and reopen spawns a NEW cid via `create_session(resume=…)`.
-Kept as the design record. Companion: `DOC-AND-CLOSE-PLAN.md` (part 2,
+Kept as the design record. Companion: `docs/archive/DOC-AND-CLOSE-PLAN.md` (part 2,
 shipped 2026-09-06).
 
 ## The question that started it

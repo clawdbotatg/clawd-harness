@@ -178,7 +178,7 @@ buffer, and there's no env var that fixes it.
 **Consequence:** for codex sessions the scroll surface has to be the
 **transcript view**, not the terminal. That view was pulled (`DEEP_VIEW`), but
 the rollout JSONL is fully structured, so reviving it for codex is
-straightforward — and it's arguably where `docs/UNIFIED-SESSIONS.md` was headed
+straightforward — and it's arguably where `docs/archive/UNIFIED-SESSIONS.md` was headed
 anyway. This is the one decision that shapes the whole port; make it first.
 
 ### 2. No `--session-id` — the cid binding inverts

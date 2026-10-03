@@ -2,7 +2,7 @@
 # harness-close — ask the clawd-harness to close THIS session when the current
 # turn ends. Only works while a human has armed it (the 📑 wrap chip, or the
 # PM's `wrap` verb); otherwise the harness refuses and says so. The optional
-# argument is a short reason for the log. See docs/DOC-AND-CLOSE-PLAN.md.
+# argument is a short reason for the log. See docs/archive/DOC-AND-CLOSE-PLAN.md.
 if [ -z "$HARNESS_CLOSE_URL" ]; then
   echo "harness-close: not running under the harness (HARNESS_CLOSE_URL unset)" >&2
   exit 2
