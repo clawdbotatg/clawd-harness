@@ -3715,6 +3715,7 @@ class ClaudeSession:
         self.wrap_armed_at = 0.0                  # epoch of the human's arm; 0 = not armed
         self.wrap_turns_left = 0                  # Stops the arm survives (WRAP_TURNS)
         self.wrap_closing = False                 # harness-close accepted: close on the next Stop
+        self.wrap_kill = False                    # 🔫 this wrap is a kill (island + 🗃️ row say so)
         self._wrap_timer = None                   # the WRAP_GRACE_S fallback
         # 🔍 double-check (volatile on purpose: a restart disarms)
         self.check_armed_at = 0.0                 # epoch of the tap; 0 = not armed
@@ -3791,6 +3792,7 @@ class ClaudeSession:
         fresh.wrap_armed_at = self.wrap_armed_at
         fresh.wrap_turns_left = self.wrap_turns_left
         fresh.wrap_closing = self.wrap_closing
+        fresh.wrap_kill = self.wrap_kill
         # Live (non-persisted) state the respawn must also keep: the PTY
         # geometry. Not a ctor param — it belongs to whoever is viewing, not
         # to the session — but the replacement must open at the same dims
@@ -3876,6 +3878,7 @@ class ClaudeSession:
                 "ctxWindow": self.ctx_window,       # 0 = unknown; the page guesses from the model
                 "wrapArmed": self.wrap_armed(),     # 📑 may close itself (badge + cancel line)
                 "wrapClosing": self.wrap_closing,   # 📑 harness-close accepted; closes at turn end
+                "wrapKill": self.wrap_kill,         # 🔫 the wrap is a kill
                 "checkArmed": self.check_armed(),   # 🔍 writing the brief; a reviewer spawns at its Stop
                 "checkOf": self.check_of or "",     # 🔍 on a reviewer: the cid it double-checks
                 "checkLog": [{"n": r.get("n", 0), "worst": r.get("worst", ""), "counts": r.get("counts", {})}
@@ -3895,6 +3898,7 @@ class ClaudeSession:
 
     def wrap_cancel(self):
         self.wrap_armed_at, self.wrap_turns_left, self.wrap_closing = 0.0, 0, False
+        self.wrap_kill = False
         t, self._wrap_timer = self._wrap_timer, None
         if t:
             t.cancel()
@@ -3938,7 +3942,7 @@ class ClaudeSession:
         if t:
             t.cancel()
         print(f"[wrap {self.cid[:8]}] closed itself ({how})", flush=True)
-        self.manager.close(self.cid, reason="wrapped")
+        self.manager.close(self.cid, reason="killed" if self.wrap_kill else "wrapped")
 
     def _wrap_on_stop(self):
         if self.wrap_closing:
@@ -8804,7 +8808,7 @@ class SessionManager:
             self.broadcast_closed()
 
     # -- 📑 wrap: the doc chip that closes the tab when the handoff is written --
-    def wrap(self, cid, text="", via="wrap"):
+    def wrap(self, cid, text="", via="wrap", kill=False):
         """Arm `cid` to close itself and deliver the wrap prompt. "" on
         success, else the reason it can't be armed (never arms a sign-in or
         an autopilot session — the supervisor owns that one)."""
@@ -8816,6 +8820,7 @@ class SessionManager:
         if s.autopilot:
             return "autopilot is on — turn it off first"
         s.wrap_arm()
+        s.wrap_kill = bool(kill)                  # 🔫 same arm, different label
         _exclude_handoff(s.workdir())             # HANDOFF-*.md stays local: .git/info/exclude, never committed
         fname = handoff_file_name()               # one file per wrap; old handoffs stay readable
         txt = ((text or "").strip() or WRAP_PROMPT).replace("{file}", fname)
@@ -10439,7 +10444,7 @@ class Handler(BaseHTTPRequestHandler):
             MGR.close(frame.get("cid"))
         elif t == "wrap":
             err = MGR.wrap(str(frame.get("cid") or ""), frame.get("text", ""),
-                           via=frame.get("via") or "wrap")
+                           via=frame.get("via") or "wrap", kill=bool(frame.get("kill")))
             if err:
                 client.send_json({"type": "error", "cid": frame.get("cid"),
                                   "error": "wrap: " + err})

@@ -97,6 +97,7 @@ class FakeSession:
         self.ceremony, self.autopilot = ceremony, autopilot
         self.last_answer, self.auto_tldr_armed = "", True
         self.wrap_armed_at, self.wrap_turns_left, self.wrap_closing = 0.0, 0, False
+        self.wrap_kill = False
         self._wrap_timer = None
         self._wd = workdir
         mgr.sessions[cid] = self

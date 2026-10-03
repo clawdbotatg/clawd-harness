@@ -1845,9 +1845,9 @@ function isOutbound(s) {
 function wrapPrompt() { return (QUICK_PROMPTS.find(q => q.wrap && !q.kill) || {}).text; }
 // Arm + type the 📑 prompt into `cid` (the chip, or a tab dropped on #outbound).
 // `text` = the 🔫 kill chip's prompt instead; same arm, same self-close.
-function wrapSession(cid, text = wrapPrompt()) {
+function wrapSession(cid, text = wrapPrompt(), kill = false) {
   if (!cid || !text) return false;
-  const f = { type: 'wrap', cid, text, via: 'quick' };
+  const f = { type: 'wrap', cid, text, via: 'quick', kill };
   const mid = FLEET ? machineForCid(cid) : null;
   if (!(mid ? hsendTo(mid, f) : hsend(f))) return false;
   const v = currentView();
@@ -1940,7 +1940,7 @@ function renderIsland() {
     s => '🍳 ' + name(s) + ' — click to open, drag to the tabs to bring it back');
   const out = document.getElementById('outbound');
   if (out) paintIsle(out, all.filter(isOutbound), 'outbound',
-    s => '📑 ' + name(s) + (s.wrapClosing ? ' — closing when its turn ends' : ' — wrapping up, closes itself when done') +
+    s => (s.wrapKill ? '🔫 ' : '📑 ') + name(s) + (s.wrapClosing ? ' — closing when its turn ends' : s.wrapKill ? ' — killed: writing its report, closes itself when done' : ' — wrapping up, closes itself when done') +
          ' · click to watch, drag to the tabs to cancel');
 }
 if (TAB_DND) {
@@ -4675,7 +4675,7 @@ function renderSessionBar(view) {
                     (sessionIsLocal(s) ? ' local' : '') + (mOff ? ' moff' : '');
     tab.title = (s.title || 'new session') +
                 (s.pinned ? ' — 📌 pinned (parked on the board)' : '') +
-                (s.wrapClosing ? ' — 📑 closing when its turn ends' : s.wrapArmed ? ' — 📑 wrapping up (will close itself)' : '') +
+                (s.wrapClosing ? ' — ' + (s.wrapKill ? '🔫' : '📑') + ' closing when its turn ends' : s.wrapArmed ? (s.wrapKill ? ' — 🔫 killed, writing its report (will close itself)' : ' — 📑 wrapping up (will close itself)') : '') +
                 (s.checkArmed ? ' — 🔍 writing its brief; a reviewer opens when this turn ends' : s.checkOf ? ' — 🔍 double-checking another session\'s work' : '') +
                 (mOff ? ` — ${s._machine} is offline (cached tab; opens when it returns)` : '');
     if (TAB_DND) { tab.draggable = true; tab.ondragstart = e => tabDragStart(e, s.cid, 'strip'); tab.ondragend = tabDragEnd; }   // 🍳 drag up to the island
@@ -4695,7 +4695,7 @@ function renderSessionBar(view) {
     // the AI's 1-2 word tab handle when it exists; full title until then
     // 🔍 a source writing its brief, or a reviewer whose namer dropped the seeded 🔍
     const chk = (s.checkArmed || reviewerOf(s.cid) || (s.checkOf && !/^🔍/.test(s.tab || s.title || ''))) ? '🔍 ' : '';   // 🔍 also while its reviewer runs in the pane
-    lbl.className = 'lbl'; lbl.textContent = (s.pinned ? '📌 ' : '') + ((s.wrapArmed || s.wrapClosing) ? '📑 ' : '') + chk + (s.tab || s.title || 'new session');
+    lbl.className = 'lbl'; lbl.textContent = (s.pinned ? '📌 ' : '') + ((s.wrapArmed || s.wrapClosing) ? (s.wrapKill ? '🔫 ' : '📑 ') : '') + chk + (s.tab || s.title || 'new session');
     tab.appendChild(lbl);
     const eb = engineBadge(s);           // only renders for non-claude engines
     if (eb) tab.appendChild(eb);
@@ -8347,11 +8347,12 @@ function closedRowFill(it, r) {
   if (r.prompt_count) bits.push(r.prompt_count + ' prompt' + (r.prompt_count === 1 ? '' : 's'));
   if (r.engine && r.engine !== 'claude') bits.push(r.engine);
   if (r.reason === 'wrapped') bits.push('📑 wrapped itself up');
+  if (r.reason === 'killed') bits.push('🔫 killed — report written');
   else if (r.reason && r.reason !== 'closed') bits.push(r.reason);
   it.querySelector('.cl-when').textContent = bits.join(' · ');
   it.querySelector('.cl-proj').textContent = (r.machine ? closedMachineTag(r.machine) + ' ' : '') + (r.project || '');
   it.querySelector('.cl-title').textContent = r.title || r.cid.slice(0, 8);
-  it.querySelector('.cl-desc').textContent = (r.reason === 'wrapped' && r.last_answer) || r.desc || r.first_prompt || '';
+  it.querySelector('.cl-desc').textContent = ((r.reason === 'wrapped' || r.reason === 'killed') && r.last_answer) || r.desc || r.first_prompt || '';
   const gone = r.reason === 'project gone';
   it.classList.toggle('gone', gone);
   it.querySelector('.cl-back').textContent = r.resumable === false ? '↩ new tab here' : '↩ bring back';
@@ -8923,7 +8924,7 @@ function sendQuick(text, q) {
     // The tab flies up to #outbound and we land on the next one (wrapSession);
     // in ⏏ breakout there's no island, so it stays put with its pending bubble.
     const cid = currentCid;
-    if (!wrapSession(cid, text)) return;
+    if (!wrapSession(cid, text, !!q.kill)) return;
     if (cid === currentCid) addPending(text, text);
     return;
   }
@@ -8942,8 +8943,10 @@ function renderWrapRow(s, show) {
   const on = !!(show && s && (s.wrapArmed || s.wrapClosing));
   wrapRow.hidden = !on;
   if (!on) return;
+  wrapRow.querySelector('.tag').textContent = s.wrapKill ? '🔫' : '📑';
   wrapText.textContent = s.wrapClosing
     ? 'closing when this turn ends — it lands in 🗃️ closed sessions (↩ brings it back)'
+    : s.wrapKill ? 'killed — closes itself once its report for the next agent is written'
     : 'wrapping up — closes itself once the handoff is written and committed';
 }
 document.getElementById('wrapCancel').onclick = () => {
@@ -8974,7 +8977,7 @@ function hideWrapToast() { wrapToast.hidden = true; clearTimeout(wrapToastTimer)
 function showWrapToast(s, machine) {
   wrapToast.innerHTML = '';
   const t = document.createElement('span');
-  t.textContent = '📑 ' + (s.tab || s.title || 'session') + ' wrapped up';
+  t.textContent = (s.wrapKill ? '🔫 ' : '📑 ') + (s.tab || s.title || 'session') + (s.wrapKill ? ' killed' : ' wrapped up');
   const u = document.createElement('button'); u.className = 'wt-undo'; u.textContent = '↩ bring back';
   u.onclick = () => { hideWrapToast(); reopenClosed({ cid: s.cid, pid: s.pid, machine: machine || null }); };
   const h = document.createElement('button'); h.className = 'wt-log'; h.textContent = '🗃️'; h.title = 'closed sessions';
