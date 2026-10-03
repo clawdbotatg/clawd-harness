@@ -207,6 +207,29 @@ WRAP_PROMPT = (      # `{file}` → handoff_file_name() at the arm (manager.wrap
     "your PATH) — it closes this session once the turn ends. If something is "
     "unresolved or you need a decision from me, do NOT close: say what's open "
     "and stop. End your last message with a 3-line TLDR.")
+# 🔫 kill: the 📑 wrap for a session that did a bad job. Same arm, same
+# HANDOFF-<stamp>.md, same self-close — only the prompt differs: an honest
+# report (goal, approach, pros/cons, what got done, confidence) for the next
+# agent, and nothing committed. index.html's 🔫 chip carries this text
+# byte-for-byte (test_wrap.py diffs the two).
+KILL_PROMPT = (
+    "This session is being stopped: the work didn't go well, and another agen"
+    "t will take it from here. Don't try to fix anything now. Write an honest"
+    " report for that agent to {file} at the repo root, with these sections: "
+    "(1) Goal — what you were asked to do, in your own words. (2) Your approa"
+    "ch — what you thought the solution was, and why. (3) Pros and cons of th"
+    "at approach. (4) What actually got done — files touched, commits made (h"
+    "ashes, pushed or not), anything left uncommitted. (5) Confidence — what "
+    "you're highly confident is right, and what you have low confidence in or"
+    " suspect is wrong. (6) What you'd tell the next agent to do differently."
+    " Be blunt; the next agent needs the truth, not a defense. Any older HAND"
+    "OFF-*.md there are earlier sessions' notes. The file is a LOCAL note: HA"
+    "NDOFF-*.md is already in this checkout's .git/info/exclude, so do NOT co"
+    "mmit it, push it, or add it to .gitignore. Do NOT commit, push or deploy"
+    " anything else either — leave the tree as it is and list what's uncommit"
+    "ted in the report. Then run `harness-close` (on your PATH) — it closes t"
+    "his session once the turn ends. End your last message with a 3-line TLDR"
+    ".")
 # 🔍 double-check: the OTHER engine reviews what a session built (codex checks
 # a claude session, claude checks a codex one). One tap: the source session is
 # armed and asked for a short brief — what it did, where, what it verified,

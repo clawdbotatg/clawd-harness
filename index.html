@@ -1842,10 +1842,10 @@ function isOutbound(s) {
   if (l) wrapLocal.delete(s.cid);            // confirmed (or lapsed) — the frame is truth again
   return !!(s.wrapArmed || s.wrapClosing);
 }
-function wrapPrompt() { return (QUICK_PROMPTS.find(q => q.wrap) || {}).text; }
+function wrapPrompt() { return (QUICK_PROMPTS.find(q => q.wrap && !q.kill) || {}).text; }
 // Arm + type the 📑 prompt into `cid` (the chip, or a tab dropped on #outbound).
-function wrapSession(cid) {
-  const text = wrapPrompt();
+// `text` = the 🔫 kill chip's prompt instead; same arm, same self-close.
+function wrapSession(cid, text = wrapPrompt()) {
   if (!cid || !text) return false;
   const f = { type: 'wrap', cid, text, via: 'quick' };
   const mid = FLEET ? machineForCid(cid) : null;
@@ -8867,7 +8867,6 @@ const QUICK_PROMPTS = [
   { e: '➡️', label: 'next?',     text: 'okay what is next?' },
   { e: '✅', label: 'go',        text: 'yes, go' },
   { e: '🔁', label: 'keep going', text: 'keep going' },
-  { e: '📦', label: 'ship',      text: 'commit and push, and deploy if applicable' },
   // 📑 wrap — not just a prompt: the harness ARMS the session to close itself
   // once the handoff is written (`harness-close`, refused unless armed). The
   // tab then vanishes into 🗃️ closed sessions with the reply's TLDR as its row.
@@ -8878,6 +8877,12 @@ const QUICK_PROMPTS = [
   { e: '📑', label: 'doc', wrap: true,
     tip: 'wrap up: write the handoff to a LOCAL HANDOFF-<stamp>.md (git-excluded, never committed; one file per wrap, old ones stay), commit any real work, then close this tab (armed for 2 turns; cancel above the composer; ↩ from 🗃️)',
     text: "We're wrapping this session up. Write the handoff for another agent or a future you: what changed, what's shipped vs. still local, open threads, gotchas, and the exact next steps. Write it to {file} at the repo root — a NEW file for this wrap; any older HANDOFF-*.md there are earlier sessions' handoffs, so skim the latest first and carry forward whatever is still true. Those files are LOCAL notes, not repo history: HANDOFF-*.md is already in this checkout's .git/info/exclude, so do NOT commit them, do NOT push them, and do NOT add them to .gitignore or any tracked file. Only if this project's own instructions say handoffs belong in a tracked log (a HISTORY / docs file) write there instead and commit as they say. If this project is in an iron with a to-do list, `harness-todo` (on your PATH) prints it: check off what you finished (`harness-todo done <id>`) and add what is still open (`harness-todo add <one short item>`), one item per task; if it says the project isn't in any iron, skip this. Your actual work is separate from the handoff: if code changes are still uncommitted, commit and push them as usual. Then run `harness-close` (on your PATH) — it closes this session once the turn ends. If something is unresolved or you need a decision from me, do NOT close: say what's open and stop. End your last message with a 3-line TLDR." },
+  // 🔫 kill — the 📑 wrap for a session that did a bad job: same arm + self-close,
+  // but the prompt asks for an honest report for the next agent and commits
+  // nothing. `text` MUST equal server.py's KILL_PROMPT (test_wrap.py diffs them).
+  { e: '🔫', label: 'kill', wrap: true, kill: true,
+    tip: 'kill: this session did a bad job — it writes an honest report (goal, approach, pros/cons, what got done, high/low confidence) to a LOCAL HANDOFF-<stamp>.md for the next agent, commits nothing, then closes this tab (cancel above the composer; ↩ from 🗃️)',
+    text: "This session is being stopped: the work didn't go well, and another agent will take it from here. Don't try to fix anything now. Write an honest report for that agent to {file} at the repo root, with these sections: (1) Goal — what you were asked to do, in your own words. (2) Your approach — what you thought the solution was, and why. (3) Pros and cons of that approach. (4) What actually got done — files touched, commits made (hashes, pushed or not), anything left uncommitted. (5) Confidence — what you're highly confident is right, and what you have low confidence in or suspect is wrong. (6) What you'd tell the next agent to do differently. Be blunt; the next agent needs the truth, not a defense. Any older HANDOFF-*.md there are earlier sessions' notes. The file is a LOCAL note: HANDOFF-*.md is already in this checkout's .git/info/exclude, so do NOT commit it, push it, or add it to .gitignore. Do NOT commit, push or deploy anything else either — leave the tree as it is and list what's uncommitted in the report. Then run `harness-close` (on your PATH) — it closes this session once the turn ends. End your last message with a 3-line TLDR." },
 ];
 // Custom hover hint (a fixed-position singleton, so the strip's overflow-x
 // clipping can't eat it — a ::after inside the scroll container would be cut
@@ -8918,7 +8923,7 @@ function sendQuick(text, q) {
     // The tab flies up to #outbound and we land on the next one (wrapSession);
     // in ⏏ breakout there's no island, so it stays put with its pending bubble.
     const cid = currentCid;
-    if (!wrapSession(cid)) return;
+    if (!wrapSession(cid, text)) return;
     if (cid === currentCid) addPending(text, text);
     return;
   }

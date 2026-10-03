@@ -253,6 +253,16 @@ check("index.html 📑 chip text == server.WRAP_PROMPT (single source of truth)"
       (json.loads(_m.group(1))[:80] if _m else "chip not found"))
 check("index.html 📑 chip tip says local / never committed, not 'commit it'",
       "never committed" in _html.split("label: 'doc'")[1].split("\n")[1] and "commit it," not in _html.split("label: 'doc'")[1].split("\n")[1])
+# 🔫 kill: same arm + self-close, its own prompt — chip copy == server copy too
+_k = re.search(r"label: 'kill', wrap: true, kill: true,\n\s+tip: [^\n]*\n\s+text: (\"(?:[^\"\\\\]|\\\\.)*\")", _html)
+check("index.html 🔫 chip text == server.KILL_PROMPT",
+      bool(_k) and json.loads(_k.group(1)) == server.KILL_PROMPT,
+      (json.loads(_k.group(1))[:80] if _k else "chip not found"))
+check("KILL_PROMPT: report for the next agent to {file}, nothing committed, then harness-close",
+      "{file}" in server.KILL_PROMPT and "harness-close" in server.KILL_PROMPT
+      and "Do NOT commit, push or deploy" in server.KILL_PROMPT and "Confidence" in server.KILL_PROMPT)
+check("📑 wrapPrompt() skips the 🔫 chip (drag-to-outbound still sends the doc prompt)",
+      "q.wrap && !q.kill" in _html)
 check("manager.wrap wrote the handoff exclude (the glob) into the session's checkout",
       "/HANDOFF-*.md\n" in open(os.path.join(w_repo, ".git", "info", "exclude")).read())
 

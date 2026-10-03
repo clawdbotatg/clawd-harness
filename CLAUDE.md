@@ -9,11 +9,11 @@ because the story isn't inline here).
 
 ## Definition of done
 
-**Small fix (Austin, 09-15: "I don't want nine minutes of process for a one
-minute fix"):** change the code, run the probe that covers it, `checkall`,
-push, `shipcheck`. No HISTORY.md entry, no CLAUDE.md edit, no new probe acts
-unless the fix touches something that broke before. The full list below is
-for real features.
+**Small fix (Austin, 10-03: "if you've made a small change, just push it to
+production and test it live"):** change the code, push, check it live on
+h.atg.link. No `checkall`, no probe runs, no HISTORY.md entry, no CLAUDE.md
+edit. The full list below is for big changes only. When you do run
+`checkall`, save its output to a file — never `| tail` it.
 
 
 1. **`tools/checkall.sh` green** — discovers and runs every `test_*.py`
