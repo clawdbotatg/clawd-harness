@@ -3126,7 +3126,12 @@ class CodexEngine(Engine):
             argv += ["resume", s.session_id]
         argv += ["--no-alt-screen",              # inline mode; see slim note below
                  "-a", CODEX_APPROVAL,
-                 "-s", CODEX_SANDBOX]
+                 "-s", CODEX_SANDBOX,
+                 # A new release opens codex on an "Update available" screen
+                 # whose default is "Update now": the 🔍 brief's CR picked it,
+                 # codex ran `npm install -g` and exited — blank reviewer
+                 # (2026-10-05, 0.160.1). update-clis keeps codex current.
+                 "-c", "check_for_update_on_startup=false"]
         if _codex_has_flag("--no-daemon"):
             # 0.157 runs the TUI against a SHARED background app-server by
             # default. Its startup goes async, and a prompt submitted before
