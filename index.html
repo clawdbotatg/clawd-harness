@@ -1700,7 +1700,7 @@
         <button id="micBtn" title="Hold to dictate (speech-to-text)">🎤</button>
       </div>
       <textarea id="box" placeholder="message"></textarea>
-      <input id="imgInput" type="file" accept="image/*,text/*,.md,.markdown,.txt,.csv,.json,.yaml,.yml,.toml,.log,.xml,.html" multiple hidden />
+      <input id="imgInput" type="file" accept="image/*,text/*,application/pdf,.pdf,.md,.markdown,.txt,.csv,.json,.yaml,.yml,.toml,.log,.xml,.html" multiple hidden />
       <div id="actions">
         <button id="imgBtn" title="Attach an image or text file">🖼</button>
         <button id="send" title="Send message">📤</button>
@@ -7897,7 +7897,10 @@ async function shrinkImage(file) {
 const TEXT_CTYPE = { md:'text/markdown', markdown:'text/markdown', txt:'text/plain',
                      csv:'text/csv', json:'application/json', yaml:'text/yaml',
                      yml:'text/yaml', toml:'text/plain', log:'text/plain',
-                     xml:'text/xml', html:'text/html' };
+                     xml:'text/xml', html:'text/html', pdf:'application/pdf' };
+// PDFs can't downscale like photos; claude's Read takes them up to ~20 MB and
+// the fleet edge (nginx 26m, relay 25 MB) has room for that.
+const PDF_MAX = 20 * 1024 * 1024;
 function fileCtype(f) {   // null → not an accepted type
   if ((f.type || '').startsWith('image/')) return f.type;
   const m = /\.([a-z0-9]+)$/i.exec(f.name || '');
@@ -7919,10 +7922,13 @@ async function uploadFile(file, opts = {}) {
   try {
     if (!ctype) throw new Error(`unsupported type${file.name ? ` (${file.name})` : ''}`);
     if (isImage) file = await shrinkImage(file);
+    else if (ctype === 'application/pdf') { if (file.size > PDF_MAX) throw new Error('PDF too big (>20MB)'); }
     else if (file.size > UPLOAD_SOFT_MAX) throw new Error('file too big (>900KB)');  // fleet edge 413s past ~1MB; text can't downscale
     // Original filename rides as a `name=` param on Content-Type — the one
     // header the fleet bridge forwards verbatim (no relay/worker change needed).
-    const safeName = (file.name || '').replace(/[^\w.-]+/g, '_').slice(0, 80);
+    // A nameless PDF (some pastes) still needs its .pdf — the harness's
+    // fallback extension is .png.
+    const safeName = (file.name || (ctype === 'application/pdf' ? 'document.pdf' : '')).replace(/[^\w.-]+/g, '_').slice(0, 80);
     const hdr = (isImage ? (file.type || 'image/png') : ctype)
                 + (safeName ? `; name="${safeName}"` : '');
     // Fleet: the relay forwards the bytes to the current machine's worker, which
