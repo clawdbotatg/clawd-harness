@@ -111,6 +111,8 @@ def load_accounts():
 
     out = []
     for name, config_dir in roster.items():
+        if not usage_probe.read_credentials(config_dir):
+            continue  # token account (env-file token, no stored login) — harness-only
         u = (cached.get(name) or {}).get("usage") or {}
         windows = u.get("windows")
         if not windows or now - (u.get("checkedAt") or 0) > CACHE_MAX_AGE:

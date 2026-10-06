@@ -99,6 +99,36 @@ never interrupted.
   how much headroom it has. See the section below.
 - Wire contract: the `accounts` frame + controls in `docs/WS-PROTOCOL.md`.
 
+## Token accounts (2026-10-06)
+
+A browser login dies ~30 days after sign-in. A `claude setup-token` lasts a
+year and works on any machine. So each plan can also run as a **token
+account**:
+
+- **Install:** `python3 tools/install_claude_tokens.py <claude-tokens SKILL.md>`
+  copies its `CLAUDE_TOKEN_<NAME>=sk-ant-oat01-…` lines into this box's
+  `.clawd-harness.env` (that save restarts the harness). On a box: tap the 📚
+  claude-tokens skill in any session and say "install".
+- **Boot:** each line becomes account `<name>` at `~/.clawd-accounts/<name>`
+  (`_adopt_token_accounts`), always ready. The tokens are popped out of the
+  harness env; a session gets only its own, as `CLAUDE_CODE_OAUTH_TOKEN`
+  (`_auth_env` — every claude spawn goes through it). Nothing is persisted:
+  drop the line and the account stops working.
+- **Credential gates** (`_read_oauth_creds_ex`) see the token as a healthy
+  login with nothing to rotate: no 🔑 button, no refresh ping, no horizon.
+- **Usage:** a setup-token only has the inference scope — the usage and profile
+  endpoints refuse it. The poller sends a 1-token message and reads the
+  `anthropic-ratelimit-unified-{5h,7d}-*` headers + `anthropic-organization-id`
+  (`_fetch_usage_token`). Every `TOKEN_FABLE_EVERY` (3h, under `FABLE_STICKY`)
+  that message asks for Fable: a 200 stamps `fable_seen`, a refusal lets it age
+  out — the capability gate needs no other evidence. 401 = revoked: out of
+  routing until the env file holds a different token.
+- **Routing:** a token account fronts its org's poll (spends no rotating grant)
+  and wins a same-pool tie (`_route_key`'s last term), so new sessions land on
+  tokens and the old logins just expire. `test_token_accounts.py`.
+- **Renew** (a year on, or a 401): Austin mints new tokens, republishes the
+  skill, re-runs the install on each box.
+
 ## The capability gate — headroom is not the only way a pool goes unusable
 
 **What happened.** On 2026-08-09 the `slop@buidlguidl.com` org changed plans:

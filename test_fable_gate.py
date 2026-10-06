@@ -233,7 +233,7 @@ def test_route_key_positional_names_match_the_tuple():
     added without moving them would silently compare the wrong fields."""
     S, a = server.SessionManager, acct("x", 98.0, fable=False, reset_in_h=1)
     k = mgr(a)._route_key(a)
-    assert len(k) == 5
+    assert len(k) == 6 and k[S.KEY_TOKEN] is True
     assert k[S.KEY_CAP] is True and k[S.KEY_HOT] is True
     assert k[S.KEY_NORESET] is False and k[S.KEY_PCT] == 98.0
     assert k[S.KEY_RESET] > time.time()

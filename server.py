@@ -121,6 +121,18 @@ def _load_env_file():
 
 _load_env_file()
 
+# Long-lived subscription tokens (`claude setup-token`, ~1 year, no sign-in):
+# each CLAUDE_TOKEN_<NAME>=sk-ant-oat01-… line in .clawd-harness.env becomes
+# the token account <name> (docs/fleet/SUB-ROUTING.md § Token accounts).
+# Popped OUT of os.environ so no child process inherits every plan's token —
+# a session only ever gets its own account's, as CLAUDE_CODE_OAUTH_TOKEN.
+CLAUDE_TOKENS = {}
+for _k in [k for k in os.environ if k.startswith("CLAUDE_TOKEN_")]:
+    _v = os.environ.pop(_k).strip()
+    _n = re.sub(r"[^a-z0-9-]+", "-", _k[len("CLAUDE_TOKEN_"):].lower()).strip("-")
+    if _n and _v:
+        CLAUDE_TOKENS[_n] = _v
+
 # ── config ──────────────────────────────────────────────────────────────────
 PORT       = int(os.environ.get("PORT", "8787"))
 BIND       = os.environ.get("BIND", "127.0.0.1")  # localhost-only by default.
@@ -798,10 +810,7 @@ def _tldr_call(text, prev, final, config_dir=None):
     env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
     env.pop("ANTHROPIC_BASE_URL", None)       # never through our own tee
     env["MAX_THINKING_TOKENS"] = "0"
-    if config_dir:
-        env["CLAUDE_CONFIG_DIR"] = config_dir
-    else:
-        env.pop("CLAUDE_CONFIG_DIR", None)
+    _auth_env(env, config_dir)
     text = text[:TLDR_CTX]
     budget = tldr_budget(text, final)
     user = (("COMPLETE REPLY:" if final else "REPLY SO FAR (still being written):")
@@ -1550,6 +1559,30 @@ def _transcript_exists(session_id, config_dir=""):
 
 
 # ── account helpers: credentials, usage, settings sharing ────────────────────
+_TOKEN_DIRS = {}   # _norm_config_dir(dir) → token; filled by _adopt_token_accounts
+
+
+def _dir_token(config_dir):
+    """The setup-token of a token account's config dir, else None."""
+    return _TOKEN_DIRS.get(_norm_config_dir(config_dir)) if config_dir else None
+
+
+def _auth_env(env, config_dir):
+    """Point a child claude's env at one account: CLAUDE_CONFIG_DIR (unset =
+    the default ~/.claude login), plus CLAUDE_CODE_OAUTH_TOKEN for a token
+    account. An inherited token is always dropped first — it outranks the
+    dir's own login and would bill whatever plan it belongs to."""
+    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    else:
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    tok = _dir_token(config_dir)
+    if tok:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = tok
+    return env
+
+
 def _keychain_service(config_dir):
     """Mirror Claude Code's own Keychain item derivation: the default login is
     'Claude Code-credentials'; a CLAUDE_CONFIG_DIR login appends
@@ -1570,7 +1603,13 @@ def _read_oauth_creds_ex(config_dir):
     failure, fd exhaustion, keychain locked, timeout. Callers must treat
     the indefinite case as transient, NEVER as a sign-out: the 2026-07-11
     Errno 24 outage mass-flagged every healthy login "credentials refused"
-    through exactly this ambiguity (root cause v3 in EXPECTATIONS.md)."""
+    through exactly this ambiguity (root cause v3 in EXPECTATIONS.md).
+    A token account answers with its token as a never-expiring access
+    token and no refresh token — every store-reading gate then sees a
+    healthy login that nothing ever needs to rotate."""
+    tok = _dir_token(config_dir)
+    if tok:
+        return {"claudeAiOauth": {"accessToken": tok, "refreshToken": ""}}, True
     definitive = False
     try:
         r = subprocess.run(["security", "find-generic-password",
@@ -1982,11 +2021,8 @@ def _ping_rotate(config_dir):
     subscription and out of embedded mode. For the default account
     CLAUDE_CONFIG_DIR must be UNSET (the 2026-07-09 trap: shells on this
     host export it pointing at a harness account)."""
-    env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
-    if config_dir:
-        env["CLAUDE_CONFIG_DIR"] = config_dir
-    else:
-        env.pop("CLAUDE_CONFIG_DIR", None)
+    env = _auth_env({k: v for k, v in os.environ.items()
+                     if k not in SCRUB_ENV}, config_dir)
     try:
         r = subprocess.run(
             [CLAUDE_BIN, "-p", "--output-format", "text",
@@ -2038,6 +2074,9 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
     `tok_cache` (a mutable dict) keeps a refreshed access token in memory
     across polls (plus the 429 back-off horizon); rotation happens via
     _ping_rotate — the real client persists its own tokens to the store."""
+    tok = _dir_token(config_dir)
+    if tok:
+        return _fetch_usage_token(tok, tok_cache, want_ident)
     blob, definitive = _read_oauth_creds_ex(config_dir)
     oauth = (blob or {}).get("claudeAiOauth") or {}
     access, refresh = oauth.get("accessToken"), oauth.get("refreshToken")
@@ -2224,6 +2263,96 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
     if want_ident:
         return worst, windows, (_fetch_profile(good) if good else None)
     return worst, windows
+
+
+# Token accounts: a setup-token carries only the inference scope, so the
+# usage and profile endpoints refuse it. Its numbers come from the
+# anthropic-ratelimit-unified-* headers on a 1-token message instead.
+PROBE_URL         = "https://api.anthropic.com/v1/messages"
+PROBE_MODEL       = os.environ.get("PROBE_MODEL", "claude-haiku-4-5-20251001")
+FABLE_PROBE_MODEL = os.environ.get("FABLE_PROBE_MODEL", "claude-fable-5-1")
+# How often the probe asks for Fable instead (the capability gate's evidence —
+# the headers carry no fable window). Must stay under FABLE_STICKY.
+TOKEN_FABLE_EVERY = float(os.environ.get("TOKEN_FABLE_EVERY", "10800"))   # 3h
+
+
+def _probe_message(tok, model):
+    """(status, headers) of a 1-token message on `tok`; (None, None) when
+    the call never got an HTTP answer."""
+    body = json.dumps({
+        "model": model, "max_tokens": 1,
+        # an OAuth subscription token is only served for Claude Code's prompt
+        "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+        "messages": [{"role": "user", "content": "hi"}]}).encode()
+    req = urllib.request.Request(PROBE_URL, data=body, method="POST", headers={
+        "Authorization": f"Bearer {tok}", "anthropic-beta": OAUTH_BETA,
+        "anthropic-version": "2023-06-01", "content-type": "application/json",
+        "User-Agent": "claude-cli/2.1.291 (external, cli)"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            r.read()
+            return r.status, r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers
+    except Exception:
+        return None, None
+
+
+def _usage_from_headers(headers):
+    """(pct, windows, org_uuid) from a probe's rate-limit headers, in
+    _fetch_usage's window shape; None when the headers carry no numbers."""
+    h = {k.lower(): v for k, v in (headers or {}).items()}
+    windows, worst = [], 0.0
+    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        try:
+            used = float(h[f"anthropic-ratelimit-unified-{label}-utilization"]) * 100
+        except (KeyError, TypeError, ValueError):
+            continue
+        try:
+            resets = datetime.datetime.fromtimestamp(
+                int(h[f"anthropic-ratelimit-unified-{label}-reset"]),
+                datetime.timezone.utc).isoformat()
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+            resets = None
+        worst = max(worst, used)
+        windows.append({"key": key, "label": label, "used": round(used, 1),
+                        "resets": resets})
+    if not windows:
+        return None
+    return worst, windows, h.get("anthropic-organization-id") or ""
+
+
+def _fetch_usage_token(tok, tok_cache=None, want_ident=False):
+    """_fetch_usage for a token account (same return contract). Every
+    TOKEN_FABLE_EVERY the probe asks for Fable: a 200 sets ident["fable"],
+    which the poller stamps into fable_seen; a refusal leaves the stamp to
+    age out — the same conviction a usage payload without a fable window
+    gets. 401 = the token was revoked or expired: AUTH_FAIL, and the poller
+    keeps it out of routing until the env file carries a different token."""
+    now = time.time()
+    cache = tok_cache if tok_cache is not None else {}
+    code = h = fable = None
+    if now - cache.get("fable_at", 0) > TOKEN_FABLE_EVERY:
+        code, h = _probe_message(tok, FABLE_PROBE_MODEL)
+        if code == 200:
+            fable = True
+        if code not in (None, 401, 429):
+            cache["fable_at"] = now
+    if code != 200 and code != 401:
+        code, h = _probe_message(tok, PROBE_MODEL)
+    if code == 401:
+        return AUTH_FAIL
+    got = _usage_from_headers(h)
+    if got is None:
+        if code == 429:
+            cache["no_poll_until"] = now + 300
+            return RATE_LIMITED
+        return None
+    pct, windows, org = got
+    if want_ident:
+        return pct, windows, {"email": "", "org": org, "org_name": "",
+                              "tier": "", "fable": fable}
+    return pct, windows
 
 
 def _parse_reset(ts):
@@ -2649,6 +2778,11 @@ class Account:
         self.tok = {}                            # in-memory refreshed-access-token cache
         self.last_pending_check = 0.0            # backoff anchor while awaiting sign-in
 
+    @property
+    def token(self):
+        """True for a token account (CLAUDE_TOKEN_<NAME> in the env file)."""
+        return bool(_dir_token(self.config_dir))
+
     def to_registry(self):
         return {"name": self.name, "config_dir": self.config_dir,
                 "email": self.email, "org": self.org,
@@ -2708,6 +2842,7 @@ class Account:
                 "wallKind": self.wall_kind if self.walled_until > time.time() else "",
                 "error": self.error,
                 "loginExpiresAt": self.login_expires or None,
+                "token": self.token,
                 "configDir": self.config_dir}
 
 
@@ -3065,13 +3200,11 @@ class ClaudeEngine(Engine):
             # block). setdefault so an operator export still wins.
             env.setdefault("CLAUDE_CODE_RESUME_THRESHOLD_MINUTES",
                            RESUME_MODAL_FLOOR_MIN)
-        if s.config_dir:                     # non-default subscription account
-            env["CLAUDE_CONFIG_DIR"] = s.config_dir
-        else:
-            # default = plain ~/.claude, always: an operator-exported
-            # CLAUDE_CONFIG_DIR would strand transcripts where our globs
-            # (config_dir or ~/.claude) never look.
-            env.pop("CLAUDE_CONFIG_DIR", None)
+        # default = plain ~/.claude, always: an operator-exported
+        # CLAUDE_CONFIG_DIR would strand transcripts where our globs
+        # (config_dir or ~/.claude) never look. A token account also gets
+        # its CLAUDE_CODE_OAUTH_TOKEN here.
+        _auth_env(env, s.config_dir)
         # Guarantee claude never opens onto the onboarding/theme screen when
         # the dir already holds a login…
         _ensure_onboarded(s.config_dir)
@@ -5970,6 +6103,7 @@ class SessionManager:
                 a.org_name = oname
             self.accounts[a.name] = a
         self._ensure_default_account()
+        self._adopt_token_accounts()
         for a in self.accounts.values():         # boot migration: shared transcripts
             if a.config_dir:
                 _share_projects(a.config_dir)
@@ -6431,6 +6565,32 @@ class SessionManager:
             self.accounts["default"] = Account(
                 "default", "", email=em, org=org, org_name=oname, ready=True)
 
+    def _adopt_token_accounts(self):
+        """One ready account per CLAUDE_TOKENS entry, at ACCOUNTS_DIR/<name>:
+        same shared settings/transcripts as any account, but no sign-in, no
+        Keychain item, nothing to rotate — the token rides into each child
+        as CLAUDE_CODE_OAUTH_TOKEN (_auth_env). Boot only: the tokens come
+        from .clawd-harness.env, and saving that file restarts the harness.
+        A name already held by a signed-in (non-token) account is skipped."""
+        for name, tok in CLAUDE_TOKENS.items():
+            cdir = str(ACCOUNTS_DIR / name)
+            a = self.accounts.get(name)
+            if a and _norm_config_dir(a.config_dir) != _norm_config_dir(cdir):
+                print(f"[account {name}] token skipped — the name belongs to "
+                      f"the login at {a.config_dir or '~/.claude'}", flush=True)
+                continue
+            _TOKEN_DIRS[_norm_config_dir(cdir)] = tok
+            try:
+                _link_shared_paths(cdir)
+                _share_projects(cdir)
+                _merge_mcp(cdir)
+            except Exception as e:
+                print(f"[account {name}] share links failed: {e}", flush=True)
+            if not a:
+                a = self.accounts[name] = Account(name, cdir)
+                print(f"[account {name}] token account added", flush=True)
+            a.ready = True
+
     def _ordered_accounts(self):
         return sorted(self.accounts.values(),
                       key=lambda a: (a.name != "default", a.created))
@@ -6495,6 +6655,10 @@ class SessionManager:
             a = self.accounts.get(slug)
             if a and a.ready and not a.broken:
                 return None                      # already signed in
+            if a and a.token:
+                print(f"[account {slug}] token account — no sign-in; put a "
+                      "fresh token in .clawd-harness.env", flush=True)
+                return None
             if not a:
                 a = Account(slug, str(ACCOUNTS_DIR / slug))
                 self.accounts[slug] = a
@@ -6564,10 +6728,11 @@ class SessionManager:
         pct = 100.0 if pct is None else pct
         reset = _weekly_reset(a.usage)
         return (not a.routable(), pct >= SUB_HOT, reset is None,
-                reset or 0.0, pct)
+                reset or 0.0, pct,
+                not a.token)    # same-pool tie: the login that never expires
 
     # Positional names for _route_key's tuple — see the docstring above.
-    KEY_CAP, KEY_HOT, KEY_NORESET, KEY_RESET, KEY_PCT = range(5)
+    KEY_CAP, KEY_HOT, KEY_NORESET, KEY_RESET, KEY_PCT, KEY_TOKEN = range(6)
 
     def _routable_first(self, accounts):
         """`accounts` narrowed to pools the capability gate allows — falling
@@ -7258,7 +7423,10 @@ class SessionManager:
                 groups = {}
                 for a in due:
                     groups.setdefault(a.org or f"~{a.name}", []).append(a)
-                reps = [next((m for m in ms if m.name not in live), ms[0])
+                # A token account fronts its org when it can: probing it
+                # spends no rotating grant, so it is always safe to poll.
+                reps = [next((m for m in ms if m.token), None)
+                        or next((m for m in ms if m.name not in live), ms[0])
                         for ms in groups.values()]
                 with ThreadPoolExecutor(max_workers=min(4, len(reps))) as ex:
                     got = list(ex.map(
@@ -7304,6 +7472,8 @@ class SessionManager:
                         pct, windows, ident = res
                         with self.lock:
                             a.record_usage(pct, windows, now)
+                            if ident and ident.get("fable"):
+                                a.fable_seen = now   # token probe: Fable answered
                             a.error = ""
                             for m in sibs:
                                 # same pool, same numbers — a copy, not a poll.
@@ -7323,6 +7493,15 @@ class SessionManager:
                                 a.org = ident["org"] or a.org
                                 a.org_name = ident["org_name"] or a.org_name
                                 a.tier = ident["tier"] or a.tier
+                                if a.token and not a.email:
+                                    # the probe names only the org; a signed-in
+                                    # sibling of that org knows whose it is
+                                    twin = next((m for m in accts if m is not a
+                                                 and m.org == a.org and m.email),
+                                                None)
+                                    if twin:
+                                        a.email = twin.email
+                                        a.org_name = a.org_name or twin.org_name
                         changed = True
                     elif not a.error:
                         with self.lock:
