@@ -9634,7 +9634,7 @@ function dgFallback(d) {
   recEngine = 'sr'; rec = rec || buildRec(); try { rec.start(); } catch {}
 }
 function dgStart(creds) {
-  const d = { ws: null, src: null, proc: null, stream: null, q: [], open: false, done: false, got: false, tries: 0, creds };
+  const d = { ws: null, src: null, proc: null, stream: null, q: [], open: false, done: false, got: false, tries: 0, creds, t0: Date.now() };
   dg = d;
   let streamP;
   try {
@@ -9688,7 +9688,7 @@ function dgOpen(d) {
     if (dg !== d || d.ws !== w) return;        // a newer hold owns the box now
     let m; try { m = JSON.parse(e.data); } catch { return; }
     if (m.type !== 'Results') return;
-    if (!d.got) dgLog('first result: "' + ((((m.channel || {}).alternatives || [])[0] || {}).transcript || '').slice(0, 30) + '"');
+    if (!d.got) dgLog('first result +' + (Date.now() - d.t0) + 'ms: "' + ((((m.channel || {}).alternatives || [])[0] || {}).transcript || '').slice(0, 30) + '"');
     d.got = true;
     const t = (((m.channel || {}).alternatives || [])[0] || {}).transcript || '';
     if (m.is_final) recApply(t, '', true);     // an empty final still closes the segment (resets recSkip)
@@ -9727,7 +9727,11 @@ function startRec() {
     setTimeout(() => { if (sttStartAt && Date.now() >= sttStartAt) { sttStartAt = 0; micBtn.classList.remove('wait'); micSay('no answer from this box yet — tap again'); } }, 5200);
     return;
   }
-  if (synth) synth.cancel();                  // barge-in: don't read replies back into the mic
+  // barge-in: stop BOTH voices. The ElevenLabs one used to keep reading over
+  // the tap, and Chrome's echo canceller muted the user's first words under it
+  // (10-05: "red, I start talking, the first three or four words are cut off").
+  if (synth) synth.cancel();
+  if (audioEl || audioQueue.length) { dgLog('barge-in: voice stopped'); stopServerAudio(); ttsBtn.classList.remove('speaking'); }
   recPre = box.value; recPost = ''; recWrote = box.value; recCtx = activeDraftId; recTail = ''; recSkip = 0;
   recOn = true;
   micBtn.classList.add('arming'); box.focus();   // red only once audio arrives (micLive)
