@@ -3697,7 +3697,7 @@ class ClaudeSession:
                  title="", desc="", tab="", prompt_count=0, first_prompt="",
                  created=0.0, last_active=0.0, prompted_at=0.0,
                  account="default", config_dir="", ceremony=False,
-                 pinned=0.0, test_hint="", model="", ctx_tokens=0,
+                 pinned=0.0, test_hint="", model="", ctx_tokens=0, burner=0.0,
                  engine="claude", autopilot=0.0, pilot_goal="",
                  pilot_status="", pilot_rounds=0,
                  tldr_text="", tldr_on=False, voice_on=False, fork=False,
@@ -3764,6 +3764,11 @@ class ClaudeSession:
         # every Stop while it stays pinned; cleared on unpin so a re-pin asks
         # again. Durable — a restart shouldn't blank the board's instructions.
         self.test_hint = test_hint
+        # 🍳 back burner: timestamp when dragged onto the top bar's middle
+        # island, 0.0 = on the tab strip. Pure UI metadata like `pinned`, but
+        # with no side effects. Server-side so every browser agrees (Austin,
+        # 10-06: it was localStorage, so each machine had its own island).
+        self.burner = burner
         self._hint_at_prompt = 0                  # prompt_count the hint was derived at
         # 🤖 autopilot (the checkbox beside the state square): timestamp when
         # engaged, 0.0 = off. While on, every Stop runs _pilot_step — a cheap
@@ -3893,6 +3898,7 @@ class ClaudeSession:
                 "prompted_at": self.prompted_at,
                 "account": self.account, "config_dir": self.config_dir,
                 "ceremony": self.ceremony, "pinned": self.pinned,
+                "burner": self.burner,
                 "test_hint": self.test_hint,
                 "autopilot": self.autopilot, "pilot_goal": self.pilot_goal,
                 "pilot_status": self.pilot_status,
@@ -4007,6 +4013,7 @@ class ClaudeSession:
                 "alive": self.alive or self.starting,   # parked-for-boot ≠ dead (no veil)
                 "account": self.account,
                 "pinned": self.pinned,
+                "burner": self.burner,
                 "testHint": self.test_hint or "",   # 📌 board: the human's verification step
                 "autopilot": bool(self.autopilot),  # 🤖 checkbox state
                 "pilotStatus": self.pilot_status or "",  # the 🤖 row above the composer
@@ -6151,7 +6158,7 @@ class SessionManager:
                     created=e.get("created", 0.0),
                     last_active=e.get("last_active", 0.0),
                     prompted_at=e.get("prompted_at", 0.0),
-                    pinned=e.get("pinned", 0.0),
+                    pinned=e.get("pinned", 0.0), burner=e.get("burner", 0.0),
                     test_hint=e.get("test_hint", ""),
                     autopilot=e.get("autopilot", 0.0),
                     pilot_goal=e.get("pilot_goal", ""),
@@ -6232,7 +6239,7 @@ class SessionManager:
                 prompted_at=e.get("prompted_at", 0.0),
                 account=name, config_dir=cfg,
                 ceremony=e.get("ceremony", False),
-                pinned=e.get("pinned", 0.0),
+                pinned=e.get("pinned", 0.0), burner=e.get("burner", 0.0),
                 test_hint=e.get("test_hint", ""),
                 autopilot=e.get("autopilot", 0.0),
                 pilot_goal=e.get("pilot_goal", ""),
@@ -8931,6 +8938,16 @@ class SessionManager:
         self.save_registry()
         self.broadcast_sessions()
 
+    def set_burner(self, cid, on):
+        """🍳 move a session onto the back-burner island (or back to the tabs).
+        Pure metadata — nothing happens to the session itself."""
+        s = self.get(cid)
+        if not s or bool(s.burner) == on:
+            return
+        s.burner = time.time() if on else 0.0
+        self.save_registry()
+        self.broadcast_sessions()
+
     def tldr(self, cid, on):
         """🟦 a viewer wants (or no longer wants) the live TLDR of a session."""
         s = self.get(cid)
@@ -10636,6 +10653,8 @@ class Handler(BaseHTTPRequestHandler):
             MGR.wrap_cancel(str(frame.get("cid") or ""))
         elif t == "pin":
             MGR.pin(frame.get("cid"), bool(frame.get("on", True)))
+        elif t == "burner":
+            MGR.set_burner(frame.get("cid"), bool(frame.get("on", True)))
         elif t == "autopilot":
             MGR.autopilot(frame.get("cid"), bool(frame.get("on", True)))
         elif t == "tldr":

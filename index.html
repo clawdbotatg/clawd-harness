@@ -1802,30 +1802,50 @@ if (ejectBC) {
 // middle of the top bar. Not pinned, not closed — just out of the strip (and
 // the rail cycling / boot landing, via sortedSessions / ironRail) and shown as
 // their emoji. Click = open it; drag it back onto the strip = a tab again.
-// This browser only (localStorage, synced across its tabs); desktop only.
-const BURNER_KEY = 'cc_burner';
-function burnerLoad() {
-  try { const a = JSON.parse(localStorage.getItem(BURNER_KEY) || '[]'); return Array.isArray(a) ? a.filter(c => typeof c === 'string') : []; }
-  catch { return []; }
+// Server state (the session's `burner` stamp), so every browser agrees —
+// park it on the laptop, it's on the island on the desktop too. `burnerLocal`
+// is the optimistic bridge until the sessions frame confirms. Desktop only.
+const burnerLocal = new Map();               // cid → { on, at, until }
+function burnerAt(s) {                       // parked-at stamp, 0 = on the strip
+  if (BREAKOUT || !s) return 0;
+  const l = burnerLocal.get(s.cid);
+  if (l && l.until > Date.now() && l.on !== !!s.burner) return l.on ? l.at : 0;
+  if (l) burnerLocal.delete(s.cid);
+  return s.burner || 0;
 }
-let burner = burnerLoad();
-function isBurner(cid) { return !BREAKOUT && !!cid && burner.includes(cid); }
+function isBurner(cid) {
+  if (BREAKOUT || !cid) return false;
+  return !!burnerAt(allSessions().find(s => s.cid === cid));
+}
 function burnerSet(cid, on) {
-  if (!cid || on === burner.includes(cid)) return;
+  if (!cid || on === isBurner(cid)) return;
   // parking the open session steps along the rail like 📌 does (before the
   // cid leaves the rail, so the hop lands on its neighbour)
   const v = currentView();
   if (on && cid === currentCid && (v === 'tty' || v === 'transcript')) hopAfterPin(cid);
-  burner = on ? burner.concat(cid) : burner.filter(c => c !== cid);
-  try { localStorage.setItem(BURNER_KEY, JSON.stringify(burner)); } catch {}
+  const f = { type: 'burner', cid, on };
+  const mid = FLEET ? machineForCid(cid) : null;
+  if (mid) hsendTo(mid, f); else hsend(f);
+  burnerLocal.set(cid, { on, at: Date.now() / 1000, until: Date.now() + WRAP_LOCAL_MS });
   renderSessionBar();
   if (currentView() === 'sessions') renderSessions();
 }
-window.addEventListener('storage', e => {
-  if (e.key !== BURNER_KEY) return;
-  burner = burnerLoad();
-  try { renderSessionBar(); } catch {}
-});
+// One-time move of this browser's old localStorage island onto the server.
+let burnerLegacy = (() => {
+  try { const a = JSON.parse(localStorage.getItem('cc_burner') || '[]'); localStorage.removeItem('cc_burner');
+        return Array.isArray(a) ? a.filter(c => typeof c === 'string') : []; }
+  catch { return []; }
+})();
+setTimeout(() => { burnerLegacy = []; }, 120000);
+function burnerMigrate(all) {
+  if (!burnerLegacy.length) return;
+  burnerLegacy = burnerLegacy.filter(cid => {
+    const s = all.find(x => x.cid === cid);
+    if (!s) return true;
+    if (!s.burner) burnerSet(cid, true);
+    return false;
+  });
+}
 // 📑 on the way out: a session whose wrap is armed or closing (the server's
 // wrapArmed / wrapClosing) leaves the strip, the rail and the 🍳 island and
 // sits on #outbound as its emoji until it closes itself — then it's simply
@@ -1933,10 +1953,11 @@ function paintIsle(el, items, from, tip) {
 }
 function renderIsland() {
   if (tabDrag) return;
-  const all = allSessions(), byCid = new Map(all.map(s => [s.cid, s]));
+  const all = allSessions();
+  burnerMigrate(all);
   const name = s => s.tab || s.title || 'new session';
   const isl = document.getElementById('island');
-  if (isl) paintIsle(isl, burner.map(c => byCid.get(c)).filter(s => s && !isOutbound(s)), 'island',
+  if (isl) paintIsle(isl, all.filter(s => burnerAt(s) && !isOutbound(s)).sort((a, b) => burnerAt(a) - burnerAt(b)), 'island',
     s => '🍳 ' + name(s) + ' — click to open, drag to the tabs to bring it back');
   const out = document.getElementById('outbound');
   if (out) paintIsle(out, all.filter(isOutbound), 'outbound',
@@ -6902,7 +6923,7 @@ function sortedSessions() {
   // 🍳 back-burner ones sit on the #island, 📑 wrapping ones on #outbound — same treatment.
   // 🔍 a reviewer rides in its source's tab (the pane under its terminal) — same treatment.
   const folded = foldedReviewers();
-  return allSessions().filter(s => !s.pinned && !isEjected(s.cid) && !isBurner(s.cid) && !isOutbound(s) && !folded(s)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
+  return allSessions().filter(s => !s.pinned && !isEjected(s.cid) && !burnerAt(s) && !isOutbound(s) && !folded(s)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
 }
 
 // The rail the strip/cycling/close-hop actually flip through. Normally the full
@@ -6925,8 +6946,8 @@ function ironRail(iron) {
   const all = ironSessions(iron).filter(s => !folded(s));
   const rank = s => !s.alive ? 4 : (s.waiting || s.status === 'blocked') ? 0 : s.busy ? 1 : s.bg ? 2 : 3;
   const warmth = s => s.promptedAt || s.lastActive || 0;
-  const live = all.filter(s => !s.pinned && !isEjected(s.cid) && !isBurner(s.cid) && !isOutbound(s)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
-  const parked = all.filter(s => s.pinned && !isEjected(s.cid) && !isBurner(s.cid) && !isOutbound(s)).sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
+  const live = all.filter(s => !s.pinned && !isEjected(s.cid) && !burnerAt(s) && !isOutbound(s)).sort((a, b) => rank(a) - rank(b) || warmth(b) - warmth(a));
+  const parked = all.filter(s => s.pinned && !isEjected(s.cid) && !burnerAt(s) && !isOutbound(s)).sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
   return live.concat(parked);
 }
 
