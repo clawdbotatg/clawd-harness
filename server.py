@@ -4005,6 +4005,7 @@ class ClaudeSession:
                 # _backfill_last_answer restores it across restarts, so a
                 # controller can always retrieve "what did it last say".
                 "lastAnswer": (self.last_answer or "")[:280],
+                "firstPrompt": (self.first_prompt or "")[:500],   # 📍 the #origin strip
                 "sessionId": self.session_id,
                 "promptCount": self.prompt_count,
                 "lastActive": self.last_active,
@@ -4479,8 +4480,10 @@ class ClaudeSession:
         and it's enough to label the session the instant it's created. The Stop
         milestones (1, then every 3) re-name from the full transcript to sharpen."""
         self.prompt_count += 1
-        if not self.first_prompt and prompt:
-            self.first_prompt = prompt.strip().splitlines()[0][:200]
+        if not self.first_prompt and prompt.strip():
+            # whole prompt, not just line 1: the UI pins it over the terminal
+            # (#origin — "how did this start?")
+            self.first_prompt = prompt.strip()[:2000]
         self.manager.save_registry()
         if self.prompt_count == 1 and prompt.strip():
             seed = ("User: " + prompt.strip())[:3500]

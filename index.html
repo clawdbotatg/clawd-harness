@@ -286,6 +286,26 @@
     font-weight:700; pointer-events:auto; }
   #machineTag .cta:active { filter:brightness(.9); }
   @media (pointer: coarse) { #machineTag { right:84px; } }   /* no ⏏ on touch — close the gap */
+  /* 📍 origin strip (Austin, 10-07: "how did this start?"): the session's first
+     prompt, one line at the top of the pane while the terminal scrolls under it.
+     Fixed height and present for every session (a placeholder before the first
+     send) so switching tabs never resizes the PTY. It's the row the ✕/📌/pill
+     float in — syncOrigin() pads its right edge to clear them. Tap = #originFull,
+     the whole prompt in a drop-down overlay (no resize either). */
+  #origin { flex:0 0 38px; height:38px; box-sizing:border-box; display:flex; align-items:center;
+            padding:0 12px 0 10px; background:var(--panel); border-bottom:1px solid var(--edge);
+            font-size:13px; color:var(--dim); cursor:pointer; min-width:0; user-select:none; }
+  #origin[hidden] { display:none; }
+  #origin::before { content:'📍'; margin-right:6px; flex:0 0 auto; }
+  #originText { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+  #origin.open #originText { color:var(--ink); }
+  #originFull { position:absolute; top:38px; left:0; right:0; z-index:16; max-height:55%;
+                overflow-y:auto; -webkit-overflow-scrolling:touch; box-sizing:border-box;
+                padding:8px 12px 10px; background:var(--panel); border-bottom:1px solid var(--edge);
+                color:var(--ink); font-size:14px; line-height:1.4; white-space:pre-wrap;
+                overflow-wrap:anywhere; user-select:text; -webkit-user-select:text; }
+  #originFull[hidden] { display:none; }
+  html.breakout #origin { flex-basis:38px; }
   .col { display:flex; flex-direction:column; min-width:0; min-height:0; }
   #left  { flex:1; position:relative; }   /* anchors the #splash overlay */
   #right { flex:1; background:var(--bg); }
@@ -1590,6 +1610,9 @@
       <div id="sessions"></div>
     </section>
     <section class="col" id="left">
+      <!-- 📍 how this session started: its first prompt, pinned over the terminal (#origin CSS) -->
+      <div id="origin" hidden title="The prompt this session started with — tap to read it all"><span id="originText"></span></div>
+      <div id="originFull" hidden></div>
       <div id="term"></div>
       <!-- 🔍 the reviewer's live terminal, under the session it double-checks (#peek CSS) -->
       <div id="peek" hidden><div id="peekbar"><span class="sdot"></span><span id="peeklbl"></span><button id="peekX" title="Stop the double-check — closes the reviewer only, this session stays">✕</button></div><div id="peekterm"></div></div>
@@ -4656,7 +4679,42 @@ function refreshBreadcrumb(view) {
       descEl.appendChild(d);
     }
   }
+  syncOrigin(inSession, live);
   renderSessionBar(view);
+}
+
+// 📍 the origin strip (#origin CSS): the open session's first prompt. Text only
+// changes when the prompt does, so a frame mid-selection in #originFull is safe.
+let originCid = '';
+function syncOrigin(inSession, live) {
+  const el = document.getElementById('origin'), txt = document.getElementById('originText'),
+        full = document.getElementById('originFull');
+  el.hidden = !inSession;
+  if (!inSession) { full.hidden = true; el.classList.remove('open'); return; }
+  if (originCid !== currentCid) { originCid = currentCid; full.hidden = true; el.classList.remove('open'); }
+  const fp = ((live && live.firstPrompt) || '').trim();
+  const one = fp ? fp.split(/\s+/).join(' ') : 'no prompt yet';
+  if (txt.textContent !== one) txt.textContent = one;
+  el.style.opacity = fp ? '' : '.6';
+  if (full.textContent !== fp) full.textContent = fp;
+  padOrigin();
+}
+function padOrigin() {
+  const el = document.getElementById('origin');
+  if (el.hidden) return;
+  // clear the floating ✕ / 📌 / ⏏ / model pill that sit in this row
+  const box = el.getBoundingClientRect(); let edge = box.right;
+  for (const id of ['machineTag', 'ejectBtn', 'pinBtn', 'closeBtn']) {
+    const r = document.getElementById(id).getBoundingClientRect();
+    if (r.width && r.left < edge) edge = r.left;
+  }
+  el.style.paddingRight = Math.max(12, box.right - edge + 8) + 'px';
+}
+function toggleOrigin() {
+  const el = document.getElementById('origin'), full = document.getElementById('originFull');
+  if (!full.textContent) return;
+  full.hidden = !full.hidden;
+  el.classList.toggle('open', !full.hidden);
 }
 
 // Row 2: a horizontal strip of session tabs for the current project, sorted
@@ -9197,6 +9255,7 @@ function setTldr(on) {
 tldrBtn.onclick = () => setTldr(!tldrOn);
 // ✕ = "read this far": blank it, and tell the server so later passes summarize only NEW
 // prose. The text itself is selectable and a tap on it does nothing (copy/paste).
+document.getElementById('origin').onclick = toggleOrigin;
 document.getElementById('tldrX').onclick = (e) => {
   e.stopPropagation();
   if (!tldrTextEl.textContent) return;
@@ -11054,6 +11113,7 @@ function refreshSessionTag() {
                       acct && ('running under the ' + acct + ' subscription'),
                       currentMachine || ''].filter(Boolean).join(' · ');
   machineTag.classList.toggle('show', inSession && machineTag.childElementCount > 0);
+  padOrigin();                                   // 📍 the pill's width just changed
 }
 function setView(view) {
   const tty = view === 'tty', sessions = view === 'sessions', projects = view === 'projects',
@@ -11770,7 +11830,7 @@ stage.addEventListener('touchend', (e) => {
 }, { capture: true, passive: true });
 
 // A window resize/rotation is the user manipulating THIS device → claim the PTY size.
-window.addEventListener('resize', () => { fit.fit(); sendResize(true); ttyBottom(); bottomJustifyTTY(); positionTldr(); });
+window.addEventListener('resize', () => { padOrigin(); fit.fit(); sendResize(true); ttyBottom(); bottomJustifyTTY(); positionTldr(); });
 
 // -- machines roster page (the 🖥️ button) ------------------------------------
 // Read-only fleet overview with per-machine stats. Replaces the old machines rung;
