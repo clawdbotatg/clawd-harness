@@ -1113,10 +1113,6 @@
   .sk-main { display:flex; flex-direction:column; gap:4px; flex:1 1 auto; min-width:0; }
   .sk-name { color:var(--accent); font-size:13px; }
   .sk-desc { color:var(--dim); font-size:11px; overflow-wrap:anywhere; }
-  .sk-item .sk-x { flex:0 0 auto; background:transparent; border:1px solid var(--edge); border-radius:5px;
-                   color:var(--dim); font-family:var(--mono); font-size:12px; cursor:pointer; padding:6px 10px; }
-  .sk-item .sk-x:hover { color:var(--err); border-color:var(--err); }
-  @media (pointer: coarse) { .sk-item .sk-x { padding:9px 12px; font-size:13px; } }
   .sk-note { color:var(--dim); font-size:11px; }
   /* project cards reuse .scard; status colors + an add-project row */
   .scard.cloning, .scard.error { cursor:default; }
@@ -8714,15 +8710,9 @@ function renderSkillbook(skills, error) {
     const desc = document.createElement('div'); desc.className = 'sk-desc';
     desc.textContent = s.description || '';
     main.append(name, desc);
-    const x = document.createElement('button'); x.className = 'sk-x';
-    x.textContent = '✕';
-    x.title = 'remove from the library — everywhere';
-    x.onclick = (e) => {
-      e.stopPropagation();
-      if (!confirm(`Remove "${s.name}" from the skill library? Gone from every machine's list.`)) return;
-      skillbookSend({ type: 'skillsRm', name: s.name });   // reply = fresh library → repaint
-    };
-    it.append(main, x);
+    // No ✕ here (Austin 10-10): one stray tap trashed a skill. Removing a
+    // skill is a deliberate ask to a session, never a button in the picker.
+    it.append(main);
     it.onclick = () => {
       if (!skillSendable()) return;               // note row above explains why
       skillbookEl.hidden = true;

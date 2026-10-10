@@ -34,7 +34,7 @@ const token = readFileSync(join(ROOT, '.clawd-harness.token'), 'utf8').trim();
 const url = `http://127.0.0.1:8787/?t=${token}#/p/self`;
 const browser = await chromium.launch({ executablePath: findChromium() });
 const page = await browser.newPage({ viewport: { width: 500, height: 850 }, hasTouch: true });
-let acceptDialogs = true;                       // the ✕ confirm()
+let acceptDialogs = true;
 const dialogs = [];
 page.on('dialog', d => { dialogs.push(d.message()); acceptDialogs ? d.accept() : d.dismiss(); });
 await page.goto(url, { waitUntil: 'domcontentloaded' });
@@ -163,22 +163,11 @@ r.failChip = await page.evaluate(() => {
 });
 await page.evaluate(() => { window.__upFail = false; attachments = []; renderChips(); });
 
-// 4. the ✕: confirm-gated remove — dismiss keeps it, accept sends skillsRm
-//    (and never a 'send'), modal stays open awaiting the fresh-list reply
+// 4. no ✕: the picker can't remove skills (Austin 10-10 — removal is a
+//    deliberate ask to a session, never a stray tap)
 await page.tap('#skillsBtn');
 await page.evaluate((fakes) => { window.__sent = []; renderSkillbook(fakes); }, FAKES);
-acceptDialogs = false;
-await page.tap('.sk-item .sk-x');
-await page.waitForTimeout(150);
-r.rmNeedsConfirm = dialogs.length === 1 && dialogs[0].includes('print-3d');
-r.rmDismissed = await page.evaluate(() => window.__sent.length === 0);
-acceptDialogs = true;
-await page.tap('.sk-item .sk-x');
-await page.waitForTimeout(150);
-r.rmSent = await page.evaluate(() =>
-  window.__sent.length === 1
-  && window.__sent[0].type === 'skillsRm' && window.__sent[0].name === 'print-3d'
-  && !document.getElementById('skillbook').hidden);
+r.noRmButton = await page.evaluate(() => !document.querySelector('.sk-item .sk-x'));
 
 // 5. reply states: an error note renders; a stale reply after close is dropped
 r.errShown = await page.evaluate(() => {
@@ -200,8 +189,8 @@ console.log('SKILLBOOK:', JSON.stringify(r));
 const ok = r.btnAfterClock && r.noopOutside && r.modalUp && r.fetched && r.rows
   && r.noNote && r.closed && r.uploaded && r.chip && r.notSent && r.boxFocused && r.dedup
   && r.sentOne && r.sentComposed && r.chipGone && r.chipX && r.failChip
-  && r.rmNeedsConfirm && r.rmDismissed && r.rmSent && r.errShown && r.staleDropped;
-console.log(ok ? 'PASS — 📚 fetches the library, a tap attaches a chip (nothing sent), Enter composes text + pointer line, ✕ confirm-removes, errors render'
+  && r.noRmButton && r.errShown && r.staleDropped;
+console.log(ok ? 'PASS — 📚 fetches the library, a tap attaches a chip (nothing sent), Enter composes text + pointer line, no ✕ remove, errors render'
               : 'FAIL');
 await browser.close();
 process.exit(ok ? 0 : 1);
