@@ -498,6 +498,15 @@ NAME_SYS_PROMPT = ("You name software-engineering sessions. Given a transcript, 
                    "the tab is the tightest possible handle for a narrow browser "
                    "tab — one or two words that still identify the task (e.g. "
                    '"local projects", "tab ages", "router port").')
+# 📍 The origin line: the first prompt as one readable sentence, pinned over
+# the terminal (Austin, 10-10: raw prompts full of HTML were hard to read).
+ORIGIN_SYS_PROMPT = ("Given the first message a developer sent to start a "
+                     "coding session, reply with ONLY compact JSON and nothing "
+                     'else: {"origin": "<max 18 words>"}. Summarize what they '
+                     "asked for in plain English, as an imperative (e.g. "
+                     '"Pin an AI summary of the first prompt at the top of the '
+                     'terminal"). Ignore HTML tags, pasted logs and code; '
+                     "describe the request, not the paste.")
 # The *digest* is the volatile companion to the (stable) title/desc: a one-line
 # "what is this session doing right now", refreshed on every Stop so a controller
 # (or the GUI) can read live session state without re-parsing a transcript. See
@@ -3698,6 +3707,7 @@ class ClaudeSession:
                  created=0.0, last_active=0.0, prompted_at=0.0,
                  account="default", config_dir="", ceremony=False,
                  pinned=0.0, test_hint="", model="", ctx_tokens=0, burner=0.0,
+                 origin="",
                  engine="claude", autopilot=0.0, pilot_goal="",
                  pilot_status="", pilot_rounds=0,
                  tldr_text="", tldr_on=False, voice_on=False, fork=False,
@@ -3794,6 +3804,7 @@ class ClaudeSession:
         self.ctx_window = 0                      # codex states its window; 0 = the page guesses from the model
         self.prompt_count = prompt_count
         self.first_prompt = first_prompt
+        self.origin = origin                     # 📍 AI one-liner of first_prompt (#origin strip)
         self.last_active = last_active or self.created   # warmth: drives project sort
         # When the HUMAN last prompted this session — the tab-strip age. Distinct
         # from last_active, which every hook (incl. resume's SessionStart) bumps:
@@ -3894,6 +3905,7 @@ class ClaudeSession:
                 "cid": self.cid, "pid": self.pid, "session_id": self.session_id,
                 "title": self.title, "desc": self.desc, "tab": self.tab,
                 "prompt_count": self.prompt_count, "first_prompt": self.first_prompt,
+                "origin": self.origin,
                 "created": self.created, "last_active": self.last_active,
                 "prompted_at": self.prompted_at,
                 "account": self.account, "config_dir": self.config_dir,
@@ -4006,6 +4018,7 @@ class ClaudeSession:
                 # controller can always retrieve "what did it last say".
                 "lastAnswer": (self.last_answer or "")[:280],
                 "firstPrompt": (self.first_prompt or "")[:500],   # 📍 the #origin strip
+                "origin": self.origin or "",                      # 📍 its AI one-liner
                 "sessionId": self.session_id,
                 "promptCount": self.prompt_count,
                 "lastActive": self.last_active,
@@ -4484,6 +4497,7 @@ class ClaudeSession:
             # whole prompt, not just line 1: the UI pins it over the terminal
             # (#origin — "how did this start?")
             self.first_prompt = prompt.strip()[:2000]
+            threading.Thread(target=self._regenerate_origin, daemon=True).start()
         self.manager.save_registry()
         if self.prompt_count == 1 and prompt.strip():
             seed = ("User: " + prompt.strip())[:3500]
@@ -4502,6 +4516,20 @@ class ClaudeSession:
             print(f"[name {self.cid[:8]}] {self.title!r} — {self.desc!r}", flush=True)
             self.manager.save_registry()
             self.manager.broadcast_sessions()
+
+    def _regenerate_origin(self):
+        """📍 One plain-English line for the #origin strip: what the first
+        prompt asked for (raw prompts carry HTML, pastes, logs). Generated once
+        and persisted; the first prompt never changes. No-op when naming is off
+        (the page shows the tag-stripped prompt instead)."""
+        if self.origin or not self.first_prompt:
+            return
+        origin = generate_origin(self.first_prompt)
+        if not origin:
+            return
+        self.origin = origin[:160]
+        self.manager.save_registry()
+        self.manager.broadcast_sessions()
 
     def _regenerate_digest(self):
         """Refresh the volatile 'what's happening now' digest from the transcript.
@@ -6158,6 +6186,7 @@ class SessionManager:
                     tab=e.get("tab", ""),
                     prompt_count=e.get("prompt_count", 0),
                     first_prompt=e.get("first_prompt", ""),
+                    origin=e.get("origin", ""),
                     created=e.get("created", 0.0),
                     last_active=e.get("last_active", 0.0),
                     prompted_at=e.get("prompted_at", 0.0),
@@ -6237,6 +6266,7 @@ class SessionManager:
                 tab=e.get("tab", ""),
                 prompt_count=e.get("prompt_count", 0),
                 first_prompt=e.get("first_prompt", ""),
+                origin=e.get("origin", ""),
                 created=e.get("created", 0.0),
                 last_active=e.get("last_active", 0.0),
                 prompted_at=e.get("prompted_at", 0.0),
@@ -6266,6 +6296,12 @@ class SessionManager:
             if s.pinned and not s.test_hint:
                 threading.Thread(target=s._regenerate_test_hint,
                                  daemon=True).start()
+        # 📍 same for origin lines on sessions that predate the field: one
+        # serial thread, so a box of old sessions trickles in instead of bursting.
+        todo = [s for s in self.sessions.values() if s.first_prompt and not s.origin]
+        if todo:
+            threading.Thread(target=lambda: [s._regenerate_origin() for s in todo],
+                             daemon=True).start()
         # No auto-created session: with zero projects there are legitimately zero
         # sessions, and the client lands on the projects page.
         self.save_registry()
@@ -9601,6 +9637,14 @@ def generate_digest(transcript_text):
     if not parsed:
         return (None, None)
     return (parsed.get("digest"), parsed.get("blocked_on"))
+
+
+def generate_origin(first_prompt):
+    """📍 The #origin strip's line: what this session's first prompt asked
+    for, or None if naming is unconfigured / the call failed."""
+    parsed = _llm_json(ORIGIN_SYS_PROMPT, first_prompt[:3500], max_tokens=100)
+    o = parsed.get("origin") if parsed else None
+    return o.strip() if isinstance(o, str) and o.strip() else None
 
 
 def generate_test_hint(transcript_text):
