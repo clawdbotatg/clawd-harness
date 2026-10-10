@@ -278,7 +278,8 @@
   #machineTag .ctx.warm { color:#d8c24a; }
   #machineTag .ctx.hot { color:var(--accent); }
   #machineTag .ctx.crit { color:var(--err); }
-  #machineTag .acct, #machineTag .mach { color:var(--ink); }
+  /* reset: .acct is also the 🧠 accounts card (padding/border/margin) */
+  #machineTag .acct, #machineTag .mach { color:var(--ink); border:0; background:none; padding:0; margin:0; }
   /* 🔑 sign-in call to action: a signed-out login beats the pool this session
      is on (server: loginCta). Yellow = the one thing to tap. */
   #machineTag .cta { background:var(--accent); color:#111; font-weight:700;
