@@ -2999,7 +2999,8 @@ class Project:
 
     def __init__(self, pid, name, path, repo_url="", status="ready",
                  error="", created=0.0, pinned=False, kind="gh",
-                 emoji="", emoji_at=0.0, upstream="", default_branch=""):
+                 emoji="", emoji_at=0.0, upstream="", default_branch="",
+                 touched=0.0):
         self.pid = pid
         self.name = name
         self.path = path                         # abs path to the repo
@@ -3018,6 +3019,7 @@ class Project:
         self.miss_since = 0.0                    # local liveness: path first seen missing (in-memory only)
         self.created = created or time.time()
         self.pinned = pinned                     # the harness-itself project: top of list, not removable
+        self.touched = touched                   # last time YOU spawned/prompted here — drives the sort
         self.emoji = emoji                       # AI-picked 1–3 emoji identity badge
         self.emoji_at = emoji_at                 # when it was last generated (drives refresh)
         self.emoji_retry_at = 0.0                # backoff anchor after immature/failed generation (in-memory only)
@@ -3029,7 +3031,8 @@ class Project:
                 "repo_url": self.repo_url, "status": self.status,
                 "created": self.created, "kind": self.kind,
                 "emoji": self.emoji, "emoji_at": self.emoji_at,
-                "upstream": self.upstream, "default_branch": self.default_branch}
+                "upstream": self.upstream, "default_branch": self.default_branch,
+                "touched": self.touched}
 
     def meta(self, session_count=0, busy_count=0, waiting_count=0, last_touched=0.0):
         return {"pid": self.pid, "name": self.name, "path": self.path,
@@ -4365,6 +4368,7 @@ class ClaudeSession:
         self.last_active = time.time()
         if ev == "UserPromptSubmit":
             self.prompted_at = time.time()   # the human prompted — the tab age anchor
+            self.manager.touch_project(self.pid)
         self.hook_count += 1
         # Claude rotates its transcript file on compaction/resume. Main-session
         # lifecycle hooks report the live transcript_path + session_id, so follow
@@ -6081,7 +6085,8 @@ class SessionManager:
                         created=e.get("created", 0.0), kind=kind,
                         emoji=e.get("emoji", ""), emoji_at=e.get("emoji_at", 0.0),
                         upstream=e.get("upstream", ""),
-                        default_branch=e.get("default_branch", ""))
+                        default_branch=e.get("default_branch", ""),
+                        touched=e.get("touched", 0.0))
             if missing:
                 p.status, p.error, p.error_at = "error", "folder missing", time.time()
             self.projects[p.pid] = p
@@ -6286,6 +6291,12 @@ class SessionManager:
                     check_log=e.get("check_log"))
             self.sessions[s.cid] = s
             self._park_for_boot(s)
+        # Projects saved before `touched` existed: seed it from their sessions.
+        unseeded = {pid for pid, p in self.projects.items() if not p.touched}
+        for s in self.sessions.values():
+            p = self.projects.get(s.pid)
+            if p and s.pid in unseeded and s.last_active > p.touched:
+                p.touched = s.last_active
         threading.Thread(target=self._boot_stagger, daemon=True).start()
         # Backfill the 📌 board's blue line for pins that predate the field (or
         # whose generation lost a race with a restart). One-shot at boot: a
@@ -8751,28 +8762,25 @@ class SessionManager:
         with self.lock:
             return self.projects.get(pid)
 
-    def _project_last_active(self):
-        """pid -> most recent session activity (max last_active over its
-        sessions), the raw input to the warmth sort. No lock: reads sessions
-        the same lock-free way as `_ordered()`."""
-        latest = {}
-        for s in self.sessions.values():
-            if s.last_active > latest.get(s.pid, 0.0):
-                latest[s.pid] = s.last_active
-        return latest
+    def _warmth(self, p):
+        """How 'warm' a project is: the last time you spawned a session or sent
+        a prompt in it (persisted, survives closed sessions), else its creation
+        time. Agent tool calls never move it (Austin 10-13)."""
+        return max(p.touched, p.created)
 
-    def _warmth(self, p, latest):
-        """How 'warm' a project is: its most-recently-active session, falling
-        back to its own creation time. Spinning up a session or sending a prompt
-        bumps a session's last_active → floats the project to the top."""
-        return max(latest.get(p.pid, 0.0), p.created)
+    def touch_project(self, pid):
+        """You acted in this project (new session / prompt) → top of the list."""
+        p = self.projects.get(pid)
+        if not p:
+            return
+        p.touched = time.time()
+        self.save_registry()
+        self.broadcast_projects()
 
     def _ordered_projects(self):
-        # pinned (the harness itself) first, then warmest first (most recently
-        # touched session at top), creation time as the fallback/tiebreak.
-        latest = self._project_last_active()
+        # pinned (the harness itself) first, then warmest first
         return sorted(self.projects.values(),
-                      key=lambda p: (not p.pinned, -self._warmth(p, latest)))
+                      key=lambda p: (not p.pinned, -self._warmth(p)))
 
     def session_count(self, pid):
         with self.lock:
@@ -8793,9 +8801,8 @@ class SessionManager:
             return total, busy, waiting
 
     def projects_meta(self):
-        latest = self._project_last_active()
         return [p.meta(*self.session_counts(p.pid),
-                       last_touched=self._warmth(p, latest))
+                       last_touched=self._warmth(p))
                 for p in self._ordered_projects()]
 
     # -- session crud ----------------------------------------------------------
@@ -8813,6 +8820,7 @@ class SessionManager:
         proj = self.projects[pid]
         if proj.kind == "local" and proj.status == "error":
             return None                          # folder missing — Popen on a dead cwd would fail
+        proj.touched = time.time()               # saved + broadcast with the new session below
         if proj.kind == "external" and proj.status == "ready" and EXTERNAL_SYNC \
                 and not ceremony and not fork:  # ⑂ the source is live in that tree; leave it be
             # Never start stale: bring the default branch up to upstream
@@ -9537,20 +9545,15 @@ class SessionManager:
     def broadcast_projects(self, force=False):
         """Fan the project list out — but only when it actually changed.
 
-        Every hook bumps a session's `last_active` (on_hook), and broadcast_sessions
-        chains into here, so an unfiltered version emits a `projects` frame per
-        PreToolUse *and* PostToolUse — a couple per tool call of every running
-        session. The browser answers each one by repainting the projects rung,
-        which is what made the rung churn under the user's hands.
-
-        The fingerprint deliberately EXCLUDES `lastTouched`: it's the warmth
-        timestamp that every hook moves, and nothing renders it — it only feeds
-        the sort, and the list is already sorted here, so a reorder still shows
-        up as a change in pid order. `force=True` bypasses the memo.
+        broadcast_sessions chains into here on every hook, so an unfiltered
+        version emits a `projects` frame per tool call of every running
+        session, and the browser repaints the rung each time (churn under the
+        user's hands). `lastTouched` IS in the fingerprint: it moves only when
+        you spawn/prompt (touch_project), and the fleet page needs the fresh
+        value to merge machines in the right order. `force=True` bypasses the memo.
         """
         meta = self.projects_meta()
-        sig = json.dumps([{k: v for k, v in p.items() if k != "lastTouched"}
-                          for p in meta], sort_keys=True, default=str)
+        sig = json.dumps(meta, sort_keys=True, default=str)
         if not force and sig == self._projects_sig:
             return
         self._projects_sig = sig

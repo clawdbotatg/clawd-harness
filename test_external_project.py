@@ -379,7 +379,7 @@ def run(tmp):
     print("spawn-time sync")
     src = open(server.__file__).read()
     i = src.index("def create_session(")
-    body = src[i:i + 3000]
+    body = src[i:i + 4000]
     check("create_session syncs external projects before spawning",
           "_external_sync(proj.path" in body and body.index("_external_sync(") < body.index("s.start()"))
     check("…gated on EXTERNAL_SYNC and not for ceremonies",
