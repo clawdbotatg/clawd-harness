@@ -8868,7 +8868,11 @@ function dispatchSend(text, ready) {
     if (!currentPid) return false;
     pendingSendText = full;
     stashPending(text || full);       // survive a reload before the session even exists
+    const was = activeDraftId;        // new:<pid> — newSession's view switch saves the still-full box there
     newSession();                     // focus reply → openSession → queued box shown
+    // …and the caller's clearDraft() then hits the NEW context, so the sent text
+    // came back on the rung next visit (Austin 10-19). Scrub that exact copy.
+    try { if (was && (localStorage.getItem(draftKey(was)) || '').trim() === text) localStorage.removeItem(draftKey(was)); } catch {}
     setTimeout(flushPendingSend, 8000);   // fallback if the SessionStart hook never lands
     return true;
   }

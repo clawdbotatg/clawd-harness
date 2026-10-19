@@ -141,6 +141,13 @@ check('the queued text is delivered once the session exists', fr.some(f => f.typ
 await page.waitForTimeout(WAIT + 500);
 st = await state();
 check('the watch does not fire on a session that did spawn', st.view === 'tty' && st.cid === 'c1', JSON.stringify(st));
+// 10-19 (Austin): the spawn's view switch saved the still-full box as the
+// project's outside draft, so the sent text was back on the rung next visit.
+await page.evaluate(() => { pendingSendText = null; setView('sessions'); });
+await page.waitForTimeout(200);
+st = await state();
+check('back on the rung the sent text is gone (not left as a draft)',
+      st.box === '' && await page.evaluate(() => localStorage.getItem('cc_draft:new:p1')) === null, JSON.stringify(st.box));
 
 // ── 5: reload mid-void ──────────────────────────────────────────────────────
 const TEXT2 = 'typed, reloaded, still here';
