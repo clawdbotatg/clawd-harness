@@ -1011,7 +1011,28 @@ EXT_BY_CTYPE = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
                 "image/webp": ".webp",
                 "text/markdown": ".md", "text/plain": ".txt", "text/csv": ".csv",
                 "application/json": ".json", "text/yaml": ".yaml",
-                "text/xml": ".xml", "text/html": ".html"}
+                "text/xml": ".xml", "text/html": ".html",
+                "image/heic": ".heic", "image/heif": ".heif"}
+
+
+def heic_to_jpeg(src):
+    """iPhone photos arrive as HEIC, which claude's Read can't open (and desktop
+    Chrome can't decode, so the browser-side shrink passes them through as-is).
+    Convert to a ≤2000px JPEG with macOS `sips`; drop the original on success.
+    Any failure keeps the HEIC — a stale path beats a lost upload."""
+    dst = src.with_suffix(".jpg")
+    try:
+        r = subprocess.run(["sips", "-s", "format", "jpeg", "-s", "formatOptions", "85",
+                            "-Z", "2000", str(src), "--out", str(dst)],
+                           capture_output=True, timeout=60)
+        if r.returncode == 0 and dst.exists() and dst.stat().st_size > 0:
+            src.unlink(missing_ok=True)
+            print(f"[upload] heic -> {dst}", flush=True)
+            return dst
+        print(f"[upload] heic convert failed: {r.stderr.decode(errors='replace')[:200]}", flush=True)
+    except Exception as e:
+        print(f"[upload] heic convert failed: {e}", flush=True)
+    return src
 REGISTRY_FILE = HERE / ".clawd-harness.sessions.json"   # persists projects+sessions across restarts
 # Serializes the tmp-write+replace in save_registry: two threads saving at once
 # (watch loop vs. a WS op) through one fixed tmp path can publish interleaved
@@ -10474,6 +10495,10 @@ class Handler(BaseHTTPRequestHandler):
         dest = UPLOAD_DIR / name
         dest.write_bytes(data)
         print(f"[upload] {n} bytes -> {dest}", flush=True)
+        if ctype in ("image/heic", "image/heif") or dest.suffix.lower() in (".heic", ".heif") \
+                or data[4:12] in (b"ftypheic", b"ftypheix", b"ftypmif1", b"ftyphevc"):
+            dest = heic_to_jpeg(dest)
+            name = dest.name
         self._serve_json({"path": str(dest), "name": name})
 
     def _serve_file(self, path, ctype):

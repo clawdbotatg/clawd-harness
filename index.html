@@ -1726,7 +1726,7 @@
         <button id="micBtn" title="Hold to dictate (speech-to-text)">🎤</button>
       </div>
       <textarea id="box" placeholder="message"></textarea>
-      <input id="imgInput" type="file" accept="image/*,text/*,application/pdf,.pdf,.md,.markdown,.txt,.csv,.json,.yaml,.yml,.toml,.log,.xml,.html" multiple hidden />
+      <input id="imgInput" type="file" accept="image/*,.heic,.heif,text/*,application/pdf,.pdf,.md,.markdown,.txt,.csv,.json,.yaml,.yml,.toml,.log,.xml,.html" multiple hidden />
       <div id="actions">
         <button id="imgBtn" title="Attach an image or text file">🖼</button>
         <button id="send" title="Send message">📤</button>
@@ -7983,7 +7983,8 @@ async function shrinkImage(file) {
 const TEXT_CTYPE = { md:'text/markdown', markdown:'text/markdown', txt:'text/plain',
                      csv:'text/csv', json:'application/json', yaml:'text/yaml',
                      yml:'text/yaml', toml:'text/plain', log:'text/plain',
-                     xml:'text/xml', html:'text/html', pdf:'application/pdf' };
+                     xml:'text/xml', html:'text/html', pdf:'application/pdf',
+                     heic:'image/heic', heif:'image/heif' };  // harness converts to JPEG
 // PDFs can't downscale like photos; claude's Read takes them up to ~20 MB and
 // the fleet edge (nginx 26m, relay 25 MB) has room for that.
 const PDF_MAX = 20 * 1024 * 1024;
@@ -8015,7 +8016,7 @@ async function uploadFile(file, opts = {}) {
     // A nameless PDF (some pastes) still needs its .pdf — the harness's
     // fallback extension is .png.
     const safeName = (file.name || (ctype === 'application/pdf' ? 'document.pdf' : '')).replace(/[^\w.-]+/g, '_').slice(0, 80);
-    const hdr = (isImage ? (file.type || 'image/png') : ctype)
+    const hdr = (isImage ? (file.type || ctype || 'image/png') : ctype)
                 + (safeName ? `; name="${safeName}"` : '');
     // Fleet: the relay forwards the bytes to the current machine's worker, which
     // POSTs to that machine's local harness /upload and returns a path local to
