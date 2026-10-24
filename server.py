@@ -488,12 +488,13 @@ NAME_SYS_PROMPT = ("You name software-engineering sessions. Given a transcript, 
                    "reply with ONLY compact JSON and nothing else: "
                    '{"title": "<max 5 words>", "desc": "<max 12 words>", '
                    '"tab": "<1-2 words>"}. '
-                   "Name the session by its MAIN objective — the overarching task "
-                   "it was set up to accomplish, usually established in the opening "
-                   "messages. Treat later one-off questions or tangents (a passing "
-                   "pricing/how-to/model question) as side-quests: do NOT let them "
-                   "redefine the name unless the session's whole focus has clearly "
-                   "and durably shifted to a new task. "
+                   "Name the session by what it is working on NOW — the task "
+                   "in the most recent messages. Sessions drift (a bug fix turns "
+                   "into a new feature); when the work has moved on, follow it — "
+                   "the opening task is shown elsewhere. Only a single passing "
+                   "question (a quick how-to, then back to the same work) should "
+                   "not rename it. Ignore boilerplate prompts like \"TLDR\" or "
+                   "wrap-up instructions. "
                    "The title is a terse label; the desc is a one-line summary; "
                    "the tab is the tightest possible handle for a narrow browser "
                    "tab — one or two words that still identify the task (e.g. "
@@ -4530,7 +4531,10 @@ class ClaudeSession:
                              kwargs={"seed_text": seed}, daemon=True).start()
 
     def _regenerate_name(self, seed_text=""):
-        text = seed_text or self._transcript_text_for_naming()
+        # Tail only: the name follows the CURRENT work (Austin, 10-24 — a
+        # session that moved from image centering to price feeds stayed
+        # "Fix image centering"); the 📍 origin line keeps the opening task.
+        text = seed_text or self._transcript_text_for_naming(head_frac=0)
         if not text:
             return
         title, desc, tab = generate_name(text)
@@ -4639,7 +4643,7 @@ class ClaudeSession:
         print(f"[session {self.cid[:8]}] pinned → typing {cmd.strip()}", flush=True)
         self.send_message(cmd, control=True)      # ours, not the human's
 
-    def _transcript_text_for_naming(self, cap=3500):
+    def _transcript_text_for_naming(self, cap=3500, head_frac=0.45):
         path = self.transcript_path or self._find_transcript()
         if not path:
             return ""
@@ -4664,7 +4668,9 @@ class ClaudeSession:
         # one-off question) can't evict the original objective from the namer's
         # window. A pure tail-truncation (text[-cap:]) used to drop the opening
         # task once a session got long, making the name chase whatever was latest.
-        head = int(cap * 0.45)
+        if not head_frac:
+            return text[-cap:]
+        head = int(cap * head_frac)
         tail = cap - head - 3                        # 3 for the "\n…\n" elision marker
         return text[:head] + "\n…\n" + text[-tail:]
 
