@@ -8999,7 +8999,9 @@ function hideChipTip() { chipTip.style.display = 'none'; }
   for (const q of QUICK_PROMPTS) {
     const b = document.createElement('button');
     b.textContent = q.e + ' ' + q.label;
-    b.onclick = () => { hideChipTip(); sendQuick(q.text, q); };
+    // focus back to the composer after a chip, or the next Enter re-fires the
+    // still-focused chip instead of sending what you typed (Austin 10-27)
+    b.onclick = () => { hideChipTip(); sendQuick(q.text, q); if (!isTouch) box.focus(); };
     b.onmouseenter = () => showChipTip(b, q.tip || q.text);
     b.onmouseleave = hideChipTip;
     chipsEl.insertBefore(b, sentEnd);
