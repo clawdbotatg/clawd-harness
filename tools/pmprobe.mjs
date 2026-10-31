@@ -202,11 +202,11 @@ check('coming back to the thinking thread shows the reply it received',
 
 // -- a quick-prompt chip sends into the PM thread (turnHeld is resolved now,
 //    so this chat answers immediately) ----------------------------------------
-await page.click('#quickchips button:first-child');   // the 'tldr' chip
+await page.click('#quickchips button:first-child');   // the 'next?' chip
 await page.waitForTimeout(700);
 const chipFeed = await page.$eval('#pmfeed', e => e.innerText);
 check('a chip tap sends its prompt into the PM chat',
-      /tldr/i.test(chipFeed), chipFeed.replace(/\s+/g, ' ').slice(-120));   // /i: the chip yells "TLDR" since 5e1e881
+      /what is next/i.test(chipFeed), chipFeed.replace(/\s+/g, ' ').slice(-120));
 
 // -- swipe left/right hops between PM threads (same gesture as the session rail) --
 // Synthesize the touch sequence the shared #app swipe handler listens for; it

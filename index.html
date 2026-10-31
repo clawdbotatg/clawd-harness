@@ -8955,10 +8955,10 @@ function holdSend(text, batch) {
 // that scrolls out of view. Re-mine the ranking every few months, and add
 // custom entries freely — it's just this array. Hover a chip for what it sends.
 const QUICK_PROMPTS = [
-  { e: '📋', label: 'tldr',      text: TLDR_CHIP_TEXT },
   { e: '➡️', label: 'next?',     text: 'okay what is next?' },
   { e: '✅', label: 'go',        text: 'yes, go' },
   { e: '🔁', label: 'keep going', text: 'keep going' },
+  { e: '🤷', label: 'idk',       text: "I'm not sure. Think critically and weigh the pros and cons. Make sure you are sure and honest, make the best decision you can, and be able to back up your answer if I ask later." },
   // 📑 wrap — not just a prompt: the harness ARMS the session to close itself
   // once the handoff is written (`harness-close`, refused unless armed). The
   // tab then vanishes into 🗃️ closed sessions with the reply's TLDR as its row.
