@@ -9453,14 +9453,15 @@ const SR = IN_HARNESS_APP ? null : (window.SpeechRecognition || window.webkitSpe
 // --- 👓 Even G1 glasses (📱 clawd harness app only) ---------------------------
 // The app (clawd-dictate ios/Harness/Glasses) holds the Bluetooth link; this
 // page steers it. Inside the app the never-used esc key becomes 👓: tap → red
-// = on. Then a tap on a glasses arm starts the 🎤 (phone mic, Deepgram — the
-// glasses' own mic decodes to hiss, 10-31), what you say shows live on the
-// glasses, and the next arm tap sends. The 🟦 live TLDR (switched on with it)
-// is what the glasses show while claude works.
+// = on. The APP listens (AirPods / phone mic, natively, so it works with the
+// phone locked — the glasses' own mic is hiss, 11-01): tap a glasses arm to
+// talk, tap again and it posts {type:'send'} here. Double tap left/right posts
+// {type:'tab'} to hop sessions. The 🟦 live TLDR (switched on with it) is what
+// the glasses show while claude works.
 // A browser without the app's message handler keeps its plain esc key.
 const GLASSES = (IN_HARNESS_APP && window.webkit?.messageHandlers?.glasses) || null;
 const glassesBtn = GLASSES ? document.querySelector('#keys button[data-k="esc"]') : null;
-let glassesOn = false, glassesLastLog = '', glassesLive = '', glassesTimer = null;
+let glassesOn = false, glassesLastLog = '', glassesLive = '', glassesTimer = null, glassesAlive = null;
 function glassesShow(text) { if (glassesOn && text) GLASSES.postMessage({ op: 'show', text: speakable(text) }); }
 function glassesSent() { if (glassesOn) GLASSES.postMessage({ op: 'sent' }); }
 function setGlasses(on) {
@@ -9471,6 +9472,8 @@ function setGlasses(on) {
   console.log('[glasses] ' + (on ? 'start' : 'stop'));
   GLASSES.postMessage({ op: on ? 'start' : 'stop' });
   clearInterval(glassesTimer); glassesTimer = null; glassesLive = '';
+  clearInterval(glassesAlive); glassesAlive = null;
+  if (on) glassesAlive = setInterval(() => console.log('[glasses] page alive ' + document.visibilityState), 30000);
   // while dictating, mirror the box onto the glasses
   if (on) glassesTimer = setInterval(() => {
     if (!recOn) return;
@@ -9481,7 +9484,7 @@ function setGlasses(on) {
 if (glassesBtn) {
   delete glassesBtn.dataset.k;                       // no longer sends ESC
   glassesBtn.textContent = '👓';
-  glassesBtn.title = 'Glasses (Even G1): tap to turn on (red). Then tap a glasses arm to talk, tap again to send. Replies show on the glasses.';
+  glassesBtn.title = 'Glasses (Even G1): tap to turn on (red). Tap a glasses arm to talk (AirPods/phone mic), tap again to send. Double tap left/right: switch session. Replies show on the glasses.';
   glassesBtn.onclick = () => setGlasses(!glassesOn);
   window.__glasses = (m) => {
     const j = JSON.stringify(m);
@@ -9489,10 +9492,22 @@ if (glassesBtn) {
     if (m.type === 'state') {
       if (!m.on && glassesOn) setGlasses(false);
       glassesBtn.classList.toggle('glasses-wait', !!(m.on && !m.connected));
-    } else if (m.type === 'tap') {
+    } else if (m.type === 'send') {
+      // the app heard you (AirPods / phone mic, natively) — send it to the open session
+      if (!glassesOn || !m.text) return;
+      if (recOn) stopRec();
+      const pre = box.value.trim();
+      box.value = pre ? pre + ' ' + m.text : m.text;
+      sendMessage();
+    } else if (m.type === 'tab') {
       if (!glassesOn) return;
-      if (recOn) { if (box.value.trim()) sendMessage(); else stopRec(); }
-      else { glassesLive = ''; GLASSES.postMessage({ op: 'show', text: 'Listening...' }); startRec(); }
+      cycleSession(m.dir);
+      const s = railSessions().find(x => x.cid === currentCid);
+      if (s) {
+        const st = s.waiting || s.status === 'blocked' ? 'needs you' : s.busy ? 'working' : 'idle';
+        const last = speakable(s.lastAnswer || s.digest || '').slice(0, 140);
+        GLASSES.postMessage({ op: 'show', text: (s.title || 'session') + ' - ' + st + (last ? '\n' + last : '') });
+      }
     }
   };
 }
