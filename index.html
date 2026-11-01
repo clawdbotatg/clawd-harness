@@ -559,6 +559,9 @@
   #keys button:hover { border-color:var(--accent); color:var(--accent); }
   #keys button:active { background:var(--accent); color:#000; }
   #keys button.on { background:var(--accent); color:#000; border-color:var(--accent); }
+  #keys button.glasses-on { background:#c62828; color:#fff; border-color:#c62828; }
+  #keys button.glasses-on.glasses-wait { animation: glassesWait 1s ease-in-out infinite; }
+  @keyframes glassesWait { 50% { opacity:.45; } }
   #attachments { display:flex; flex-wrap:wrap; gap:6px; }
   #attachments:empty { display:none; }
   /* 🤖 autopilot: the checkbox (head of the session-name row, beside the state
@@ -8837,6 +8840,7 @@ box.addEventListener('blur', () => {
 });
 
 function sendMessage() {
+  glassesSent();                             // 👓 the heard words are in the box now; start a fresh message
   // Sending while the mic is on stops it first, then waits for the tail: the
   // last words finalize only after the stream closes (Deepgram flushes on
   // CloseStream, Web Speech on stop) — sending at once would drop them. Capped
@@ -9237,6 +9241,7 @@ function tldrHello(cid) {
 }
 function showTldr(text, final, sents) {
   if (!text) { clearTldr(); return; }
+  glassesShow(text);                         // 👓 the summary is what the glasses show
   if (sents && sents.length) {
     tldrTextEl.textContent = '';
     sents.forEach(([t, ok], i) => {
@@ -9444,6 +9449,45 @@ function speak(text) {
 // as absent there so that tap takes the sttStartAt wait path.
 const IN_HARNESS_APP = /clawd-harness-app/.test(navigator.userAgent || '');
 const SR = IN_HARNESS_APP ? null : (window.SpeechRecognition || window.webkitSpeechRecognition || null);
+
+// --- 👓 Even G1 glasses (📱 clawd harness app only) ---------------------------
+// The app (clawd-dictate ios/Harness/Glasses) holds the Bluetooth link, the
+// glasses mic and Apple's speech-to-text; this page only steers it. Inside the
+// app the never-used esc key becomes 👓: tap → red = listening. What you say
+// goes into the box (after whatever was already typed); a tap on a glasses
+// arm sends it; the 🟦 live TLDR (switched on with it) is what the glasses show.
+// A browser without the app's message handler keeps its plain esc key.
+const GLASSES = (IN_HARNESS_APP && window.webkit?.messageHandlers?.glasses) || null;
+const glassesBtn = GLASSES ? document.querySelector('#keys button[data-k="esc"]') : null;
+let glassesOn = false, glassesBase = '';
+function glassesShow(text) { if (glassesOn && text) GLASSES.postMessage({ op: 'show', text: speakable(text) }); }
+function glassesSent() { if (glassesOn) { glassesBase = ''; GLASSES.postMessage({ op: 'sent' }); } }
+function setGlasses(on) {
+  glassesOn = on;
+  glassesBtn.classList.toggle('glasses-on', on);
+  glassesBtn.classList.toggle('glasses-wait', on);
+  if (on) { glassesBase = box.value; if (!tldrOn) setTldr(true); }
+  GLASSES.postMessage({ op: on ? 'start' : 'stop' });
+}
+if (glassesBtn) {
+  delete glassesBtn.dataset.k;                       // no longer sends ESC
+  glassesBtn.textContent = '👓';
+  glassesBtn.title = 'Glasses: tap to listen through your Even G1 mic (red = on). Tap a glasses arm to send. Replies show on the glasses.';
+  glassesBtn.onclick = () => setGlasses(!glassesOn);
+  window.__glasses = (m) => {
+    if (m.type === 'state') {
+      if (!m.on && glassesOn) setGlasses(false);
+      glassesBtn.classList.toggle('glasses-wait', !!(m.on && !m.connected));
+    } else if (m.type === 'text') {
+      if (!glassesOn) return;
+      const base = glassesBase.trim();
+      box.value = base && m.text ? base + ' ' + m.text : (base || m.text);
+      autosizeBox(); saveDraft();
+    } else if (m.type === 'send') {
+      if (glassesOn && box.value.trim()) sendMessage();
+    }
+  };
+}
 let rec = null, recOn = false;
 let recEngine = null;                          // 'dg' | 'sr' while a hold is live
 // The box is three stretches while dictating: recPre (everything before the
