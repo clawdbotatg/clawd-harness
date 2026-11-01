@@ -9459,14 +9459,14 @@ const SR = IN_HARNESS_APP ? null : (window.SpeechRecognition || window.webkitSpe
 // A browser without the app's message handler keeps its plain esc key.
 const GLASSES = (IN_HARNESS_APP && window.webkit?.messageHandlers?.glasses) || null;
 const glassesBtn = GLASSES ? document.querySelector('#keys button[data-k="esc"]') : null;
-let glassesOn = false, glassesBase = '', glassesLastLog = '';
+let glassesOn = false, glassesWrote = '', glassesLastLog = '';
 function glassesShow(text) { if (glassesOn && text) GLASSES.postMessage({ op: 'show', text: speakable(text) }); }
-function glassesSent() { if (glassesOn) { glassesBase = ''; GLASSES.postMessage({ op: 'sent' }); } }
+function glassesSent() { if (glassesOn) { glassesWrote = ''; GLASSES.postMessage({ op: 'sent' }); } }
 function setGlasses(on) {
   glassesOn = on;
   glassesBtn.classList.toggle('glasses-on', on);
   glassesBtn.classList.toggle('glasses-wait', on);
-  if (on) { glassesBase = box.value; if (!tldrOn) setTldr(true); }
+  if (on) { glassesWrote = ''; if (!tldrOn) setTldr(true); }
   console.log('[glasses] ' + (on ? 'start' : 'stop'));
   GLASSES.postMessage({ op: on ? 'start' : 'stop' });
 }
@@ -9482,9 +9482,14 @@ if (glassesBtn) {
       if (!m.on && glassesOn) setGlasses(false);
       glassesBtn.classList.toggle('glasses-wait', !!(m.on && !m.connected));
     } else if (m.type === 'text') {
-      if (!glassesOn) return;
-      const base = glassesBase.trim();
-      box.value = base && m.text ? base + ' ' + m.text : (base || m.text);
+      // Only ever rewrite our OWN tail of the box: typed text and 🎤 dictation
+      // stay put (10-31: the glasses' empty reset wiped a 🎤 dictation).
+      if (!glassesOn || recOn) return;
+      const cur = box.value;
+      const base = (glassesWrote && cur.endsWith(glassesWrote) ? cur.slice(0, -glassesWrote.length) : cur).replace(/\s+$/, '');
+      if (!m.text) { glassesWrote = ''; return; }
+      glassesWrote = (base ? ' ' : '') + m.text;
+      box.value = base + glassesWrote;
       autosizeBox(); saveDraft();
     } else if (m.type === 'send') {
       if (glassesOn && box.value.trim()) sendMessage();
