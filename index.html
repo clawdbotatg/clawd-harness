@@ -9459,7 +9459,7 @@ const SR = IN_HARNESS_APP ? null : (window.SpeechRecognition || window.webkitSpe
 // A browser without the app's message handler keeps its plain esc key.
 const GLASSES = (IN_HARNESS_APP && window.webkit?.messageHandlers?.glasses) || null;
 const glassesBtn = GLASSES ? document.querySelector('#keys button[data-k="esc"]') : null;
-let glassesOn = false, glassesBase = '';
+let glassesOn = false, glassesBase = '', glassesLastLog = '';
 function glassesShow(text) { if (glassesOn && text) GLASSES.postMessage({ op: 'show', text: speakable(text) }); }
 function glassesSent() { if (glassesOn) { glassesBase = ''; GLASSES.postMessage({ op: 'sent' }); } }
 function setGlasses(on) {
@@ -9467,6 +9467,7 @@ function setGlasses(on) {
   glassesBtn.classList.toggle('glasses-on', on);
   glassesBtn.classList.toggle('glasses-wait', on);
   if (on) { glassesBase = box.value; if (!tldrOn) setTldr(true); }
+  console.log('[glasses] ' + (on ? 'start' : 'stop'));
   GLASSES.postMessage({ op: on ? 'start' : 'stop' });
 }
 if (glassesBtn) {
@@ -9475,6 +9476,8 @@ if (glassesBtn) {
   glassesBtn.title = 'Glasses: tap to listen through your Even G1 mic (red = on). Tap a glasses arm to send. Replies show on the glasses.';
   glassesBtn.onclick = () => setGlasses(!glassesOn);
   window.__glasses = (m) => {
+    const j = JSON.stringify(m);
+    if (m.type !== 'text' && j !== glassesLastLog) console.log('[glasses] ' + (glassesLastLog = j));
     if (m.type === 'state') {
       if (!m.on && glassesOn) setGlasses(false);
       glassesBtn.classList.toggle('glasses-wait', !!(m.on && !m.connected));
