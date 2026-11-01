@@ -9451,48 +9451,48 @@ const IN_HARNESS_APP = /clawd-harness-app/.test(navigator.userAgent || '');
 const SR = IN_HARNESS_APP ? null : (window.SpeechRecognition || window.webkitSpeechRecognition || null);
 
 // --- 👓 Even G1 glasses (📱 clawd harness app only) ---------------------------
-// The app (clawd-dictate ios/Harness/Glasses) holds the Bluetooth link, the
-// glasses mic and Apple's speech-to-text; this page only steers it. Inside the
-// app the never-used esc key becomes 👓: tap → red = listening. What you say
-// goes into the box (after whatever was already typed); a tap on a glasses
-// arm sends it; the 🟦 live TLDR (switched on with it) is what the glasses show.
+// The app (clawd-dictate ios/Harness/Glasses) holds the Bluetooth link; this
+// page steers it. Inside the app the never-used esc key becomes 👓: tap → red
+// = on. Then a tap on a glasses arm starts the 🎤 (phone mic, Deepgram — the
+// glasses' own mic decodes to hiss, 10-31), what you say shows live on the
+// glasses, and the next arm tap sends. The 🟦 live TLDR (switched on with it)
+// is what the glasses show while claude works.
 // A browser without the app's message handler keeps its plain esc key.
 const GLASSES = (IN_HARNESS_APP && window.webkit?.messageHandlers?.glasses) || null;
 const glassesBtn = GLASSES ? document.querySelector('#keys button[data-k="esc"]') : null;
-let glassesOn = false, glassesWrote = '', glassesLastLog = '';
+let glassesOn = false, glassesLastLog = '', glassesLive = '', glassesTimer = null;
 function glassesShow(text) { if (glassesOn && text) GLASSES.postMessage({ op: 'show', text: speakable(text) }); }
-function glassesSent() { if (glassesOn) { glassesWrote = ''; GLASSES.postMessage({ op: 'sent' }); } }
+function glassesSent() { if (glassesOn) GLASSES.postMessage({ op: 'sent' }); }
 function setGlasses(on) {
   glassesOn = on;
   glassesBtn.classList.toggle('glasses-on', on);
   glassesBtn.classList.toggle('glasses-wait', on);
-  if (on) { glassesWrote = ''; if (!tldrOn) setTldr(true); }
+  if (on && !tldrOn) setTldr(true);
   console.log('[glasses] ' + (on ? 'start' : 'stop'));
   GLASSES.postMessage({ op: on ? 'start' : 'stop' });
+  clearInterval(glassesTimer); glassesTimer = null; glassesLive = '';
+  // while dictating, mirror the box onto the glasses
+  if (on) glassesTimer = setInterval(() => {
+    if (!recOn) return;
+    const t = box.value.trim();
+    if (t && t !== glassesLive) { glassesLive = t; GLASSES.postMessage({ op: 'show', text: '> ' + t.slice(-190) }); }
+  }, 400);
 }
 if (glassesBtn) {
   delete glassesBtn.dataset.k;                       // no longer sends ESC
   glassesBtn.textContent = '👓';
-  glassesBtn.title = 'Glasses: tap to listen through your Even G1 mic (red = on). Tap a glasses arm to send. Replies show on the glasses.';
+  glassesBtn.title = 'Glasses (Even G1): tap to turn on (red). Then tap a glasses arm to talk, tap again to send. Replies show on the glasses.';
   glassesBtn.onclick = () => setGlasses(!glassesOn);
   window.__glasses = (m) => {
     const j = JSON.stringify(m);
-    if (m.type !== 'text' && j !== glassesLastLog) console.log('[glasses] ' + (glassesLastLog = j));
+    if (j !== glassesLastLog) console.log('[glasses] ' + (glassesLastLog = j));
     if (m.type === 'state') {
       if (!m.on && glassesOn) setGlasses(false);
       glassesBtn.classList.toggle('glasses-wait', !!(m.on && !m.connected));
-    } else if (m.type === 'text') {
-      // Only ever rewrite our OWN tail of the box: typed text and 🎤 dictation
-      // stay put (10-31: the glasses' empty reset wiped a 🎤 dictation).
-      if (!glassesOn || recOn) return;
-      const cur = box.value;
-      const base = (glassesWrote && cur.endsWith(glassesWrote) ? cur.slice(0, -glassesWrote.length) : cur).replace(/\s+$/, '');
-      if (!m.text) { glassesWrote = ''; return; }
-      glassesWrote = (base ? ' ' : '') + m.text;
-      box.value = base + glassesWrote;
-      autosizeBox(); saveDraft();
-    } else if (m.type === 'send') {
-      if (glassesOn && box.value.trim()) sendMessage();
+    } else if (m.type === 'tap') {
+      if (!glassesOn) return;
+      if (recOn) { if (box.value.trim()) sendMessage(); else stopRec(); }
+      else { glassesLive = ''; GLASSES.postMessage({ op: 'show', text: 'Listening...' }); startRec(); }
     }
   };
 }
