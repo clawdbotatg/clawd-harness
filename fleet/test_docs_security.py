@@ -112,7 +112,9 @@ class HttpTests(unittest.TestCase):
                  "FLEET_DOCS_CREDENTIALS_FILE": str(cls.credentials),
                  "FLEET_MAX_DOC_BYTES": "1024", "FLEET_WORKER_TOKEN": "worker-token",
                  "FLEET_MOBILE_TOKEN": "mobile-token", "FLEET_PREFS_FILE": str(root / "prefs"),
-                 "FLEET_SESSIONS_FILE": str(root / "sessions")},
+                 "FLEET_SESSIONS_FILE": str(root / "sessions"),
+                 "FLEET_ROSTER_FILE": str(root / "roster"), "FLEET_TODOS_FILE": str(root / "todos"),
+                 "FLEET_TODO_BRIDGE_FILE": str(root / "todo-bridge")},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(50):
             try:

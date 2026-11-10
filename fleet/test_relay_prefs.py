@@ -46,6 +46,11 @@ ENV = {
     "FLEET_PREFS_FILE": str(PREFS),
     "FLEET_SESSIONS_FILE": str(Path(tempfile.gettempdir()) / "clawd-fleet-test-prefs.sessions.json"),
     "FLEET_PUSH_SUBS_FILE": str(Path(tempfile.gettempdir()) / "clawd-fleet-test-prefs.push.json"),
+    # never the box's real roster / iron to-do / bridge-token files — this test's
+    # irons write PRUNES every to-do list whose iron it doesn't know
+    "FLEET_ROSTER_FILE": str(Path(tempfile.gettempdir()) / "clawd-fleet-test-prefs.roster.json"),
+    "FLEET_TODOS_FILE": str(Path(tempfile.gettempdir()) / "clawd-fleet-test-prefs.todos.json"),
+    "FLEET_TODO_BRIDGE_FILE": str(Path(tempfile.gettempdir()) / "clawd-fleet-test-prefs.todo-bridge.token"),
 }
 
 

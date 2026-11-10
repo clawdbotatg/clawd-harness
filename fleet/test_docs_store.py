@@ -59,6 +59,10 @@ ENV = {
     "FLEET_PREFS_FILE": str(TMP / "prefs.json"),
     "FLEET_SESSIONS_FILE": str(TMP / "sessions.json"),
     "FLEET_PUSH_SUBS_FILE": str(TMP / "push.json"),
+    # never the box's real roster / iron to-do / bridge-token files
+    "FLEET_ROSTER_FILE": str(TMP / "roster.json"),
+    "FLEET_TODOS_FILE": str(TMP / "todos.json"),
+    "FLEET_TODO_BRIDGE_FILE": str(TMP / "todo-bridge.token"),
 }
 
 

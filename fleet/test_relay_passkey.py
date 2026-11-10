@@ -44,6 +44,10 @@ ENV = {
     # Same isolation for the persisted edge-session table (relay writes it on
     # every passkey success) — never the live fleet/.clawd-fleet.sessions.json.
     "FLEET_SESSIONS_FILE": str(Path(tempfile.gettempdir()) / "clawd-fleet-test.sessions.json"),
+    # never the box's real roster / iron to-do / bridge-token files
+    "FLEET_ROSTER_FILE": str(Path(tempfile.gettempdir()) / "clawd-fleet-test.roster.json"),
+    "FLEET_TODOS_FILE": str(Path(tempfile.gettempdir()) / "clawd-fleet-test.todos.json"),
+    "FLEET_TODO_BRIDGE_FILE": str(Path(tempfile.gettempdir()) / "clawd-fleet-test.todo-bridge.token"),
 }
 
 

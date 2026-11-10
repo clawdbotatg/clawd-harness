@@ -58,6 +58,7 @@ ENV = {
     "FLEET_SESSIONS_FILE": str(TMP / "clawd-fleet-test-todos.sessions.json"),
     "FLEET_PUSH_SUBS_FILE": str(TMP / "clawd-fleet-test-todos.push.json"),
     "FLEET_DOCS_DIR": str(TMP / "clawd-fleet-test-todos.docs"),
+    "FLEET_ROSTER_FILE": str(TMP / "clawd-fleet-test-todos.roster.json"),
 }
 FAILS = []
 

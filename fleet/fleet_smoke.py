@@ -27,7 +27,8 @@ ENV = {**os.environ, "FLEET_PORT": PORT,
        "FLEET_REQUIRE_PASSKEY": "0",  # routing smokes: 2nd factor off
        "FLEET_RELAY": RELAY, "FLEET_BIND": "127.0.0.1",
        "FLEET_E2E_REQUIRE": "0",  # diagnostic suite: exec only exists on non-E2E workers
-       "FLEET_ALLOW_EXEC": "1"}   # this suite exercises the exec diagnostic
+       "FLEET_ALLOW_EXEC": "1",
+       "FLEET_SELF_RESTART": "0"}   # a real fleet.env here must not re-exec the test workers at production   # this suite exercises the exec diagnostic
 
 procs = []
 
