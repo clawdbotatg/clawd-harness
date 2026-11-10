@@ -30,6 +30,14 @@ notes (TLDR/voice, dictation, fork, 🔍 check, iron to-dos, skills):
 - Git: **clawdbotatg** / `clawd@buidlguidl.com`, HTTPS. If push asks for a
   password: `gh auth switch --user clawdbotatg`, push with
   `-c credential.helper='!gh auth git-credential'`, switch back.
+- **Two sessions, one folder: use a worktree.** This applies to every project
+  under `projects/` too. Run `git status` before you start. Files changed or
+  commits made that aren't yours mean another session is in this checkout:
+  do your work in `git worktree add <dir> origin/main` (or a branch), then
+  push from there. Staging only your own files is not enough: the index is
+  shared, and the other session's commit takes your staged changes with it
+  (Austin, 11-10: a half-finished delete got pushed that way and broke a
+  deploy).
 
 ## Run
 
