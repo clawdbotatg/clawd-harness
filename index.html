@@ -2625,21 +2625,31 @@ function renderNeedsBar() {
   const inSession = currentView() === 'transcript' || currentView() === 'tty';
   const items = needsYouSessions().filter(x => !(inSession && x.cid === currentCid));
   if (!items.length) { bar.hidden = true; bar.textContent = ''; return; }
-  bar.textContent = '';
-  const lbl = document.createElement('span'); lbl.className = 'nb-lbl'; lbl.textContent = '⏳';
-  bar.appendChild(lbl);
-  for (const it of items) {
-    const chip = document.createElement('button');
-    chip.className = 'nb-chip';
-    const who = document.createElement('span'); who.className = 'nb-who';
-    who.textContent = it.machine.replace(/^clawd-/, '') + ' · ' + it.title;
-    const ask = document.createElement('span'); ask.className = 'nb-ask';
-    ask.textContent = it.ask || 'waiting on you';   // the actual question, not a generic label
-    chip.appendChild(who); chip.appendChild(ask);
-    chip.title = it.title + (it.ask ? ' — ' + it.ask : '');
-    chip.onclick = () => { location.hash = it.hash; };   // → hashchange → resolvePendingNav (machine-aware)
-    bar.appendChild(chip);
-  }
+  // Reconcile by machine+cid — never wipe (landmine 4): this runs on every
+  // sessions frame from any machine, and these chips are tap targets.
+  let lbl = bar.querySelector('.nb-lbl');
+  if (!lbl) { lbl = document.createElement('span'); lbl.className = 'nb-lbl'; lbl.textContent = '⏳'; bar.insertBefore(lbl, bar.firstChild); }
+  const have = new Map([...bar.querySelectorAll('.nb-chip')].map(n => [n.dataset.key, n]));
+  const put = (el, prop, v) => { if (el[prop] !== v) el[prop] = v; };
+  items.forEach((it, i) => {
+    const key = it.machine + '\x1f' + it.cid;
+    let chip = have.get(key);
+    have.delete(key);
+    if (!chip) {
+      chip = document.createElement('button');
+      chip.className = 'nb-chip'; chip.dataset.key = key;
+      chip.appendChild(document.createElement('span')).className = 'nb-who';
+      chip.appendChild(document.createElement('span')).className = 'nb-ask';
+      chip.onclick = () => { location.hash = chip._hash; };   // → hashchange → resolvePendingNav (machine-aware)
+    }
+    chip._hash = it.hash;
+    put(chip.querySelector('.nb-who'), 'textContent', it.machine.replace(/^clawd-/, '') + ' · ' + it.title);
+    put(chip.querySelector('.nb-ask'), 'textContent', it.ask || 'waiting on you');   // the actual question, not a generic label
+    put(chip, 'title', it.title + (it.ask ? ' — ' + it.ask : ''));
+    const at = bar.children[i + 1];                          // slot 0 is the ⏳ label
+    if (at !== chip) bar.insertBefore(chip, at || null);
+  });
+  have.forEach(n => n.remove());
   bar.hidden = false;
 }
 
@@ -4727,64 +4737,88 @@ function renderSessionBar(view) {
   // hidden on the projects rung and both 🔥 iron surfaces (the global strip on
   // a sessionless iron's page would contradict the page saying "no sessions")
   if (view === 'projects' || view === 'irons' || view === 'iron' || !sorted.length) {
-    bar.hidden = true; bar.innerHTML = '';
+    bar.hidden = true; bar.innerHTML = ''; delete bar.dataset.pmfp;
     if (!wasHidden) refitTTY();
     return;
   }
-  // The 🔎 node lives for the app's life: wipe the tabs around it and insert
-  // new ones BEFORE it, never move it.
-  const fbox = ensureTabFilter(bar);
-  Array.from(bar.children).forEach(c => { if (c !== fbox) c.remove(); });
+  // Reconcile by cid — NEVER wipe (landmine 4). This runs on every sessions /
+  // projects frame and roster pulse, several times a second; the strip used to
+  // delete and recreate every tab each time, so a click whose mousedown landed
+  // on the old node and mouseup on its replacement was simply lost ("I click a
+  // tab and nothing happens", Austin 11-09). A tab's node now lives as long as
+  // its session is on the strip; only what changed is written.
+  delete bar.dataset.pmfp;                                       // the PM strip's fingerprint is void once we own the bar
+  const fbox = ensureTabFilter(bar);                             // the 🔎 node lives for the app's life
+  const have = new Map();
+  Array.from(bar.children).forEach(c => {
+    if (c === fbox) return;
+    if (c.dataset && c.dataset.cid && c.classList.contains('stab')) have.set(c.dataset.cid, c);
+    else c.remove();                                             // PM-view leftovers (thread tabs, controls)
+  });
   // The strip trims badges against ITS OWN tabs, not every project fleet-wide:
   // a tab whose code shares no leading emoji with any other tab here shows one
   // glyph, however many projects elsewhere start the same way (Austin, 09-30:
   // "mic bug" wore 🎤✅📱 with no other 🎤 tab in sight).
   const stripEm = emojiPrefixMap(sorted.map(sessionEmojiFull));
-  sorted.forEach(s => {
-    const tab = document.createElement('button');
+  const put = (el, prop, v) => { if (el[prop] !== v) el[prop] = v; };   // write only what changed
+  sorted.forEach((s, i) => {
+    let tab = have.get(s.cid);
+    have.delete(s.cid);
+    if (!tab) {
+      tab = document.createElement('button');
+      tab.dataset.cid = s.cid;
+      tab.appendChild(document.createElement('span')).className = 'sdot';
+      tab.appendChild(document.createElement('span')).className = 'lbl';
+      if (TAB_DND) { tab.draggable = true; tab.ondragstart = e => tabDragStart(e, tab.dataset.cid, 'strip'); tab.ondragend = tabDragEnd; }   // 🍳 drag up to the island
+      tab.onclick = () => focusSession(tab._s);   // the LATEST frame's session; may cross project/machine; cancels any queued new-session send
+    }
+    tab._s = s;
     const mOff = FLEET && s._machine && !isMachineOnline(s._machine);   // cached tab — host not on the roster right now
-    tab.className = 'stab' + (s.cid === currentCid ? ' active' : '') +
+    put(tab, 'className', 'stab' + (s.cid === currentCid ? ' active' : '') +
                     (s.pinned ? ' parked' : '') +               // 📌 members ride the scoped iron rail
-                    (sessionIsLocal(s) ? ' local' : '') + (mOff ? ' moff' : '');
-    tab.title = (s.title || 'new session') +
+                    (sessionIsLocal(s) ? ' local' : '') + (mOff ? ' moff' : ''));
+    put(tab, 'title', (s.title || 'new session') +
                 (s.pinned ? ' — 📌 pinned (parked on the board)' : '') +
                 (s.wrapClosing ? ' — ' + (s.wrapKill ? '🔫' : '📑') + ' closing when its turn ends' : s.wrapArmed ? (s.wrapKill ? ' — 🔫 killed, writing its report (will close itself)' : ' — 📑 wrapping up (will close itself)') : '') +
                 (s.checkArmed ? ' — 🔍 writing its brief; a reviewer opens when this turn ends' : s.checkOf ? ' — 🔍 double-checking another session\'s work' : '') +
-                (mOff ? ` — ${s._machine} is offline (cached tab; opens when it returns)` : '');
-    if (TAB_DND) { tab.draggable = true; tab.ondragstart = e => tabDragStart(e, s.cid, 'strip'); tab.ondragend = tabDragEnd; }   // 🍳 drag up to the island
-    tab.onclick = () => focusSession(s);   // may cross project/machine; cancels any queued new-session send
-    const dot = document.createElement('span');
-    dot.className = 'sdot' + dotState(s);
-    tab.appendChild(dot);
+                (mOff ? ` — ${s._machine} is offline (cached tab; opens when it returns)` : ''));
+    put(tab.querySelector('.sdot'), 'className', 'sdot' + dotState(s));
+    const lbl = tab.querySelector('.lbl');
     const full = sessionEmojiFull(s);
     const em = full ? (stripEm.get(full) || full) : '';   // project badge: which project this tab belongs to
+    let pe = tab.querySelector('.pemoji');
     if (em) {
-      const pe = document.createElement('span');
-      pe.className = 'pemoji'; pe.textContent = em;
-      if (full !== em) pe.title = full;  // hover shows the project's whole code
-      tab.appendChild(pe);
-    }
-    const lbl = document.createElement('span');
+      if (!pe) { pe = document.createElement('span'); pe.className = 'pemoji'; tab.insertBefore(pe, lbl); }
+      put(pe, 'textContent', em);
+      put(pe, 'title', full !== em ? full : '');   // hover shows the project's whole code
+    } else if (pe) pe.remove();
     // the AI's 1-2 word tab handle when it exists; full title until then
     // 🔍 a source writing its brief, or a reviewer whose namer dropped the seeded 🔍
     const chk = (s.checkArmed || reviewerOf(s.cid) || (s.checkOf && !/^🔍/.test(s.tab || s.title || ''))) ? '🔍 ' : '';   // 🔍 also while its reviewer runs in the pane
-    lbl.className = 'lbl'; lbl.textContent = (s.pinned ? '📌 ' : '') + ((s.wrapArmed || s.wrapClosing) ? (s.wrapKill ? '🔫 ' : '📑 ') : '') + chk + (s.tab || s.title || 'new session');
-    tab.appendChild(lbl);
-    const eb = engineBadge(s);           // only renders for non-claude engines
-    if (eb) tab.appendChild(eb);
+    put(lbl, 'textContent', (s.pinned ? '📌 ' : '') + ((s.wrapArmed || s.wrapClosing) ? (s.wrapKill ? '🔫 ' : '📑 ') : '') + chk + (s.tab || s.title || 'new session'));
     // the honest stamp: how long since YOU last prompted this session.
     // promptedAt moves only on a human prompt — lastActive (the fallback for
     // sessions that predate the field) is bumped by every hook, including the
     // SessionStart a restart fires, which is how all tabs once read 0s at once.
     const age = fmtAge(s.promptedAt || s.lastActive);
+    let ag = tab.querySelector('.age');
     if (age) {
-      const ag = document.createElement('span');
-      ag.className = 'age'; ag.textContent = age;
-      ag.title = 'last prompted ' + age + ' ago';
-      tab.appendChild(ag);
-    }
-    bar.insertBefore(tab, fbox);
+      if (!ag) { ag = document.createElement('span'); ag.className = 'age'; tab.appendChild(ag); }
+      put(ag, 'textContent', age);
+      put(ag, 'title', 'last prompted ' + age + ' ago');
+    } else if (ag) { ag.remove(); ag = null; }
+    const wantEb = !!(s.engine && s.engine !== 'claude');   // only non-claude engines wear a badge
+    let eb = tab.querySelector('.ebadge');
+    if (wantEb && (!eb || eb.textContent !== s.engine)) {
+      if (eb) eb.remove();
+      tab.insertBefore(engineBadge(s), ag);                // after the label, before the age
+    } else if (!wantEb && eb) eb.remove();
+    // slot i (the tabs sit before the 🔎 box, in order): move only a tab that is out of place
+    const at = bar.children[i];
+    if (at !== tab) bar.insertBefore(tab, at || fbox);
   });
+  have.forEach(n => n.remove());                                 // sessions that left the strip
+  if (bar.lastElementChild !== fbox) bar.appendChild(fbox);
   bar.hidden = false;
   if (wasHidden) refitTTY();
   paintTabMore();
@@ -12208,6 +12242,17 @@ function renderPmFeed() {
 // PM threads in the #sessionbar: same .stab look as session tabs (dot + title),
 // a subtle ✕ to archive, then trailing controls (new / debug).
 function renderPmBar(bar, wasHidden) {
+  // This runs on every sessions frame while the PM view is up. Rebuild only
+  // when what the strip SHOWS changed — a wipe eats the thread tab, the ✕ or
+  // the model <select> under a finger (landmine 4).
+  const fp = JSON.stringify([pmThreads.map(t => [t.id, t.title, t.desc, !!t.archived]), pmCurrent, pmArchOpen,
+                             !!pmBusy, pmBusyTid, !pmvc ? 0 : (pmvc.connecting ? 1 : 2), pmVoiceLive(),
+                             pmState.backend, pmState.models, pmState.model]);
+  if (bar.dataset.pmfp === fp && bar.firstElementChild) {
+    if (bar.hidden) { bar.hidden = false; refitTTY(); }
+    return;
+  }
+  bar.dataset.pmfp = fp;
   bar.innerHTML = '';
   pmThreads.forEach(t => {
     if (t.archived && !pmArchOpen) return;
