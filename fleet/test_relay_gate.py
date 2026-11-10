@@ -58,6 +58,7 @@ ENV = {
     "FLEET_UNAUTH_TTL": "10",
     "FLEET_MOBILE_MAX_MESSAGE": str(64 * 1024),
     "FLEET_UPLOAD_QUOTA": str(10 * 1024),
+    "FLEET_MAX_UPLOAD": "9000",
     # every state file isolated — never the live fleet/.clawd-fleet.*.json
     "FLEET_PASSKEY_FILE": str(TMP / "passkeys.json"),
     "FLEET_SESSIONS_FILE": str(TMP / "sessions.json"),
@@ -139,6 +140,8 @@ def post_upload(qs, body=b"x" * 100):
             return r.status
     except urllib.error.HTTPError as e:
         return e.code
+    except (urllib.error.URLError, ConnectionError, OSError):
+        return -1          # refused before the body was read: the socket was cut
 
 
 def main():
@@ -192,7 +195,12 @@ def main():
         check("upload with valid session passes the gate (502 no such machine)",
               post_upload(f"machine=no-such-box&s={quote(GOOD_SESS)}") == 502)
         # 5. quota (10 KiB/window in this env): the second 8 KiB body trips it
-        post_upload(f"machine=no-such-box&s={quote(GOOD_SESS)}", body=b"x" * 8000)
+        # (audit 2026-11-09) an oversized body is refused BEFORE it is charged:
+        # it used to burn the window, so the next honest upload got a 429
+        too_big = post_upload(f"machine=no-such-box&s={quote(GOOD_SESS)}", body=b"x" * 9500)
+        check("oversized upload refused (413, or cut before the body)", too_big in (413, -1))
+        check("…and it did not use up the upload quota",
+              post_upload(f"machine=no-such-box&s={quote(GOOD_SESS)}", body=b"x" * 8000) == 502)
         check("upload quota trips → 429",
               post_upload(f"machine=no-such-box&s={quote(GOOD_SESS)}", body=b"x" * 8000) == 429)
 
@@ -232,9 +240,31 @@ def main():
         check("earlier parked mobiles unaffected", not (mob.closed.is_set() or p3.closed.is_set()))
         p2.send({"type": "auth", "session": GOOD_SESS})
         check("valid session authenticates", p2.wait_for(lambda f: f.get("type") == "authOk") is not None)
+        # (audit 2026-11-09) "alerts off" reaches the workers, who do the ringing
+        wk.inbox.clear()
+        p2.send({"type": "pushSubscribe", "subscription": {"endpoint": "https://push.example/a"}})
+        check("a new push subscription is fanned out to workers",
+              wk.wait_for(lambda f: f.get("type") == "pushSub"
+                          and (f.get("sub") or {}).get("endpoint") == "https://push.example/a") is not None)
+        p2.send({"type": "pushUnsubscribe", "endpoint": "https://push.example/a"})
+        gone = wk.wait_for(lambda f: f.get("type") == "pushSubs")
+        check("turning alerts off sends workers the reduced list (they stop ringing)",
+              gone is not None and not any(x.get("endpoint") == "https://push.example/a"
+                                           for x in gone.get("subs") or []))
+        # (audit 2026-11-09) a worker that reconnects supersedes its old socket:
+        # the old one is CLOSED at once, and its exit does not read as "offline"
+        wk2 = Peer(f"{RELAY}/ws?role=worker&machine=gatebox&host=gate.local&t={quote(WTOK)}")
+        check("a superseded worker socket is closed right away", wk.closed.wait(3.0))
+        time.sleep(0.5)                          # let the old handler thread exit
+        p2.inbox.clear()
+        p2.send({"type": "list"})
+        ros = p2.wait_for(lambda f: f.get("type") == "machines")
+        check("…and the machine still reads online on its new socket",
+              ros is not None and any(m.get("id") == "gatebox" and m.get("online")
+                                      for m in ros.get("machines") or []))
         check("unauthenticated socket expires despite answering pings", mob.closed.wait(25))
         check("authenticated socket survives login deadline", not p2.closed.is_set())
-        for p in (mob, wk, big, p2, p3, p4):
+        for p in (mob, wk, wk2, big, p2, p3, p4):
             p.close()
     finally:
         proc.terminate()

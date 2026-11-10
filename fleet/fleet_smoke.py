@@ -17,7 +17,7 @@ from pathlib import Path
 import fleet_ws
 
 HERE = Path(__file__).resolve().parent
-PORT = "8799"            # dedicated test port
+PORT = "8797"            # dedicated test port (8799 is the controller chat default)
 MOBILE_TOKEN = "mobile-smoketoken"   # split tokens — exercise the auth model
 WORKER_TOKEN = "worker-smoketoken"
 RELAY = f"ws://127.0.0.1:{PORT}"

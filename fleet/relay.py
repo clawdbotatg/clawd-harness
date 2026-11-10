@@ -255,6 +255,7 @@ PREFS_FILE = Path(os.environ.get("FLEET_PREFS_FILE") or (HERE / ".clawd-fleet.pr
 # running without a passkey. Aggregate counts + build info only, never content.
 ROSTER_FILE = Path(os.environ.get("FLEET_ROSTER_FILE") or (HERE / ".clawd-fleet.roster.json"))
 _prefs_lock = threading.Lock()
+_roster_lock = threading.Lock()   # _dump_roster runs from every worker thread + the ping loop
 # ☑ per-iron to-do lists: item-level ops applied HERE (fleet/todo_store.py —
 # the same module the direct-mode harness applies to its registry), snapshot
 # broadcast to every authed mobile after each. Own file, own lock: a checkbox
@@ -975,15 +976,18 @@ class Relay:
                 m.send_json(msg)
 
     def _dump_roster(self, machines):
-        """Best-effort write of the roster for shipcheck (see ROSTER_FILE)."""
-        try:
-            tmp = ROSTER_FILE.with_name(ROSTER_FILE.name + f".tmp{os.getpid()}")
-            tmp.write_text(json.dumps({"ts": int(time.time()), "machines": machines,
-                                       "expected": sorted(WORKER_ALLOW)}))
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, ROSTER_FILE)
-        except OSError:
-            pass
+        """Best-effort write of the roster for shipcheck (see ROSTER_FILE).
+        Under a lock: the tmp name is per-process, not per-thread, and two
+        overlapping writes of different lengths left a torn file behind."""
+        with _roster_lock:
+            try:
+                tmp = ROSTER_FILE.with_name(ROSTER_FILE.name + f".tmp{os.getpid()}")
+                tmp.write_text(json.dumps({"ts": int(time.time()), "machines": machines,
+                                           "expected": sorted(WORKER_ALLOW)}))
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, ROSTER_FILE)
+            except OSError:
+                pass
 
     # ── worker lifecycle ────────────────────────────────────────────────────
     def add_worker(self, conn):
@@ -991,8 +995,14 @@ class Relay:
             old = self.workers.get(conn.ident)
             if old and old is not conn:
                 old.dead = True  # a reconnect supersedes the stale connection
+            else:
+                old = None
             self.workers[conn.ident] = conn
             subs = list(self.push_subs)
+        if old:
+            # Close outside the lock (as add_mobile does): the old handler
+            # thread otherwise parks on its dead socket for up to 90s.
+            old.close()
         print(f"[relay] worker online: {conn.ident} ({conn.host}) [{conn.peer}]", flush=True)
         self.broadcast_roster()
         # Hand the worker the current push subscriptions so it can ring the phone
@@ -1002,8 +1012,13 @@ class Relay:
 
     def drop_worker(self, conn):
         with self.lock:
-            if self.workers.get(conn.ident) is conn:
+            mine = self.workers.get(conn.ident) is conn
+            if mine:
                 del self.workers[conn.ident]
+        if not mine:
+            # A superseded connection finally exiting: its machine is ONLINE on
+            # the newer one — don't log "offline" or pulse the roster for it.
+            return
         print(f"[relay] worker offline: {conn.ident} [{conn.peer}]", flush=True)
         self.broadcast_roster()
 
@@ -1234,7 +1249,13 @@ class Relay:
             with self.lock:
                 self.push_subs = [s for s in self.push_subs if s.get("endpoint") != ep]
                 subs_snapshot = list(self.push_subs)
+                workers = list(self.workers.values())
             save_push_subs(subs_snapshot)
+            # Tell the workers too: they each cache the list and do the actual
+            # ringing, so "alerts off" used to keep ringing until a worker
+            # happened to reconnect. `pushSubs` replaces their cache.
+            for w in workers:
+                w.send_json({"type": "pushSubs", "subs": subs_snapshot})
             return
         if t == "toMachine":
             target = frame.get("machine")
@@ -1872,13 +1893,15 @@ class Handler(BaseHTTPRequestHandler):
         if n <= 0:
             self.close_connection = True
             return self.send_error(400, "invalid content length")
-        if not RELAY.upload_quota_ok(quota_key, n):
-            self.close_connection = True
-            return self.send_error(429, "upload quota exceeded")
         if n > MAX_UPLOAD:
             # Refuse oversized bodies up front; don't read them into memory.
             self.close_connection = True
             return self.send_error(413, "upload too large")
+        # Charged only after the size check: an oversized request we were
+        # always going to refuse used to burn the caller's upload window.
+        if not RELAY.upload_quota_ok(quota_key, n):
+            self.close_connection = True
+            return self.send_error(429, "upload quota exceeded")
         body = self.rfile.read(n) if n > 0 else b""   # always drain to keep the stream aligned
         machine = q.get("machine", [""])[0]
         with RELAY.lock:
@@ -1897,7 +1920,9 @@ class Handler(BaseHTTPRequestHandler):
             w.bulk_credit += len(frame)
         try:
             w.send_text(frame)
-            ok = ev.wait(timeout=35)
+            # send_text returns quietly on a dead/backlogged link — don't sit
+            # out the full 35s for an answer that can't come.
+            ok = False if w.dead else ev.wait(timeout=35)
         finally:
             with w.credit_lock:
                 w.bulk_credit -= len(frame)

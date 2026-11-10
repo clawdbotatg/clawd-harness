@@ -14,8 +14,10 @@
 #   - only on main, only with a clean worktree (a live edit is never clobbered)
 #   - fetch + merge --ff-only, never a rebase or a merge commit
 #   - a UI-only change needs NO restart (the relay reads index.html per request)
-#   - fleet/ code changed  -> restart the relay + worker (they are Restart=always
-#     and every client reconnects; this is routine)
+#   - a file the RELAY imports changed -> restart the relay (Restart=always;
+#     every phone and worker reconnects). Tests, smokes and worker-only modules
+#     do NOT restart it: every relay restart drops every socket in the fleet.
+#   - a file the WORKER watches changed -> restart the box's relay-node worker
 #   - controller/ changed  -> WARN ONLY. Restarting mid-turn would kill a running
 #     PM turn, so that stays a human's call.
 # Disable with: sudo systemctl disable --now clawd-fleet-pull.timer
@@ -43,9 +45,15 @@ changed=$(git diff --name-only "$before" "$after")
 echo "pulled $(git rev-parse --short "$before") -> $(git rev-parse --short "$after")"
 echo "$changed" | sed 's/^/    /'
 
-if echo "$changed" | grep -q '^fleet/.*\.py$'; then
-    echo "fleet code changed — restarting relay + worker"
-    sudo systemctl restart clawd-fleet-relay clawd-fleet-worker
+# relay.py and the local modules it imports (keep in step with its imports)
+if echo "$changed" | grep -qE '^fleet/(relay|fleet_ws|docs_store|projkey|todo_store|webauthn)\.py$'; then
+    echo "relay code changed — restarting the relay"
+    sudo systemctl restart clawd-fleet-relay
+fi
+# buildinfo.WATCH + projkey (worker.py imports it)
+if echo "$changed" | grep -qE '^fleet/(worker|e2e|fleet_ws|webauthn|webpush|sysstats|buildinfo|projkey)\.py$'; then
+    echo "worker code changed — restarting the relay-node worker"
+    sudo systemctl restart clawd-fleet-worker
 fi
 if echo "$changed" | grep -q '^controller/'; then
     echo "WARNING: controller code changed but NOT restarted (a restart kills a"

@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/clawd-fleet
-EnvironmentFile=/home/ubuntu/clawd-fleet/fleet.env
-ExecStart=/usr/bin/python3 /home/ubuntu/clawd-fleet/relay.py
+WorkingDirectory=/home/ubuntu/clawd-harness/fleet
+EnvironmentFile=/home/ubuntu/clawd-harness/fleet/fleet.env
+ExecStart=/usr/bin/python3 /home/ubuntu/clawd-harness/fleet/relay.py
 Restart=always
 RestartSec=2
 
