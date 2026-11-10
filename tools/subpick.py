@@ -16,16 +16,19 @@ session lands on the right subscription with zero logging in/out.
 Usage data comes from the harness's poller cache (.clawd-harness.sessions.json,
 kept fresh while the harness runs) when it's recent, falling back to a live
 probe per account (same mechanism as usage_probe.py). Zero third-party deps.
+The live probe never refreshes a token (that rotates the login's grant, and
+the new one would be thrown away): an expired access token just means "no
+fresh reading" and the cached one stands.
 """
 import datetime, json, os, select, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import usage_probe  # read_credentials / fetch_usage / http_json / constants
+import usage_probe  # read_credentials / fetch_usage
 
 REGISTRY = os.path.join(os.path.dirname(HERE), ".clawd-harness.sessions.json")
 ACCOUNTS_DIR = os.path.expanduser("~/.clawd-accounts")
-SUB_HOT = float(os.environ.get("SUB_HOT", "90"))
+SUB_HOT = float(os.environ.get("SUB_HOT", "97"))   # same default as server.py
 CACHE_MAX_AGE = 15 * 60  # trust the harness poller this long
 
 
@@ -73,17 +76,10 @@ def _windows_from_live(usage):
 def _probe_live(config_dir):
     creds = usage_probe.read_credentials(config_dir)
     oauth = (creds or {}).get("claudeAiOauth") or {}
-    access, refresh = oauth.get("accessToken"), oauth.get("refreshToken")
+    access = oauth.get("accessToken")
     if not access:
         return None
-    status, usage = usage_probe.fetch_usage(access)
-    if status == 401 and refresh:
-        st, tok = usage_probe.http_json(
-            usage_probe.TOKEN_URL, {"Content-Type": "application/json"},
-            {"grant_type": "refresh_token", "refresh_token": refresh,
-             "client_id": usage_probe.OAUTH_CLIENT_ID})
-        if st == 200 and tok and tok.get("access_token"):
-            status, usage = usage_probe.fetch_usage(tok["access_token"])
+    status, usage = usage_probe.fetch_usage(access)      # read-only: never refresh
     if status != 200 or not usage:
         return None
     return _windows_from_live(usage)
@@ -125,7 +121,8 @@ def load_accounts():
 
 
 def route_key(a):
-    """Mirror of server._route_key: (hot?, no-reset?, weekly reset, pct)."""
+    """The core of server._route_key: (hot?, no-reset?, weekly reset, pct).
+    (The server also weighs capability and token accounts; this doesn't.)"""
     pct = max((w.get("used") or 0.0) for w in a["windows"])
     reset = _weekly_reset(a["windows"])
     return (pct >= SUB_HOT, reset is None, reset or 0.0, pct)

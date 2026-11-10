@@ -145,8 +145,6 @@ One WebSocket carries everything: **binary** frames are raw PTY bytes (→ xterm
   transcript renderer (safe markdown + command/system parsing), message box,
   image paste.
 - **`daemon.sh`** — launchd install/uninstall/status/logs/restart.
-- **`smoke_test.py`** — headless WebSocket client; asserts both channels (PTY
-  stream + structured events + on-disk transcript).
 
 ### Hooks → turn-boundary signal
 
@@ -176,11 +174,10 @@ Both were dead ends until found; both are baked into `server.py`:
 ## Verify
 
 ```bash
-python3 server.py &
-python3 smoke_test.py     # sends a message; asserts user+assistant events + transcript file
+tools/checkall.sh > /tmp/c.log    # every test and UI probe; read the FAIL lines
 ```
 
-Or open the page, send a message, and watch it in both views. Run `/status` in the
+Or open the page, send a message, and watch it land. Run `/status` in the
 terminal to confirm it's on the subscription.
 
 ### Watch the UI run headlessly — `tools/uiprobe.mjs`

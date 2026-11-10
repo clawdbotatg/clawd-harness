@@ -8,12 +8,17 @@ Validates the whole mechanism with zero third-party installs.
   python3 tools/usage_probe.py [CONFIG_DIR]
 
 No arg = the default ~/.claude login. Exit 0 iff usage was fetched and parsed.
+
+READ-ONLY on the login: it never refreshes the token. A refresh ROTATES the
+grant — the old refresh token dies and the new one must be written back to the
+store, which only the real CLI does. This probe used to refresh on a 401 and
+throw the new token away, which can strand the very login you were diagnosing
+(EXPECTATIONS.md, single-consumer rule). An expired access token is reported
+as such; a live claude session on that login renews it.
 Mechanism credit: github.com/dennisonbertram/claw-router (studied, not run).
 """
 import hashlib, json, os, subprocess, sys, unicodedata, urllib.request
 
-OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # Claude Code's public client id
-TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA = "oauth-2025-04-20"
 WINDOWS = [("five_hour", "5h session"), ("seven_day", "7d total"),
@@ -71,20 +76,17 @@ def main():
     if not creds:
         print(f"FAIL: no credentials found for {label}"); return 1
     oauth = creds.get("claudeAiOauth") or {}
-    access, refresh = oauth.get("accessToken"), oauth.get("refreshToken")
+    access = oauth.get("accessToken")
     if not access:
         print(f"FAIL: credential blob has no accessToken ({label})"); return 1
     print(f"credential: OK ({label}, keychain service '{keychain_service(config_dir)}')")
 
     status, usage = fetch_usage(access)
-    if status == 401 and refresh:
-        print("  access token expired -> refreshing…")
-        st, tok = http_json(TOKEN_URL, {"Content-Type": "application/json"},
-                            {"grant_type": "refresh_token", "refresh_token": refresh,
-                             "client_id": OAUTH_CLIENT_ID})
-        if st != 200 or not tok or not tok.get("access_token"):
-            print(f"FAIL: token refresh returned {st}"); return 1
-        status, usage = fetch_usage(tok["access_token"])
+    if status == 401:
+        print("FAIL: access token expired (401). Not refreshing — that would rotate "
+              "the login's grant and discard the new token. Start (or prompt) a "
+              "claude session on this login to renew it, then re-run.")
+        return 1
     if status != 200 or usage is None:
         print(f"FAIL: usage endpoint returned {status}"); return 1
 
