@@ -397,12 +397,14 @@ def severity_counts_text(counts):
 # exactly when it can't carry history: a width-change fence (_apply_size) or a
 # fresh boot. Deep rings skip the seed (real painted bytes beat a re-rendering).
 # SEED_RING_MAX=0 disables seeding.
+HISTORY_EVENTS = 400       # transcript events one subscribe reads (150 replayed, the seed draws on all)
 SEED_RING_MAX = int(os.environ.get("SEED_RING_MAX", "8192"))
 SEED_CHARS    = int(os.environ.get("SEED_CHARS", "12000"))   # cap on rendered seed text
 # Controller read-query bounds (the `search` / `transcriptTail` / `screen` WS
 # frames — docs/WS-PROTOCOL.md). Every reply must fit an LLM tool-output budget,
 # so the caps are hard: clamps, per-session hit limits, and a wall-clock stop.
 SEARCH_LIMIT_MAX   = 40                # matches per search reply
+READ_WINDOW_BYTES  = 256 * 1024        # first bite of a transcript read; grows ×4 until it holds enough
 SEARCH_TAIL_BYTES  = 2 * 1024 * 1024   # per-transcript read window (tail of file)
 SEARCH_PER_SESSION = 3                 # transcript hits kept per session (newest first)
 SEARCH_SNIPPET     = 160               # chars of context per hit
@@ -4202,18 +4204,76 @@ class ClaudeSession:
     def _last_assistant_text(self):
         """The last assistant message in the transcript ("" if none) — the
         fallback when a Stop payload has no last_assistant_message."""
+        for ev in reversed(self._recent_events(
+                1, lambda e: e.get("role") == "assistant" and e.get("text"))):
+            return ev["text"]
+        return ""
+
+    # -- bounded transcript reads ---------------------------------------------
+    # A transcript grows to tens of MB and every reader below wants only its
+    # ends. Reading it whole on each tab switch / Stop / controller poll was
+    # the server's biggest steady cost (audit S6).
+    @staticmethod
+    def _read_window(path, nbytes, from_end=True):
+        """→ (complete lines, whole): the last (or first) `nbytes` of a file,
+        cut at line boundaries. whole=True when that was the entire file."""
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size <= nbytes:
+                data, whole = f.read(), True
+            elif from_end:
+                f.seek(size - nbytes)
+                data, whole = f.read(), False
+                data = data[data.find(b"\n") + 1:]      # drop the partial first line
+            else:
+                data, whole = f.read(nbytes), False
+                data = data[:data.rfind(b"\n") + 1]     # drop the partial last line
+        return data.decode("utf-8", "ignore").split("\n"), whole
+
+    def _recent_events(self, limit, keep=None):
+        """The last `limit` slim events (oldest first) that pass `keep`,
+        reading the transcript backwards in chunks and stopping as soon as it
+        has enough — each line is parsed once, however far back it goes."""
         path = self.transcript_path or self._find_transcript()
         if not path:
-            return ""
+            return []
+        events, carry = [], b""
         try:
-            lines = open(path).read().splitlines()
+            with open(path, "rb") as f:
+                pos = f.seek(0, os.SEEK_END)
+                while pos > 0 and len(events) < limit:
+                    step = min(READ_WINDOW_BYTES, pos)
+                    pos -= step
+                    f.seek(pos)
+                    lines = (f.read(step) + carry).split(b"\n")
+                    carry = lines.pop(0) if pos > 0 else b""   # may be half a line
+                    found = [e for e in (self._slim_event(l.decode("utf-8", "ignore"))
+                                         for l in lines)
+                             if e and (keep is None or keep(e))]
+                    events[:0] = found
         except OSError:
-            return ""
-        for ln in reversed(lines):
-            ev = self._slim_event(ln)
-            if ev and ev.get("role") == "assistant" and ev.get("text"):
-                return ev["text"]
-        return ""
+            return []
+        return events[-limit:]
+
+    def _convo_text(self, path, need, from_end=True):
+        """→ (text, whole): "User: …/Claude: …" lines from one end of the
+        transcript, at least `need` characters of them when the file has it."""
+        window = READ_WINDOW_BYTES
+        while True:
+            lines, whole = self._read_window(path, window, from_end)
+            chunks = []
+            for ln in lines:
+                ev = self._slim_event(ln)
+                if not ev:
+                    continue
+                if ev.get("role") == "user" and ev.get("text"):
+                    chunks.append("User: " + ev["text"])
+                elif ev.get("role") == "assistant" and ev.get("text"):
+                    chunks.append("Claude: " + ev["text"])
+            text = "\n".join(chunks)
+            if whole or len(text) >= need:
+                return text, whole
+            window *= 4
 
     def _bg_probe_claude(self):
         """One read-only look at claude's status file → "shell" | "agent" | "".
@@ -4406,9 +4466,10 @@ class ClaudeSession:
             ev = "Notification"
             obj = {**obj, "hook_event_name": ev}
         self.last_active = time.time()
+        before = (self.busy, self.waiting, self.last_tool)
         if ev == "UserPromptSubmit":
             self.prompted_at = time.time()   # the human prompted — the tab age anchor
-            self.manager.touch_project(self.pid)
+            self.manager.touch_project(self.pid, save=False)   # _on_prompt saves, the tail broadcasts
         self.hook_count += 1
         # Claude rotates its transcript file on compaction/resume. Main-session
         # lifecycle hooks report the live transcript_path + session_id, so follow
@@ -4527,7 +4588,14 @@ class ClaudeSession:
         self.manager.broadcast_all({"type": "hook", "cid": self.cid, "event": ev,
                                     "busy": self.busy, "waiting": self.waiting,
                                     "tool": self.last_tool, "data": data})
-        self.manager.broadcast_sessions()
+        if ev in ("PreToolUse", "PostToolUse") \
+                and before == (self.busy, self.waiting, self.last_tool):
+            # A tool call that changed no status (the `hook` frame above
+            # already carried it): a long turn fires dozens a second, and each
+            # full list rebuild repaints every viewer. Coalesce those.
+            self.manager.broadcast_sessions_soon()
+        else:
+            self.manager.broadcast_sessions()
 
     def _on_prompt(self, prompt):
         """Count the prompt + remember a fallback first prompt. On the *first*
@@ -4584,6 +4652,8 @@ class ClaudeSession:
         at milestones) since that's when the turn's outcome is freshest. Held in
         memory only — derived/ephemeral state, regenerated next turn (no registry).
         See docs/CONTROLLER.md."""
+        if not (BANKR_API_KEY and BANKR_BASE_URL):
+            return                                   # naming off: don't read the transcript for nothing
         text = self._transcript_text_for_naming()
         if not text:
             return
@@ -4666,19 +4736,17 @@ class ClaudeSession:
         if not path:
             return ""
         try:
-            lines = open(path).read().splitlines()
+            text, whole = self._convo_text(path, cap)
+            if not whole:
+                # A long transcript: only its two ends are read. `text` is the
+                # tail (≥ cap chars); the head comes from the file's start.
+                if not head_frac:
+                    return text[-cap:]
+                head = int(cap * head_frac)
+                top, _ = self._convo_text(path, head, from_end=False)
+                return top[:head] + "\n…\n" + text[-(cap - head - 3):]
         except OSError:
             return ""
-        chunks = []
-        for ln in lines:
-            ev = self._slim_event(ln)
-            if not ev:
-                continue
-            if ev.get("role") == "user" and ev.get("text"):
-                chunks.append("User: " + ev["text"])
-            elif ev.get("role") == "assistant" and ev.get("text"):
-                chunks.append("Claude: " + ev["text"])
-        text = "\n".join(chunks)
         if len(text) <= cap:
             return text
         # Keep BOTH the session's founding context (the head — what it was set up
@@ -5595,30 +5663,27 @@ class ClaudeSession:
         with self.ring_lock:
             snapshot = bytes(self.ring)
         snapshot = OSC52_SCRUB_RE.sub(b"", snapshot)
+        # One bounded read of the transcript's tail serves both the seed
+        # scrollback and the structured replay (was: the whole file, twice).
+        events = self._recent_events(HISTORY_EVENTS)
         if len(snapshot) < SEED_RING_MAX:
             try:
-                seed = self._history_seed_bytes()
+                seed = self._history_seed_bytes(events=events)
             except Exception:
                 seed = b""            # seeding is best-effort — never block the replay
             if seed:
                 client.send_bytes(seed)
         if snapshot:
             client.send_bytes(snapshot)
-        self._replay_history(client)
+        self._replay_history(client, events=events)
         if self.tldr_text:                        # 🟦 late joiner sees the current summary
             client.send_json(self._tldr_frame(self.tldr_text, not self.busy))
 
-    def _replay_history(self, client, limit=150):
+    def _replay_history(self, client, limit=150, events=None):
         """Send recent transcript events so a fresh subscriber's structured view
         isn't empty — important now that mobile defaults to the transcript."""
-        path = self.transcript_path or self._find_transcript()
-        if not path:
-            return
-        try:
-            lines = open(path).read().splitlines()
-        except OSError:
-            return
-        events = [e for e in (self._slim_event(l) for l in lines) if e]
+        if events is None:
+            events = self._recent_events(limit)
         for ev in events[-limit:]:
             client.send_json({"type": "transcript", "cid": self.cid,
                               "event": ev, "history": True})
@@ -5630,14 +5695,7 @@ class ClaudeSession:
         construction: n/chars clamped, whole reply capped at TAIL_REPLY_BYTES."""
         n = max(1, min(int(n or 30), TAIL_EVENTS_MAX))
         chars = max(40, min(int(chars or 400), TAIL_CHARS_MAX))
-        path = self.transcript_path or self._find_transcript()
-        if not path:
-            return []
-        try:
-            lines = open(path).read().splitlines()
-        except OSError:
-            return []
-        events = [e for e in (self._slim_event(l) for l in lines) if e]
+        events = self._recent_events(n)
         out = []
         for ev in events[-n:]:
             ev = dict(ev)
@@ -5688,7 +5746,7 @@ class ClaudeSession:
                 return
             time.sleep(5)
 
-    def _history_seed_bytes(self, limit=60):
+    def _history_seed_bytes(self, limit=60, events=None):
         """Rendered-transcript scrollback, sent before a shallow ring replay.
 
         Raw PTY bytes can't cross a width change — they're painted for one
@@ -5703,19 +5761,12 @@ class ClaudeSession:
         whole block above the visible rows: the live repaint that follows uses
         relative cursor moves, which can never reach scrollback, so it can't
         chew into the seeded history."""
-        path = self.transcript_path or self._find_transcript()
-        if not path:
-            return b""
-        try:
-            lines = open(path).read().splitlines()
-        except OSError:
-            return b""
+        if events is None:
+            events = self._recent_events(HISTORY_EVENTS)
         DIM, RST, MARK = "\x1b[2m", "\x1b[0m", "\x1b[38;5;179m"
         scrub = lambda s: SEED_SCRUB_RE.sub("", s)
         parts = []                    # (kind, text); runs of tool-only chips coalesce below
-        for ev in (self._slim_event(l) for l in lines):
-            if not ev:
-                continue
+        for ev in events:
             role, text = ev.get("role"), scrub(ev.get("text") or "").strip()
             if role == "user" and text:
                 parts.append(("text", MARK + "❯ " + RST + text))
@@ -8869,14 +8920,16 @@ class SessionManager:
         time. Agent tool calls never move it (Austin 10-13)."""
         return max(p.touched, p.created)
 
-    def touch_project(self, pid):
-        """You acted in this project (new session / prompt) → top of the list."""
+    def touch_project(self, pid, save=True):
+        """You acted in this project (new session / prompt) → top of the list.
+        save=False: the caller saves + broadcasts itself right after."""
         p = self.projects.get(pid)
         if not p:
             return
         p.touched = time.time()
-        self.save_registry()
-        self.broadcast_projects()
+        if save:
+            self.save_registry()
+            self.broadcast_projects()
 
     def _ordered_projects(self):
         # pinned (the harness itself) first, then warmest first
@@ -8898,7 +8951,16 @@ class SessionManager:
             return total, busy, waiting
 
     def projects_meta(self):
-        return [p.meta(*self.session_counts(p.pid),
+        counts = {}                              # pid → [total, busy, waiting], one pass
+        with self.lock:
+            for s in self.sessions.values():
+                c = counts.setdefault(s.pid, [0, 0, 0])
+                c[0] += 1
+                if s.waiting:
+                    c[2] += 1
+                elif s.busy:
+                    c[1] += 1
+        return [p.meta(*counts.get(p.pid, (0, 0, 0)),
                        last_touched=self._warmth(p))
                 for p in self._ordered_projects()]
 
@@ -9667,6 +9729,21 @@ class SessionManager:
         if self.restart_pending:                 # refresh the pending banner's busy count…
             self.broadcast_restart()
             self._maybe_restart()                # …and fire if the last turn just ended
+
+    def broadcast_sessions_soon(self, delay=0.3):
+        """broadcast_sessions, at most once per `delay` — for callers whose
+        news can wait a beat. Always fires (trailing edge), never drops."""
+        with self.lock:
+            if getattr(self, "_sessions_soon", None):
+                return
+            self._sessions_soon = t = threading.Timer(delay, self._sessions_soon_fire)
+        t.daemon = True
+        t.start()
+
+    def _sessions_soon_fire(self):
+        with self.lock:
+            self._sessions_soon = None
+        self.broadcast_sessions()
 
     def shutdown(self):
         with self.lock:

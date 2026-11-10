@@ -69,8 +69,8 @@ def main():
         }))
         started = []
         mod.ClaudeSession.start = lambda self: (started.append(self.cid), setattr(self, "alive", True))
-        mod.ClaudeSession._history_seed_bytes = lambda self: b""
-        mod.ClaudeSession._replay_history = lambda self, client, limit=150: None
+        mod.ClaudeSession._history_seed_bytes = lambda self, **kw: b""
+        mod.ClaudeSession._replay_history = lambda self, client, limit=150, **kw: None
         mod.BOOT_STAGGER_S = 0.6
 
         mgr = mod.SessionManager()
