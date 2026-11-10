@@ -558,8 +558,10 @@ class Verbs:
             if t.get("step"):
                 return {"ok": False, "error": f"{task_id} already started "
                         f"(at step {t['step']}) — advance_pipeline continues it"}
-            if machine:
-                t["machine"] = machine
+            # Persist the defaults: every later step is run from a fresh read
+            # of the task, so a default kept only on this copy reached step 1
+            # and nothing after it ("no machine None", "has no project").
+            t = self.ledger.set_pipeline_defaults(task_id, machine, pid)
             return self._run_step(t, 1, default_pid=pid)
         return self._gate("start_pipeline", {"task_id": task_id, "machine": machine,
                                              "pid": pid, "confirm": confirm}, do)
@@ -576,7 +578,11 @@ class Verbs:
         approval can't be skipped by calling this first.
 
         `force` closes a step whose session produced nothing readable — the
-        escape hatch for an engine whose turn-end hook never fired."""
+        escape hatch for an engine whose turn-end hook never fired.
+
+        With no step running but one still pending (it failed to START: the
+        spawn timed out, its machine was away), this runs that step instead
+        (`resumed_step` in the result) — a failed start is not a dead end."""
         if self.guard.autonomy == "readonly":
             return {"ok": False, "blocked": "controller is read-only"}
         if not self.guard.rate_ok(f"pipeline:{task_id}"):
@@ -599,11 +605,21 @@ class Verbs:
             if not t.get("step"):
                 return {"ok": False, "error": f"{task_id} hasn't started — "
                         "start_pipeline runs step 1 (and is the approval gate)"}
+            # A step ≥2 that failed to START (spawn timed out, its machine was
+            # away) is still `pending` with nothing running. That used to be
+            # a dead end — "no running step" here, "already started" from
+            # start_pipeline. Run it now: the chain was approved at start.
+            stalled = next((s for s in steps if s.get("status") == "pending"), None)
+            if stalled:
+                run = self._run_step(t, stalled["n"])
+                return {"ok": run.get("ok", False), "task": task_id,
+                        "resumed_step": stalled["n"], "next": run}
             return {"ok": False, "error": f"{task_id} has no running step "
                     f"(status {t.get('status')})"}
         machine = running.get("machine") or t.get("machine")
         out, src = self._step_output(machine, running.get("cid"))
-        if out and running.get("base") and out_hash(out) == running["base"]:
+        if out and running.get("base") and running["base"] in (
+                out_hash(out), out_hash(out[:700]), out_hash(out[:280])):   # (older baselines hashed a capped read)
             out, src = "", "unchanged"      # still the answer that was already there
         if not out and not force:
             return {"ok": False, "error": f"step {running['n']}'s session "
@@ -656,7 +672,7 @@ class Verbs:
                         "let it spawn fresh"}
             engine = _norm_engine(live[cid].get("engine"))
         else:
-            pid = step.get("pid") or default_pid
+            pid = step.get("pid") or default_pid or task.get("pid")
             if not pid:
                 return {"ok": False, "error": f"step {n} has no project — set "
                         "`pid` on the step or pass pid= to start_pipeline"}
@@ -666,7 +682,8 @@ class Verbs:
                         "came back (spawn timed out)"}
             spawned = True
             live = {s["cid"]: s for s in c.state()["sessions"]}
-        pid_used = (live.get(cid) or {}).get("pid") or step.get("pid") or default_pid
+        pid_used = ((live.get(cid) or {}).get("pid") or step.get("pid")
+                    or default_pid or task.get("pid"))
         # Baseline: what this session's "final answer" reads as BEFORE we prompt
         # it. A step that reuses an earlier step's session already has an answer
         # sitting there, and without this the advance logic would read that stale
@@ -737,18 +754,37 @@ class Verbs:
         lost — docs/CODEX-ENGINE.md). n=20 rather than a small tail, because a
         codex transcript ends in token-count bookkeeping the parser drops.
         Returns (text, source)."""
-        det = self.world.session_detail(machine, cid)
-        if isinstance(det, dict):
-            out = (det.get("last_answer") or "").strip()
-            if out:
-                return out[:STEP_OUTPUT_CHARS], "last_answer"
-        r = self.transcript_tail(machine, cid, n=20)
-        if r.get("ok"):
-            for ev in reversed(r.get("events") or []):
-                if ev.get("role") == "assistant":
-                    txt = (ev.get("text") or "").strip()
-                    if txt:
-                        return txt[:STEP_OUTPUT_CHARS], "transcript"
+        c = self.clients.get(machine)
+        if not c:
+            return "", "none"
+        st = c.state()
+        # The Stop frame carries the WHOLE final message. (This used to read
+        # world.session_detail, a display read capped at 700 chars — so every
+        # hand-off between steps and the final report were cut to 700.)
+        out = ((st.get("last_answer") or {}).get(cid) or "").strip()
+        if out:
+            return out[:STEP_OUTPUT_CHARS], "last_answer"
+        # No Stop seen by THIS PM process (it restarted, or the hook was lost).
+        # The session's broadcast `lastAnswer` is only the first 280 chars:
+        # use it to find the full text in the transcript, else settle for it.
+        s = next((x for x in st.get("sessions") or [] if x.get("cid") == cid), None)
+        short = ((s or {}).get("lastAnswer") or "").strip()
+        texts = []
+        try:
+            r = c.transcript_tail(cid, n=20, chars=STEP_OUTPUT_CHARS)
+        except Exception:
+            r = None
+        if isinstance(r, dict) and not r.get("error"):
+            texts = [(ev.get("text") or "").strip() for ev in r.get("events") or []
+                     if ev.get("role") == "assistant"]
+            texts = [t for t in texts if t]
+        if short:
+            for txt in reversed(texts):
+                if txt.startswith(short[:200]):
+                    return txt[:STEP_OUTPUT_CHARS], "last_answer"
+            return short, "last_answer"
+        if texts:
+            return texts[-1][:STEP_OUTPUT_CHARS], "transcript"
         return "", "none"
 
     # ── navigate: "send me to" a session/project in the harness UI ────────────

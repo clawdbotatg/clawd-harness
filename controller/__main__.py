@@ -227,7 +227,8 @@ def main(argv):
         tg = None
         if config.TELEGRAM_TOKEN:
             from .telegram import TelegramBridge
-            tg = TelegramBridge(config.TELEGRAM_TOKEN, config.TELEGRAM_ALLOW, router).start()
+            tg = TelegramBridge(config.TELEGRAM_TOKEN, config.TELEGRAM_ALLOW, router,
+                                turn_lock=turn_lock).start()
 
         # -- autopilot: reactor events → budgeted PM turns -------------------
         # Turns land in a dedicated "🤖 autopilot" thread so every decision it

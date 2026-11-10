@@ -10,6 +10,7 @@ Run: python3 -m controller.test_telegram
 """
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler
 from socketserver import TCPServer, ThreadingMixIn
 
@@ -115,6 +116,33 @@ def main():
     check("notify() pushes to the allow set", t_notify)
 
     srv.shutdown()
+    def t_turn_lock():
+        # Telegram used to call the router bare: a phone message could run
+        # while an HTTP or autopilot turn held the one turn lock.
+        lock = threading.Lock()
+        r2 = FakeRouter()
+        b2 = TelegramBridge("faketoken", ["672968601"], r2, base_url=base, turn_lock=lock)
+        msg = lambda text: {"chat": {"id": 672968601}, "from": {"id": 672968601}, "text": text}
+        lock.acquire()                           # another turn is running
+        th = threading.Thread(target=b2._handle, args=(msg("while busy"),), daemon=True)
+        th.start()
+        time.sleep(0.4)
+        held_back = not r2.seen
+        lock.release()
+        th.join(5)
+        assert held_back, "the brain ran while another turn held the lock"
+        assert r2.seen == ["while busy"], r2.seen
+        r2.seen.append("stale")
+        lock.acquire()
+        th = threading.Thread(target=b2._handle, args=(msg("/reset"),), daemon=True)
+        th.start()
+        time.sleep(0.4)
+        still = list(r2.seen)
+        lock.release()
+        th.join(5)
+        assert still and not r2.seen, (still, r2.seen)
+    check("a Telegram turn (and /reset) waits for the shared turn lock", t_turn_lock)
+
     print()
     if failures:
         print(f"FAILED: {failures}")

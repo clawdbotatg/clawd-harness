@@ -184,9 +184,13 @@ Rules:
 - ≤6 steps. Longer than that is several tasks, not one pipeline.
 - When it finishes, the task lands in `review` and the report is
   `get_step_output(task_id, <last step>)`. Hand the report to the operator.
-- If a chain is stuck, `advance_pipeline(task_id)` nudges it and
-  `advance_pipeline(task_id, force=true)` closes a step whose session produced
-  nothing readable. Read the step's transcript before you force it.
+- If a chain is stuck, `advance_pipeline(task_id)` nudges it — including a
+  step that never started (its spawn failed): it runs that pending step and
+  says `resumed_step` — and `advance_pipeline(task_id, force=true)` closes a
+  step whose session produced nothing readable. Read the step's transcript
+  before you force it.
+- `start_pipeline`'s `machine`/`pid` are the defaults for EVERY step that names
+  none, not only step 1.
 
 # Done, but not verified (the pin board)
 `get_pins` is the fleet's third queue, and the one nobody else surfaces: work

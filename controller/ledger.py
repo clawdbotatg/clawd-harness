@@ -79,6 +79,17 @@ class TaskLedger:
                              f"pipeline created ({len(ev.get('steps') or [])} steps)"}],
             }
             self._bump_seq(tid)
+        elif kind == "pipeline_defaults":
+            # start_pipeline's machine/pid: where steps that name none run.
+            # Persisted, because every step after the first is run later from
+            # a fresh read of the task (and maybe after a PM restart).
+            tk = self.tasks.get(ev["id"])
+            if tk:
+                if ev.get("machine"):
+                    tk["machine"] = ev["machine"]
+                if ev.get("pid"):
+                    tk["pid"] = ev["pid"]
+                tk["updated"] = t
         elif kind == "assigned":
             tk = self.tasks.get(ev["id"])
             if tk:
@@ -189,6 +200,12 @@ class TaskLedger:
         self._append({"ev": "pipeline_created", "id": tid, "goal": goal,
                       "project": project, "acceptance": acceptance,
                       "machine": machine, "steps": steps})
+        return self.get(tid)
+
+    def set_pipeline_defaults(self, tid, machine=None, pid=None):
+        if machine or pid:
+            self._append({"ev": "pipeline_defaults", "id": tid,
+                          "machine": machine, "pid": pid})
         return self.get(tid)
 
     def start_step(self, tid, n, cid, machine=None, engine=None, prompt=None,

@@ -225,7 +225,9 @@ await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:txy
 await page.waitForTimeout(80);
 await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
 await page.waitForTimeout(200);
-check('tap on the text does NOT clear it (selectable)', await page.evaluate(()=>tldrText.textContent==='read me now' && getComputedStyle(tldrEl).userSelect==='text' && window.__frames.length===0));
+// (resize frames don't count: the subscribe a few lines up arms hardRepaint for 2.5s, and its
+// timers land in this window or not depending on machine load — that was a coin-flip red)
+check('tap on the text does NOT clear it (selectable)', await page.evaluate(()=>tldrText.textContent==='read me now' && getComputedStyle(tldrEl).userSelect==='text' && window.__frames.filter(f=>f.type!=='resize').length===0));
 const xxy = await page.evaluate(()=>{const r=tldrX.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,visible:r.width>0};});
 check('✕ visible in the box', xxy.visible);
 await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:xxy.x,y:xxy.y}]});

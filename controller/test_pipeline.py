@@ -227,6 +227,8 @@ def main():
         ap._pipeline_sweep()                   # second: unchanged → advance
         _wait(lambda: ledger.get(p["id"])["steps"][0]["status"] == "done",
               what="the settle sweep to close step 1")
+        _wait(lambda: ledger.get(p["id"])["steps"][1]["status"] != "pending",
+              what="step 2 to start")    # its spawn is still in flight when step 1 reads done
         t = ledger.get(p["id"])
         assert t["steps"][0]["output"], t["steps"][0]
         assert t["steps"][1]["status"] in ("running", "done"), t["steps"]
@@ -251,6 +253,108 @@ def main():
         assert t["steps"][1]["status"] in ("running", "done"), t["steps"]
     check("a step whose session vanished is force-closed, not left hanging",
           t_vanished_session)
+
+    # -- audit 2026-11-09 -----------------------------------------------------
+    def t_long_answer_survives():
+        # a step's answer used to be read through a 700-char display cap, so
+        # the hand-off to the next step and the final report were cut there
+        ap.enabled = True
+        marker = "MARKER-PAST-700"
+        p = verbs.create_pipeline("long answers", [
+            {"role": "one", "pid": "p1", "prompt": "A" * 1400 + " " + marker},
+            {"role": "two", "pid": "p1", "prompt": "second"},
+        ], machine="self")["task"]
+        assert verbs.start_pipeline(p["id"], confirm=True)["ok"]
+        _wait(lambda: ledger.get(p["id"])["steps"][1].get("sent"),
+              what="step 2 to be sent its prompt")
+        t = ledger.get(p["id"])
+        out = t["steps"][0]["output"]
+        assert len(out) > 1400 and marker in out, (len(out), out[-80:])
+        assert marker in t["steps"][1]["sent"], "step 2 never saw the end of step 1's answer"
+    check("a long step answer reaches the next step whole (not cut at 700)",
+          t_long_answer_survives)
+
+    def t_defaults_reach_every_step():
+        # start_pipeline(machine=, pid=) used to apply to step 1 only
+        ap.enabled = True
+        p = verbs.create_pipeline("defaults", [
+            {"role": "one", "prompt": "first"},
+            {"role": "two", "prompt": "second"},
+        ])["task"]
+        r = verbs.start_pipeline(p["id"], machine="self", pid="p1", confirm=True)
+        assert r["ok"], r
+        _wait(lambda: ledger.get(p["id"])["status"] == "review",
+              what="the defaulted pipeline to finish")
+        t = ledger.get(p["id"])
+        assert [s["status"] for s in t["steps"]] == ["done", "done"], t["steps"]
+        assert t["machine"] == "self" and t["pid"] == "p1", (t.get("machine"), t.get("pid"))
+    check("start_pipeline's machine/pid defaults reach every step, not just step 1",
+          t_defaults_reach_every_step)
+
+    def t_failed_start_is_not_a_dead_end():
+        # step 2 fails to START (spawn timed out) → it stays pending with
+        # nothing running. advance_pipeline used to answer "no running step"
+        # and start_pipeline "already started": wedged for good.
+        ap.enabled = True
+        p = verbs.create_pipeline("stall", [
+            {"role": "one", "pid": "p1", "prompt": "first"},
+            {"role": "two", "pid": "p1", "prompt": "second"},
+        ], machine="self")["task"]
+        real_new, calls = client.new_session, []
+
+        def flaky_new(pid, timeout=12, engine="claude"):
+            calls.append(pid)
+            if len(calls) == 2:                 # step 2's spawn "times out"
+                return None
+            return real_new(pid, timeout=timeout, engine=engine)
+        client.new_session = flaky_new
+        try:
+            assert verbs.start_pipeline(p["id"], confirm=True)["ok"]
+            _wait(lambda: ledger.get(p["id"])["steps"][0]["status"] == "done"
+                  and len(calls) >= 2, what="step 1 to finish and step 2 to fail to start")
+            time.sleep(0.3)
+            t = ledger.get(p["id"])
+            assert t["steps"][1]["status"] == "pending", t["steps"]
+            r = verbs.advance_pipeline(p["id"])
+            assert r["ok"] and r.get("resumed_step") == 2, r
+        finally:
+            client.new_session = real_new
+        _wait(lambda: ledger.get(p["id"])["status"] == "review",
+              what="the resumed pipeline to finish")
+    check("a step that failed to start is resumed by advance_pipeline (no dead end)",
+          t_failed_start_is_not_a_dead_end)
+
+    def t_unseen_machine_is_not_gone():
+        # "session gone" was inferred from cached lists alone: a machine that
+        # is offline / not yet synced had every running step force-failed
+        ap.enabled = False
+        p = verbs.create_pipeline("away", [
+            {"role": "one", "pid": "p1", "prompt": "first"},
+            {"role": "two", "pid": "p1", "prompt": "second"},
+        ], machine="self")["task"]
+        verbs.start_pipeline(p["id"], confirm=True)
+        cid = ledger.get(p["id"])["steps"][0]["cid"]
+        real_state = client.state
+
+        def away():                              # link down, nothing listed
+            st = real_state()
+            st["connected"] = False
+            st["sessions"] = []
+            st["last_answer"] = {}
+            return st
+        client.state = away
+        try:
+            ap.enabled = True
+            ap._pipeline_sweep(); ap._pipeline_sweep()
+            time.sleep(0.3)
+            assert ledger.get(p["id"])["steps"][0]["status"] == "running", \
+                ledger.get(p["id"])["steps"][0]
+        finally:
+            client.state = real_state
+            ap.enabled = False
+        assert cid in client.sessions
+    check("a step on a machine we can't see is left running, not force-failed",
+          t_unseen_machine_is_not_gone)
 
     def t_readonly_stops_advance():
         guard.autonomy = "readonly"

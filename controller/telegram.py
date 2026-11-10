@@ -50,8 +50,13 @@ def _md_to_html(text):
 
 
 class TelegramBridge:
-    def __init__(self, token, allow_ids, router, base_url="https://api.telegram.org"):
+    def __init__(self, token, allow_ids, router, base_url="https://api.telegram.org",
+                 turn_lock=None):
         self.token = token
+        # The ONE lock every brain turn holds (HTTP chat, autopilot). Telegram
+        # used to call the router bare, so a phone message could interleave
+        # with another turn and repoint the shared conversation mid-flight.
+        self.turn_lock = turn_lock or threading.Lock()
         self.allow = set(str(a) for a in (allow_ids or []) if str(a))
         self.router = router
         self.base = f"{base_url}/bot{token}"
@@ -138,7 +143,8 @@ class TelegramBridge:
                              "start work on a project. /reset (or /new, /clear) wipes the conversation.")
             return
         if text in ("/reset", "/new", "/clear"):
-            self.router.reset()
+            with self.turn_lock:
+                self.router.reset()
             self._send(chat, "Conversation reset.")
             return
         # Stream the PM's work live (tool calls + narration) rather than one final
@@ -156,10 +162,11 @@ class TelegramBridge:
             self._send(chat, ("🔧 " + body) if kind == "tool" else body)
 
         try:
-            if hasattr(self.router, "chat_stream"):
-                self.router.chat_stream(text, emit)     # streams; emits the final answer itself
-            else:
-                out = self.router.chat(text)            # fallback (non-streaming router)
-                self._send(chat, out.get("reply", "(no reply)"))
+            with self.turn_lock:                         # one brain turn at a time, whoever asks
+                if hasattr(self.router, "chat_stream"):
+                    self.router.chat_stream(text, emit)     # streams; emits the final answer itself
+                else:
+                    out = self.router.chat(text)            # fallback (non-streaming router)
+                    self._send(chat, out.get("reply", "(no reply)"))
         except Exception as e:
             self._send(chat, f"error: {e}")

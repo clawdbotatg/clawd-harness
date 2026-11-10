@@ -153,7 +153,9 @@ TOOLS = [
         "task `review` and return the report. Normally you do NOT call this — it "
         "fires by itself the moment a step's session finishes. Call it by hand "
         "to unstick a chain, with force=true to close a step whose session "
-        "produced nothing readable.",
+        "produced nothing readable. If no step is running because the next one "
+        "failed to START (spawn timed out, its machine was away), this runs "
+        "that pending step (the result says `resumed_step`).",
         _S({"task_id": _STR, "force": _BOOL}, ["task_id"])),
     ("get_step_output", "One pipeline step's FULL recorded answer — get_task "
         "truncates them. This is where a finished pipeline's final report is.",

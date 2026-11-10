@@ -300,21 +300,33 @@ class Autopilot:
         if not self.verbs or self._paused_reason():
             return
         now = time.time()
-        live = set()
-        for c in (self.verbs.clients or {}).values():
+        # cid -> session, and which machines we can actually SEE right now. A
+        # session is only "gone" if its own machine is connected and doesn't
+        # list it: an offline or not-yet-synced machine used to get every
+        # running step there force-failed, and the chain moved on empty.
+        live, seen = {}, set()
+        for mid, c in (self.verbs.clients or {}).items():
             try:
-                live.update(s["cid"] for s in c.state()["sessions"])
+                st = c.state()
             except Exception:
                 continue
+            if st.get("connected", True):
+                seen.add(mid)
+            for s in st.get("sessions") or []:
+                live[s["cid"]] = s
         for task in self.ledger.pipelines():
             for step in task.get("steps") or []:
                 if step.get("status") != "running":
                     continue
                 key, cid = (task["id"], step["n"]), step.get("cid")
-                if cid and cid not in live:
-                    self._advance(task, step, why="session gone", force=True)
-                    continue
                 machine = step.get("machine") or task.get("machine")
+                if cid and cid not in live:
+                    if machine in seen:
+                        self._advance(task, step, why="session gone", force=True)
+                    continue
+                # (Deliberately NOT skipped while the session reads `busy`: a
+                # lost Stop hook leaves busy stuck on, and that lost-Stop case
+                # is the one this sweep exists to rescue.)
                 try:
                     out, _src = self.verbs._step_output(machine, cid)
                 except Exception:
