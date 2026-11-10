@@ -71,6 +71,7 @@ async function open(ctxOpts) {
     window.hsend = f => { window.__sent.push(f); return true; };
     window.hsendTo = (m, f) => { window.__sent.push(f); return true; };
     window.__opened = [];
+    window.__realFocus = window.focusSession;
     window.focusSession = s => { window.__opened.push(s && s.cid); };
   });
   return page;
@@ -152,8 +153,112 @@ check('…by moving the existing nodes', moved.sameNodes);
 check('a session that left loses its tab', moved.dropped);
 check('…and the other tabs keep their nodes', moved.restKept && moved.restored);
 
+// ───────────── the sessions rung (same wipe, same lost taps) ─────────────
+// `#/p/self` IS the sessions rung. openSession is captured; the ✕ goes through
+// the stubbed hsend, so a real session is never opened or closed.
+await page.evaluate(() => { window.__opened = []; window.openSession = cid => { window.__opened.push(cid); }; });
+const rstorm = (n = 6) => page.evaluate(n => { for (let i = 0; i < n; i++) renderSessions(); }, n);
+const cardCids = await page.evaluate(() => [...document.querySelectorAll('#sessions > .scard')].map(c => c.dataset.cid));
+if (cardCids.length < 1) console.log('SKIP: no session cards on this rung');
+else {
+  const keptC = await page.evaluate(() => {
+    const grab = () => [...document.querySelectorAll('#sessions > .scard, #sessions .sclose, #newSession, #sessions .menutitle')];
+    const nodes = grab();
+    for (let i = 0; i < 5; i++) renderSessions();
+    const now = grab();
+    return { n: nodes.length, same: nodes.length === now.length && nodes.every((x, i) => x === now[i]) };
+  });
+  check('rung: a repaint keeps every card, ✕, title and ＋ node', keptC.same, JSON.stringify(keptC));
+  const cc = cardCids[cardCids.length - 1];
+  const tb = await page.locator(`#sessions > .scard[data-cid="${cc}"] .stitle`).boundingBox();
+  await page.mouse.move(tb.x + Math.min(20, tb.width / 2), tb.y + tb.height / 2);
+  await page.mouse.down();
+  await rstorm(); await page.waitForTimeout(40); await rstorm();
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  const co = await page.evaluate(() => window.__opened.slice());
+  check('rung: a card click that spans repaints opens that session', co.length === 1 && co[0] === cc, 'opened=' + JSON.stringify(co));
+  // a live change lands in the SAME card
+  const live = await page.evaluate(cid => {
+    const node = document.querySelector(`#sessions > .scard[data-cid="${cid}"]`);
+    const s = sessionList.find(x => x.cid === cid);
+    if (!s) return { skip: true };
+    const was = { busy: s.busy, tool: s.tool, blocked_on: s.blocked_on, alive: s.alive, waiting: s.waiting };
+    s.alive = true; s.waiting = false; s.busy = true; s.tool = 'TabTapTool'; s.blocked_on = 'probe question?';
+    renderSessions();
+    const now = document.querySelector(`#sessions > .scard[data-cid="${cid}"]`);
+    const out = { same: now === node, meta: now.querySelector('.smeta').textContent, blk: (now.querySelector('.sblock') || {}).textContent || '',
+                  order: [...now.children].map(c => c.className.split(' ')[0]).join() };
+    Object.assign(s, was); renderSessions();
+    out.cleared = !document.querySelector(`#sessions > .scard[data-cid="${cid}"] .sblock`) || !!was.blocked_on;
+    return out;
+  }, cc);
+  if (live.skip) console.log('SKIP: live-change check (session not on this machine\'s list)');
+  else {
+    check('rung: a live change is written into the same card', live.same && /running TabTapTool/.test(live.meta) && /probe question/.test(live.blk), JSON.stringify(live));
+    check('rung: the card keeps its line order (…, needs-you, meta, ✕)', /sblock,smeta,sclose$/.test(live.order), live.order);
+    check('rung: a line that no longer applies is removed', live.cleared);
+  }
+  // ✕ pressed, repaints land, released → exactly one close frame, captured not sent
+  await page.evaluate(() => { window.__sent = []; });
+  const xb = await page.locator(`#sessions > .scard[data-cid="${cc}"] .sclose`).boundingBox();
+  await page.mouse.move(xb.x + xb.width / 2, xb.y + xb.height / 2);
+  await page.mouse.down();
+  await rstorm(); await page.waitForTimeout(40); await rstorm();
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  const closes = await page.evaluate(() => window.__sent.filter(f => f.type === 'close').map(f => f.cid));
+  check('rung: a ✕ click that spans repaints asks to close that session (captured, never sent)', closes.length === 1 && closes[0] === cc, 'close=' + JSON.stringify(closes));
+  const co2 = await page.evaluate(() => window.__opened.length);
+  check('rung: …and the ✕ did not also open the card', co2 === 1, 'opened=' + co2);
+  await page.evaluate(() => { window.__sent = window.__sent.filter(f => f.type !== 'close'); });
+}
+
 const sent = await page.evaluate(() => window.__sent.length);
 check('nothing was sent to the server', sent === 0, 'frames=' + sent);
+
+// ───────────── the top-right pill and its 🔑 sign-in button ─────────────
+// A FAKE session (never on the server) is opened so the pill has something to
+// show; live frames are held off for these few lines so they can't drop it.
+const PCID = '00000000-probe-tabtap-pill';
+const pill = await page.evaluate(PCID => {
+  window.__hj = window.handleJson; window.handleJson = () => {};
+  window.__added = []; window.addAccount = (mid, name) => { window.__added.push(name); };
+  const fake = { cid: PCID, pid: 'self', title: 'probe pill session', tab: 'pill', promptCount: 2, alive: true, busy: false,
+                 model: 'claude-opus-5', ctxTokens: 120000, lastActive: Date.now() / 1000, promptedAt: Date.now() / 1000,
+                 loginCta: { name: 'sub9', reason: 'probe' } };
+  sessionList.push(fake);
+  window.__realFocus(sessionList.find(s => s.cid === PCID));
+  refreshSessionTag();
+  const b = document.querySelector('#machineTag .cta');
+  if (!b) return { noCta: true, view: currentView(), html: document.getElementById('machineTag').innerHTML.slice(0, 200) };
+  const r = b.getBoundingClientRect();
+  window.__ctaNode = b;
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: b.textContent, hit: document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === b };
+}, PCID);
+if (pill.noCta) fail('pill: no 🔑 sign-in button for a session with a loginCta — ' + JSON.stringify(pill));
+else {
+  check('pill: the 🔑 sign-in button is up and reachable', /sign in to/.test(pill.text) && pill.hit, JSON.stringify(pill));
+  await page.mouse.move(pill.x, pill.y);
+  await page.mouse.down();
+  await page.evaluate(() => { for (let i = 0; i < 6; i++) refreshSessionTag(); });   // sessions/accounts frames
+  await page.waitForTimeout(40);
+  await page.evaluate(() => { for (let i = 0; i < 6; i++) refreshSessionTag(); });
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  const pr = await page.evaluate(PCID => {
+    const out = { added: window.__added.slice(), same: document.querySelector('#machineTag .cta') === window.__ctaNode };
+    const s = sessionList.find(x => x.cid === PCID);
+    s.model = 'claude-haiku-5-5'; refreshSessionTag();       // a real change still repaints
+    out.model = (document.querySelector('#machineTag .model') || {}).textContent || '';
+    return out;
+  }, PCID);
+  check('pill: repaints keep the 🔑 button node', pr.same);
+  check('pill: a click that spans repaints starts that sign-in', pr.added.length === 1 && pr.added[0] === 'sub9', 'added=' + JSON.stringify(pr.added));
+  check('pill: a changed model still updates it', /haiku/i.test(pr.model), 'model=' + pr.model);
+}
+const psent0 = await page.evaluate(() => window.__sent.filter(f => f.type !== 'subscribe' && f.type !== 'resize' && f.type !== 'unsubscribe' && f.type !== 'tldr' && f.type !== 'stt').map(f => f.type));
+check('pill: nothing but the fake session\'s own view frames were captured', psent0.length === 0, 'frames=' + JSON.stringify(psent0));
 await page.context().close();
 
 // ───────────── touch ─────────────

@@ -4340,22 +4340,28 @@ function renderSysStats(sys) {
   return wrap;
 }
 
-function renderMachines(list) {
-  machineList = list;
-  machinesEl.innerHTML = '';
+// The 🖥️ roster cards, reconciled by machine id. A card's node (and its
+// checkbox) lives as long as the machine is on the roster; only the info
+// block of a card whose own data changed is rebuilt.
+function paintMachines(list) {
   const online = list.filter(m => m.online).length;
-  const off = list.filter(m => m.kind !== 'relay' && !isMachineActive(m.id)).length;
-  const label = document.createElement('div');
-  label.className = 'menutitle';
-  label.textContent = `machines · ${online}/${list.length} online` + (off ? ` · ${off} off` : '');
-  machinesEl.appendChild(label);
-  if (!list.length) {
-    const note = document.createElement('div');
+  const offN = list.filter(m => m.kind !== 'relay' && !isMachineActive(m.id)).length;
+  let label = machinesEl.querySelector(':scope > .menutitle');
+  if (!label) {
+    machinesEl.innerHTML = '';
+    label = document.createElement('div'); label.className = 'menutitle';
+    machinesEl.appendChild(label);
+  }
+  putProp(label, 'textContent', `machines · ${online}/${list.length} online` + (offN ? ` · ${offN} off` : ''));
+  let note = machinesEl.querySelector(':scope > .ahint');
+  if (!list.length && !note) {
+    note = document.createElement('div');
     note.className = 'ahint';
     note.textContent = 'no machines connected — start a worker (worker.py) on a machine running a harness.';
     machinesEl.appendChild(note);
-  }
-  list.forEach(m => {
+  } else if (list.length && note) { note.remove(); note = null; }
+  const have = new Map([...machinesEl.querySelectorAll(':scope > .scard')].map(n => [n.dataset.mid, n]));
+  list.forEach((m, i) => {
     // The relay node is the hub box itself — it has no harness, so there are no
     // projects/sessions to drive. Show it for topology awareness, but as a muted,
     // non-clickable infra card (opening it would only hang on an empty list).
@@ -4364,79 +4370,106 @@ function renderMachines(list) {
     // passkey and contributes no projects. The card stays here (dimmed) because
     // this is the one place you can switch it back on.
     const off = !isRelay && !isMachineActive(m.id);
-    const card = document.createElement('div');
+    let card = have.get(m.id);
+    have.delete(m.id);
+    if (!card) {
+      card = document.createElement('div');
+      card.dataset.mid = m.id;
+      card.style.cursor = 'default';
+      const info = document.createElement('div');
+      info.className = 'minfo'; info.style.display = 'contents';   // layout-neutral wrapper for the rebuilt part
+      card.appendChild(info);
+    }
     // Read-only roster overview (no longer a navigable rung): the machine behind a
     // project is chosen via the per-project default + the sessions-rung select, not
     // by picking a machine here. Cards are informational only.
-    card.className = 'scard ro' + (m.id === currentMachine ? ' active' : '') + (isRelay ? ' relay' : '');
-    card.style.cursor = 'default';
-    if (isRelay) card.style.opacity = '0.7';
-    else if (off) card.style.opacity = '0.5';
-    const row = document.createElement('div'); row.className = 'row';
-    const sdot = document.createElement('span');
-    sdot.className = 'sdot' + (m.online ? '' : ' dead');
-    const title = document.createElement('span');
-    title.className = 'stitle'; title.textContent = m.id;
-    row.appendChild(sdot); row.appendChild(title);
-    const tag = document.createElement('span');
-    tag.className = 'scount';
-    tag.textContent = isRelay ? 'relay' : off ? 'off' : (m.online ? 'online' : 'offline');
-    if (isRelay || off) { tag.style.color = 'var(--dim)'; tag.style.borderColor = 'var(--edge)'; }
-    else if (m.online) { tag.style.color = 'var(--ok)'; tag.style.borderColor = '#22401f'; }
-    else tag.style.color = 'var(--err)';
-    row.appendChild(tag);
-    card.appendChild(row);
-    if (m.host && m.host !== m.id) {
-      const d = document.createElement('div'); d.className = 'sdesc'; d.textContent = m.host;
-      card.appendChild(d);
-    }
-    if (isRelay) {
-      const d = document.createElement('div'); d.className = 'sdesc';
-      d.textContent = 'the hub — routes every machine (no sessions of its own)';
-      card.appendChild(d);
-      machinesEl.appendChild(card);
-      return;   // no stats line for the relay
-    }
-    // Aggregate counts the worker reported in plaintext (no titles/content):
-    // N projects · N sessions · N active — an at-a-glance per-machine load.
-    if (m.stats) {
-      const s = m.stats;
-      const cl = document.createElement('div'); cl.className = 'sdesc';
-      cl.append(`${s.projects} project${s.projects === 1 ? '' : 's'} · `
-              + `${s.sessions} session${s.sessions === 1 ? '' : 's'}`);
-      if (s.active > 0) {
-        const a = document.createElement('span');
-        a.textContent = ` · ${s.active} active`;
-        a.style.color = 'var(--ok)';
-        cl.append(a);
+    putProp(card, 'className', 'scard ro' + (m.id === currentMachine ? ' active' : '') + (isRelay ? ' relay' : ''));
+    const op = isRelay ? '0.7' : off ? '0.5' : '';
+    if (card.style.opacity !== op) card.style.opacity = op;
+    const info = card.querySelector(':scope > .minfo');
+    const fp = JSON.stringify([m.id, !!m.online, m.kind || '', m.host || '', off, m.stats || 0]);
+    if (info.dataset.fp !== fp) {
+      info.dataset.fp = fp;
+      info.innerHTML = '';
+      const row = document.createElement('div'); row.className = 'row';
+      const sdot = document.createElement('span');
+      sdot.className = 'sdot' + (m.online ? '' : ' dead');
+      const title = document.createElement('span');
+      title.className = 'stitle'; title.textContent = m.id;
+      row.appendChild(sdot); row.appendChild(title);
+      const tag = document.createElement('span');
+      tag.className = 'scount';
+      tag.textContent = isRelay ? 'relay' : off ? 'off' : (m.online ? 'online' : 'offline');
+      if (isRelay || off) { tag.style.color = 'var(--dim)'; tag.style.borderColor = 'var(--edge)'; }
+      else if (m.online) { tag.style.color = 'var(--ok)'; tag.style.borderColor = '#22401f'; }
+      else tag.style.color = 'var(--err)';
+      row.appendChild(tag);
+      info.appendChild(row);
+      if (m.host && m.host !== m.id) {
+        const d = document.createElement('div'); d.className = 'sdesc'; d.textContent = m.host;
+        info.appendChild(d);
       }
-      card.appendChild(cl);
-      // CPU / RAM / disk / GPU — best-effort per-machine load (sysstats.collect).
-      // Each metric is optional; a probe that failed on the box is just omitted.
-      if (m.stats.sys) card.appendChild(renderSysStats(m.stats.sys));
+      if (isRelay) {
+        const d = document.createElement('div'); d.className = 'sdesc';
+        d.textContent = 'the hub — routes every machine (no sessions of its own)';
+        info.appendChild(d);                     // no stats line for the relay
+      } else if (m.stats) {
+        // Aggregate counts the worker reported in plaintext (no titles/content):
+        // N projects · N sessions · N active — an at-a-glance per-machine load.
+        const st = m.stats;
+        const cl = document.createElement('div'); cl.className = 'sdesc';
+        cl.append(`${st.projects} project${st.projects === 1 ? '' : 's'} · `
+                + `${st.sessions} session${st.sessions === 1 ? '' : 's'}`);
+        if (st.active > 0) {
+          const a = document.createElement('span');
+          a.textContent = ` · ${st.active} active`;
+          a.style.color = 'var(--ok)';
+          cl.append(a);
+        }
+        info.appendChild(cl);
+        // CPU / RAM / disk / GPU — best-effort per-machine load (sysstats.collect).
+        // Each metric is optional; a probe that failed on the box is just omitted.
+        if (m.stats.sys) info.appendChild(renderSysStats(m.stats.sys));
+      }
     }
     // The active switch. Unchecked = this browser opens no channel to the box,
     // so it costs no passkey at dawn and shows no projects. Offered for offline
     // machines too — switching one off while it's asleep is exactly how you stop
     // it ambushing you with a prompt when it wakes. The setting lives on the
-    // relay, so this also unchecks it on your other devices.
-    if (!isRelay) {
-      const act = document.createElement('label');
-      act.className = 'cdefault' + (off ? '' : ' on');
-      const cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.checked = !off;
-      cb.onchange = () => setMachineActive(m.id, cb.checked);
-      const txt = document.createElement('span');
-      txt.textContent = off ? 'switched off · no passkey, no projects' : 'talk to this machine';
-      act.append(cb, txt);
-      act.title = 'unchecked: this machine is never contacted — one less passkey to unlock the fleet';
-      card.appendChild(act);
+    // relay, so this also unchecks it on your other devices. Its node is never
+    // rebuilt: it is the one thing on this page you tap.
+    let act = card.querySelector(':scope > .cdefault');
+    if (isRelay) { if (act) act.remove(); }
+    else {
+      if (!act) {
+        act = document.createElement('label');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.onchange = () => setMachineActive(card.dataset.mid, cb.checked);
+        act.append(cb, document.createElement('span'));
+        act.title = 'unchecked: this machine is never contacted — one less passkey to unlock the fleet';
+        card.appendChild(act);
+      }
+      putProp(act, 'className', 'cdefault' + (off ? '' : ' on'));
+      putProp(act.querySelector('input'), 'checked', !off);
+      putProp(act.querySelector('span'), 'textContent', off ? 'switched off · no passkey, no projects' : 'talk to this machine');
     }
     // (The "default for new repos" pin used to be a checkbox here. It's a
     // one-of-N choice, so it was N checkboxes that had to clear each other —
     // now it's a single select on the ⚙️ settings page, see renderSettings.)
-    machinesEl.appendChild(card);
+    const at = machinesEl.children[i + 1];       // slot 0 is the label
+    if (at !== card) machinesEl.insertBefore(card, at || null);
   });
+  have.forEach(n => n.remove());
+  if (note) machinesEl.appendChild(note);        // the empty-roster hint sits last
+}
+function renderMachines(list) {
+  machineList = list;
+  // The roster is the relay's pulse (~1/s fleet-wide). The cards live in the
+  // 🖥️ modal: don't build them while it's closed, and never wipe them while
+  // it's open — the "talk to this machine" checkbox under a finger would be
+  // destroyed mid-tap (landmine 4). openMachines() paints on arrival.
+  if (!machinesModal.hidden) paintMachines(list);
   // Roster changed: connect any NEWLY-live machine and re-merge (online flags
   // gate which entries are selectable in the unified list). Only the machines
   // that just became live get listed: this roster is also the relay's pulse —
@@ -7244,16 +7277,31 @@ function highlightCard(cid) {
     c.classList.toggle('active', c.dataset.cid === cid));
 }
 
+// In-place repaint helpers (landmine 4): lists that repaint on server frames
+// keep their nodes and write only what changed.
+function putProp(el, prop, v) { if (el[prop] !== v) el[prop] = v; }
+// Keep `parent`'s optional children in a fixed order without rebuilding it.
+// specs: [[key, want, tag, className, fill(el)]...] in display order — a child
+// is found by its `data-slot`, created when wanted and missing, removed when
+// not wanted, and never moved once placed.
+function syncSlots(parent, specs) {
+  let prev = null;
+  for (const [key, want, tag, cls, fill] of specs) {
+    let el = null;
+    for (const c of parent.children) if (c.dataset.slot === key) { el = c; break; }
+    if (!want) { if (el) el.remove(); continue; }
+    if (!el) {
+      el = document.createElement(tag);
+      el.dataset.slot = key; el.className = cls;
+      parent.insertBefore(el, prev ? prev.nextSibling : parent.firstChild);
+    }
+    if (fill) fill(el);
+    prev = el;
+  }
+}
 let sessionsRepaintDeferred = false; // a broadcast landed while the machine picker had focus
 function renderSessions() {
   updateTtyStat();   // activity box tracks live state (a sessions frame follows every hook)
-  // A repaint tears down sessionsEl wholesale, which destroys the machine
-  // <select> mid-pick (closes the native dropdown, steals focus). While focus
-  // is inside the picker row, defer metadata-driven repaints; the row's
-  // focusout handler catches up once the user is done.
-  const mp = sessionsEl.querySelector('.machinepick');
-  if (mp && mp.contains(document.activeElement)) { sessionsRepaintDeferred = true; return; }
-  sessionsRepaintDeferred = false;
   // Sessions for this project across EVERY machine that hosts it, each tagged with
   // its `_machine` — no more "pick one machine to view". A multi-machine project
   // now shows one merged list; each card badges the host it's on.
@@ -7266,161 +7314,160 @@ function renderSessions() {
   const list = noProject ? sortedSessions()          // all machines/projects, already unpinned + ranked
                          : everything.filter(s => !s.pinned && !isEjected(s.cid));   // 📌 parked ones live on the pin board, ⏏ ejected ones in their window
   const pinnedHere = everything.length - list.length;
-  const multi = FLEET && (() => { const g = unifiedProjects.get(currentProjectKey); return g && g.machines.length > 1; })();
-  sessionsEl.innerHTML = '';
-  const label = document.createElement('div');
-  label.className = 'menutitle';
+  const g = FLEET ? unifiedProjects.get(currentProjectKey) : null;
+  const multi = !!(g && g.machines.length > 1);
+
+  // ---- the head (title, ＋ new session row, 📌 note): rebuilt only when what
+  // it shows changes, never on an ordinary frame. This used to be wiped along
+  // with every card on EVERY sessions/accounts frame — a card, its ✕ or the
+  // ＋ button under a finger mid-tap was destroyed (landmine 4).
+  if (!noProject && multi && (!newSessionMachine || !g.machines.some(m => m.machineId === newSessionMachine && m.online)))
+    newSessionMachine = defaultMachineFor(currentProjectKey) || currentMachine
+                     || (pickMachineEntry(g) || {}).machineId;
   const pn = noProject ? '' : projectName(currentPid);
   const pe = noProject ? '' : currentProjectEmoji();
-  label.textContent = noProject
+  const titleText = noProject
     ? `all sessions · ${list.length}`
     : (pn ? (pe ? pe + ' ' : '') + pn + ' · ' : '') + `sessions · ${list.length}`;
-  sessionsEl.appendChild(label);
-
-  // ＋ new session — with a machine picker when the project spans more than one
-  // host, so you choose WHERE it spawns (defaults to the project's default
-  // machine; ★ pins the current pick as that default). Single-machine / direct
-  // mode: just the button, host stays invisible.
-  if (noProject) {
-    // Nothing to spawn into yet — a new session needs a project for its cwd. Point
-    // at the projects rung instead of offering a button that can't work.
-    const row = document.createElement('div'); row.className = 'newrow';
-    const pick = document.createElement('button');
-    pick.id = 'newSession'; pick.textContent = '＋  new session — pick a project';
-    pick.onclick = () => navTo('projects');
-    row.appendChild(pick);
-    sessionsEl.appendChild(row);
-  } else if (multi) {
-    const g = unifiedProjects.get(currentProjectKey);
-    if (!newSessionMachine || !g.machines.some(m => m.machineId === newSessionMachine && m.online))
-      newSessionMachine = defaultMachineFor(currentProjectKey) || currentMachine
-                       || (pickMachineEntry(g) || {}).machineId;
-    const mrow = document.createElement('div'); mrow.className = 'machinepick';
-    const add = document.createElement('button');
-    add.id = 'newSession'; add.textContent = '＋  new session on';
-    add.onclick = () => newSession(sel.value);
-    const sel = document.createElement('select');
-    g.machines.forEach(me => {
-      const opt = document.createElement('option');
-      opt.value = me.machineId;
-      opt.textContent = shortMachine(me.machineId) + (me.online ? '' : ' · offline') + ` · ${me.sessionCount || 0} sess`;
-      opt.disabled = !me.online;
-      if (me.machineId === newSessionMachine) opt.selected = true;
-      sel.appendChild(opt);
-    });
-    const starLabel = () =>
-      defaultMachineFor(currentProjectKey) === newSessionMachine ? '★ default' : '☆ set default';
-    // update the ★ in place — a full repaint here would drop focus mid-interaction
-    sel.onchange = () => { newSessionMachine = sel.value; star.textContent = starLabel(); };
-    const star = document.createElement('button');
-    star.className = 'setdefault';
-    star.textContent = starLabel();
-    star.title = 'make this the default machine for new sessions in this project';
-    star.onclick = () => { setDefaultMachine(currentProjectKey, newSessionMachine); star.textContent = starLabel(); };
-    mrow.append(add, sel, star, codexButton(() => sel.value));
-    mrow.addEventListener('focusout', e => {
-      if (e.relatedTarget && mrow.contains(e.relatedTarget)) return; // select → ★ stays in-row
-      if (!sessionsRepaintDeferred) return;
-      // small delay so a click that caused this blur lands before the rebuild
-      setTimeout(() => { if (sessionsRepaintDeferred) renderSessions(); }, 300);
-    });
-    sessionsEl.appendChild(mrow);
-  } else {
-    const row = document.createElement('div'); row.className = 'newrow';
-    const add = document.createElement('button');
-    add.id = 'newSession'; add.textContent = '＋  new session';
-    add.onclick = () => newSession();
-    row.append(add, codexButton());
-    sessionsEl.appendChild(row);
+  const headFp = JSON.stringify([noProject, multi, FLEET ? currentProjectKey : currentPid, !!pinnedHere,
+    multi ? g.machines.map(m => [m.machineId, !!m.online, m.sessionCount || 0]) : 0]);
+  let head = sessionsEl.querySelector(':scope > .shead');
+  // The machine <select> mid-pick: a rebuild closes the native dropdown and
+  // steals focus. While focus is inside the picker row, defer the HEAD rebuild
+  // (cards still update); the row's focusout handler catches up.
+  const mp = head && head.querySelector('.machinepick');
+  const picking = !!(mp && mp.contains(document.activeElement));
+  if (head && head.dataset.fp !== headFp && picking) sessionsRepaintDeferred = true;
+  else if (!head || head.dataset.fp !== headFp) {
+    sessionsRepaintDeferred = false;
+    if (!head) {
+      sessionsEl.innerHTML = '';                 // first paint (or foreign content): start clean
+      head = document.createElement('div'); head.className = 'shead';
+      head.style.display = 'contents';           // layout-neutral: its children lay out as #sessions' own
+      sessionsEl.appendChild(head);
+    }
+    head.dataset.fp = headFp;
+    head.innerHTML = '';
+    const label = document.createElement('div');
+    label.className = 'menutitle';
+    head.appendChild(label);
+    // ＋ new session — with a machine picker when the project spans more than one
+    // host, so you choose WHERE it spawns (defaults to the project's default
+    // machine; ★ pins the current pick as that default). Single-machine / direct
+    // mode: just the button, host stays invisible.
+    if (noProject) {
+      // Nothing to spawn into yet — a new session needs a project for its cwd. Point
+      // at the projects rung instead of offering a button that can't work.
+      const row = document.createElement('div'); row.className = 'newrow';
+      const pick = document.createElement('button');
+      pick.id = 'newSession'; pick.textContent = '＋  new session — pick a project';
+      pick.onclick = () => navTo('projects');
+      row.appendChild(pick);
+      head.appendChild(row);
+    } else if (multi) {
+      const mrow = document.createElement('div'); mrow.className = 'machinepick';
+      const add = document.createElement('button');
+      add.id = 'newSession'; add.textContent = '＋  new session on';
+      add.onclick = () => newSession(sel.value);
+      const sel = document.createElement('select');
+      g.machines.forEach(me => {
+        const opt = document.createElement('option');
+        opt.value = me.machineId;
+        opt.textContent = shortMachine(me.machineId) + (me.online ? '' : ' · offline') + ` · ${me.sessionCount || 0} sess`;
+        opt.disabled = !me.online;
+        if (me.machineId === newSessionMachine) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      const starLabel = () =>
+        defaultMachineFor(currentProjectKey) === newSessionMachine ? '★ default' : '☆ set default';
+      // update the ★ in place — a full repaint here would drop focus mid-interaction
+      sel.onchange = () => { newSessionMachine = sel.value; star.textContent = starLabel(); };
+      const star = document.createElement('button');
+      star.className = 'setdefault';
+      star.textContent = starLabel();
+      star.title = 'make this the default machine for new sessions in this project';
+      star.onclick = () => { setDefaultMachine(currentProjectKey, newSessionMachine); star.textContent = starLabel(); };
+      mrow.append(add, sel, star, codexButton(() => sel.value));
+      mrow.addEventListener('focusout', e => {
+        if (e.relatedTarget && mrow.contains(e.relatedTarget)) return; // select → ★ stays in-row
+        if (!sessionsRepaintDeferred) return;
+        // small delay so a click that caused this blur lands before the rebuild
+        setTimeout(() => { if (sessionsRepaintDeferred) renderSessions(); }, 300);
+      });
+      head.appendChild(mrow);
+    } else {
+      const row = document.createElement('div'); row.className = 'newrow';
+      const add = document.createElement('button');
+      add.id = 'newSession'; add.textContent = '＋  new session';
+      add.onclick = () => newSession();
+      row.append(add, codexButton());
+      head.appendChild(row);
+    }
+    // some of this project's sessions are parked on the 📌 board — say so, quietly
+    if (pinnedHere) {
+      const note = document.createElement('button');
+      note.className = 'pinnednote';
+      note.title = 'open the pin board';
+      note.onclick = () => navTo('pins');
+      head.appendChild(note);
+    }
   }
+  // text that moves with every spawn/close/pin: written in place, no rebuild
+  putProp(head.querySelector('.menutitle'), 'textContent', titleText);
+  const pnote = head.querySelector('.pinnednote');
+  if (pnote) putProp(pnote, 'textContent', `📌 ${pinnedHere} pinned on the board`);
 
-  // some of this project's sessions are parked on the 📌 board — say so, quietly
-  if (pinnedHere) {
-    const note = document.createElement('button');
-    note.className = 'pinnednote';
-    note.textContent = `📌 ${pinnedHere} pinned on the board`;
-    note.title = 'open the pin board';
-    note.onclick = () => navTo('pins');
-    sessionsEl.appendChild(note);
-  }
-
+  // ---- the cards: reconciled by cid, each written in place ----
+  const have = new Map([...sessionsEl.querySelectorAll(':scope > .scard')].map(n => [n.dataset.cid, n]));
   const localProj = !noProject && currentProjectIsLocal();
-  list.forEach(s => {
-    const card = document.createElement('div');
-    card.className = 'scard' + (s.cid === currentCid ? ' active' : '') +
-                     (localProj ? ' local' : '');
-    card.dataset.cid = s.cid;
-    // In all-sessions mode a card can live in another project (and, in fleet,
-    // another machine), so go through focusSession — it re-points the project/
-    // machine first. openSession assumes the session is in the current project.
-    card.onclick = noProject
-      ? () => focusSession(s)
-      : () => { pendingSendText = null; openSession(s.cid); };  // manual open cancels a queued new-session send
-
-    const row = document.createElement('div'); row.className = 'row';
-    const sdot = document.createElement('span');
-    sdot.className = 'sdot' + dotState(s);
-    const title = document.createElement('span');
-    title.className = 'stitle'; title.textContent = s.title || 'new session';
-    row.appendChild(sdot);
-    if (noProject) {                     // mixed list — badge which project each one is in
-      const em = sessionEmoji(s);
-      if (em) {
-        const pb = document.createElement('span');
-        pb.className = 'pemoji'; pb.textContent = em;
-        const full = sessionEmojiFull(s);
-        if (full !== em) pb.title = full;
-        row.appendChild(pb);
-      }
+  list.forEach((s, i) => {
+    let card = have.get(s.cid);
+    have.delete(s.cid);
+    if (!card) {
+      card = document.createElement('div');
+      card.dataset.cid = s.cid;
+      // In all-sessions mode a card can live in another project (and, in fleet,
+      // another machine), so go through focusSession — it re-points the project/
+      // machine first. openSession assumes the session is in the current project.
+      card.onclick = () => {
+        if (card._np) focusSession(card._s);
+        else { pendingSendText = null; openSession(card.dataset.cid); }   // manual open cancels a queued new-session send
+      };
     }
-    row.appendChild(title);
-    const eb0 = engineBadge(s); if (eb0) row.appendChild(eb0);
-    if (multi && s._machine) {                  // which host this session lives on
-      const mt = document.createElement('span');
-      mt.className = 'scount smach'; mt.textContent = '🖥️ ' + shortMachine(s._machine);
-      mt.title = 'running on ' + s._machine;
-      row.appendChild(mt);
-    }
-    if (s.account && s.account !== 'default') { // which subscription it burns
-      const at = document.createElement('span');
-      const plan = acctDisplay(s._machine || 'local', s.account);
-      at.className = 'scount smach'; at.textContent = '🔑 ' + plan;
-      at.title = 'running under the ' + plan + ' subscription account';
-      row.appendChild(at);
-    }
-    card.appendChild(row);
-
-    if (s.desc) {
-      const desc = document.createElement('div');
-      desc.className = 'sdesc'; desc.textContent = s.desc;
-      card.appendChild(desc);
-    }
-    // live digest ("what it's doing right now"), shown when it adds over the stable desc
-    if (s.digest && s.digest !== s.desc) {
-      const dig = document.createElement('div');
-      dig.className = 'sdig'; dig.textContent = '› ' + s.digest;
-      card.appendChild(dig);
-    }
-    // the "needs you" line — highest-signal state, surfaced prominently
-    if (s.blocked_on) {
-      const blk = document.createElement('div');
-      blk.className = 'sblock'; blk.textContent = '⏳ ' + s.blocked_on;
-      card.appendChild(blk);
-    }
-    const sm = document.createElement('div');
-    sm.className = 'smeta';
+    card._s = s; card._np = noProject;           // the LATEST frame's session and mode
+    putProp(card, 'className', 'scard' + (s.cid === currentCid ? ' active' : '') + (localProj ? ' local' : ''));
+    const em = noProject ? sessionEmoji(s) : '';         // mixed list — badge which project each one is in
+    const full = em ? sessionEmojiFull(s) : '';
+    const eng = (s.engine && s.engine !== 'claude') ? s.engine : '';
+    const plan = (s.account && s.account !== 'default') ? acctDisplay(s._machine || 'local', s.account) : '';   // which subscription it burns
     const state = !s.alive ? 'ended' : s.waiting ? 'needs you' :
                   s.busy ? (s.tool ? `running ${s.tool}` : 'working…') : 'idle';
-    sm.textContent = `${s.promptCount || 0} msg · ${state}`;
-    card.appendChild(sm);
-
-    const x = document.createElement('button');
-    x.className = 'sclose'; x.textContent = '✕'; x.title = 'close session';
-    x.onclick = (e) => closeSession(s.cid, e);
-    card.appendChild(x);
-
-    sessionsEl.appendChild(card);
+    syncSlots(card, [
+      ['row', true, 'div', 'row', row => syncSlots(row, [
+        ['dot', true, 'span', 'sdot', el => putProp(el, 'className', 'sdot' + dotState(s))],
+        ['pe', !!em, 'span', 'pemoji', el => { putProp(el, 'textContent', em); putProp(el, 'title', full !== em ? full : ''); }],
+        ['title', true, 'span', 'stitle', el => putProp(el, 'textContent', s.title || 'new session')],
+        ['eng', !!eng, 'span', 'ebadge', el => { putProp(el, 'textContent', eng); putProp(el, 'title', 'this session is driven by ' + eng + ', not claude'); }],
+        ['mach', !!(multi && s._machine), 'span', 'scount smach',   // which host this session lives on
+          el => { putProp(el, 'textContent', '🖥️ ' + shortMachine(s._machine)); putProp(el, 'title', 'running on ' + s._machine); }],
+        ['acct', !!plan, 'span', 'scount smach',
+          el => { putProp(el, 'textContent', '🔑 ' + plan); putProp(el, 'title', 'running under the ' + plan + ' subscription account'); }],
+      ])],
+      ['desc', !!s.desc, 'div', 'sdesc', el => putProp(el, 'textContent', s.desc)],
+      // live digest ("what it's doing right now"), shown when it adds over the stable desc
+      ['dig', !!(s.digest && s.digest !== s.desc), 'div', 'sdig', el => putProp(el, 'textContent', '› ' + s.digest)],
+      // the "needs you" line — highest-signal state, surfaced prominently
+      ['blk', !!s.blocked_on, 'div', 'sblock', el => putProp(el, 'textContent', '⏳ ' + s.blocked_on)],
+      ['meta', true, 'div', 'smeta', el => putProp(el, 'textContent', `${s.promptCount || 0} msg · ${state}`)],
+      ['x', true, 'button', 'sclose', el => {
+        if (!el.onclick) { el.textContent = '✕'; el.title = 'close session'; el.onclick = e => closeSession(card.dataset.cid, e); }
+      }],
+    ]);
+    // slot i after the head: move only a card that is out of place
+    const at = sessionsEl.children[i + 1];
+    if (at !== card) sessionsEl.insertBefore(card, at || null);
   });
+  have.forEach(n => n.remove());                 // sessions that left this list
 }
 
 // ── 📌 pin board ──────────────────────────────────────────────────────────────
@@ -11172,12 +11219,6 @@ function refreshSessionTag() {
   const mach = (FLEET && currentMachine) ? shortMachine(currentMachine) : '';
   const model = s ? prettyModel(s.model) : '';
   const pct = (s && s.ctxTokens > 0) ? ctxPct(s) : 0;
-  machineTag.textContent = '';
-  const add = (cls, text) => {
-    const el = document.createElement('span');
-    el.className = cls; el.textContent = text;
-    machineTag.appendChild(el);
-  };
   // 🔑 CTA: the server says a SIGNED-OUT login would be the router's pick
   // for this session (dead/hot/far-behind pool) — one tap opens that
   // login's sign-in ceremony (same path as the 🧠 card's "sign in again").
@@ -11186,24 +11227,37 @@ function refreshSessionTag() {
   // pushed to x = -180 on a 390px viewport).
   const cta = s && s.loginCta && s.loginCta.name && ctaStillTrue(s) ? s.loginCta : null;
   const room = !(cta && isTouch);
-  if (model && room) add('model', model);
   // Colour by tokens, not percent (Austin, 09-30): green under 200k (the
   // old full window — a session opens at ~60k of system prompt + memory),
   // yellow to 300k, orange to 400k, red from 400k — where a long session
   // gets less sharp and burns the plan fast, well before a 1M window is full.
   const tk = (s && s.ctxTokens) || 0;
   const heat = tk >= 400000 ? 'crit' : tk >= 300000 ? 'hot' : tk >= 200000 ? 'warm' : 'fresh';
+  const ctaMid = FLEET ? currentMachine : 'local';
+  const ctaText = cta ? '🔑 sign in to ' + acctDisplay(ctaMid, cta.name) : '';
+  // Rebuilt only when what it shows changed — this runs on every sessions and
+  // accounts frame, and a wipe destroys the 🔑 sign-in button under a finger
+  // (landmine 4).
+  const fp = JSON.stringify([inSession, model, pct, heat, acct, mach, room, ctaText, cta ? cta.reason || '' : 0, cta ? ctaMid : 0, currentMachine || '']);
+  if (machineTag.dataset.fp === fp) return;
+  machineTag.dataset.fp = fp;
+  machineTag.textContent = '';
+  const add = (cls, text) => {
+    const el = document.createElement('span');
+    el.className = cls; el.textContent = text;
+    machineTag.appendChild(el);
+  };
+  if (model && room) add('model', model);
   if (pct > 0 && room) add('ctx ' + heat, 'ctx ' + pct + '%');
   if (acct && room) add('acct', '🔑 ' + acct);
   if (mach && room) add('mach', mach);
   if (cta) {
-    const mid = FLEET ? currentMachine : 'local';
     const b = document.createElement('button');
     b.className = 'cta';
-    b.textContent = '🔑 sign in to ' + acctDisplay(mid, cta.name);
+    b.textContent = ctaText;
     b.title = 'a better subscription is signed out: ' + (cta.reason || '')
             + ' — tap to sign in to it';
-    b.onclick = (e) => { e.stopPropagation(); addAccount(mid, cta.name); };
+    b.onclick = (e) => { e.stopPropagation(); addAccount(ctaMid, cta.name); };
     machineTag.appendChild(b);
   }
   machineTag.title = [model && ('model: ' + model),
@@ -11936,7 +11990,7 @@ window.addEventListener('resize', () => { padOrigin(); fit.fit(); sendResize(tru
 // (same shape as the 🧠 subscriptions page) — so there's no backdrop to click away
 // on: you leave via ✕ close or Esc.
 const machinesModal = document.getElementById('machinesmodal');
-function openMachines() { renderMachines(machineList); machinesModal.hidden = false; }
+function openMachines() { machinesModal.hidden = false; renderMachines(machineList); }   // unhide first: the cards paint only while it shows
 const accountsModal = document.getElementById('accountsmodal');
 document.getElementById('accountsclose').onclick = () => { accountsModal.hidden = true; };
 document.getElementById('accountsBtn').onclick = () => openAccounts();   // 🧠 subscriptions page

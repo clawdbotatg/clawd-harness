@@ -162,6 +162,42 @@ check('the off machines are still listed (so you can switch them back on)',
       cards.filter(c => c.tag === 'off').map(c => c.id).sort().join() === 'clawd-head,clawd-heart',
       JSON.stringify(cards));
 
+// -- 2b. the roster is the relay's pulse (~1/s): the cards and the checkbox must
+// survive it. They used to be wiped and rebuilt on every pulse, so a tap on
+// "talk to this machine" that spanned one was lost (landmine 4, 2026-11-09).
+const pulse = n => ({ ...ROSTER, machines: ROSTER.machines.map(m =>
+  m.stats ? { ...m, stats: { ...m.stats, sessions: m.stats.sessions + n } } : m) });
+await page.evaluate(() => {
+  window.__mnodes = [...document.querySelectorAll('#machinelist .scard')].map(c => [c, c.querySelector('.cdefault input')]);
+});
+for (let i = 1; i <= 4; i++) await rx(pulse(i));
+const keptM = await page.evaluate(() => {
+  const now = [...document.querySelectorAll('#machinelist .scard')];
+  return { n: now.length,
+           same: now.length === window.__mnodes.length && now.every((c, i) =>
+             c === window.__mnodes[i][0] && c.querySelector('.cdefault input') === window.__mnodes[i][1]),
+           fresh: document.getElementById('machinelist').innerText.includes('7 sessions') };
+});
+check('roster pulses keep every machine card and checkbox node', keptM.same, JSON.stringify(keptM));
+check('…while the numbers on the card still update', keptM.fresh, JSON.stringify(keptM));
+// a REAL click on the checkbox, with pulses landing while the button is down
+const cbBox = await page.evaluate(() => {
+  const card = [...document.querySelectorAll('#machinelist .scard')].find(c => c.querySelector('.stitle').textContent === 'clawd-atg');
+  const cb = card.querySelector('.cdefault input');
+  cb.scrollIntoView({ block: 'center' });
+  const r = cb.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+});
+await clearSent();
+await page.mouse.move(cbBox.x, cbBox.y);
+await page.mouse.down();
+await rx(pulse(5)); await rx(pulse(6));
+await page.mouse.up();
+await page.waitForTimeout(300);
+const wrote2 = (await sent()).filter(f => f.type === 'prefs').pop();
+check('a click on the checkbox that spans roster pulses still lands',
+      !!wrote2 && (wrote2.inactive || []).includes('clawd-atg'), JSON.stringify(wrote2));
+
 // -- 3. THE POINT: tomorrow morning, only the machine you kept costs a passkey -
 // A fresh load with the stored set — the relay always sends `prefs` before the
 // first roster, which is what stops the page unlocking boxes you switched off.
