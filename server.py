@@ -265,6 +265,7 @@ KILL_PROMPT = (
 # `check_of` / `check_file` / `check_pending` are ctor params + registry rows
 # so a restart between its spawn and its Stop still hands the findings back.
 CHECK_TTL_S = int(os.environ.get("CHECK_TTL_S", "1800"))
+BOOT_SEND_WAIT = float(os.environ.get("BOOT_SEND_WAIT", "25"))  # a send to a just-woken session waits this long for its TUI
 CHECK_READY_S = float(os.environ.get("CHECK_READY_S", "30"))   # wait for the reviewer's TUI before typing
 REVIEW_GLOB = "REVIEW-*.md"                                    # the exclude entry; one file per review
 
@@ -3141,6 +3142,10 @@ class Engine:
     def hook_setup(self, s):    return None   # → settings path, or None
     def transcript_globs(self, s):  return []
     def slim_event(self, s, line):  return None
+    def is_conversation(self, s, line):
+        """Is this raw transcript line a real conversation turn? The default
+        asks the engine's own parser, so a new engine is right for free."""
+        return (s._slim_event(line.strip()) or {}).get("role") in ("user", "assistant")
     def send_settle(self, big): return SEND_SETTLE if big else SEND_SETTLE_MIN
     def bg_probe(self, s):      return ""
     # Wrap message text in bracketed-paste markers (ESC[200~ … ESC[201~) so
@@ -3258,6 +3263,9 @@ class ClaudeEngine(Engine):
 
     def slim_event(self, s, line):
         return s._slim_event_claude(line)
+
+    def is_conversation(self, s, line):
+        return '"type":"user"' in line or '"type":"assistant"' in line
 
     def bg_probe(self, s):
         return s._bg_probe_claude()
@@ -3845,6 +3853,7 @@ class ClaudeSession:
         self.alive = False
         self.starting = False                    # parked by load(): starts on demand / in the stagger
         self._start_lock = threading.Lock()
+        self._waking = False                     # woken from the boot park, no send has waited on it yet
 
         self.ring = bytearray()                  # recent PTY output for late joiners
         self.ring_lock = threading.Lock()
@@ -4252,7 +4261,11 @@ class ClaudeSession:
             if not self.starting:
                 return False
             self.starting = False
-        self.start()
+            # Spawn INSIDE the lock: a second caller (two sends, a send racing
+            # the stagger thread) must not get past here while there is still
+            # no PTY — its write would be dropped without a word.
+            self._waking = True
+            self.start()
         return True
 
     def start(self):
@@ -4809,6 +4822,15 @@ class ClaudeSession:
         they aren't prompts, so they must not touch `prompted_at` (the "when
         did a human last say something" clock behind tab ages)."""
         self.ensure_started()                    # a send jumps the boot stagger
+        if self._waking:
+            # Just woken from the boot park (by this send, a viewer, or the
+            # stagger): the TUI may not be up yet, and text typed before it is
+            # lands in the resume gate or nowhere. Same barrier every other
+            # respawn-then-type path uses. Once per wake.
+            if not self.wait_ready(BOOT_SEND_WAIT):
+                print(f"[session {self.cid[:8]}] send: not ready "
+                      f"{BOOT_SEND_WAIT:.0f}s after waking — typing anyway", flush=True)
+            self._waking = False
         if not control:
             self.prompted_at = time.time()   # belt-and-braces: a bounced prompt fires no hook
         pre_hooks = self.hook_count
@@ -5202,7 +5224,7 @@ class ClaudeSession:
         try:
             with open(path) as f:
                 for line in f:
-                    if '"type":"user"' in line or '"type":"assistant"' in line:
+                    if self.eng.is_conversation(self, line):
                         return True
         except OSError:
             pass
@@ -5261,6 +5283,12 @@ class ClaudeSession:
                 announced = target
             with f:
                 buf = ""
+                # A resumed session's file opens full of turns from before
+                # this launch. Viewers already have those (subscribe replays
+                # them as history) — streaming them again as LIVE doubled the
+                # transcript and read old answers aloud. Skip the broadcast
+                # until the first line from this launch; tripwires still run.
+                stale = True
                 while self.alive:
                     if self._live_transcript and self._live_transcript != target:
                         target = self._live_transcript       # rotated → reopen new file
@@ -5274,7 +5302,9 @@ class ClaudeSession:
                         continue                     # partial line; wait for the rest
                     raw, buf = buf, ""
                     ev = self._slim_event(raw.strip())
-                    if ev:
+                    if ev and stale:
+                        stale = not self._live_line(ev, raw)
+                    if ev and not stale:
                         self._to_subscribers_json(
                             {"type": "transcript", "cid": self.cid, "event": ev})
                     # Login-expired tripwire: the CLI's own reply once its

@@ -30,6 +30,7 @@ class Stub:
     send_message = server.ClaudeSession.send_message
     def __init__(self):
         self.eng, self.hook_count, self.writes = Eng(), 0, []
+        self._waking = False
     def ensure_started(self): pass
     def write(self, b): self.writes.append(b)
     def _send_watchdog(self, *a): pass

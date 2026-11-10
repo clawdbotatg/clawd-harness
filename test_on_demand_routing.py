@@ -294,7 +294,8 @@ with tempfile.TemporaryDirectory() as td:
         f.write('{"type":"mode","mode":"normal","sessionId":"x"}\n'
                 '{"type":"user","message":{"role":"user","content":"hi"}}\n')
     fake = types.SimpleNamespace(transcript_path=fresh,
-                                 _find_transcript=lambda: None)
+                                 _find_transcript=lambda: None,
+                                 eng=server.ENGINES["claude"])
     a = server.ClaudeSession._has_conversation(fake)
     fake.transcript_path = talked
     b = server.ClaudeSession._has_conversation(fake)
