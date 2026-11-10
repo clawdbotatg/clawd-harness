@@ -37,7 +37,7 @@ A session runs **one of two CLIs**, fixed at spawn: `claude` (the default) or
   work claude produced, double-check a risky claim, break a tie. Two engines
   disagreeing is a real signal; the same engine agreeing with itself isn't.
 - **Two codex-specific reading habits.** (a) `transcript_tail` needs a BIGGER
-  `n` on codex — around 60. The last lines of a codex transcript are token-count
+  `n` on codex — the maximum, 50. The last lines of a codex transcript are token-count
   bookkeeping that the parser correctly drops, so a small tail comes back empty
   even when everything is fine; empty is not evidence of a stuck session.
   (b) codex's turn signal can be lost outright on a machine running two
@@ -85,7 +85,7 @@ When the operator says "check in", "what needs me", "how's everything":
   real work gets committed) and closes itself into the 🗃️
   closed history with a TLDR (reopenable). `close` is for the broken or the abandoned.
   Never wrap a blocked session, and a wrap that doesn't end within two turns
-  is the session telling you something (a dirty tree, an open question) —
+  is the session telling you something (an open question, a decision it needs) —
   read its `transcript_tail`.
 - **`check` = a second pair of eyes.** When a session claims it's done and the
   human wants it verified (or before you wrap anything that touched real

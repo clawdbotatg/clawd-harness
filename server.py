@@ -1428,9 +1428,9 @@ GATE_RAW_MAX = 8192
 SHARE_PATHS = ["settings.json", "CLAUDE.md", "commands", "rules", "skills",
                "agents", "hooks", "workflows", "plugins"]
 
-# Shared secret. Required on /ws and /hook because we bind to the LAN and the
-# session runs with bypass-permissions — without it anyone on the wifi could run
-# commands as you. Persisted so the URL/QR stays stable across restarts.
+# Shared secret. Enforced on /ws and /hook whenever we bind beyond loopback
+# (AUTH_REQUIRED): the session runs with bypass-permissions — without it anyone
+# on the wifi could run commands as you. Persisted so the URL/QR stays stable across restarts.
 def _load_or_make_token():
     env = os.environ.get("CONSOLE_TOKEN")
     if env:
@@ -3353,8 +3353,8 @@ class CodexEngine(Engine):
     def transcript_globs(self, s):
         # $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl. Old
         # rollouts get zstd-compressed in place (.jsonl.zst) by codex's
-        # maintenance pass — we only ever tail the LIVE one, but the glob
-        # tolerates the suffix so a resume can still find a just-archived file.
+        # maintenance pass — we only ever tail the LIVE one; these globs do
+        # NOT match the .zst suffix, so a just-archived rollout isn't found.
         return [f"{CODEX_STORE}/sessions/*/*/*/rollout-*{s.session_id}.jsonl",
                 f"{CODEX_STORE}/sessions/*/*/*/*{s.session_id}*.jsonl"]
 
@@ -3837,6 +3837,7 @@ class ClaudeSession:
         self.prompted_at = prompted_at
 
         self.master_fd = None
+        self._fd_lock = threading.Lock()          # write/resize vs the pump closing the master (fd numbers get reused)
         self.os_pid = None                       # claude's process pid (not the project pid)
         self.proc = None
         self.alive = False
@@ -3868,6 +3869,7 @@ class ClaudeSession:
         self.hooks_at_prompt = 0                  # hook_count when it landed — "did that turn ever progress?"
         self._limit_raw = b""                     # rolling RAW PTY bytes, for the limit banner/modal scan
         self._limit_seen_at = 0.0                 # cooldown anchor for banner-triggered rescues
+        self._limit_kind = "session"              # which wall the last scan saw (session | weekly …)
         # The PTY limit scan arms on the first Enter into THIS process: a
         # --resume repaints the old conversation, and a limit line in that
         # history is not a wall now — worse, its confirm meets the resume
@@ -4675,11 +4677,15 @@ class ClaudeSession:
         return text[:head] + "\n…\n" + text[-tail:]
 
     def resize(self, cols, rows):
-        if self.master_fd is not None and cols and rows:
-            try:
-                self._set_winsize(self.master_fd, int(rows), int(cols))
-            except OSError:
-                pass
+        if not (cols and rows):
+            return
+        with self._fd_lock:
+            fd = self.master_fd
+            if fd is not None:
+                try:
+                    self._set_winsize(fd, int(rows), int(cols))
+                except OSError:
+                    pass
 
     # -- viewer size policy -----------------------------------------------------
     # A resize frame is a size CLAIM, not a command. `claim:true` (a deliberate
@@ -4760,15 +4766,21 @@ class ClaudeSession:
         if not self._limit_armed and b"\r" in data:
             self._limit_armed = True             # a prompt is going in — walls from here are live
             self._limit_raw = b""                # drop the resume repaint already buffered
-        try:
-            # Loop: os.write may return short (signal wakeup) even on a
-            # blocking fd, and a silently dropped tail is a truncated prompt.
-            view = memoryview(data)
-            while view:
-                n = os.write(self.master_fd, view)
-                view = view[n:]
-        except OSError:
-            pass
+        # Under _fd_lock: the pump closes the master when the child exits, and
+        # a closed fd NUMBER is reused by the next spawn — never write to it.
+        with self._fd_lock:
+            fd = self.master_fd
+            if fd is None:
+                return
+            try:
+                # Loop: os.write may return short (signal wakeup) even on a
+                # blocking fd, and a silently dropped tail is a truncated prompt.
+                view = memoryview(data)
+                while view:
+                    n = os.write(fd, view)
+                    view = view[n:]
+            except OSError:
+                pass
 
     def wait_ready(self, timeout=20.0):
         """Safe-to-type barrier for a freshly (re)spawned session: SessionStart
@@ -4976,15 +4988,16 @@ class ClaudeSession:
 
     # -- read channel: raw PTY bytes -> subscribed clients ---------------------
     def _pump_pty(self):
+        fd = self.master_fd                      # THIS spawn's master — ours to close
         while True:
             try:
-                r, _, _ = select.select([self.master_fd], [], [], 0.5)
-            except (OSError, ValueError):
+                r, _, _ = select.select([fd], [], [], 0.5)
+            except (OSError, ValueError, TypeError):
                 break
             if not r:
                 continue
             try:
-                chunk = os.read(self.master_fd, 65536)
+                chunk = os.read(fd, 65536)
             except OSError:
                 chunk = b""
             if not chunk:
@@ -5011,6 +5024,17 @@ class ClaudeSession:
             if self.eng.ready_on_title_spin and not self._started_evt.is_set():
                 self._scan_for_title_ready(chunk)
         self.alive = False
+        # Close the master: nothing else ever did, so every spawn (handoff,
+        # rescue, close, restart-resume) leaked one fd for the daemon's life
+        # — the slow road to Errno 24. Unhook first so write()/resize see None.
+        with self._fd_lock:
+            if self.master_fd == fd:
+                self.master_fd = None
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
         # Stamp the account: the poller must not consume this grant for
         # SUB_REFRESH_EXIT_GRACE — the dying claude's last token rotation
         # may still be settling (or stranded, if it was killed mid-refresh).
@@ -5508,8 +5532,10 @@ class ClaudeSession:
             elif isinstance(out, dict):
                 out = out.get("output") or json.dumps(out)
             out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", str(out))[:2000]
+            # a list of STRINGS, like the claude path — the UI and the PM's
+            # tail both str() each entry
             return {"role": "tool_result",
-                    "results": [{"text": out}]} if out.strip() else None
+                    "results": [out]} if out.strip() else None
 
         if ptype == "reasoning":
             return None                          # thinking is not the transcript
@@ -5952,10 +5978,6 @@ class SessionManager:
         self._restart_lock = threading.Lock()
 
     # -- graceful self-restart -------------------------------------------------
-    def busy_count(self):
-        with self.lock:
-            return sum(1 for s in self.sessions.values() if s.busy and s.alive)
-
     def restart_blockers(self):
         """Sessions that would actually LOSE something to a restart — the bar
         for holding one back, which is narrower than `busy`.
@@ -6032,10 +6054,10 @@ class SessionManager:
                               for s in blockers[:6])
             print(f"[restart] {why} — cutting {len(blockers)} mid-turn "
                   f"session(s): {names}", flush=True)
-        threading.Thread(target=self._execute_restart, daemon=True).start()
+        threading.Thread(target=self._execute_restart, args=(why,), daemon=True).start()
 
-    def _execute_restart(self):
-        print("[restart] all idle → tearing down + exiting (launchd relaunches)",
+    def _execute_restart(self, why="all idle"):
+        print(f"[restart] {why} → tearing down + exiting (launchd relaunches)",
               flush=True)
         self.broadcast_all({"type": "restart", "state": "go"})
         time.sleep(0.5)                          # let the 'go' frame flush to clients
@@ -8785,10 +8807,6 @@ class SessionManager:
             i += 1
         return f"{base}-{i}"
 
-    def get_project(self, pid):
-        with self.lock:
-            return self.projects.get(pid)
-
     def _warmth(self, p):
         """How 'warm' a project is: the last time you spawned a session or sent
         a prompt in it (persisted, survives closed sessions), else its creation
@@ -8808,10 +8826,6 @@ class SessionManager:
         # pinned (the harness itself) first, then warmest first
         return sorted(self.projects.values(),
                       key=lambda p: (not p.pinned, -self._warmth(p)))
-
-    def session_count(self, pid):
-        with self.lock:
-            return sum(1 for s in self.sessions.values() if s.pid == pid)
 
     def session_counts(self, pid):
         """(total, busy, waiting) sessions for a project — busy = a turn in
@@ -8887,8 +8901,9 @@ class SessionManager:
             return s
         # Routing: an explicit override (e.g. the sign-in ceremony) always
         # wins; otherwise, with auto-routing on, each new session picks the
-        # account with the MOST HEADROOM at this moment (per-spawn — not a
-        # sticky default), falling back to active_account when no fresh usage
+        # router's best account at this moment (_best_account: soonest weekly
+        # reset first, NOT most headroom; per-spawn — not a sticky default),
+        # falling back to active_account when no fresh usage
         # data qualifies. The resolved config dir is recorded on the session
         # so --resume always finds it.
         name = account
@@ -9067,6 +9082,7 @@ class SessionManager:
     def close(self, cid, _broadcast=True, reason="closed"):
         with self.lock:
             s = self.sessions.pop(cid, None)
+            self._route_locks.pop(cid, None)
         if not s:
             return
         s.kill()
@@ -9518,6 +9534,7 @@ class SessionManager:
         client.send_json(self.accounts_meta())
         client.send_json(self.irons_meta())
         client.send_json(self.todos_meta())
+        client.send_json(self.closed_meta())     # 🗃️ else a direct page shows none until the next close
         if self.restart_pending:                 # a late joiner still sees the banner
             client.send_json(self.restart_state())
 

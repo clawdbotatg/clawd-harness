@@ -2,7 +2,7 @@
 
 Implementation handoff for the builder worker.
 
-Status: approved design; not implemented.
+Status: stages 1–2 are built (see `SUB-ROUTING.md`, `test_on_demand_routing.py`); the rest is still plan.
 
 ## Scope
 

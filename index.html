@@ -499,7 +499,7 @@
   #sessiondesc .sd-desc::before { content:': '; }
   @media (pointer: coarse) { #sessiondesc { font-size:5px; } }
   /* Quick-prompt chips: one-tap sends of the things you say most (QUICK_PROMPTS,
-     most-used farthest right). Share the session-name line; only in a session. */
+     most-used farthest left). Share the session-name line; only in a session. */
   #descrow { display:none; align-items:center; gap:8px; min-width:0; }
   #descrow.insession { display:flex; }
   #descrow #sessiondesc { flex:1 1 auto; min-width:0; }
@@ -797,7 +797,6 @@
   #micBtn.arming { border-color:#f5c518; box-shadow:0 0 0 2px #f5c518; }
   #micBtn.rec { border-color:var(--err); background:var(--err); }
   #micBtn.wait { opacity:.45; }   /* asked the box for its Deepgram key; starts on its own when it lands */
-  @keyframes vpulse { 0%,100%{opacity:1} 50%{opacity:.45} }
   button { background:var(--accent); color:#000; border:0; padding:10px 16px;
            font-family:var(--mono); font-weight:600; cursor:pointer; }
   /* right-side action column: attach-image over send, mirroring the voice column on the left */
@@ -808,7 +807,6 @@
   #send { background:var(--raised); border:1px solid var(--edge); color:var(--ink); }
   #send:hover { border-color:var(--accent); }
   button:disabled { opacity:.4; cursor:default; }
-  .hint { color:var(--dim); font-size:11px; padding:0 12px 8px; }
   /* header controls: one uniform emoji square. Everything in the top-right strip
      (incl. the PM face, which is also #status) wears .hbtn so the row reads as a
      single set of controls — no mixed pill/label shapes. */
@@ -872,7 +870,7 @@
     header .bico { font-size:13px; }
   }
   /* projects (top rung) + sessions (next rung): both are scrollable card lists */
-  #menu, #projects, #machines, #pinsview, #ironsview, #ironview { flex:1; background:var(--bg); }
+  #menu, #projects, #pinsview, #ironsview, #ironview { flex:1; background:var(--bg); }
   #sessions, #projectlist, #machinelist, #pinboard, #ironlist, #ironvlist { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
               padding:14px; display:flex; flex-direction:column; gap:9px;
               width:100%; max-width:780px; align-self:center; }
@@ -1004,7 +1002,6 @@
   .ironempty { color:var(--dim); font-size:12px; font-family:var(--mono); padding:10px 2px; line-height:1.6; }
   /* 📌 pinned members of a scoped iron sit dashed at the end of the strip */
   #sessionbar .stab.parked { border-style:dashed; }
-  .iprojrow { display:flex; flex-wrap:wrap; gap:6px; }
   .iprojchip { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--edge);
                background:transparent; color:var(--dim); font-size:12px; font-family:var(--mono);
                cursor:pointer; padding:4px 9px; max-width:220px; }
@@ -1351,7 +1348,6 @@
   .scard.offline:hover { border-color:var(--edge); }
   /* per-project machine selector on the sessions rung (multi-machine projects only) */
   .machinepick { display:flex; align-items:center; gap:8px; padding:4px 2px 8px; flex-wrap:wrap; }
-  .machinepick .mplabel { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.12em; }
   .machinepick select { background:var(--panel); color:var(--ink); border:1px solid var(--edge);
             border-radius:4px; padding:4px 6px; font-family:var(--mono); font-size:12px; }
   .machinepick .setdefault { background:transparent; border:1px solid var(--edge); color:var(--dim);
@@ -1703,7 +1699,7 @@
              title="🤖 autopilot — let the harness keep this session working on its goal, narrating progress in a status row. Bounded; your own messages steer it." />
       <div id="ttystat" hidden role="img"><span class="dot"></span></div>
       <div id="sessiondesc" title="AI-generated name for this session"></div>
-      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest right."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — your skill library (same list everywhere). Tap one to attach it to your next message; Enter sends your text with a one-line pointer claude reads.">📚</button><button id="closedBtn" title="Closed sessions — every session closed on any machine, newest first. ↩ brings one back as a new tab resuming the old conversation.">🗃️</button><button id="forkBtn" title="Fork — a new tab in this project that continues this conversation (everything claude knows so far), while this session keeps going on its own. One context, two directions.">⑂</button><button id="checkBtn" title="Double-check — the OTHER engine reviews this session's work (codex checks claude, claude checks codex). This session writes a short brief first; when that turn ends a reviewer tab opens in this project with the brief + the diff since this session started, verifies it, and reports issues. It never edits.">🔍</button></div>
+      <div id="quickchips" title="Quick prompts — the things you say most, one tap each. Most-used farthest left."><button id="sentBtn" title="Sent history — the full text of every message sent from this browser. A long paste can echo in the terminal as just its tail; the whole message is kept here.">🕘</button><button id="skillsBtn" title="Skills — your skill library (same list everywhere). Tap one to attach it to your next message; Enter sends your text with a one-line pointer claude reads.">📚</button><button id="closedBtn" title="Closed sessions — every session closed on any machine, newest first. ↩ brings one back as a new tab resuming the old conversation.">🗃️</button><button id="forkBtn" title="Fork — a new tab in this project that continues this conversation (everything claude knows so far), while this session keeps going on its own. One context, two directions.">⑂</button><button id="checkBtn" title="Double-check — the OTHER engine reviews this session's work (codex checks claude, claude checks codex). This session writes a short brief first; when that turn ends a reviewer tab opens in this project with the brief + the diff since this session started, verifies it, and reports issues. It never edits.">🔍</button></div>
     </div>
     <!-- 🤖 the autopilot's narration row — same slot style as the upload chips:
          where the work stands / what the supervisor is doing, live per round -->
@@ -1726,7 +1722,7 @@
     <div class="inputrow">
       <div id="voice">
         <button id="ttsBtn" title="Read replies aloud (text-to-speech)">🔊</button>
-        <button id="micBtn" title="Hold to dictate (speech-to-text)">🎤</button>
+        <button id="micBtn" title="Tap to dictate (speech-to-text)">🎤</button>
       </div>
       <textarea id="box" placeholder="message"></textarea>
       <input id="imgInput" type="file" accept="image/*,.heic,.heif,text/*,application/pdf,.pdf,.md,.markdown,.txt,.csv,.json,.yaml,.yml,.toml,.log,.xml,.html" multiple hidden />
@@ -2832,16 +2828,6 @@ function deliverSend(cid, full, recover, via) {
     }, 4000);
   }
 }
-// Pull a fresh copy of what we're viewing: re-subscribe replays the live TTY
-// screen + recent transcript (and, in fleet, re-ensures the secure channel). The
-// "refresh the tty so I'm looking at current state" primitive.
-function resync() {
-  if (!ws || ws.readyState !== 1) { scheduleReconnect(0); return; }
-  if (FLEET) fleetBootstrap();          // re-list every machine so the unified rung stays fresh
-  const v = currentView();
-  if (currentCid && (v === 'tty' || v === 'transcript')) subscribe(currentCid);   // only reset the term when we're actually viewing the session
-  flushOutbound();
-}
 // PWA escape hatch. A backgrounded mobile socket can come back DEAD while
 // readyState still reads OPEN — so if a real resume doesn't yield a live socket
 // shortly, the body is stuck blank with no manual refresh. Reload (the draft +
@@ -3508,7 +3494,6 @@ async function e2eEnsure(machine, opts = {}) {
   return ch.ready;
 }
 
-function e2eSendCtl(machine, msg) { relaySend({ type: 'toMachine', machine, msg }); }   // buffered until the relay auth gate is passed
 // Handshake ctl frames are TRACKED on the channel until answered: if the socket
 // dies while one is in flight (the iOS Face-ID-sheet drop), setRelayAuthed()
 // re-sends it on the next authed socket and the worker completes the SAME
@@ -4559,7 +4544,6 @@ function projectEmojiFullByPid(pid) {
   const p = (projectList || []).find(p => p.pid === pid);
   return (p && p.emoji) || '';
 }
-function projectEmojiByPid(pid) { return shortEmoji(projectEmojiFullByPid(pid)); }
 // Badge for a session row/tab. In fleet the badge must come from the MERGED
 // project (electEmoji), not the host machine's own pick — two boxes running the
 // same repo each badge it independently, and reading the raw per-machine code
@@ -5370,9 +5354,8 @@ function confirmCreateLocal(machine, path) {
 // is born with the branch-and-PR rule. Async — status rides the projects frame.
 function addExternalProject(url) {
   url = (url || '').trim();
-  if (!url) return;
-  hsend({ type: 'addExternalProject', repoUrl: url });
-  meta.textContent = 'checking access + forking/cloning…';
+  if (!url || !ensureTargetMachine()) return;
+  if (hsend({ type: 'addExternalProject', repoUrl: url })) meta.textContent = 'checking access + forking/cloning…';
 }
 function addExternalProjectOnMachine(machineId, url) {
   url = (url || '').trim();
@@ -5407,6 +5390,11 @@ function accountSend(mid, frame) {
   if (FLEET && mid !== 'local') hsendTo(mid, frame); else hsend(frame);
 }
 // live sessions currently burning an account on a machine (badge on its card)
+function codexLiveCount(mid) {
+  const list = (FLEET && mid && mid !== 'local') ? ((perMachine[mid] || {}).sessionList || [])
+                                                 : (sessionList || []);
+  return list.filter(s => s.engine === 'codex' && s.alive).length;
+}
 function accountSessionCount(mid, name) {
   const list = (FLEET && mid !== 'local') ? ((perMachine[mid] || {}).sessionList || [])
                                           : sessionList;
@@ -5527,7 +5515,7 @@ function windowRow(w) {
 // "use this plan" / "next spawn" / remove — nothing here is a routing input.
 // It answers one question: how much codex have I got left? Absent (null) when
 // codex isn't signed in on that box, so the card simply doesn't appear.
-function renderCodexCard(container, cx) {
+function renderCodexCard(container, cx, mid) {
   if (!cx) return;
   const card = document.createElement('div');
   card.className = 'acct codexacct';
@@ -5588,7 +5576,7 @@ function renderCodexCard(container, cx) {
             + 'only moves claude sessions between plans, so this card is '
             + 'informational';
   act.appendChild(tag);
-  const n = (sessionList || []).filter(s => s.engine === 'codex' && s.alive).length;
+  const n = codexLiveCount(mid);
   if (n) {
     const sc = document.createElement('span');
     sc.className = 'scount'; sc.textContent = `${n} live session${n === 1 ? '' : 's'}`;
@@ -5800,7 +5788,7 @@ function renderAccountsPanel(container, info, mid) {
     container.appendChild(card);
   });
 
-  renderCodexCard(container, info.codex);
+  renderCodexCard(container, info.codex, mid);
 
   // add flow: one tap → a terminal opens → do the claude.ai OAuth there.
   // No label field: the server auto-picks the folder name (sub2, sub3, …),
@@ -6047,8 +6035,7 @@ function renderCodexPlanCard(grid, machines) {
              + 'subscription router — this card is informational';
     chips.appendChild(nr);
     p.readings.forEach((r, i) => {
-      const n = (sessionList || []).filter(s => s.engine === 'codex' && s.alive
-                                             && (!FLEET || machineForCid(s.cid) === r.mid)).length;
+      const n = codexLiveCount(r.mid);
       const c = document.createElement('span');
       c.className = 'amchip' + (i ? '' : ' fresh');
       const pctTxt = typeof r.cx.pct === 'number'
@@ -6624,7 +6611,7 @@ function shortMachine(id) { return (id || '').replace(/^clawd-/, ''); }
 // Reconnect re-subscribes and the auto-surfaced-question path never call this
 // — only real navigation does.
 const splashEl = document.getElementById('splash');
-let splashTimers = [], splashCid = null, splashShownAt = 0;
+let splashTimers = [], splashCid = null;
 // One shared read of "what is this session doing right now" — feeds both the
 // splash's NOW line and the persistent #ttystat activity box. `agent` = a turn
 // is in flight AND its current tool is a subagent (Task/Agent) — i.e. work is
@@ -6750,7 +6737,7 @@ function maybeSplash(cid) {
   if (!s.promptCount && !s.desc) return;                 // brand-new: nothing to say yet
   if (seenRecently(cid)) { markSeen(cid); return; }      // just been here — no show
   markSeen(cid);
-  splashCid = cid; splashShownAt = Date.now();
+  splashCid = cid;
   for (const t of splashTimers) clearTimeout(t);
   splashTimers = [];
   const machine = FLEET ? (s._machine || currentMachine) : null;
@@ -6914,7 +6901,7 @@ function armNewFocusWatch(machine) {
     pendingNewFocus = false;
     hideDeadVeil();
     if (FLEET && mid && e2eChans[mid] && e2eChans[mid].queue) {
-      e2eChans[mid].queue = e2eChans[mid].queue.filter(f => !(f.type === 'new' || f.type === 'send' || f.type === 'accountAdd'));
+      e2eChans[mid].queue = e2eChans[mid].queue.filter(f => !(f.type === 'new' || f.type === 'send' || f.type === 'accountAdd' || f.type === 'fork' || f.type === 'reopen'));
     }
     pendingSendText = null;          // a late focus must not also deliver the text we're handing back
     // Only climb if we're still parked on the void — a session opened by hand
@@ -8289,7 +8276,7 @@ function recordSent(cid, text) {
   } catch {}
 }
 function sentSessName(cid) {
-  const s = (sessionList || []).find(x => x.cid === cid);
+  const s = allSessions().find(x => x.cid === cid);
   return s ? (s.title || cid.slice(0, 8)) : (cid ? cid.slice(0, 8) : '');
 }
 function sentAgo(t) {
@@ -8443,7 +8430,7 @@ function closedRowFill(it, r) {
   if (r.prompt_count) bits.push(r.prompt_count + ' prompt' + (r.prompt_count === 1 ? '' : 's'));
   if (r.engine && r.engine !== 'claude') bits.push(r.engine);
   if (r.reason === 'wrapped') bits.push('📑 wrapped itself up');
-  if (r.reason === 'killed') bits.push('🔫 killed — report written');
+  else if (r.reason === 'killed') bits.push('🔫 killed — report written');
   else if (r.reason && r.reason !== 'closed') bits.push(r.reason);
   it.querySelector('.cl-when').textContent = bits.join(' · ');
   it.querySelector('.cl-proj').textContent = (r.machine ? closedMachineTag(r.machine) + ' ' : '') + (r.project || '');
@@ -8941,10 +8928,11 @@ function holdSend(text, batch) {
     if (batch.some(a => a.error)) { restore(); return; }
     const ready = batch.filter(a => a.path);
     if (currentDraftId() !== ctx) {
-      // You navigated away mid-upload. A session target still gets its message
-      // (the outbox is per-cid, so it recovers there); a sessions-list target
-      // has no session to go to — leave it in that context's draft.
-      if (cid && ctx === cid) deliverSend(cid, composeSend(text, ready), text);
+      // You navigated away mid-upload. A `send` frame carries no cid — it lands
+      // in whatever session the socket is bound to NOW, i.e. the wrong one — so
+      // never send here: stash the composed message (paths and all) in that
+      // session's outbox and it comes back in its composer when you return.
+      if (cid && ctx === cid) stashOutbox(cid, composeSend(text, ready));
       return;
     }
     if (!dispatchSend(text, ready)) { restore(); return; }
@@ -9045,7 +9033,7 @@ function renderWrapRow(s, show) {
   wrapText.textContent = s.wrapClosing
     ? 'closing when this turn ends — it lands in 🗃️ closed sessions (↩ brings it back)'
     : s.wrapKill ? 'killed — closes itself once its report for the next agent is written'
-    : 'wrapping up — closes itself once the handoff is written and committed';
+    : 'wrapping up — closes itself once the handoff is written';
 }
 document.getElementById('wrapCancel').onclick = () => {
   if (!currentCid) return;
@@ -9749,7 +9737,7 @@ function sttAsk() {
     if (sttStartAt) { const late = Date.now() > sttStartAt; sttStartAt = 0; micBtn.classList.remove('wait'); if (!late && !recOn) startRec(); }
     clearTimeout(sttReqT);
     if (m.ttl) sttReqT = setTimeout(sttAsk, Math.max(5000, (m.ttl - 60) * 1000));
-    micBtn.title = 'Hold to dictate (Deepgram — knows your words, see ⚙️) — or hold Space in the box';
+    micBtn.title = 'Tap to dictate (Deepgram — knows your words, see ⚙️); tap again, Enter or ➤ to stop — or hold Space in the box';
     sttSyncPull();                                            // creds in hand = a live session token: fetch the shared list once
   });
   if (!hsend({ type: 'stt', id })) { clearTimeout(timer); sttPending.delete(id); }
@@ -12320,10 +12308,6 @@ async function pmNew() {
   pmArchOpen = false;
   try { pmApplyThreads(await pmApi('/api/thread/new', pmPost({}))); } catch (e) {}
   pmMessages = []; renderPmFeed(); syncComposer(); box.focus();
-}
-async function pmClear() {
-  try { pmApplyThreads(await pmApi('/api/thread/clear', pmPost({}))); } catch (e) {}
-  pmMessages = []; renderPmFeed();
 }
 async function pmArchive(tid) {
   const wasCurrent = tid === pmCurrent;

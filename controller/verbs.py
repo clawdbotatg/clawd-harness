@@ -1095,10 +1095,10 @@ class Verbs:
 
     def remove_project(self, machine, pid, confirm=False):
         """Detach a `kind:"local"` project: drop it from the registry and close
-        its sessions. **Never touches the folder on disk.** Silently ignored for
-        gh projects (those are removed by deleting the folder, which is not
-        something this controller can or should do) and for the pinned self
-        project."""
+        its sessions. **Never touches the folder on disk.** Refused with an
+        error for gh projects (those are removed by deleting the folder, which
+        is not something this controller can or should do); the pinned self
+        project is silently ignored by the harness."""
         def do():
             c = self.clients.get(machine)
             if not c:

@@ -642,7 +642,7 @@ is.
    entirely (root cause v3). A wall of `refresh blocked in transit (HTTP 429)`
    lines = the refresh client is being identity-blocked again.
 3c. **A rate limit was SEEN (banner flashed / message bounced):** grep the
-   log for which layer caught it, in order — `limit banner in the PTY`
+   log for which layer caught it, in order — `limit banner/modal in the PTY`
    (tripwire), `send got NO hook in` (send watchdog; its `pty tail:` dump
    shows exactly what the terminal displayed — if a real banner is visible
    in that dump but the tripwire line is absent, the banner regex missed

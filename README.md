@@ -57,13 +57,15 @@ Two views, switched with the header button (one at a time):
 
 Shared across both:
 
-- **📑 doc = wrap up** — the last quick-chip on the composer. The session
-  writes its handoff, commits it, and then **closes itself**, landing in 🗃️
-  closed sessions with its TLDR (↩ brings it back). It can only do that while
-  the chip armed it (two turns, cancel above the composer), and it refuses to
-  close on a dirty worktree — so a wrap that doesn't end is the session
-  telling you something.
-- **⑂ fork** — the last button on the composer strip. A new tab in the same
+- **📑 doc = wrap up** — a quick-chip on the composer. The session writes
+  its handoff to a local `HANDOFF-<stamp>.md` (git-excluded, never committed),
+  commits any real work, and then **closes itself**, landing in 🗃️ closed
+  sessions with its TLDR (↩ brings it back). It can only do that while the
+  chip armed it (two turns, cancel above the composer). A dirty worktree
+  doesn't block the close — the uncommitted files are named in the TLDR.
+  🔫 kill is the same exit for a session that did a bad job: an honest report,
+  nothing committed.
+- **⑂ fork** — on the composer strip. A new tab in the same
   project that continues the current conversation (everything claude knows so
   far) under its own id, while the original keeps running. One context, two
   directions. Claude only (codex can't), and there must be a conversation to
