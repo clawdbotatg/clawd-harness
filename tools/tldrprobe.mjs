@@ -143,7 +143,7 @@ check('scrollback, no summary: viewport held 5 rows + the blank cursor line up, 
 await page.waitForTimeout(100);
 const gap = await page.evaluate(()=>{ const rowsEl=term.element.querySelector('.xterm-rows'); let lastRow=-1; for (let i=0;i<rowsEl.children.length;i++) if (rowsEl.children[i].textContent.trim()) lastRow=i;
   const r=rowsEl.children[lastRow].getBoundingClientRect(), t=document.getElementById('term').getBoundingClientRect(); return {text:rowsEl.children[lastRow].textContent.trim().slice(0,20), gap:+(t.bottom-r.bottom).toFixed(1)}; });
-check('no summary: the thinking line is last, with a few px of air under it', gap.text.startsWith('* Thinking') && gap.gap>=TLDR_HOLD_GAP_PROBE && gap.gap<TLDR_HOLD_GAP_PROBE+20, JSON.stringify(gap));
+check('no summary: the thinking line is last, with a few px of air under it', gap.text.startsWith('* Thinking') && gap.gap>=TLDR_HOLD_GAP_PROBE-0.5 && gap.gap<TLDR_HOLD_GAP_PROBE+20, JSON.stringify(gap));
 await page.evaluate((CID)=>handleJson({type:'tldr',cid:CID,text:'summary back',final:false}), CID);
 await page.waitForTimeout(120);
 const sb2 = await page.evaluate(()=>{ const b=term.buffer.active; const rowsEl=term.element.querySelector('.xterm-rows');

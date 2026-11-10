@@ -29,7 +29,8 @@ res=$({ ls "$ROOT"/test_*.py "$ROOT"/fleet/test_*.py
       } | xargs -P "${JOBS:-6}" -n 1 sh "$0" --one)
 # A timing probe can flake under parallel load: rerun each failure once, alone.
 fails=""
-for label in $(echo "$res" | sed -n 's/ FAIL$//p'); do
+# (only the unindented "<label> FAIL" lines — a guard's own indented tail can end in FAIL too)
+for label in $(echo "$res" | sed -n '/^[^ ]/s/ FAIL$//p'); do
   again=$(sh "$0" --one "$ROOT/$label")
   case "$again" in *" PASS") echo "$label flaky (passed on retry)" ;;
                    *) echo "$again"; fails="$fails$label

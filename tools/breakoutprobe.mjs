@@ -116,7 +116,8 @@ if (popup) {
     out.descOnTop = desc.parentElement.id === 'breakoutbar' && desc.textContent.includes('probe breakout session') && bar.top < 2 && bar.height > 10;
     out.descOffFooter = !document.getElementById('descrow').contains(desc);
     const term = document.getElementById('term').getBoundingClientRect();
-    out.paneAtTop = Math.abs(term.top - bar.bottom) < 3 && term.height > 200;   // nothing between the bar and the pane
+    const og = document.getElementById('origin'), ogH = og && !og.hidden ? og.getBoundingClientRect().height : 0;
+    out.paneAtTop = Math.abs(term.top - bar.bottom - ogH) < 3 && term.height > 200;   // only the 📍 origin strip (10-07) between the bar and the pane
     out.footerUp = getComputedStyle(document.querySelector('footer')).display !== 'none';
     out.title = document.title;
     out.titled = document.title === '⏏ eject-me';
