@@ -211,6 +211,76 @@ check("both parked sessions were moved",
 check("the eaten prompt is retyped on the replacement",
       sent2 == [("eaten", "write the handoff")], f"sent={sent2}")
 
+print("\na dead LOGIN is not a walled POOL (bounce rescue, audit 2026-11-09):")
+# rescue_bounced_prompt quarantined the whole org for ANY dead verdict, so a
+# refused/expired login locked its healthy same-org sibling out of routing
+# for the 5h fallback and the session left the org (or stayed put).
+
+
+def bounce(fetch, **login):
+    """One bounced prompt on `gone` (org EF2) with a healthy sibling `twin`
+    in the same org and a busier `far` pool elsewhere. Returns the lot."""
+    gone = acct("gone", 20.0, "EF2", 30 * 60, 2 * 86400)
+    twin = acct("twin", 20.0, "EF2", 30 * 60, 2 * 86400)
+    far = acct("far", 80.0, "FAR", 40 * 60, 6 * 86400)
+    for k, v in login.items():
+        setattr(gone, k, v)
+    bm = manager(gone, twin, far)
+    for name in ("rescue_bounced_prompt", "_blind_alternative"):
+        setattr(bm, name, getattr(server.SessionManager, name).__get__(bm))
+    bm._stay_put_log = lambda *args: None
+    bm._blind_log = lambda *args: None
+    bm._redeliver = lambda sess, prompt: bm.moved.append(("redeliver", prompt))
+    bm._handoff = lambda sess, target, why="", fresh_if_empty=False: \
+        bm.moved.append((target.name, fresh_if_empty))
+    bs = types.SimpleNamespace(
+        cid="bounce-cid", account="gone", config_dir="/tmp/gone", alive=True,
+        ceremony=False, eng=Eng(), last_bounce_rescue=0.0, busy=True,
+        hook_count=4)
+    saved = server._fetch_usage, server.time.sleep, server._cred_sig
+    try:
+        server._fetch_usage = fetch
+        server.time.sleep = lambda _seconds: None
+        server._cred_sig = lambda _dir: "sig-of-the-refused-blob"   # never the real store
+        bm.rescue_bounced_prompt(bs, "ship it", 4)
+    finally:
+        server._fetch_usage, server.time.sleep, server._cred_sig = saved
+    return gone, twin, far, bm
+
+
+gone, twin, far, bm = bounce(lambda *a, **k: server.AUTH_FAIL)
+check("refused login: the session moves to its same-org sibling",
+      bm.moved[:1] == [("twin", True)], f"moves={bm.moved}")
+check("refused login: the bounced prompt is redelivered",
+      ("redeliver", "ship it") in bm.moved)
+check("refused login: that login alone leaves routing",
+      gone.broken and gone.refused_sig == "sig-of-the-refused-blob"
+      and not twin.broken)
+check("refused login: the org is NOT quarantined",
+      not getattr(twin, "walled_until", 0.0) and not getattr(gone, "walled_until", 0.0))
+
+windows = lambda: [{"key": "five_hour", "label": "5h", "used": 20.0, "resets": iso(1800)}]
+gone, twin, far, bm = bounce(lambda *a, **k: (20.0, windows()),
+                             login_gone="login expired — test")
+check("expired login (store verdict) with a 200: sibling, no quarantine",
+      bm.moved[:1] == [("twin", True)] and gone.broken
+      and not getattr(twin, "walled_until", 0.0), f"moves={bm.moved}")
+
+gone, twin, far, bm = bounce(lambda *a, **k: server.RATE_LIMITED)
+check("a real wall (429) still quarantines the whole org and leaves it",
+      bm.moved[:1] == [("far", True)] and twin.walled_until > NOW
+      and gone.walled_until > NOW and not gone.broken, f"moves={bm.moved}")
+
+gone, twin, far, bm = bounce(lambda *a, **k: (100.0, windows()))
+check("a measured 100% still quarantines the whole org and leaves it",
+      bm.moved[:1] == [("far", True)] and twin.walled_until > NOW,
+      f"moves={bm.moved}")
+
+gone, twin, far, bm = bounce(lambda *a, **k: (40.0, windows()))
+check("a healthy plan is left alone (nothing moved, nothing marked)",
+      bm.moved == [] and not gone.broken
+      and not getattr(gone, "walled_until", 0.0), f"moves={bm.moved}")
+
 print()
 if FAILED:
     print(f"FAILED: {len(FAILED)} — {FAILED}")

@@ -56,6 +56,7 @@ import subprocess
 import tempfile
 import termios
 import threading
+import traceback
 import time
 import urllib.error
 import urllib.parse
@@ -1441,6 +1442,7 @@ def _load_or_make_token():
     except OSError:
         tok = secrets.token_urlsafe(32)  # 256-bit, URL-safe (was uuid4 hex[:16] = 64-bit)
         tok_file.write_text(tok)
+        os.chmod(tok_file, 0o600)
         return tok
 
 TOKEN = _load_or_make_token()
@@ -4266,8 +4268,8 @@ class ClaudeSession:
         env = dict(os.environ)
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"          # xterm.js renders 24-bit; let claude emit it
-        env["COLUMNS"] = str(COLS)
-        env["LINES"] = str(ROWS)
+        env["COLUMNS"] = str(self.tty_cols or COLS)     # the winsize the PTY was just opened at
+        env["LINES"] = str(self.tty_rows or ROWS)
         # 📑 wrap: `harness-close` (bin/) asks the harness to close THIS
         # session; the URL carries the cid, the endpoint carries the gates.
         env["HARNESS_CLOSE_URL"] = f"http://127.0.0.1:{PORT}/self/close?t={TOKEN}&cid={self.cid}"
@@ -4371,6 +4373,7 @@ class ClaudeSession:
         }}
         path = str(HERE / f".clawd-harness.hooks.{self.cid}.json")
         Path(path).write_text(json.dumps(settings))
+        os.chmod(path, 0o600)                    # it embeds our token (same as the codex hooks file)
         return path
 
     def _set_winsize(self, fd, rows, cols):
@@ -7416,221 +7419,231 @@ class SessionManager:
         blocking credential/network reads happen outside it. Any change
         re-evaluates the auto-switch rule."""
         while True:
-            forced = self._poll_now.wait(timeout=15.0)
-            self._poll_now.clear()
-            changed = False
-            now = time.time()
+            # Fenced: one exception here used to end the thread for the life of
+            # the process — no usage polling, no auto-switch, no handoff sweep.
+            try:
+                self._poll_accounts_tick()
+            except Exception:
+                _loop_crashed("accounts poller")
+                time.sleep(5.0)
+
+    def _poll_accounts_tick(self):
+        """One pass of poll_accounts_loop (split out so the loop can fence it)."""
+        forced = self._poll_now.wait(timeout=15.0)
+        self._poll_now.clear()
+        changed = False
+        now = time.time()
+        with self.lock:
+            accts = list(self.accounts.values())
+        # Pending accounts: watch for first credentials. Full 15s cadence
+        # while the sign-in is plausibly in progress (first hour), then
+        # back off to USAGE_TTL — an abandoned ceremony must not fork a
+        # Keychain subprocess every 15s forever.
+        for a in accts:
+            if a.ready and not a.broken:
+                continue
+            # pending accounts await their FIRST credentials; broken ones
+            # await a RE-sign-in — both watched the same way
+            fresh_add = now - a.created < 3600
+            if not (forced or fresh_add or a.broken
+                    or now - a.last_pending_check > USAGE_TTL):
+                continue
+            a.last_pending_check = now
+            if not _has_creds(a.config_dir):
+                continue
+            if a.broken and a.refused_sig \
+                    and _cred_sig(a.config_dir) == a.refused_sig:
+                continue                     # same refused login still there —
+                                             # wait for an actual re-sign-in
+            if a.broken and _login_verdict(a.config_dir, now)[0]:
+                continue                     # the store still says wiped / about to
+                                             # expire — a rotated token is not a sign-in
+            email, org, oname = _account_identity(a.config_dir)
+            if not a.ready and a.config_dir:
+                _merge_mcp(a.config_dir)
             with self.lock:
-                accts = list(self.accounts.values())
-            # Pending accounts: watch for first credentials. Full 15s cadence
-            # while the sign-in is plausibly in progress (first hour), then
-            # back off to USAGE_TTL — an abandoned ceremony must not fork a
-            # Keychain subprocess every 15s forever.
-            for a in accts:
-                if a.ready and not a.broken:
-                    continue
-                # pending accounts await their FIRST credentials; broken ones
-                # await a RE-sign-in — both watched the same way
-                fresh_add = now - a.created < 3600
-                if not (forced or fresh_add or a.broken
-                        or now - a.last_pending_check > USAGE_TTL):
-                    continue
-                a.last_pending_check = now
-                if not _has_creds(a.config_dir):
-                    continue
-                if a.broken and a.refused_sig \
-                        and _cred_sig(a.config_dir) == a.refused_sig:
-                    continue                     # same refused login still there —
-                                                 # wait for an actual re-sign-in
-                if a.broken and _login_verdict(a.config_dir, now)[0]:
-                    continue                     # the store still says wiped / about to
-                                                 # expire — a rotated token is not a sign-in
-                email, org, oname = _account_identity(a.config_dir)
-                if not a.ready and a.config_dir:
-                    _merge_mcp(a.config_dir)
-                with self.lock:
-                    was_broken = a.broken
-                    a.ready, a.broken = True, False
-                    a.refused_sig = ""
-                    a.login_gone = ""
-                    a.email = email or a.email
-                    a.org = org or a.org
-                    a.org_name = oname or a.org_name
-                    a.tok.clear()                # stale cached token from the old login
-                print(f"[account {a.name}] "
-                      f"{'re-signed in' if was_broken else 'signed in'}"
-                      f" ({email or 'email unknown'})", flush=True)
-                changed = True
-            # Ready accounts due a usage refresh — fetched in PARALLEL so one
-            # slow/hung endpoint can't stall the other accounts (or the
-            # sign-in watch above) behind a serial chain of 10s timeouts.
-            # A pool nearing the hot bar can cross 90→100 inside one normal
-            # poll under a hard parallel burn — watch the endgame 3× closer
-            # so evacuation fires from headroom data, not the banner tripwire.
-            def _ttl(a):
-                pct = (a.usage or {}).get("pct")
-                near_hot = pct is not None and pct >= SUB_HOT - 15
-                return USAGE_TTL / 3 if near_hot else USAGE_TTL
-            due = [a for a in accts if a.ready and not a.broken and
-                   (forced or (now - (a.usage or {}).get("checkedAt", 0) > _ttl(a)
-                               and now >= a.tok.get("no_poll_until", 0)))]
-            # The store's own verdict first (2026-09-06): a login whose blob
-            # the client WIPED, or whose refresh family expires inside
-            # SUB_LOGIN_HORIZON, leaves routing now — before it is polled,
-            # and before a same-org sibling's healthy numbers get copied
-            # onto it below. That copy is how slop sat "50%" for four hours
-            # after its grant died while its session bounced every prompt.
-            for a in list(due):
-                why, horizon = _login_verdict(a.config_dir, now)
-                with self.lock:
-                    a.login_expires = horizon or 0.0
-                if not why:
-                    continue
-                self._retire_login(a, why)
-                due.remove(a)
-                changed = True
-            if due:
-                # An account with live claude sessions: those processes hold
-                # (and renew) the very same refresh grant — the poller must
-                # not consume it too, or two consumers of one rotating grant
-                # race and the loser kills the token family. Poll such
-                # accounts with the stored access token only; claude keeps
-                # the store fresh whenever it actually works.
-                with self.lock:
-                    live = {s.account or "default"
-                            for s in self.sessions.values() if s.alive}
-                    last_exit = dict(self.acct_last_exit)
-                # ...and claude processes we did NOT spawn hold grants too
-                # (a hand-launched terminal claude, cont's keepalive ping, a
-                # ceremony left open). Scan the whole host, and also honor a
-                # grace window after any session on the account exits — its
-                # final rotation may still be settling. sub3 died 2026-08-06
-                # because this gate only knew about our own live sessions.
-                proc_dirs = _live_claude_dirs()
-                # ...and a login in cont's VM custody has a consumer no ps
-                # scan can see: the guest's claude inside a tart VM. The
-                # wrangler's bounce path (2026-08-07) ran guests on the
-                # fleet login with no host-visible process at all.
-                custody_dirs = _vm_custody_dirs()
-                self._reclaim_custody(accts, live)
-                def _grant_free(a):
-                    return (a.name not in live
-                            and _norm_config_dir(a.config_dir) not in proc_dirs
-                            and _norm_config_dir(a.config_dir)
-                                not in custody_dirs
-                            and now - last_exit.get(a.name, 0)
-                                > SUB_REFRESH_EXIT_GRACE)
-                # Same-org logins share one pool AND one endpoint rate
-                # limiter — polling each config dir separately multi-taps the
-                # limiter for identical numbers (three EF seats = 3 hits per
-                # burst, the pattern behind the 07-19 429 storm). Poll ONE
-                # representative per known org and share its reading with the
-                # siblings; never-identified (org-less) accounts poll solo.
-                groups = {}
-                for a in due:
-                    groups.setdefault(a.org or f"~{a.name}", []).append(a)
-                # A token account fronts its org when it can: probing it
-                # spends no rotating grant, so it is always safe to poll.
-                reps = [next((m for m in ms if m.token), None)
-                        or next((m for m in ms if m.name not in live), ms[0])
-                        for ms in groups.values()]
-                with ThreadPoolExecutor(max_workers=min(4, len(reps))) as ex:
-                    got = list(ex.map(
-                        lambda a: _fetch_usage(a.config_dir, a.tok,
-                                               want_ident=True,
-                                               allow_refresh=_grant_free(a)),
-                        reps))
-                for a, res in zip(reps, got):
-                    sibs = [m for m in groups[a.org or f"~{a.name}"]
-                            if m is not a]
-                    if res == AUTH_FAIL:
-                        # the rep's OWN login is refused → OUT of routing until
-                        # re-sign-in; siblings hold their own credentials and
-                        # are untouched — one of them fronts the next poll
-                        sig = _cred_sig(a.config_dir)
+                was_broken = a.broken
+                a.ready, a.broken = True, False
+                a.refused_sig = ""
+                a.login_gone = ""
+                a.email = email or a.email
+                a.org = org or a.org
+                a.org_name = oname or a.org_name
+                a.tok.clear()                # stale cached token from the old login
+            print(f"[account {a.name}] "
+                  f"{'re-signed in' if was_broken else 'signed in'}"
+                  f" ({email or 'email unknown'})", flush=True)
+            changed = True
+        # Ready accounts due a usage refresh — fetched in PARALLEL so one
+        # slow/hung endpoint can't stall the other accounts (or the
+        # sign-in watch above) behind a serial chain of 10s timeouts.
+        # A pool nearing the hot bar can cross 90→100 inside one normal
+        # poll under a hard parallel burn — watch the endgame 3× closer
+        # so evacuation fires from headroom data, not the banner tripwire.
+        def _ttl(a):
+            pct = (a.usage or {}).get("pct")
+            near_hot = pct is not None and pct >= SUB_HOT - 15
+            return USAGE_TTL / 3 if near_hot else USAGE_TTL
+        due = [a for a in accts if a.ready and not a.broken and
+               (forced or (now - (a.usage or {}).get("checkedAt", 0) > _ttl(a)
+                           and now >= a.tok.get("no_poll_until", 0)))]
+        # The store's own verdict first (2026-09-06): a login whose blob
+        # the client WIPED, or whose refresh family expires inside
+        # SUB_LOGIN_HORIZON, leaves routing now — before it is polled,
+        # and before a same-org sibling's healthy numbers get copied
+        # onto it below. That copy is how slop sat "50%" for four hours
+        # after its grant died while its session bounced every prompt.
+        for a in list(due):
+            why, horizon = _login_verdict(a.config_dir, now)
+            with self.lock:
+                a.login_expires = horizon or 0.0
+            if not why:
+                continue
+            self._retire_login(a, why)
+            due.remove(a)
+            changed = True
+        if due:
+            # An account with live claude sessions: those processes hold
+            # (and renew) the very same refresh grant — the poller must
+            # not consume it too, or two consumers of one rotating grant
+            # race and the loser kills the token family. Poll such
+            # accounts with the stored access token only; claude keeps
+            # the store fresh whenever it actually works.
+            with self.lock:
+                live = {s.account or "default"
+                        for s in self.sessions.values() if s.alive}
+                last_exit = dict(self.acct_last_exit)
+            # ...and claude processes we did NOT spawn hold grants too
+            # (a hand-launched terminal claude, cont's keepalive ping, a
+            # ceremony left open). Scan the whole host, and also honor a
+            # grace window after any session on the account exits — its
+            # final rotation may still be settling. sub3 died 2026-08-06
+            # because this gate only knew about our own live sessions.
+            proc_dirs = _live_claude_dirs()
+            # ...and a login in cont's VM custody has a consumer no ps
+            # scan can see: the guest's claude inside a tart VM. The
+            # wrangler's bounce path (2026-08-07) ran guests on the
+            # fleet login with no host-visible process at all.
+            custody_dirs = _vm_custody_dirs()
+            self._reclaim_custody(accts, live)
+            def _grant_free(a):
+                return (a.name not in live
+                        and _norm_config_dir(a.config_dir) not in proc_dirs
+                        and _norm_config_dir(a.config_dir)
+                            not in custody_dirs
+                        and now - last_exit.get(a.name, 0)
+                            > SUB_REFRESH_EXIT_GRACE)
+            # Same-org logins share one pool AND one endpoint rate
+            # limiter — polling each config dir separately multi-taps the
+            # limiter for identical numbers (three EF seats = 3 hits per
+            # burst, the pattern behind the 07-19 429 storm). Poll ONE
+            # representative per known org and share its reading with the
+            # siblings; never-identified (org-less) accounts poll solo.
+            groups = {}
+            for a in due:
+                groups.setdefault(a.org or f"~{a.name}", []).append(a)
+            # A token account fronts its org when it can: probing it
+            # spends no rotating grant, so it is always safe to poll.
+            reps = [next((m for m in ms if m.token), None)
+                    or next((m for m in ms if m.name not in live), ms[0])
+                    for ms in groups.values()]
+            with ThreadPoolExecutor(max_workers=min(4, len(reps))) as ex:
+                got = list(ex.map(
+                    lambda a: _fetch_usage(a.config_dir, a.tok,
+                                           want_ident=True,
+                                           allow_refresh=_grant_free(a)),
+                    reps))
+            for a, res in zip(reps, got):
+                sibs = [m for m in groups[a.org or f"~{a.name}"]
+                        if m is not a]
+                if res == AUTH_FAIL:
+                    # the rep's OWN login is refused → OUT of routing until
+                    # re-sign-in; siblings hold their own credentials and
+                    # are untouched — one of them fronts the next poll
+                    sig = _cred_sig(a.config_dir)
+                    with self.lock:
+                        a.broken = True
+                        a.refused_sig = sig
+                    print(f"[account {a.name}] credentials refused — "
+                          "excluded from routing until re-sign-in", flush=True)
+                    changed = True
+                elif res == RATE_LIMITED:
+                    # endpoint 429 ≠ plan exhausted (see the sentinel
+                    # comment): keep the last GOOD reading routable while
+                    # it's young enough to trust, banner the card, and
+                    # spread the back-off horizon to the whole org so a
+                    # sibling doesn't immediately re-poke the hot limiter.
+                    until = a.tok.get("no_poll_until", 0)
+                    with self.lock:
+                        for m in [a] + sibs:
+                            u = m.usage
+                            if u and now - u.get("goodAt",
+                                                 u.get("checkedAt", 0)) \
+                                    < USAGE_RL_TRUST:
+                                u["checkedAt"] = now
+                            m.error = ("usage endpoint rate-limited — "
+                                       "backing off; real numbers resume "
+                                       "automatically")
+                            m.tok["no_poll_until"] = max(
+                                m.tok.get("no_poll_until", 0), until)
+                    changed = True
+                elif res:
+                    pct, windows, ident = res
+                    with self.lock:
+                        a.record_usage(pct, windows, now)
+                        if ident and ident.get("fable"):
+                            a.fable_seen = now   # token probe: Fable answered
+                        a.error = ""
+                        for m in sibs:
+                            # same pool, same numbers — a copy, not a poll.
+                            # The fable sighting copies too: siblings are
+                            # the SAME subscription under another folder
+                            # label, so one seeing fable is all of them
+                            # seeing it (and a sibling left unstamped
+                            # would convict on the next degraded payload).
+                            m.usage = dict(a.usage)
+                            m.fable_seen = max(m.fable_seen, a.fable_seen)
+                            m.error = ""
+                        if ident:
+                            # token-bound identity is THE authority: it
+                            # names the pool the numbers above came from,
+                            # even when a stale .claude.json disagrees
+                            a.email = ident["email"] or a.email
+                            a.org = ident["org"] or a.org
+                            a.org_name = ident["org_name"] or a.org_name
+                            a.tier = ident["tier"] or a.tier
+                            if a.token and not a.email:
+                                # the probe names only the org; a signed-in
+                                # sibling of that org knows whose it is
+                                twin = next((m for m in accts if m is not a
+                                             and m.org == a.org and m.email),
+                                            None)
+                                if twin:
+                                    a.email = twin.email
+                                    a.org_name = a.org_name or twin.org_name
+                    changed = True
+                elif not a.error:
+                    with self.lock:
+                        a.error = ("access token stale — a live claude "
+                                   "session renews it on its next turn"
+                                   if a.name in live else "usage unavailable")
+                    changed = True
+                # backfill from .claude.json only while the profile
+                # endpoint hasn't spoken — a label guess, never an override
+                if not a.email or not a.org or not a.org_name:
+                    email, org, oname = _account_identity(a.config_dir)
+                    if (email and not a.email) or (org and not a.org) \
+                            or (oname and not a.org_name):
                         with self.lock:
-                            a.broken = True
-                            a.refused_sig = sig
-                        print(f"[account {a.name}] credentials refused — "
-                              "excluded from routing until re-sign-in", flush=True)
+                            a.email = a.email or email
+                            a.org = a.org or org
+                            a.org_name = a.org_name or oname
                         changed = True
-                    elif res == RATE_LIMITED:
-                        # endpoint 429 ≠ plan exhausted (see the sentinel
-                        # comment): keep the last GOOD reading routable while
-                        # it's young enough to trust, banner the card, and
-                        # spread the back-off horizon to the whole org so a
-                        # sibling doesn't immediately re-poke the hot limiter.
-                        until = a.tok.get("no_poll_until", 0)
-                        with self.lock:
-                            for m in [a] + sibs:
-                                u = m.usage
-                                if u and now - u.get("goodAt",
-                                                     u.get("checkedAt", 0)) \
-                                        < USAGE_RL_TRUST:
-                                    u["checkedAt"] = now
-                                m.error = ("usage endpoint rate-limited — "
-                                           "backing off; real numbers resume "
-                                           "automatically")
-                                m.tok["no_poll_until"] = max(
-                                    m.tok.get("no_poll_until", 0), until)
-                        changed = True
-                    elif res:
-                        pct, windows, ident = res
-                        with self.lock:
-                            a.record_usage(pct, windows, now)
-                            if ident and ident.get("fable"):
-                                a.fable_seen = now   # token probe: Fable answered
-                            a.error = ""
-                            for m in sibs:
-                                # same pool, same numbers — a copy, not a poll.
-                                # The fable sighting copies too: siblings are
-                                # the SAME subscription under another folder
-                                # label, so one seeing fable is all of them
-                                # seeing it (and a sibling left unstamped
-                                # would convict on the next degraded payload).
-                                m.usage = dict(a.usage)
-                                m.fable_seen = max(m.fable_seen, a.fable_seen)
-                                m.error = ""
-                            if ident:
-                                # token-bound identity is THE authority: it
-                                # names the pool the numbers above came from,
-                                # even when a stale .claude.json disagrees
-                                a.email = ident["email"] or a.email
-                                a.org = ident["org"] or a.org
-                                a.org_name = ident["org_name"] or a.org_name
-                                a.tier = ident["tier"] or a.tier
-                                if a.token and not a.email:
-                                    # the probe names only the org; a signed-in
-                                    # sibling of that org knows whose it is
-                                    twin = next((m for m in accts if m is not a
-                                                 and m.org == a.org and m.email),
-                                                None)
-                                    if twin:
-                                        a.email = twin.email
-                                        a.org_name = a.org_name or twin.org_name
-                        changed = True
-                    elif not a.error:
-                        with self.lock:
-                            a.error = ("access token stale — a live claude "
-                                       "session renews it on its next turn"
-                                       if a.name in live else "usage unavailable")
-                        changed = True
-                    # backfill from .claude.json only while the profile
-                    # endpoint hasn't spoken — a label guess, never an override
-                    if not a.email or not a.org or not a.org_name:
-                        email, org, oname = _account_identity(a.config_dir)
-                        if (email and not a.email) or (org and not a.org) \
-                                or (oname and not a.org_name):
-                            with self.lock:
-                                a.email = a.email or email
-                                a.org = a.org or org
-                                a.org_name = a.org_name or oname
-                            changed = True
-            if changed:
-                self.save_registry()
-                self.broadcast_accounts()
-                self._maybe_autoswitch()
-                self._handoff_sweep()
+        if changed:
+            self.save_registry()
+            self.broadcast_accounts()
+            self._maybe_autoswitch()
+            self._handoff_sweep()
 
     def _handoff_sweep(self):
         """Poller-driven safety net behind maybe_handoff: sessions idling on a
@@ -7859,9 +7872,12 @@ class SessionManager:
         # usage endpoint, and the prompt's silent death is independent evidence
         # (unlike the background poller, where a bare 429 proves nothing).
         dead = got in (AUTH_FAIL, RATE_LIMITED)
+        # `walled` = the POOL is out (limit hit) — every login in the org is.
+        # A refused or expired LOGIN is dead alone: its org siblings are fine.
+        walled = got == RATE_LIMITED
         if got and got not in (AUTH_FAIL, RATE_LIMITED):
             pct, windows = got
-            dead = pct >= 100
+            walled = dead = pct >= 100
             if acct:
                 with self.lock:
                     now2 = time.time()
@@ -7873,13 +7889,23 @@ class SessionManager:
             # poll snapshot that flagged this plan (only if it's fresh).
             u = acct.usage or {}
             fresh_poll = now - (u.get("checkedAt") or 0) < 600
-            dead = acct.broken or (fresh_poll and u.get("pct", 0) >= 100)
+            walled = bool(fresh_poll and u.get("pct", 0) >= 100)
+            dead = acct.broken or walled
         if not dead:
             return
         # Independent evidence (silent bounced prompt + endpoint refusal/429)
-        # overrides a stale-low usage snapshot. Quarantine BEFORE asking the
-        # router for a target, or it can select this same dead pool again.
-        self._mark_pool_walled(acct, "session")
+        # overrides a stale-low usage snapshot. Take the dead thing out of
+        # routing BEFORE asking the router for a target, or it can select it
+        # again — but only the dead thing: quarantining the whole org for a
+        # dead LOGIN locked its healthy siblings out for the 5h fallback, so
+        # the "moves to its sibling" branch below could never be taken.
+        if walled:
+            self._mark_pool_walled(acct, "session")
+        elif acct and not acct.broken:           # AUTH_FAIL: this login was refused
+            sig = _cred_sig(acct.config_dir)
+            with self.lock:
+                acct.broken = True               # out of routing until its blob changes
+                acct.refused_sig = sig           # (same mark maybe_handoff leaves)
         best = self.accounts.get(self._best_account() or "")
         if (not best or best.name == s.account
                 or (acct and acct.org and best.org and acct.org == best.org
@@ -10273,10 +10299,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._origin_ok():
             self.close_connection = True
             return self.send_error(403, "bad origin")
-        if path == "/ws" and self._is_ws_upgrade():
-            if not self._origin_ok():
-                self.close_connection = True
-                return self.send_error(403, "bad origin")
+        if path == "/ws" and self._is_ws_upgrade():      # origin already checked above
             if not self._token_ok():
                 return self.send_error(403, "bad token")
             return self.handle_ws()
@@ -11011,6 +11034,20 @@ def _share_sig():
         return ()
 
 
+_LOOP_CRASH_LOG = {}                             # loop name -> (last traceback, when printed)
+
+
+def _loop_crashed(name):
+    """A background loop's tick raised: log it and let the loop carry on. The
+    same traceback is printed at most once a minute — a tick that fails every
+    second must not bury the log."""
+    tb = traceback.format_exc()
+    last, at = _LOOP_CRASH_LOG.get(name, ("", 0.0))
+    if tb != last or time.time() - at > 60:
+        _LOOP_CRASH_LOG[name] = (tb, time.time())
+        print(f"[{name}] tick failed — carrying on:\n{tb}", flush=True)
+
+
 def watch_ui():
     last = {}
     gate = _RestartGate(RESTART_FILES[0])        # server.py: committed + compiles, or wait
@@ -11020,41 +11057,47 @@ def watch_ui():
         except OSError: last[f] = 0
     while True:
         time.sleep(1.0)
-        if MGR.reconcile_projects():             # project list follows disk
-            MGR.broadcast_projects()
-        MGR.emoji_sweep()                        # self-throttled; badges one project at a time
-        # Background-work sweep: does claude have shells/agents still running
-        # behind an idle prompt? (poll_bg reads claude's own status file.)
-        if any([s.poll_bg() for s in list(MGR.sessions.values())]):
-            MGR.broadcast_sessions()
-        for f in WATCH_FILES:
-            try: m = f.stat().st_mtime
-            except OSError: continue
-            if m != last[f]:
+        # Fenced: one exception here used to end the thread — no reconcile, no
+        # browser reload, and no restart gate (i.e. no more deploys) until a
+        # manual restart.
+        try:
+            if MGR.reconcile_projects():             # project list follows disk
+                MGR.broadcast_projects()
+            MGR.emoji_sweep()                        # self-throttled; badges one project at a time
+            # Background-work sweep: does claude have shells/agents still running
+            # behind an idle prompt? (poll_bg reads claude's own status file.)
+            if any([s.poll_bg() for s in list(MGR.sessions.values())]):
+                MGR.broadcast_sessions()
+            for f in WATCH_FILES:
+                try: m = f.stat().st_mtime
+                except OSError: continue
+                if m != last[f]:
+                    last[f] = m
+                    print(f"[watch] {f.name} changed → reloading browsers", flush=True)
+                    MGR.broadcast_all({"type": "reload"})
+            sig = _share_sig()
+            if sig != share_sig:                     # share/ pulled → re-sync the kit, no restart
+                share_sig = sig
+                _sync_shared_kit()
+            for f in RESTART_FILES:
+                try: m = f.stat().st_mtime
+                except OSError: continue
+                moved = m != last[f]
                 last[f] = m
-                print(f"[watch] {f.name} changed → reloading browsers", flush=True)
-                MGR.broadcast_all({"type": "reload"})
-        sig = _share_sig()
-        if sig != share_sig:                     # share/ pulled → re-sync the kit, no restart
-            share_sig = sig
-            _sync_shared_kit()
-        for f in RESTART_FILES:
-            try: m = f.stat().st_mtime
-            except OSError: continue
-            moved = m != last[f]
-            last[f] = m
-            if f == gate.path:
-                why = gate.check(moved)
-                if why:
-                    MGR.request_restart(why)
-            elif moved:
-                MGR.request_restart(f"{f.name} changed")
-        # Re-check a pending restart on the tick, not only when session state
-        # moves: the RESTART_MAX_WAIT ceiling is a clock, and a box quiet enough
-        # to stop broadcasting `sessions` is exactly the one that would never
-        # re-evaluate it. Cheap — restart_blockers is a list comp over sessions.
-        if MGR.restart_pending:
-            MGR._maybe_restart()
+                if f == gate.path:
+                    why = gate.check(moved)
+                    if why:
+                        MGR.request_restart(why)
+                elif moved:
+                    MGR.request_restart(f"{f.name} changed")
+            # Re-check a pending restart on the tick, not only when session state
+            # moves: the RESTART_MAX_WAIT ceiling is a clock, and a box quiet enough
+            # to stop broadcasting `sessions` is exactly the one that would never
+            # re-evaluate it. Cheap — restart_blockers is a list comp over sessions.
+            if MGR.restart_pending:
+                MGR._maybe_restart()
+        except Exception:
+            _loop_crashed("watch_ui")
 
 
 def raise_fd_limit(target=10240):
