@@ -30,14 +30,17 @@ TOOLS = [
         "questions use `find`, NOT this. Two flags appear only when true: "
         "`engine` (absent ⇒ claude, so `engine:\"codex\"` marks the codex ones) "
         "and `pinned` (parked on the 📌 board = done-but-unverified, NOT idle "
-        "work). `kind:\"local\"` on a project = a private folder, no GitHub.",
+        "work). `kind:\"local\"` on a project = a private folder, no GitHub; "
+        "`iron` on a project = the 🔥 iron it belongs to (absent ⇒ none).",
         _S({"machine": _STR, "pid": _STR, "verbose": _BOOL})),
     ("find", "Deterministic fleet-wide search in ONE call: session titles/"
         "digests/blocked_on/lastAnswer, project names, the task ledger, AND "
         "each machine's transcript store (searched server-side on the machine). "
         "THE way to answer 'which session/task is about X' — never use Bash, "
-        "GitHub, or get_world for that. Returns matches with deep links (and "
-        "`engine` on the non-claude ones); scope=meta skips transcripts.",
+        "GitHub, or get_world for that. Also searches the 🗃️ closed history: "
+        "those hits say `closed: true` (where='closed') and carry "
+        "`reopen_with`. Returns matches with deep links (and `engine` on the "
+        "non-claude ones, `iron` when in one); scope=meta skips transcripts.",
         _S({"query": _STR, "machine": _STR, "scope": _STR, "limit": _INT},
            ["query"])),
     ("transcript_tail", "Last n structured transcript events for one session — "
@@ -77,6 +80,28 @@ TOOLS = [
         "'are we about to run out of plan?'. There is intentionally no verb to "
         "switch accounts: the harness routes itself, continuously, better than "
         "a turn-based PM can.", _S({"machine": _STR})),
+    ("get_irons", "🔥 The operator's IRONS — named groups of projects he is "
+        "pushing on as one effort, in his priority order (rank 1 = top). Each "
+        "iron: title, desc, member projects (machine/pid/name), and its live "
+        "sessions warmest first (status, age since last prompt, deep link). "
+        "Use this to describe 'what's in motion' in his own terms. "
+        "`unresolved_members` = members no connected machine reports. "
+        "get_world/find/sweep/get_warm rows carry `iron` (a title) only when "
+        "the project is in one — absent means no iron. Read-only.", _S({})),
+    ("get_warm", "What's warm right now: live sessions fleet-wide, warmest "
+        "first — warmth is the last human prompt, else last activity (the "
+        "harness tab strip's own order). Pinned sessions are left out. Each "
+        "row: machine, cid, title, status, age, one-line digest, iron, deep "
+        "link. THE answer to 'what am I working on / what's warm / what did I "
+        "just touch'. Read-only.", _S({"limit": _INT})),
+    ("get_closed", "🗃️ Closed-session history, newest first: finished work "
+        "(a 📑 wrapped session leaves its TLDR in `last_answer`) and closed "
+        "tabs. Rows: machine, cid, title, project, closed_ago, reason "
+        "(closed | wrapped | reviewed | project gone), last_answer, resumable. "
+        "`query` = case-insensitive filter over title/desc/first prompt/last "
+        "answer. Search here (or `find`, which includes closed rows) before "
+        "saying something doesn't exist. `reopen` brings one back. Read-only.",
+        _S({"machine": _STR, "query": _STR, "limit": _INT})),
     ("escalate", "Queue a question/decision for the operator. urgency='digest' "
         "(default) batches into ONE periodic push — use it for almost "
         "everything; 'now' pushes immediately — only for actively-breaking "
@@ -183,6 +208,11 @@ TOOLS = [
     ("close", "Close/kill a session: its claude is terminated and dropped from the "
         "harness (the project stays). Irreversible — check session_digest first. WRITE.",
         _S({"machine": _STR, "cid": _STR, "confirm": _BOOL}, ["machine", "cid"])),
+    ("reopen", "🗃️ Bring a CLOSED session back from the history (get_closed / "
+        "a closed `find` hit): a NEW session (new cid, returned) in the same "
+        "project that resumes the old conversation; `resumable: false` rows "
+        "start fresh. Fails if the project is gone. WRITE.",
+        _S({"machine": _STR, "cid": _STR, "confirm": _BOOL}, ["machine", "cid"])),
     ("wrap", "📑 Wrap a FINISHED session up: it writes its handoff to a LOCAL "
         "HANDOFF-<stamp>.md (one new file per wrap, older ones stay; git-excluded, "
         "never committed or pushed — only the project's real work is committed), "
@@ -271,6 +301,12 @@ class MCPServer:
             return v.get_pins(a.get("machine"))
         if name == "get_accounts":
             return v.get_accounts(a.get("machine"))
+        if name == "get_irons":
+            return v.get_irons()
+        if name == "get_warm":
+            return v.get_warm(a.get("limit", 15))
+        if name == "get_closed":
+            return v.get_closed(a.get("machine"), a.get("query"), a.get("limit", 20))
         if name == "escalate":
             return v.escalate(a["question"], a.get("machine"), a.get("cid"),
                               a.get("urgency", "digest"))
@@ -328,6 +364,8 @@ class MCPServer:
                            engine=a.get("engine", "claude"))
         if name == "close":
             return v.close(a["machine"], a["cid"], a.get("confirm", False))
+        if name == "reopen":
+            return v.reopen(a["machine"], a["cid"], a.get("confirm", False))
         if name == "wrap":
             return v.wrap(a["machine"], a["cid"], a.get("text", ""),
                           a.get("confirm", False))

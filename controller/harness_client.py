@@ -34,6 +34,11 @@ class HarnessClient:
         # to be able to say "that machine is nearly out of plan" without the
         # operator asking the harness UI.
         self.accounts = {}
+        # 🔥 irons (direct mode: the harness owns them, members are pids) and the
+        # 🗃️ closed-session history — both pushed after every `list` and on
+        # every change, so they're cached like `accounts`.
+        self.irons = []
+        self.closed = []
         self.boot = None
         self.connected = False
 
@@ -45,6 +50,8 @@ class HarnessClient:
         self._new_lock = threading.Lock()     # serialize new_session→focus waits
         self._focus_event = threading.Event()
         self._focus_cid = None
+        self._reopen_for = None               # cid a reopen is waiting on (error routing)
+        self._reopen_err = None
         self._pending = {}                    # request id -> {"ev": Event, "resp": frame}
 
     # -- lifecycle -------------------------------------------------------------
@@ -109,6 +116,16 @@ class HarnessClient:
                 self.sessions = {s["cid"]: s for s in f.get("sessions", [])}
             elif t == "accounts":
                 self.accounts = f
+            elif t == "irons":
+                self.irons = sorted((i for i in f.get("irons") or [] if isinstance(i, dict)),
+                                    key=lambda i: i.get("rank") or 0)
+            elif t == "closed":
+                self.closed = [r for r in f.get("closed") or [] if isinstance(r, dict)]
+            elif t == "error":
+                # a refused reopen answers {type:"error", cid, error}
+                if self._reopen_for and f.get("cid") == self._reopen_for:
+                    self._reopen_err = f.get("error") or "refused"
+                    self._focus_event.set()
             elif t == "hook":
                 if f.get("event") == "Stop":
                     self.last_answer[f.get("cid")] = (f.get("data") or {}).get("last", "")
@@ -154,6 +171,24 @@ class HarnessClient:
             if self._focus_event.wait(timeout):
                 return self._focus_cid
             return None
+
+    def reopen_session(self, cid, timeout=12):
+        """🗃️ bring a closed session back from its history row. Blocks for the
+        harness's focus reply like `new`. Returns (new_cid, None) or
+        (None, reason) — the harness refuses with an `error` frame when the
+        row's project is gone."""
+        with self._new_lock:
+            self._focus_event.clear()
+            self._focus_cid, self._reopen_err, self._reopen_for = None, None, cid
+            try:
+                if not self.send({"type": "reopen", "cid": cid}):
+                    return None, "not connected"
+                got = self._focus_event.wait(timeout)
+            finally:
+                self._reopen_for = None
+            if self._reopen_err:
+                return None, self._reopen_err
+            return (self._focus_cid, None) if got else (None, "timeout (no reply)")
 
     def send_message(self, cid, text):
         return self.send({"type": "send", "cid": cid, "text": text})
@@ -239,4 +274,6 @@ class HarnessClient:
                 "sessions": [dict(s) for s in self.sessions.values()],
                 "last_answer": dict(self.last_answer),
                 "accounts": dict(self.accounts),
+                "irons": [dict(i) for i in self.irons],
+                "closed": [dict(r) for r in self.closed],
             }

@@ -36,11 +36,14 @@ class RelayMachine:
         self.sessions = {}
         self.last_answer = {}
         self.accounts = {}          # last `accounts` frame (subscription usage)
+        self.closed = []            # 🗃️ last `closed` frame (closed-session history)
         self.connected = True
         self._lock = threading.RLock()
         self._new_lock = threading.Lock()
         self._focus_event = threading.Event()
         self._focus_cid = None
+        self._reopen_for = None       # cid a reopen is waiting on (error routing)
+        self._reopen_err = None
         self._pending = {}            # request id -> {"ev": Event, "resp": frame}
 
     # -- inbound (called from the fleet reader thread) ------------------------
@@ -53,6 +56,13 @@ class RelayMachine:
                 self.sessions = {s["cid"]: s for s in msg.get("sessions", [])}
             elif t == "accounts":
                 self.accounts = msg
+            elif t == "closed":
+                self.closed = [r for r in msg.get("closed") or [] if isinstance(r, dict)]
+            elif t == "error":
+                # a refused reopen answers {type:"error", cid, error}
+                if self._reopen_for and msg.get("cid") == self._reopen_for:
+                    self._reopen_err = msg.get("error") or "refused"
+                    self._focus_event.set()
             elif t == "hook":
                 if msg.get("event") == "Stop":
                     self.last_answer[msg.get("cid")] = (msg.get("data") or {}).get("last", "")
@@ -81,6 +91,22 @@ class RelayMachine:
             if not self._send({"type": "new", "pid": pid, "engine": engine}):
                 return None
             return self._focus_cid if self._focus_event.wait(timeout) else None
+
+    def reopen_session(self, cid, timeout=15):
+        """🗃️ bring a closed session back (see HarnessClient.reopen_session).
+        Returns (new_cid, None) or (None, reason)."""
+        with self._new_lock:
+            self._focus_event.clear()
+            self._focus_cid, self._reopen_err, self._reopen_for = None, None, cid
+            try:
+                if not self._send({"type": "reopen", "cid": cid}):
+                    return None, "not connected"
+                got = self._focus_event.wait(timeout)
+            finally:
+                self._reopen_for = None
+            if self._reopen_err:
+                return None, self._reopen_err
+            return (self._focus_cid, None) if got else (None, "timeout (no reply)")
 
     def send_message(self, cid, text):
         return self._send({"type": "send", "cid": cid, "text": text})
@@ -160,7 +186,11 @@ class RelayMachine:
                     "projects": [dict(p) for p in self.projects.values()],
                     "sessions": [dict(s) for s in self.sessions.values()],
                     "last_answer": dict(self.last_answer),
-                    "accounts": dict(self.accounts)}
+                    "accounts": dict(self.accounts),
+                    # fleet irons live on the RELAY, not per machine — see
+                    # RelayFleet.irons_state; this key stays empty here
+                    "irons": [],
+                    "closed": [dict(r) for r in self.closed]}
 
 
 class RelayFleet:
@@ -170,6 +200,10 @@ class RelayFleet:
         self.on_hook = on_hook or (lambda *a: None)
         self.on_change = on_change or (lambda *a: None)
         self.machines = {}                 # live; World/Verbs read this as `clients`
+        # 🔥 irons from the relay's `prefs` frame (fleet irons are relay-side:
+        # members are projectKeys, priority = array order). None until the
+        # first prefs frame lands, so "no irons" and "not heard yet" differ.
+        self.irons = None
         self.connected = False
         self._lock = threading.RLock()
         self._wfile = None
@@ -278,8 +312,26 @@ class RelayFleet:
     def _to_machine(self, machine, msg):
         return self.send({"type": "toMachine", "machine": machine, "msg": msg})
 
+    def irons_state(self):
+        """{"seen": bool, "irons": [...]} — what Verbs reads in fleet mode."""
+        with self._lock:
+            irons = self.irons
+        return {"seen": irons is not None,
+                "irons": [dict(i) for i in (irons or [])]}
+
     def _on_frame(self, f):
         t = f.get("type")
+        if t == "prefs":
+            # The relay sends prefs to this connection on connect, on every
+            # `list`, and on every change (role=controller is registered via
+            # add_mobile and is authed, so broadcast_prefs reaches it like a
+            # phone). Only a list is applied — a frame without the field must
+            # not read as "every iron deleted".
+            if isinstance(f.get("irons"), list):
+                with self._lock:
+                    self.irons = [i for i in f["irons"] if isinstance(i, dict)]
+                self.on_change("relay", "prefs")
+            return
         if t == "machines":
             prime = []
             with self._lock:

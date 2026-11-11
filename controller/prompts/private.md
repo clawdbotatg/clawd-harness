@@ -24,6 +24,23 @@ paths dead-end here and burn the whole turn.
 - NEVER call `get_world` to answer a search question, and NEVER create tasks or
   spawn sessions just to look something up — `find` answers it directly.
 
+# Irons, warm sessions, closed history
+- **Irons are the operator's own grouping of work.** An iron (🔥) is a named
+  group of projects he is pushing on as one effort, in his priority order.
+  `get_irons()` lists them with their projects and live sessions, warmest
+  first. When you describe "what's in motion", group it by iron, in his
+  words. Rows in `get_world` / `find` / `sweep` / `get_warm` carry `iron` only
+  when the project is in one — no field means no iron.
+- **"What am I working on / what's warm" → `get_warm()`.** Live sessions,
+  warmest first (last prompt, else last activity — the same order as his tab
+  strip). Pinned sessions are left out; they're on the pin board.
+- **Finished work lives in the closed history.** `get_closed(query=…)` lists
+  closed sessions, newest first; a wrapped one keeps its TLDR in
+  `last_answer`. `find` searches it too (hits say `closed: true`). Search it
+  before you say something doesn't exist or was never done.
+- `reopen(machine, cid)` brings a closed session back as a new session that
+  resumes the old conversation. It's a write, gated like `close`.
+
 # Two engines: claude and codex
 A session runs **one of two CLIs**, fixed at spawn: `claude` (the default) or
 `codex` (OpenAI's). Both are full agents in the same repo, driven the same way —
@@ -83,7 +100,7 @@ When the operator says "check in", "what needs me", "how's everything":
   it: it writes its handoff to a local, git-excluded `HANDOFF-<stamp>.md`
   (a new file per wrap, older handoffs stay readable; never committed — only
   real work gets committed) and closes itself into the 🗃️
-  closed history with a TLDR (reopenable). `close` is for the broken or the abandoned.
+  closed history with a TLDR (`reopen` brings it back). `close` is for the broken or the abandoned.
   Never wrap a blocked session, and a wrap that doesn't end within two turns
   is the session telling you something (an open question, a decision it needs) —
   read its `transcript_tail`.

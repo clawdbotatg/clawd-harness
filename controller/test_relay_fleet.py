@@ -8,10 +8,12 @@ Proves the box-resident controller sees a machine's projects/sessions and can
 drive it (send + spawn) over the trusted plaintext path *while E2E is required*
 for mobiles. No real claude. Run: python3 -m controller.test_relay_fleet
 """
+import json
 import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 from .mock_harness import MockHarness, TOKEN as HARNESS_TOKEN
@@ -55,10 +57,20 @@ def main():
 
     mock = MockHarness(HARNESS_PORT).start()
     mock.state.add_session(title="remote work")          # c1
+    mock.state.add_closed(title="finished thing", reason="wrapped")   # c2
+
+    # 🔥 a seeded relay prefs file: proves the relay hands irons to role=controller
+    tmp = tempfile.mkdtemp(prefix="ctl-relay-")
+    prefs = os.path.join(tmp, "prefs.json")
+    with open(prefs, "w") as f:
+        json.dump({"inactive": [], "irons": [{"id": "i1", "title": "Demo iron",
+                   "keys": ["github.com/clawdbotatg/demo"], "created": 0}]}, f)
 
     spawn(["relay.py"], {"FLEET_PORT": RELAY_PORT, "FLEET_BIND": "127.0.0.1",
                          "FLEET_CONTROLLER_TOKEN": CTL_TOKEN, "FLEET_WORKER_TOKEN": WORKER_TOKEN,
-                         "FLEET_REQUIRE_PASSKEY": "0", "FLEET_PASSKEY_FILE": "/tmp/ctl-pk.json"})
+                         "FLEET_REQUIRE_PASSKEY": "0", "FLEET_PASSKEY_FILE": "/tmp/ctl-pk.json",
+                         "FLEET_PREFS_FILE": prefs,
+                         "FLEET_TODOS_FILE": os.path.join(tmp, "todos.json")})
     time.sleep(1.2)
     spawn(["worker.py", "--machine", "mockbox", "--host", "mock",
            "--harness", f"ws://127.0.0.1:{HARNESS_PORT}", "--harness-token", HARNESS_TOKEN],
@@ -105,6 +117,20 @@ def main():
         t = mm.transcript_tail("c1", n=5)
         assert isinstance(t, dict) and not t.get("error"), t
     check("search/transcriptTail round-trip the relay bridge", t_search_roundtrip)
+
+    def t_prefs_and_closed():
+        # irons live relay-side: the relay must send its `prefs` frame to the
+        # controller connection, not only to phones
+        wait(lambda: fleet.irons_state()["seen"], what="relay prefs frame")
+        assert [i["title"] for i in fleet.irons_state()["irons"]] == ["Demo iron"]
+        mm = fleet.machines["mockbox"]
+        wait(lambda: any(r["cid"] == "c2" for r in mm.state()["closed"]),
+             what="harness `closed` frame through the worker")
+        new, err = mm.reopen_session("c2")
+        assert new and not err, (new, err)
+        wait(lambda: not mm.state()["closed"], what="reopened row to leave the history")
+    check("relay prefs (irons) reach the controller; closed + reopen ride the bridge",
+          t_prefs_and_closed)
 
     fleet.stop()
     mock.stop()

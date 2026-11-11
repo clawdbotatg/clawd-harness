@@ -152,10 +152,11 @@ endpoint (e.g. behind the relay).
 ## The tool surface (read + write)
 
 Read: `get_world`, `find`, `transcript_tail`, `peek_screen`, `sweep`,
-`get_attention`, `get_pins`, `get_accounts`, `session_digest`, `open_session`,
+`get_attention`, `get_pins`, `get_accounts`, `get_irons`, `get_warm`,
+`get_closed`, `session_digest`, `open_session`,
 `open_project`, `list_tasks`, `get_task`, `get_step_output`.
 Write: `create_task`, `set_task_status`, `note_task`, `assign`, `ask`,
-`answer_prompt`, `interrupt`, `spawn`, `close`, `pin`, `create_project`,
+`answer_prompt`, `interrupt`, `spawn`, `close`, `reopen`, `pin`, `create_project`,
 `clone_project`, `add_local_project`, `remove_project`, `create_pipeline`,
 `start_pipeline`, `advance_pipeline`.
 

@@ -20,7 +20,7 @@ import urllib.parse
 WRITE_VERBS = {"assign", "ask", "answer_prompt", "interrupt",
                "create_project", "clone_project", "spawn", "close", "wrap", "check",
                "start_pipeline", "pin", "add_local_project", "remove_project",
-               "external_project"}
+               "external_project", "reopen"}
 
 # Engines a session can run under (server.py ENGINES). A missing/unknown value
 # means claude everywhere — old registry rows and pre-engine harnesses.
@@ -63,17 +63,26 @@ class Guard:
 
 
 class Verbs:
-    def __init__(self, world, ledger, clients, guard, notes=None):
+    def __init__(self, world, ledger, clients, guard, notes=None, irons_source=None):
         self.world = world
         self.ledger = ledger
         self.clients = clients
         self.guard = guard
         self.notes = notes                # NotesStore (PM durable memory), optional
         self.escalate_sink = None         # set by serve: Autopilot.escalate
+        # Fleet mode: a callable → {"seen", "irons"} from the relay's `prefs`
+        # frame (RelayFleet.irons_state). None = direct mode, where each
+        # harness client carries its own `irons` (members are pids).
+        self.irons_source = irons_source
 
     # ── read ──────────────────────────────────────────────────────────────
     def get_world(self, machine=None, pid=None, verbose=False):
         snap = self.world.snapshot(machine=machine, pid=pid, verbose=verbose)
+        # 🔥 iron title on the project row, only when it's in one (like engine)
+        _, by_proj, _ = self._iron_index()
+        for m in snap["machines"]:
+            for p in m.get("projects", []):
+                p.update(_iron_tag(by_proj, m["id"], p.get("pid")))
         # Nothing this verb returns may blow the tool-output budget — the raw
         # fleet snapshot once hit 66KB and the PM's primary sense organ died.
         if len(json.dumps(snap)) > WORLD_CHAR_BUDGET:
@@ -129,6 +138,7 @@ class Verbs:
         # 2) cached session/project meta — includes offline machines
         clients = {mid: c for mid, c in self.clients.items()
                    if not machine or mid == machine}
+        _, by_proj, _ = self._iron_index()
         for mid, c in clients.items():
             st = c.state()
             for p in st["projects"]:
@@ -136,6 +146,7 @@ class Verbs:
                 if ql in name.lower():
                     add({"where": "project", "machine": mid, "pid": p.get("pid"),
                          "snippet": name[:160],
+                         **_iron_tag(by_proj, mid, p.get("pid")),
                          "url": self._harness_link(p.get("pid"), machine=mid)["url"]})
             for s in st["sessions"]:
                 for where, val in (("title", s.get("title")),
@@ -150,9 +161,26 @@ class Verbs:
                              "title": (s.get("title") or s["cid"])[:60],
                              "snippet": val[:160],
                              **engine_tag(s),
+                             **_iron_tag(by_proj, mid, s.get("pid")),
                              "url": self._harness_link(s.get("pid"), s["cid"],
                                                        machine=mid)["url"]})
                         break               # one meta hit per session is plenty
+            # 🗃️ closed history — finished work still answers "where is X"
+            for r in st.get("closed") or []:
+                for val in (r.get("title"), r.get("desc"), r.get("first_prompt"),
+                            r.get("last_answer")):
+                    if val and ql in val.lower():
+                        add({"where": "closed", "closed": True, "machine": mid,
+                             "cid": r.get("cid"), "pid": r.get("pid"),
+                             "title": (r.get("title") or r.get("cid") or "")[:60],
+                             "snippet": val[:160], "reason": r.get("reason"),
+                             "closed_ago": _ago(r.get("closed_at")),
+                             **engine_tag(r),
+                             **_iron_tag(by_proj, mid, r.get("pid")),
+                             "reopen_with": {"verb": "reopen",
+                                             "args": {"machine": mid,
+                                                      "cid": r.get("cid")}}})
+                        break
         # 3) transcript fan-out — server-side search on each connected machine
         unreachable = []
         if scope in ("transcript", "all"):
@@ -185,11 +213,12 @@ class Verbs:
                          "title": (hit.get("title") or "")[:60],
                          "snippet": (hit.get("snippet") or "")[:160],
                          **engine_tag(cached.get(hit.get("cid")) or {}),
+                         **_iron_tag(by_proj, mid, hit.get("pid")),
                          "url": self._harness_link(hit.get("pid"), hit.get("cid"),
                                                    machine=mid)["url"]})
         # precise sources first, transcript hits last
         order = {"title": 0, "task": 1, "project": 2, "desc": 3, "digest": 4,
-                 "blocked_on": 5, "lastAnswer": 6, "transcript": 7}
+                 "blocked_on": 5, "lastAnswer": 6, "closed": 7, "transcript": 8}
         matches.sort(key=lambda m: order.get(m.get("where"), 9))
         out = {"ok": True, "query": q, "matches": matches[:limit],
                "truncated": len(matches) > limit}
@@ -235,8 +264,10 @@ class Verbs:
         the autonomy gate."""
         max_items = max(1, min(int(max_items or 20), 30))
         items = self.world.attention(limit=max_items)
+        _, by_proj, _ = self._iron_index()
         enriched = 0
         for it in items:
+            it.update(_iron_tag(by_proj, it["machine"], it.get("pid")))
             it["url"] = self._harness_link(it.get("pid"), it["cid"],
                                            machine=it["machine"])["url"]
             it["clear_with"] = {"verb": it.get("suggested_action"),
@@ -259,14 +290,16 @@ class Verbs:
                     # that are mid-turn (they're not attention, not idle) and
                     # reads a busy fleet as a quiet one
                     row = {"machine": mid, "cid": s["cid"], "status": st,
-                           "title": (s.get("title") or s["cid"])[:60]}
+                           "title": (s.get("title") or s["cid"])[:60],
+                           **_iron_tag(by_proj, mid, s.get("pid"))}
                     if s.get("digest"):
                         row["digest"] = s["digest"][:80]
                     working.append(row)
                 elif (st == "idle" and not s.get("pinned")
                         and not self.ledger.task_for_cid(s["cid"])):
                     idle_no_task.append({"machine": mid, "cid": s["cid"],
-                                         "title": (s.get("title") or s["cid"])[:60]})
+                                         "title": (s.get("title") or s["cid"])[:60],
+                                         **_iron_tag(by_proj, mid, s.get("pid"))})
         for t in self.ledger.list_tasks("in_progress"):
             if t.get("sessions") and not any(x in live_cids for x in t["sessions"]):
                 stale_tasks.append({"task_id": t["id"],
@@ -409,6 +442,196 @@ class Verbs:
                                                        machine=mid)["url"]})
         pins.sort(key=lambda p: p.get("pinned_at") or 0, reverse=True)
         return {"ok": True, "count": len(pins), "pins": pins[:30]}
+
+    # ── 🔥 irons · 🗃️ closed history · warm sessions ──────────────────────────
+    def _iron_index(self):
+        """Resolve irons → (irons, {(machine, pid): iron}, seen).
+
+        Fleet mode: irons come from the relay's `prefs` frame and members are
+        fleet projectKeys (a gh repo is ONE key across machines), so a project
+        on machine m belongs to an iron when its projectKey — canonicalized the
+        way index.html's ironKeyCanon does — is in the iron's `keys`. The one
+        fold that matters: a `name:<x>` key (a machine that couldn't report a
+        repo URL) resolves to the URL key whose repo basename is <x>. Direct
+        mode: each harness sends its own `irons` frame with pids. A project is
+        in at most one iron (first match in list order, like ironForRow)."""
+        irons, by_proj = [], {}
+        src = self.irons_source() if self.irons_source else None
+        if src is not None:
+            projs = [(mid, p) for mid, c in self.clients.items()
+                     for p in c.state()["projects"]]
+            base = {}
+            for _mid, p in projs:
+                if p.get("kind") != "local" and p.get("repoUrl"):
+                    k = self._norm_repo(p["repoUrl"])
+                    if k:
+                        base.setdefault(k.split("/")[-1], k)
+
+            def canon(k):
+                if isinstance(k, str) and k.startswith("name:"):
+                    return base.get(k[5:].lower(), k)
+                return k
+            known = set()
+            pkeys = {}
+            for mid, p in projs:
+                ck = canon(_pkey_of(p, mid))
+                pkeys[(mid, p.get("pid"))] = ck
+                known.add(ck)
+            for n, i in enumerate(src.get("irons") or [], 1):
+                keys = {canon(k) for k in (i.get("keys") or [])}
+                irons.append({"id": i.get("id"), "title": i.get("title") or "",
+                              "desc": i.get("desc") or "", "tags": i.get("tags") or [],
+                              "rank": n, "_keys": keys,
+                              "_missing": len(keys - known)})
+            for key, ck in pkeys.items():
+                ir = next((i for i in irons if ck in i["_keys"]), None)
+                if ir:
+                    by_proj[key] = ir
+            return irons, by_proj, bool(src.get("seen"))
+        multi = len(self.clients) > 1
+        n = 0
+        for mid, c in self.clients.items():
+            st = c.state()
+            pids = {p.get("pid") for p in st["projects"]}
+            for i in st.get("irons") or []:
+                n += 1
+                ir = {"id": i.get("id"), "title": i.get("title") or "",
+                      "desc": i.get("desc") or "", "tags": i.get("tags") or [],
+                      "rank": n, "_missing": len(set(i.get("pids") or []) - pids)}
+                if multi:
+                    ir["machine"] = mid
+                irons.append(ir)
+                for pid in i.get("pids") or []:
+                    by_proj.setdefault((mid, pid), ir)
+        return irons, by_proj, True
+
+    def get_irons(self):
+        """🔥 The operator's irons — named groups of projects ("irons in the
+        fire"), in priority order. Each with its member projects and their live
+        sessions, warmest first, with deep links."""
+        irons, by_proj, seen = self._iron_index()
+        now = time.time()
+        for ir in irons:
+            ir["projects"], ir["sessions"] = [], []
+        for (mid, pid), ir in by_proj.items():
+            c = self.clients.get(mid)
+            st = c.state() if c else {"projects": [], "sessions": []}
+            p = next((x for x in st["projects"] if x.get("pid") == pid), None)
+            if not p:
+                continue                  # counted in unresolved_members
+            ir["projects"].append({"machine": mid, "pid": pid,
+                                   "name": p.get("name") or pid})
+            for s in st["sessions"]:
+                if s.get("pid") != pid or s.get("alive") is False:
+                    continue
+                row = {"machine": mid, "cid": s["cid"],
+                       "title": (s.get("title") or s["cid"])[:60],
+                       "status": self.world._status(s),
+                       "age": _ago(_warmth(s), now), "_w": _warmth(s),
+                       **engine_tag(s),
+                       "url": self._harness_link(pid, s["cid"], machine=mid)["url"]}
+                if s.get("pinned"):
+                    row["pinned"] = True
+                ir["sessions"].append(row)
+        out = []
+        for ir in irons:
+            sess = sorted(ir["sessions"], key=lambda r: r["_w"], reverse=True)
+            for r in sess:
+                r.pop("_w", None)
+            row = {k: ir[k] for k in ("id", "title", "rank") if k in ir}
+            if ir.get("machine"):
+                row["machine"] = ir["machine"]
+            if ir["desc"]:
+                row["desc"] = ir["desc"][:200]
+            if ir["tags"]:
+                row["tags"] = ir["tags"]
+            row["projects"] = ir["projects"][:20]
+            row["session_count"] = len(sess)
+            row["sessions"] = sess[:8]
+            if len(sess) > 8:
+                row["more_sessions"] = len(sess) - 8
+            if ir.get("_missing"):
+                # members no connected machine reports (offline box, or the
+                # project was removed) — still in the iron, just not visible
+                row["unresolved_members"] = ir["_missing"]
+            out.append(row)
+        res = {"ok": True, "count": len(out), "irons": out}
+        if not seen:
+            res["hint"] = ("the relay's irons haven't arrived yet (link just came "
+                           "up) — try again in a moment")
+        if len(json.dumps(res)) > WORLD_CHAR_BUDGET:
+            for r in out:
+                r.pop("sessions", None)
+                r.pop("more_sessions", None)
+                r["projects"] = r["projects"][:6]
+            res["truncated"] = True
+        return res
+
+    def get_closed(self, machine=None, query=None, limit=20):
+        """🗃️ Closed-session history, newest first: what finished (a 📑 wrap
+        leaves its TLDR in `last_answer`) or was closed. `query` filters
+        title/desc/first prompt/last answer (case-insensitive). `reopen`
+        brings a row back."""
+        limit = max(1, min(int(limit or 20), 50))
+        ql = (query or "").strip().lower()
+        _, by_proj, _ = self._iron_index()
+        now = time.time()
+        rows = []
+        for mid, c in self.clients.items():
+            if machine and mid != machine:
+                continue
+            for r in c.state().get("closed") or []:
+                if ql and not any(ql in (r.get(f) or "").lower() for f in
+                                  ("title", "desc", "first_prompt", "last_answer")):
+                    continue
+                row = {"machine": mid, "cid": r.get("cid"),
+                       "title": (r.get("title") or r.get("cid") or "")[:60],
+                       "project": r.get("project") or r.get("pid"),
+                       "closed_ago": _ago(r.get("closed_at"), now),
+                       "reason": r.get("reason") or "closed",
+                       "resumable": bool(r.get("resumable")),
+                       "_at": r.get("closed_at") or 0,
+                       **engine_tag(r),
+                       **_iron_tag(by_proj, mid, r.get("pid"))}
+                if r.get("last_answer"):
+                    row["last_answer"] = r["last_answer"][:200]
+                rows.append(row)
+        rows.sort(key=lambda r: r["_at"], reverse=True)
+        for r in rows:
+            r.pop("_at", None)
+        return {"ok": True, "count": len(rows), "closed": rows[:limit],
+                "truncated": len(rows) > limit}
+
+    def get_warm(self, limit=15):
+        """What's warm: live sessions fleet-wide, warmest first, where warmth =
+        the last human prompt (`promptedAt`), else last activity — the same
+        clock the harness tab strip sorts and stamps by. Pinned sessions are
+        parked work and are left out (see get_pins)."""
+        limit = max(1, min(int(limit or 15), 40))
+        _, by_proj, _ = self._iron_index()
+        now = time.time()
+        rows = []
+        for mid, c in self.clients.items():
+            for s in c.state()["sessions"]:
+                if s.get("pinned") or s.get("alive") is False:
+                    continue
+                w = _warmth(s)
+                row = {"machine": mid, "cid": s["cid"],
+                       "title": (s.get("title") or s["cid"])[:60],
+                       "status": self.world._status(s),
+                       "age": _ago(w, now), "_w": w,
+                       **engine_tag(s),
+                       **_iron_tag(by_proj, mid, s.get("pid")),
+                       "url": self._harness_link(s.get("pid"), s["cid"],
+                                                 machine=mid)["url"]}
+                line = (s.get("digest") or s.get("desc") or "").strip()
+                if line:
+                    row["digest"] = line.splitlines()[0][:80]
+                rows.append(row)
+        rows.sort(key=lambda r: r["_w"], reverse=True)
+        for r in rows:
+            r.pop("_w", None)
+        return {"ok": True, "count": len(rows), "sessions": rows[:limit]}
 
     def list_tasks(self, status=None):
         tasks = self.ledger.list_tasks(status)[:50]
@@ -819,9 +1042,7 @@ class Verbs:
             p = next((x for x in c.state()["projects"] if x.get("pid") == pid), None)
         if not p:
             return None
-        if p.get("kind") == "local":
-            return f"local:{machine}:{p.get('path') or p.get('name') or ''}"
-        return self._norm_repo(p.get("repoUrl")) or ("name:" + (p.get("name") or ""))
+        return _pkey_of(p, machine)
 
     def _harness_link(self, pid=None, cid=None, view="transcript", machine=None):
         """Build the deep link into the harness UI. Hash route mirrors index.html:
@@ -1028,6 +1249,32 @@ class Verbs:
         return self._gate("close", {"machine": machine, "cid": cid,
                                     "confirm": confirm}, do)
 
+    def reopen(self, machine, cid, confirm=False):
+        """🗃️ Bring a CLOSED session back from the history (get_closed): a NEW
+        session (new cid) in the same project, resuming the old conversation.
+        A row with `resumable: false` had no conversation, so it starts fresh.
+        The row leaves the history once reopened."""
+        def do():
+            c = self.clients.get(machine)
+            if not c:
+                return {"ok": False, "error": f"no such machine: {machine}"}
+            row = next((r for r in c.state().get("closed") or []
+                        if r.get("cid") == cid), None)
+            if not row:
+                return {"ok": False, "error": f"no closed session {cid} on "
+                        f"{machine} — get_closed lists them"}
+            new_cid, err = c.reopen_session(cid)
+            if not new_cid:
+                return {"ok": False, "error": f"reopen failed: {err}",
+                        "machine": machine, "cid": cid}
+            return {"ok": True, "machine": machine, "reopened": cid,
+                    "cid": new_cid, "title": row.get("title"),
+                    "resumed": bool(row.get("resumable")),
+                    "url": self._harness_link(row.get("pid"), new_cid,
+                                              machine=machine)["url"]}
+        return self._gate("reopen", {"machine": machine, "cid": cid,
+                                     "confirm": confirm}, do)
+
     def wrap(self, machine, cid, text="", confirm=False):
         """📑 Wrap a FINISHED session up: it writes its handoff to a LOCAL
         HANDOFF-<stamp>.md at the repo root (one new file per wrap, older
@@ -1167,6 +1414,40 @@ def engine_tag(s):
     descriptions so the reading model can't misread silence as "unknown"."""
     eng = (s or {}).get("engine") or "claude"
     return {} if eng == "claude" else {"engine": eng}
+
+
+def _iron_tag(by_proj, machine, pid):
+    """`{"iron": <title>}` when (machine, pid) is in an iron, `{}` otherwise —
+    same absent-means-none convention as engine_tag, for the same budget
+    reason."""
+    ir = by_proj.get((machine, pid)) if pid else None
+    return {"iron": ir["title"]} if ir else {}
+
+
+def _pkey_of(p, machine):
+    """The fleet projectKey for a project dict (index.html projectKey)."""
+    if p.get("kind") == "local":
+        return f"local:{machine}:{p.get('path') or p.get('name') or ''}"
+    return Verbs._norm_repo(p.get("repoUrl")) or ("name:" + (p.get("name") or ""))
+
+
+def _warmth(s):
+    """index.html's warmth rule: last human prompt, else last activity."""
+    return s.get("promptedAt") or s.get("lastActive") or 0
+
+
+def _ago(ts, now=None):
+    """'42s' / '5m' / '3h' / '2d' — index.html fmtAge. '' for no timestamp."""
+    if not ts:
+        return ""
+    d = max(0, (now or time.time()) - ts)
+    if d < 60:
+        return f"{int(d)}s"
+    if d < 3600:
+        return f"{int(d // 60)}m"
+    if d < 86400:
+        return f"{int(d // 3600)}h"
+    return f"{int(d // 86400)}d"
 
 
 def _norm_engine(engine):

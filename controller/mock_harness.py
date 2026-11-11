@@ -36,6 +36,36 @@ class _State:
         # frame types the mock should IGNORE (simulates an old harness that
         # predates them — the client must time out gracefully)
         self.ignore_frames = set()
+        # 🔥 direct-mode irons (members are pids) + 🗃️ closed-session history
+        self.irons = []
+        self.closed = []
+
+    def irons_frame(self):
+        with self.lock:
+            return {"type": "irons",
+                    "irons": sorted((dict(i) for i in self.irons),
+                                    key=lambda i: i.get("rank") or 0)}
+
+    def closed_frame(self):
+        with self.lock:
+            return {"type": "closed", "closed": [dict(r) for r in self.closed]}
+
+    def add_closed(self, pid="p1", **kw):
+        """File a closed-history row (newest first), shaped like server.py's
+        _closed_row."""
+        with self.lock:
+            self._n += 1
+            cid = f"c{self._n}"
+            row = {"cid": cid, "engine": "claude", "pid": pid,
+                   "project": (self.projects.get(pid) or {}).get("name", ""),
+                   "session_id": f"s{cid}", "title": f"session {cid}", "desc": "",
+                   "account": "", "prompt_count": 3, "first_prompt": "",
+                   "created": 0, "last_active": 0, "closed_at": 0,
+                   "reason": "closed", "last_answer": "", "resumable": True}
+            row.update({k: v for k, v in kw.items() if k in row})
+            self.closed.insert(0, row)
+        self.broadcast(self.closed_frame())
+        return cid
 
     def add_session(self, pid="p1", **kw):
         with self.lock:
@@ -45,6 +75,7 @@ class _State:
                  "desc": "", "named": False, "busy": False, "waiting": False,
                  "tool": None, "status": "idle", "digest": "", "blocked_on": "",
                  "sessionId": f"s{cid}", "promptCount": 0, "lastActive": 0,
+                 "promptedAt": 0,
                  "created": 0, "alive": True,
                  # engine layer + pin board fields (docs/WS-PROTOCOL.md sessionMeta)
                  "engine": "claude", "pinned": 0.0, "testHint": "",
@@ -204,7 +235,24 @@ def _make_handler(state):
             if t == "list":
                 j(state.projects_frame())
                 j(state.sessions_frame())
+                j(state.irons_frame())        # the real harness: irons, todos, closed
+                j(state.closed_frame())
                 j(state.accounts_frame())
+            elif t == "reopen":
+                cid = f.get("cid")
+                with state.lock:
+                    row = next((r for r in state.closed if r["cid"] == cid), None)
+                if not row or row["pid"] not in state.projects:
+                    j({"type": "error", "cid": cid,
+                       "error": "can't reopen: its project is gone"})
+                    return
+                new = state.add_session(row["pid"], title=row["title"],
+                                        engine=row["engine"])
+                with state.lock:
+                    state.closed = [r for r in state.closed if r["cid"] != cid]
+                j({"type": "focus", "cid": new})
+                state.broadcast(state.sessions_frame())
+                state.broadcast(state.closed_frame())
             elif t == "new":
                 # unknown engine falls back to claude, exactly as the harness does
                 eng = f.get("engine") or "claude"

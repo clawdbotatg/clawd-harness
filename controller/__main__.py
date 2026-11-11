@@ -33,6 +33,7 @@ def build(connect_wait=4.0):
     ledger = TaskLedger(config.LEDGER_PATH)
     reactor = Reactor(ledger)
     clients = {}
+    irons_source = None          # fleet mode: irons live on the relay, not a machine
     if config.RELAY_URL:
         # Box mode: drive the whole fleet through the relay's trusted-control path.
         # `clients` IS the fleet's live machine map — World/Verbs see machines come
@@ -40,6 +41,7 @@ def build(connect_wait=4.0):
         from .relay_client import RelayFleet
         fleet = RelayFleet(config.RELAY_URL, config.RELAY_TOKEN, on_hook=reactor.feed).start()
         clients = fleet.machines
+        irons_source = fleet.irons_state
         if connect_wait:
             end = time.time() + connect_wait
             while time.time() < end and not fleet.connected:
@@ -58,7 +60,8 @@ def build(connect_wait=4.0):
     guard = Guard(autonomy=config.AUTONOMY, rate_per_min=config.RATE_PER_MIN)
     world = World(clients, ledger)
     from .notes import NotesStore
-    verbs = Verbs(world, ledger, clients, guard, notes=NotesStore(config.NOTES_PATH))
+    verbs = Verbs(world, ledger, clients, guard, notes=NotesStore(config.NOTES_PATH),
+                  irons_source=irons_source)
     return verbs, clients, guard, ledger, reactor
 
 

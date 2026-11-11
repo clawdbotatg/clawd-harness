@@ -284,6 +284,33 @@ a verb the model can't see the effect of is a verb it never uses. Closed:
 
 Guarded by `controller/test_engines.py`.
 
+**2026-11: irons, closed history, warm.** The operator stopped using the PM
+partly because it couldn't see three things the web UI shows:
+
+- **`get_irons`** — the 🔥 irons in priority order, each with its member
+  projects and their live sessions (warmest first, deep links). Direct mode
+  reads the harness `irons` frame (members are pids). Fleet mode reads the
+  relay's `prefs` frame, which the relay already sends to `role=controller`
+  (it's registered via `add_mobile`, authed, so it gets prefs on connect, on
+  `list`, and on every `broadcast_prefs`). Fleet members are projectKeys:
+  a project on machine m is in an iron when its projectKey, canonicalized like
+  index.html `ironKeyCanon` (`name:<x>` folds to the URL key whose repo
+  basename is x), is in the iron's `keys`. One iron per project, first match.
+  `iron` (a title) now rides `get_world` project rows and `find` / `sweep` /
+  `get_warm` / `get_closed` rows — only when present, like `engine`.
+- **`get_closed` + `reopen`** — the 🗃️ `closed` frame (sent after every
+  `list` and on every change) is cached per machine. `get_closed` lists it
+  newest first with a query filter; `find` includes matching rows marked
+  `closed: true`. `reopen` (WRITE, gated like `close`) sends the `reopen`
+  frame and waits for the `focus` reply; a refused reopen's `error` frame is
+  matched by cid and returned as an error.
+- **`get_warm`** — live sessions fleet-wide, warmest first by
+  `promptedAt || lastActive` (index.html's rule), pinned left out.
+
+No wire change. Guarded by `controller/test_pm_visibility.py`; the real
+relay/worker path (prefs reach the controller, `closed` + `reopen` ride the
+bridge) by `controller/test_relay_fleet.py`.
+
 ---
 
 ## The controller (the brain)
