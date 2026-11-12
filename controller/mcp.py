@@ -83,7 +83,7 @@ TOOLS = [
     ("get_irons", "🔥 The operator's IRONS — named groups of projects he is "
         "pushing on as one effort, in his priority order (rank 1 = top). Each "
         "iron: title, desc, member projects (machine/pid/name), and its live "
-        "sessions warmest first (status, age since last prompt, deep link). "
+        "sessions warmest first (status, `prompted`/`active` ages, deep link). "
         "Use this to describe 'what's in motion' in his own terms. "
         "`unresolved_members` = members no connected machine reports. "
         "get_world/find/sweep/get_warm rows carry `iron` (a title) only when "
@@ -91,9 +91,15 @@ TOOLS = [
     ("get_warm", "What's warm right now: live sessions fleet-wide, warmest "
         "first — warmth is the last human prompt, else last activity (the "
         "harness tab strip's own order). Pinned sessions are left out. Each "
-        "row: machine, cid, title, status, age, one-line digest, iron, deep "
-        "link. THE answer to 'what am I working on / what's warm / what did I "
-        "just touch'. Read-only.", _S({"limit": _INT})),
+        "row: machine, cid, title, status, `prompted` (time since the OPERATOR "
+        "last prompted it), `active` (time since the session last did "
+        "anything), one-line digest, iron, deep link. `since` keeps only "
+        "sessions prompted inside a window: \"today\" (since the operator's "
+        "local midnight) or a number of hours, e.g. \"3\"; `older_left_out` "
+        "counts what the window dropped. THE answer to 'what am I working on "
+        "/ what's warm / what did I just touch' — and with since=\"today\", "
+        "'what are we working on today'. Read-only.",
+        _S({"limit": _INT, "since": _STR})),
     ("get_closed", "🗃️ Closed-session history, newest first: finished work "
         "(a 📑 wrapped session leaves its TLDR in `last_answer`) and closed "
         "tabs. Rows: machine, cid, title, project, closed_ago, reason "
@@ -304,7 +310,7 @@ class MCPServer:
         if name == "get_irons":
             return v.get_irons()
         if name == "get_warm":
-            return v.get_warm(a.get("limit", 15))
+            return v.get_warm(a.get("limit", 15), a.get("since"))
         if name == "get_closed":
             return v.get_closed(a.get("machine"), a.get("query"), a.get("limit", 20))
         if name == "escalate":

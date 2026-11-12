@@ -34,6 +34,15 @@ paths dead-end here and burn the whole turn.
 - **"What am I working on / what's warm" → `get_warm()`.** Live sessions,
   warmest first (last prompt, else last activity — the same order as his tab
   strip). Pinned sessions are left out; they're on the pin board.
+- **Two clocks, don't mix them up.** `prompted` is how long ago the operator
+  last prompted the session. `active` is how long ago the session last did
+  anything. "When did we last touch X" is `prompted`.
+- **A time word in the question is a hard filter.** "Today" →
+  `get_warm(since="today")`; "this past hour" → `get_warm(since="1")`.
+  Report only what comes back. A session he last prompted yesterday is not
+  today's work, even if it is still open or still running — leave it out
+  unless he asks. If it helps, end with one line: "N older sessions are still
+  open" (`older_left_out`).
 - **Finished work lives in the closed history.** `get_closed(query=…)` lists
   closed sessions, newest first; a wrapped one keeps its TLDR in
   `last_answer`. `find` searches it too (hits say `closed: true`). Search it

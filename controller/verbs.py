@@ -12,6 +12,7 @@ write returns {ok, ...} or {ok:false, blocked|needs_confirm|error, ...}.
 import collections
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -527,7 +528,7 @@ class Verbs:
                 row = {"machine": mid, "cid": s["cid"],
                        "title": (s.get("title") or s["cid"])[:60],
                        "status": self.world._status(s),
-                       "age": _ago(_warmth(s), now), "_w": _warmth(s),
+                       **_clocks(s, now), "_w": _warmth(s),
                        **engine_tag(s),
                        "url": self._harness_link(pid, s["cid"], machine=mid)["url"]}
                 if s.get("pinned"):
@@ -602,24 +603,33 @@ class Verbs:
         return {"ok": True, "count": len(rows), "closed": rows[:limit],
                 "truncated": len(rows) > limit}
 
-    def get_warm(self, limit=15):
+    def get_warm(self, limit=15, since=None):
         """What's warm: live sessions fleet-wide, warmest first, where warmth =
         the last human prompt (`promptedAt`), else last activity — the same
         clock the harness tab strip sorts and stamps by. Pinned sessions are
-        parked work and are left out (see get_pins)."""
+        parked work and are left out (see get_pins).
+
+        Each row says `prompted` (how long since the OPERATOR last prompted it)
+        and `active` (how long since the session last did anything) — two
+        different clocks. `since` keeps only sessions prompted inside a window:
+        "today" (since local midnight, CONTROLLER_TZ) or a number of hours."""
         limit = max(1, min(int(limit or 15), 40))
         _, by_proj, _ = self._iron_index()
         now = time.time()
-        rows = []
+        cutoff, window = _since_cutoff(since, now)
+        rows, left_out = [], 0
         for mid, c in self.clients.items():
             for s in c.state()["sessions"]:
                 if s.get("pinned") or s.get("alive") is False:
                     continue
                 w = _warmth(s)
+                if cutoff and w < cutoff:
+                    left_out += 1
+                    continue
                 row = {"machine": mid, "cid": s["cid"],
                        "title": (s.get("title") or s["cid"])[:60],
                        "status": self.world._status(s),
-                       "age": _ago(w, now), "_w": w,
+                       **_clocks(s, now), "_w": w,
                        **engine_tag(s),
                        **_iron_tag(by_proj, mid, s.get("pid")),
                        "url": self._harness_link(s.get("pid"), s["cid"],
@@ -631,7 +641,11 @@ class Verbs:
         rows.sort(key=lambda r: r["_w"], reverse=True)
         for r in rows:
             r.pop("_w", None)
-        return {"ok": True, "count": len(rows), "sessions": rows[:limit]}
+        out = {"ok": True, "count": len(rows), "sessions": rows[:limit]}
+        if window:
+            out["since"] = window
+            out["older_left_out"] = left_out
+        return out
 
     def list_tasks(self, status=None):
         tasks = self.ledger.list_tasks(status)[:50]
@@ -1434,6 +1448,41 @@ def _pkey_of(p, machine):
 def _warmth(s):
     """index.html's warmth rule: last human prompt, else last activity."""
     return s.get("promptedAt") or s.get("lastActive") or 0
+
+
+def _clocks(s, now):
+    """`prompted` = since the operator's last prompt, `active` = since the
+    session last did anything. `prompted` is absent when it was never prompted
+    (or the harness is too old to say)."""
+    out = {}
+    if s.get("promptedAt"):
+        out["prompted"] = _ago(s["promptedAt"], now)
+    if s.get("lastActive"):
+        out["active"] = _ago(s["lastActive"], now)
+    return out
+
+
+def _since_cutoff(since, now):
+    """`since` → (cutoff epoch or 0, a label for the reply). "today" = local
+    midnight in CONTROLLER_TZ (default America/Denver — the box runs UTC, the
+    operator doesn't); a number = that many hours back."""
+    if since in (None, "", 0, "0"):
+        return 0, ""
+    if str(since).strip().lower() == "today":
+        import datetime
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(os.environ.get("CONTROLLER_TZ") or "America/Denver")
+        except Exception:
+            tz = None
+        d = datetime.datetime.fromtimestamp(now, tz)
+        mid = d.replace(hour=0, minute=0, second=0, microsecond=0)
+        return mid.timestamp(), f"today (since {mid.strftime('%Y-%m-%d %H:%M %Z').strip()})"
+    try:
+        h = float(since)
+    except (TypeError, ValueError):
+        return 0, ""
+    return (now - h * 3600, f"last {h:g}h") if h > 0 else (0, "")
 
 
 def _ago(ts, now=None):

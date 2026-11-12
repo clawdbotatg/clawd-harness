@@ -159,10 +159,19 @@ def main():
         assert c_pin not in cids, cids                       # parked work is not warm
         assert cids.index(c_hot) < cids.index(c_mid) < cids.index(c_cold), cids
         mid = next(s for s in r["sessions"] if s["cid"] == c_mid)
-        assert mid["digest"] == "refactoring the parser" and mid["age"] == "10m", mid
+        assert mid["digest"] == "refactoring the parser" and mid["active"] == "10m" and "prompted" not in mid, mid
         hot = next(s for s in r["sessions"] if s["cid"] == c_hot)
+        assert hot["prompted"] == "1m" and hot["active"] == "50s", hot
         assert hot["iron"] == "Voice" and hot["url"].endswith(f"/s/{c_hot}"), hot
         assert len(verbs.get_warm(limit=1)["sessions"]) == 1
+        assert "age" not in mid and "since" not in r, (mid, r)
+        # a time window is a hard filter on the last human prompt
+        hour = verbs.get_warm(since="0.5")
+        got = [s["cid"] for s in hour["sessions"]]
+        assert c_mid in got and c_cold not in got, got
+        assert hour["since"] == "last 0.5h" and hour["older_left_out"] >= 1, hour
+        today = verbs.get_warm(since="today")
+        assert today["since"].startswith("today (since ") and "older_left_out" in today, today
     check("get_warm: promptedAt||lastActive order, pinned excluded", t_warm)
 
     def t_mcp_surface():
