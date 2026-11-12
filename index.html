@@ -587,7 +587,7 @@
   #wraprow button:hover, #checkrow button:hover { border-color:var(--accent); color:var(--accent); }
   /* 🔍 double-check — the session is writing its brief; a reviewer tab opens when its turn ends */
   /* 📑 wrapped-up toast: the tab just vanished on purpose — say so, offer ↩ */
-  #wraptoast { position:fixed; left:50%; bottom:84px; transform:translateX(-50%); z-index:60;
+  #wraptoast { position:fixed; left:50%; top:var(--wt-top, 56px); transform:translateX(-50%); z-index:60;
                display:flex; gap:10px; align-items:center; background:var(--raised); color:var(--ink);
                border:1px solid var(--accent); border-radius:10px; padding:8px 12px; font-size:13px;
                box-shadow:0 4px 18px rgba(0,0,0,.35); max-width:92vw; }
@@ -9141,6 +9141,13 @@ const wrapToast = document.createElement('div'); wrapToast.id = 'wraptoast'; wra
 document.body.appendChild(wrapToast);
 let wrapToastTimer = null;
 function hideWrapToast() { wrapToast.hidden = true; clearTimeout(wrapToastTimer); wrapToastTimer = null; }
+// Top-middle, over the first rows of the terminal (old output already read) —
+// never down over the composer / key bar / chips (Austin, 11-12).
+function placeWrapToast() {
+  const r = document.getElementById('term').getBoundingClientRect();
+  if (r.height > 0) wrapToast.style.setProperty('--wt-top', Math.max(8, Math.round(r.top) + 8) + 'px');
+  else wrapToast.style.removeProperty('--wt-top');
+}
 function showWrapToast(s, machine) {
   wrapToast.innerHTML = '';
   const t = document.createElement('span');
@@ -9151,6 +9158,7 @@ function showWrapToast(s, machine) {
   h.onclick = () => { hideWrapToast(); showClosedLog(); };
   wrapToast.append(t, u, h);
   wrapToast.hidden = false;
+  placeWrapToast(); requestAnimationFrame(placeWrapToast);   // again once the view has landed
   clearTimeout(wrapToastTimer);
   wrapToastTimer = setTimeout(hideWrapToast, 15000);
 }
