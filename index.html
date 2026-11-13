@@ -1304,9 +1304,6 @@
   .amchip.dead { color:var(--err); border-color:var(--err); opacity:.75; }
   .aadd { margin-top:14px; border-top:1px dashed var(--edge); padding-top:12px; }
   .aadd .aaddrow { display:flex; gap:8px; margin-top:8px; }
-  .aadd input { flex:1; min-width:0; background:var(--bg); color:var(--ink);
-                border:1px solid var(--edge); padding:9px 11px; font-size:13px; }
-  .aadd input:focus { outline:none; border-color:var(--accent); }
   .aadd button { font-size:13px; padding:9px 12px; white-space:nowrap; }
   /* "default for new repos" toggle on a machine card: a checkbox that pins the
      global clone target so the projects rung stops auto-picking the first host */
@@ -7220,6 +7217,12 @@ function newSession(targetMachine, engine) {
     currentPid = me.pid;
   }
   if (!currentPid) { setView('projects'); return; }   // need a project to host it
+  // Ask FIRST: with the socket down nothing is spawning, and blanking the
+  // terminal for a session that will never come left a black void.
+  if (!hsend({ type: 'new', pid: currentPid, engine: engine || 'claude' })) {
+    meta.textContent = 'not connected — try again in a moment';
+    return;
+  }
   pendingNewFocus = true;          // the focus that comes back should switch us into it
   // We're still subscribed to the session we're leaving (the server only swaps the
   // subscription when we `subscribe` the new cid, which can't happen until the focus
@@ -7229,12 +7232,6 @@ function newSession(targetMachine, engine) {
   currentCid = null;               // anything still streaming for the old cid is now stale
   term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
   if (activeType) { activeType.finish(); activeType = null; }
-  if (!hsend({ type: 'new', pid: currentPid, engine: engine || 'claude' })) {
-    // socket down / no machine: nothing was asked, so don't open the void
-    pendingNewFocus = false;
-    meta.textContent = 'not connected — try again in a moment';
-    return;
-  }
   // ＋ tapped on the sessions rung with a half-typed prompt in the box: bring the
   // text INTO the fresh session rather than leaving it behind outside. (Austin,
   // 2026-09-11: you land on a project's session list, start typing, and — since
@@ -8585,14 +8582,14 @@ function reopenClosed(r) {
     if (!r.machine || !isMachineOnline(r.machine)) { meta.textContent = 'that machine is offline'; return; }
     attachMachine(r.machine);
   }
+  const sent = r.machine ? hsendTo(r.machine, { type: 'reopen', cid: r.cid })
+                         : hsend({ type: 'reopen', cid: r.cid });
+  if (!sent) { meta.textContent = 'not connected — try again in a moment'; return; }   // nothing asked → leave the screen alone
   currentPid = r.pid;
   pendingNewFocus = true;
   currentCid = null;
   term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
   if (activeType) { activeType.finish(); activeType = null; }
-  const sent = r.machine ? hsendTo(r.machine, { type: 'reopen', cid: r.cid })
-                         : hsend({ type: 'reopen', cid: r.cid });
-  if (!sent) { pendingNewFocus = false; meta.textContent = 'not connected — try again in a moment'; return; }
   closedlogEl.hidden = true;
   armNewFocusWatch();
   setView(DEEP_VIEW);
@@ -8612,13 +8609,13 @@ function forkSession() {
   if (!src || !inSessionView()) { meta.textContent = 'open a session to fork it'; return; }
   const mid = FLEET ? machineForCid(src) : null;
   if (FLEET && (!mid || !isMachineOnline(mid))) { meta.textContent = 'that machine is offline'; return; }
+  const f = { type: 'fork', cid: src };
+  if (!(mid ? hsendTo(mid, f) : hsend(f))) { meta.textContent = 'not connected — try again in a moment'; return; }   // nothing asked → leave the screen alone
   forkSrcCid = src;
   pendingNewFocus = true;
   currentCid = null;
   term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
   if (activeType) { activeType.finish(); activeType = null; }
-  const f = { type: 'fork', cid: src };
-  if (!(mid ? hsendTo(mid, f) : hsend(f))) { pendingNewFocus = false; currentCid = src; forkSrcCid = null; meta.textContent = 'not connected — try again in a moment'; return; }
   armNewFocusWatch(mid);
   meta.textContent = 'forking…';
 }
@@ -9048,9 +9045,20 @@ function holdSend(text, batch) {
   body.textContent = text || batch.map(a => a.name || 'image').join(', ');
   const x = document.createElement('button'); x.textContent = '✕'; x.title = 'cancel — back into the box';
   let cancelled = false;
+  // You've moved on: the box was emptied at the send and navigation then dropped
+  // the (empty) draft, so nothing holds the text any more. Put it back in THAT
+  // context's draft — in front of anything typed there since — so it is in the
+  // composer when you return. (The attachments can't ride a draft; the words can.)
+  const keepForLater = () => {
+    if (!ctx || !text) return;
+    try {
+      const k = draftKey(ctx), cur = localStorage.getItem(k) || '';
+      if (cur !== text && !cur.startsWith(text + '\n')) localStorage.setItem(k, text + (cur ? '\n' + cur : ''));
+    } catch {}
+  };
   const restore = () => {          // message back where it came from, chips and all
     d.remove();
-    if (currentDraftId() !== ctx) return;   // you've moved on — the draft copy is still there for that context
+    if (currentDraftId() !== ctx) { keepForLater(); return; }
     attachments = [...batch, ...attachments]; renderChips();
     box.value = text + (box.value && text ? '\n' : '') + box.value; autosizeBox(); saveDraft();
     box.focus();
@@ -9069,10 +9077,11 @@ function holdSend(text, batch) {
       // never send here: stash the composed message (paths and all) in that
       // session's outbox and it comes back in its composer when you return.
       if (cid && ctx === cid) stashOutbox(cid, composeSend(text, ready));
+      else keepForLater();           // a sessions-rung / PM composer has no outbox
       return;
     }
     if (!dispatchSend(text, ready)) { restore(); return; }
-    try { localStorage.removeItem(draftKey(ctx)); } catch {}
+    saveDraft();                     // box empty → draft removed; a NEW message typed during the upload is kept
   });
 }
 
@@ -9426,7 +9435,7 @@ try { ttsOn = localStorage.getItem('cc_tts') === '1'; } catch {}
 // Probe the server once: with a key we route audio through /tts (better voice).
 // /config is token-gated (it leaks workdir/lanIp); send the token we hold. In
 // fleet mode the relay doesn't serve /config, so this just falls through to catch.
-fetch('/config' + (FLEET ? '' : '?t=' + encodeURIComponent(token))).then(r => r.json()).then(c => { serverTts = !!c.tts; }).catch(() => {});
+if (!FLEET) fetch('/config?t=' + encodeURIComponent(token)).then(r => r.json()).then(c => { serverTts = !!c.tts; }).catch(() => {});
 
 // ElevenLabs playback queue. speak() fires per streamed chunk and the fetches
 // return out of order, so we play strictly in enqueue order. Each item carries
@@ -11465,7 +11474,6 @@ function setView(view) {
   pinsBtn.classList.toggle('on', pins);
   ironsHdrBtn.classList.toggle('on', irons || iron || ((tty || view === 'transcript') && !!ironScope));
   statusEl.classList.toggle('pmopen', pm);
-  try { localStorage.setItem('cc_view', view); } catch {}
   refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
   syncUrl();                       // keep the URL in step with the depth we're at
   if (tty) showTTY();
@@ -11482,7 +11490,7 @@ function setView(view) {
   // same rule as the projects rung (a repaint never focuses).
   else if (irons) { renderIronList(); focusIronFilter(); }
   else if (iron) renderIronDetail();
-  if (typeof renderNeedsBar === 'function') renderNeedsBar();   // depth changed → re-filter the bar
+  renderNeedsBar();   // depth changed → re-filter the bar
 }
 // the toggle button hops between the two deep views; projects/sessions have their own entries.
 // Each is a manual nav, so it cancels any pending question auto-return (navTo wraps that).
