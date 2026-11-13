@@ -597,6 +597,22 @@ AUTO_TLDR_TEXT  = os.environ.get("AUTO_TLDR_TEXT",
 AUTO_TLDR_MIN   = int(os.environ.get("AUTO_TLDR_MIN", "350"))   # shorter never fires
 AUTO_TLDR_LONG  = int(os.environ.get("AUTO_TLDR_LONG", "900"))  # one-paragraph wall
 AUTO_TLDR_DELAY = float(os.environ.get("AUTO_TLDR_DELAY", "3")) # grace before sending
+# The length gate alone fired on replies that were already a TLDR — three
+# numbered options and "say go" (Austin, 11-13: "there's no reason for this
+# TLDR to fire … make that decision in an intelligent way"). So a reply that
+# passes wants_auto_tldr is read by a cheap model that decides whether a TLDR
+# would actually say it in far fewer words. Judge unreachable → length gate
+# decides alone (the old behavior). AUTO_TLDR_JUDGE=0 skips the judge.
+AUTO_TLDR_JUDGE = os.environ.get("AUTO_TLDR_JUDGE", "1") != "0"
+AUTO_TLDR_JUDGE_SYS = (
+    "A coding assistant just finished a reply to a busy person. Decide if "
+    "that person would want a much shorter TLDR of it. Say NO when the reply "
+    "is already tight: a short list of options or steps, a brief status, a "
+    "question, anything a person can take in within ~10 seconds — even if it "
+    "has several paragraphs or list items. Say YES only for a real wall: long "
+    "explanation, padding, repetition, many details buried around the point, "
+    "where a TLDR would cut it to a fraction. "
+    'Reply with JSON only: {"tldr": true} or {"tldr": false}.')
 
 
 def is_tldr_prompt(text):
@@ -936,6 +952,19 @@ def wants_auto_tldr(text):
         return False
     paras = [p for p in re.split(r"\n\s*\n", t) if p.strip()]
     return len(paras) >= 2 or len(t) >= AUTO_TLDR_LONG
+
+
+def judge_auto_tldr(text):
+    """After the length gate: would a TLDR actually help? False only when the
+    judge says the reply is already tight; None/failure → True (length gate
+    stands)."""
+    if not AUTO_TLDR_JUDGE:
+        return True
+    t = (text or "").strip()[:12000]
+    parsed = _llm_json(AUTO_TLDR_JUDGE_SYS, t, max_tokens=20, model=PILOT_MODEL) \
+        or _llm_json(AUTO_TLDR_JUDGE_SYS, t, max_tokens=20)
+    v = (parsed or {}).get("tldr")
+    return v if isinstance(v, bool) else True
 
 
 # ── 🤖 Autopilot (per-session, the checkbox beside the state square) ─────────
@@ -4779,7 +4808,8 @@ class ClaudeSession:
             if (AUTO_TLDR and armed and not self.ceremony and not self.pinned
                     and not self.autopilot
                     and wants_auto_tldr(data["last"])):
-                threading.Thread(target=self._auto_tldr, daemon=True).start()
+                threading.Thread(target=self._auto_tldr, args=(data["last"],),
+                                 daemon=True).start()
             # 🤖 autopilot: the turn just ended — let the supervisor read the
             # outcome and decide (continue / needs a human / done). Fires on
             # EVERY Stop while engaged, including turns its own prompt caused:
@@ -5177,7 +5207,7 @@ class ClaudeSession:
               f"plan; pty tail: {tail!r}", flush=True)
         self.manager.rescue_bounced_prompt(self, text, pre_hooks)
 
-    def _auto_tldr(self):
+    def _auto_tldr(self, reply=""):
         """Deliver the AUTO_TLDR chip tap (armed + gated in on_hook's Stop).
         A short grace re-checks everything that can change at the Stop
         boundary: a new prompt (any hook moves hook_count), or the session
@@ -5185,7 +5215,12 @@ class ClaudeSession:
         it's a real prompt, so the bounce watchdog / limit rescues cover it
         like anything a human sends."""
         pre_hooks = self.hook_count
-        time.sleep(AUTO_TLDR_DELAY)
+        t0 = time.time()
+        if not judge_auto_tldr(reply):
+            print(f"[session {self.cid[:8]}] auto-tldr: judge says the reply "
+                  "is already tight — skipped", flush=True)
+            return
+        time.sleep(max(0, AUTO_TLDR_DELAY - (time.time() - t0)))
         if (not self.alive or self.busy or self.waiting
                 or self.hook_count != pre_hooks):
             return
