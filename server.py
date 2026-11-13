@@ -4004,6 +4004,7 @@ class ClaudeSession:
         self.hooks_at_prompt = 0                  # hook_count when it landed — "did that turn ever progress?"
         self._limit_raw = b""                     # rolling RAW PTY bytes, for the limit banner/modal scan
         self._limit_seen_at = 0.0                 # cooldown anchor for banner-triggered rescues
+        self._limit_modal = False                 # last scan was the model-scoped credits dialog
         self._limit_kind = "session"              # which wall the last scan saw (session | weekly …)
         # The PTY limit scan arms on the first Enter into THIS process: a
         # --resume repaints the old conversation, and a limit line in that
@@ -5381,6 +5382,11 @@ class ClaudeSession:
             return
         self._limit_kind = ("weekly" if modal or re.search(
             r"weekly limit|usage for this week", spaced, re.I) else "session")
+        # The model-scoped credits dialog is authoritative on its own: the
+        # usage endpoint does NOT show the included-Fable allowance as spent
+        # (2026-11-12: modal painted while the endpoint read 51% overall,
+        # fable 6%), so rescue_limit_wall must not gate it on a percentage.
+        self._limit_modal = bool(modal)
         self._limit_raw = b""                    # don't re-match this paint
         now = time.time()
         if now - self._limit_seen_at < BOUNCE_COOLDOWN:
@@ -5602,6 +5608,9 @@ class ClaudeSession:
         self._limit_seen_at = now
         self._limit_kind = ("weekly" if re.search(r"weekly|fable|opus|sonnet|model",
                                                   raw, re.I) else "session")
+        # A model-scoped reply (Fable/Opus/Sonnet) is invisible to the usage
+        # endpoint's overall percentage — trust the CLI's own words.
+        self._limit_modal = bool(re.search(r"fable|opus|sonnet|model", raw, re.I))
         print(f"[session {self.cid[:8]}] limit reply in the transcript on "
               f"{self.account} — confirming against the endpoint", flush=True)
         threading.Thread(target=self.manager.rescue_limit_wall,
@@ -8328,7 +8337,9 @@ class SessionManager:
         walled = got is None or got in (AUTH_FAIL, RATE_LIMITED)
         if got and got not in (AUTH_FAIL, RATE_LIMITED):
             pct, windows = got
-            walled = pct >= SUB_HOT              # the wall the banner announced
+            # The credits dialog ("You've reached your Fable limit") is the
+            # CLI's own verdict and the endpoint can't see it — trust it.
+            walled = pct >= SUB_HOT or bool(getattr(s, "_limit_modal", False))
             if acct:
                 with self.lock:
                     now2 = time.time()
