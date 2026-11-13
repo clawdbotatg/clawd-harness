@@ -65,6 +65,14 @@ print("the reply is recognized:")
 check("the incident text matches", server._LIMIT_SYNTH_RE.search(TEXT))
 check("the classic session wall matches too",
       server._LIMIT_SYNTH_RE.search("You've hit your session limit · resets 2pm"))
+ORG = ("You've hit your org's monthly spend limit · ask your admin to raise it "
+       "at https://claude.ai/admin-settings/usage · your Fable limit resets 3am "
+       "(America/Denver)")
+check("the 11-13 org spend-cap text matches (apostrophe in the blank)",
+      server._LIMIT_SYNTH_RE.search(ORG) and server._LIMIT_BANNER_RE.search(ORG))
+check("…and is trusted as model-scoped", server._LIMIT_MODEL_RE.search(ORG))
+check("a plain session limit is NOT trusted without the endpoint",
+      not server._LIMIT_MODEL_RE.search("You've hit your session limit · resets 2pm"))
 check("ordinary prose doesn't", not server._LIMIT_SYNTH_RE.search(
     "we reached the limit of what the Fable model can do"))
 

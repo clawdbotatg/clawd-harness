@@ -1188,8 +1188,16 @@ _LOGIN_EXPIRED_RE = re.compile(r"login expired|please run /login", re.I)
 # fable 100%, with the EF pool at 36% on the same box). Transcript text is the
 # CLI's own words, not a rendering — matched on <synthetic> lines only and
 # confirm-gated by rescue_limit_wall, so quoting it is harmless.
+# The blank allows apostrophes: "You've hit your org's monthly spend limit ·
+# … · your Fable limit resets 3am" (2026-11-13) slipped past a [a-z0-9 .-]
+# class and the session sat walled with no hop.
 _LIMIT_SYNTH_RE = re.compile(
-    r"you.?ve (?:hit|reached) your [a-z0-9 .-]{0,32}limit", re.I)
+    r"you.?ve (?:hit|reached) your [a-z0-9 .'\u2019-]{0,40}limit", re.I)
+# A wall that names a model ("your Fable limit resets …") or an org/monthly
+# SPEND cap is model-scoped: the usage endpoint's overall percentage can't see
+# it, so the rescue trusts the CLI's words instead of gating on SUB_HOT.
+_LIMIT_MODEL_RE = re.compile(
+    r"(?:fable|opus|sonnet|model)\S* limit|spend limit", re.I)
 # Send watchdog: every delivered message must produce a UserPromptSubmit hook
 # within seconds. A hard-walled CLI answers with its limit line and fires NO
 # hook at all (proven live 2026-07-12 03:2x: send → hook-silent 881s → only
@@ -1336,8 +1344,8 @@ BOOT_STAGGER_S = float(os.environ.get("BOOT_STAGGER_S", "1.5"))
 _PTY_ANSI_RE = re.compile(
     rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>]")
 _LIMIT_BANNER_RE = re.compile(
-    r"you.?ve hit your [a-z0-9 -]{0,24}limit"    # .? = ' or ’ (the CLI uses either)
-    r"|you.?ve reached your [a-z0-9 .-]{0,32}limit"
+    r"you.?ve hit your [a-z0-9 .'\u2019-]{0,40}limit"  # .? = ' or ’; blank may hold "org's"
+    r"|you.?ve reached your [a-z0-9 .'\u2019-]{0,40}limit"
     r"|stop and wait for limit to reset"
     r"|ask your admin for more usage", re.I)
 # The newer EXTRA-USAGE-CREDITS wall (2026-08): a model-scoped weekly window
@@ -5403,7 +5411,10 @@ class ClaudeSession:
         # usage endpoint does NOT show the included-Fable allowance as spent
         # (2026-11-12: modal painted while the endpoint read 51% overall,
         # fable 6%), so rescue_limit_wall must not gate it on a percentage.
-        self._limit_modal = bool(modal)
+        self._limit_modal = bool(modal) or bool(_LIMIT_MODEL_RE.search(
+            spaced[banner.start():banner.start() + 300] if banner else ""))
+        if self._limit_modal:
+            self._limit_kind = "weekly"
         self._limit_raw = b""                    # don't re-match this paint
         now = time.time()
         if now - self._limit_seen_at < BOUNCE_COOLDOWN:
@@ -5623,11 +5634,11 @@ class ClaudeSession:
         if now - self._limit_seen_at < BOUNCE_COOLDOWN:
             return
         self._limit_seen_at = now
-        self._limit_kind = ("weekly" if re.search(r"weekly|fable|opus|sonnet|model",
-                                                  raw, re.I) else "session")
-        # A model-scoped reply (Fable/Opus/Sonnet) is invisible to the usage
+        self._limit_modal = bool(_LIMIT_MODEL_RE.search(raw))
+        self._limit_kind = ("weekly" if self._limit_modal
+                            or re.search(r"weekly", raw, re.I) else "session")
+        # A model-scoped or spend-cap reply is invisible to the usage
         # endpoint's overall percentage — trust the CLI's own words.
-        self._limit_modal = bool(re.search(r"fable|opus|sonnet|model", raw, re.I))
         print(f"[session {self.cid[:8]}] limit reply in the transcript on "
               f"{self.account} — confirming against the endpoint", flush=True)
         threading.Thread(target=self.manager.rescue_limit_wall,
