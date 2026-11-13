@@ -43,6 +43,25 @@ check("many single-\\n lines are ONE paragraph (a list isn't a wall)",
           "\n".join(["- item %d, a bounded line" % i for i in range(10)])[
               :server.AUTO_TLDR_LONG - 1]))
 
+print("judge:")
+_real_llm = server._llm_json
+_calls = []
+def _no(*a, **k):
+    _calls.append(1)
+    return {"tldr": False}
+server._llm_json = _no
+check("a long reply never reaches the judge — a wall always gets the TLDR",
+      server.judge_auto_tldr("z" * (server.AUTO_TLDR_JUDGE_MAX + 1)) is True
+      and not _calls)
+check("a short reply the judge calls tight is skipped",
+      server.judge_auto_tldr("z" * server.AUTO_TLDR_JUDGE_MAX) is False)
+server._llm_json = lambda *a, **k: None
+check("judge unreachable -> the TLDR fires",
+      server.judge_auto_tldr("z" * 400) is True)
+server._llm_json = _real_llm
+check("the judge's reach stays near one phone screen",
+      server.AUTO_TLDR_MIN < server.AUTO_TLDR_JUDGE_MAX <= 1000)
+
 print("knobs:")
 check("feature defaults ON (the user asked to try it)", server.AUTO_TLDR)
 check("the tap is tldr-shaped (the arming guard keys on this prefix)",

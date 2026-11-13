@@ -598,20 +598,24 @@ AUTO_TLDR_MIN   = int(os.environ.get("AUTO_TLDR_MIN", "350"))   # shorter never 
 AUTO_TLDR_LONG  = int(os.environ.get("AUTO_TLDR_LONG", "900"))  # one-paragraph wall
 AUTO_TLDR_DELAY = float(os.environ.get("AUTO_TLDR_DELAY", "3")) # grace before sending
 # The length gate alone fired on replies that were already a TLDR — three
-# numbered options and "say go" (Austin, 11-13: "there's no reason for this
-# TLDR to fire … make that decision in an intelligent way"). So a reply that
-# passes wants_auto_tldr is read by a cheap model that decides whether a TLDR
-# would actually say it in far fewer words. Judge unreachable → length gate
-# decides alone (the old behavior). AUTO_TLDR_JUDGE=0 skips the judge.
+# numbered options and "say go" (Austin, 11-13). So a SHORT reply that passes
+# wants_auto_tldr is read by a cheap model that may veto the TLDR. The first
+# cut let the judge rule on every reply with a prompt that said "YES only for
+# a real wall": it vetoed 20 of 21, including 2,600-char explanations (Austin,
+# 11-13: "giant walls of slop verbosity and you're not triggering the TLDR").
+# So: the judge only gets a vote under AUTO_TLDR_JUDGE_MAX chars — anything
+# longer is a bunch of text and always gets the TLDR — and it defaults to YES.
+# Judge unreachable → TLDR fires. AUTO_TLDR_JUDGE=0 skips the judge.
 AUTO_TLDR_JUDGE = os.environ.get("AUTO_TLDR_JUDGE", "1") != "0"
+AUTO_TLDR_JUDGE_MAX = int(os.environ.get("AUTO_TLDR_JUDGE_MAX", "800"))
 AUTO_TLDR_JUDGE_SYS = (
-    "A coding assistant just finished a reply to a busy person. Decide if "
-    "that person would want a much shorter TLDR of it. Say NO when the reply "
-    "is already tight: a short list of options or steps, a brief status, a "
-    "question, anything a person can take in within ~10 seconds — even if it "
-    "has several paragraphs or list items. Say YES only for a real wall: long "
-    "explanation, padding, repetition, many details buried around the point, "
-    "where a TLDR would cut it to a fraction. "
+    "A coding assistant just finished a reply to a busy person reading on a "
+    "phone. By default they want a shorter TLDR of it, so answer YES. "
+    "Answer NO only when the reply is already as short as a TLDR would be: "
+    "a few terse bullets or numbered options, a one- or two-sentence status, "
+    "or a direct question, with nothing left to cut. Any explanatory prose, "
+    "background, reasoning, or more than a handful of short lines means YES. "
+    "When unsure, YES. "
     'Reply with JSON only: {"tldr": true} or {"tldr": false}.')
 
 
@@ -956,11 +960,11 @@ def wants_auto_tldr(text):
 
 def judge_auto_tldr(text):
     """After the length gate: would a TLDR actually help? False only when the
-    judge says the reply is already tight; None/failure → True (length gate
-    stands)."""
-    if not AUTO_TLDR_JUDGE:
+    reply is short (≤ AUTO_TLDR_JUDGE_MAX) AND the judge says it is already
+    tight; longer replies never reach the judge; None/failure → True."""
+    t = (text or "").strip()
+    if not AUTO_TLDR_JUDGE or len(t) > AUTO_TLDR_JUDGE_MAX:
         return True
-    t = (text or "").strip()[:12000]
     parsed = _llm_json(AUTO_TLDR_JUDGE_SYS, t, max_tokens=20, model=PILOT_MODEL) \
         or _llm_json(AUTO_TLDR_JUDGE_SYS, t, max_tokens=20)
     v = (parsed or {}).get("tldr")
