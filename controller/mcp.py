@@ -232,7 +232,8 @@ TOOLS = [
         "armed session can self-close (2 turns / 30 min; a dirty worktree no "
         "longer blocks it) — a wrap that doesn't end has something to say: read "
         "transcript_tail. Optional `text` replaces the harness's wrap prompt (a "
-        "literal {file} in it becomes this wrap's HANDOFF-<stamp>.md). WRITE.",
+        "literal {file} in it becomes this wrap's HANDOFF-<stamp>.md). If the "
+        "harness refuses, you get ok:false + its reason. WRITE.",
         _S({"machine": _STR, "cid": _STR, "text": _STR, "confirm": _BOOL}, ["machine", "cid"])),
     ("check", "🔍 Double-check a session's work with the OTHER engine (codex "
         "reviews claude, claude reviews codex). The session writes a short local "
@@ -246,7 +247,7 @@ TOOLS = [
         "reviewer shows in the roster with checkOf = the source cid; its lastAnswer "
         "is the verdict, the source's next lastAnswer is what it did about it. "
         "Refused for a sign-in session, no conversation yet, or codex not signed "
-        "in. WRITE.",
+        "in — ok:false + the harness's reason. WRITE.",
         _S({"machine": _STR, "cid": _STR, "confirm": _BOOL}, ["machine", "cid"])),
     ("pin", "📌 Park a finished session on the pin board (on=true, default) or "
         "restore it to the tab strip (on=false). The move for \"the work is "
@@ -261,13 +262,15 @@ TOOLS = [
         "remote added, default branch synced from upstream at every spawn, and "
         "every session in it carries a standing rule — never push the default "
         "branch, branch + open a PR against upstream, report the PR link. Use "
-        "this, not clone_project, for any repo that isn't ours. WRITE.",
+        "this, not clone_project, for any repo that isn't ours. A bad URL is "
+        "ok:false + the reason. WRITE.",
         _S({"machine": _STR, "repo_url": _STR, "confirm": _BOOL},
            ["machine", "repo_url"])),
     ("add_local_project", "Adopt an existing folder on that machine's disk as a "
         "PRIVATE local project: sessions run in it normally, but the harness "
         "never runs gh/git-remote against it and it has no repo URL. Use when "
-        "the operator names a folder that isn't a GitHub repo. WRITE.",
+        "the operator names a folder that isn't a GitHub repo. A rejected "
+        "path (missing, not allowed) is ok:false + why. WRITE.",
         _S({"machine": _STR, "path": _STR, "confirm": _BOOL},
            ["machine", "path"])),
     ("remove_project", "Detach a local (private) project: drop it from the "

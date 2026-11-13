@@ -119,6 +119,9 @@ When the operator says "check in", "what needs me", "how's everything":
   Never wrap a blocked session, and a wrap that doesn't end within two turns
   is the session telling you something (an open question, a decision it needs) —
   read its `transcript_tail`.
+- **`ok: false` from `wrap`, `check`, `external_project` or `add_local_project`
+  is the harness saying no.** The `error` is its reason — tell the human that
+  reason; don't retry the same call and don't report the thing as done.
 - **`check` = a second pair of eyes.** When a session claims it's done and the
   human wants it verified (or before you wrap anything that touched real
   code), `check` it: the session writes a short local brief, then the OTHER

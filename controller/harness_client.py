@@ -14,7 +14,12 @@ import threading
 import time
 import uuid
 
+from . import refusals
 from .wsclient import client_connect, ws_send, ws_read_message
+
+
+# How long a write verb waits for the harness to say no (it never says yes).
+REFUSAL_WAIT = 1.5
 
 
 class HarnessClient:
@@ -53,6 +58,7 @@ class HarnessClient:
         self._reopen_for = None               # cid a reopen is waiting on (error routing)
         self._reopen_err = None
         self._pending = {}                    # request id -> {"ev": Event, "resp": frame}
+        self._refusals = refusals.Refusals()   # write verbs listening for an `error`
 
     # -- lifecycle -------------------------------------------------------------
     def start(self):
@@ -108,6 +114,7 @@ class HarnessClient:
     # -- inbound state ---------------------------------------------------------
     def _handle(self, f):
         t = f.get("type")
+        self._refusals.feed(f)
         with self._state_lock:
             if t == "projects":
                 self.boot = f.get("boot")
@@ -237,13 +244,19 @@ class HarnessClient:
 
     def wrap_session(self, cid, text=""):
         """📑 arm the session to close itself + deliver the wrap prompt (the
-        harness's default text when `text` is empty)."""
-        return self.send({"type": "wrap", "cid": cid, "text": text or ""})
+        harness's default text when `text` is empty). Returns the refusal
+        text, or None when the harness took it."""
+        return self._refusals.ask(
+            lambda: self.send({"type": "wrap", "cid": cid, "text": text or ""}),
+            refusals.for_cid(cid), REFUSAL_WAIT)
 
     def check_session(self, cid):
         """🔍 arm the session for a double-check: it writes its brief, then
-        the harness spawns the other engine's reviewer in the same project."""
-        return self.send({"type": "check", "cid": cid, "via": "pm"})
+        the harness spawns the other engine's reviewer in the same project.
+        Returns the refusal text, or None when the harness took it."""
+        return self._refusals.ask(
+            lambda: self.send({"type": "check", "cid": cid, "via": "pm"}),
+            refusals.for_cid(cid), REFUSAL_WAIT)
 
     def pin_session(self, cid, on=True):
         return self.send({"type": "pin", "cid": cid, "on": bool(on)})
@@ -255,10 +268,15 @@ class HarnessClient:
         return self.send({"type": "addProject", "repoUrl": repo_url})
 
     def add_local_project(self, path):
-        return self.send({"type": "addLocalProject", "path": path})
+        return self._refusals.ask(
+            lambda: self.send({"type": "addLocalProject", "path": path}),
+            refusals.with_prefix("addLocalProject:", "localProjectMissing"),
+            REFUSAL_WAIT)
 
     def add_external_project(self, repo_url):
-        return self.send({"type": "addExternalProject", "repoUrl": repo_url})
+        return self._refusals.ask(
+            lambda: self.send({"type": "addExternalProject", "repoUrl": repo_url}),
+            refusals.with_prefix("addExternalProject:"), REFUSAL_WAIT)
 
     def remove_project(self, pid):
         return self.send({"type": "removeProject", "pid": pid})

@@ -304,6 +304,11 @@ partly because it couldn't see three things the web UI shows:
   `closed: true`. `reopen` (WRITE, gated like `close`) sends the `reopen`
   frame and waits for the `focus` reply; a refused reopen's `error` frame is
   matched by cid and returned as an error.
+- **A harness "no" is heard** (`controller/refusals.py`). `wrap`, `check`,
+  `external_project` and `add_local_project` get no reply when they work, and
+  an `error` frame when they don't. Both clients wait `REFUSAL_WAIT` (1.5 s
+  direct, 2.5 s through the relay) for that frame and return `ok: false` with
+  its text. `test_refusals.py`.
 - **`get_warm`** — live sessions fleet-wide, warmest first by
   `promptedAt || lastActive` (index.html's rule), pinned left out.
 

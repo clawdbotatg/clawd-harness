@@ -1299,14 +1299,16 @@ class Verbs:
         for 2 turns / 30 min — only an armed session can self-close (a dirty
         worktree no longer blocks it; the uncommitted files are named in its
         reply), so a wrap that doesn't end means it has something to say:
-        read its transcript_tail. Never wrap a blocked session. Optional
+        read its transcript_tail. Never wrap a blocked session. A refusal
+        from the harness (no such session, nothing to wrap) comes back as
+        `ok: false` with its reason. Optional
         `text` replaces the harness's wrap prompt; a literal `{file}` in it
         becomes this wrap's HANDOFF-<stamp>.md."""
         def do():
             c = self.clients.get(machine)
             if not c:
                 return {"ok": False, "error": f"no such machine: {machine}"}
-            return {"ok": c.wrap_session(cid, text), "machine": machine, "cid": cid}
+            return _refused(c.wrap_session(cid, text), machine=machine, cid=cid)
         return self._gate("wrap", {"machine": machine, "cid": cid, "text": text,
                                    "confirm": confirm}, do)
 
@@ -1323,13 +1325,14 @@ class Verbs:
         reviewer appears in the roster with `checkOf` = the source cid; its
         lastAnswer is the verdict, the source's next lastAnswer is what it did
         about it. Refused (with a reason) for a sign-in
-        session, one with no conversation yet, or when codex isn't signed in.
-        The source keeps running untouched."""
+        session, one with no conversation yet, or when codex isn't signed in
+        — `ok: false` carries the harness's reason. The source keeps running
+        untouched."""
         def do():
             c = self.clients.get(machine)
             if not c:
                 return {"ok": False, "error": f"no such machine: {machine}"}
-            return {"ok": c.check_session(cid), "machine": machine, "cid": cid}
+            return _refused(c.check_session(cid), machine=machine, cid=cid)
         return self._gate("check", {"machine": machine, "cid": cid,
                                     "confirm": confirm}, do)
 
@@ -1359,16 +1362,17 @@ class Verbs:
         from upstream at every spawn, and every session in it is born with a
         standing rule — never push the default branch, work on a branch, open
         a PR against upstream, report the PR link. Use this (not clone_project)
-        for any repo that isn't ours to push to."""
+        for any repo that isn't ours to push to. A bad URL is refused at once
+        (`ok: false` + the reason); a clone that fails later shows on the card."""
         def do():
             c = self.clients.get(machine)
             if not c:
                 return {"ok": False, "error": f"no such machine: {machine}"}
-            return {"ok": c.add_external_project(repo_url), "machine": machine,
-                    "repo": repo_url,
-                    "note": "async: the card goes cloning → ready (or error with "
-                            "the reason) — re-read get_world; sessions in it "
-                            "land work as PRs against upstream"}
+            return _refused(
+                c.add_external_project(repo_url), machine=machine, repo=repo_url,
+                note="async: the card goes cloning → ready (or error with "
+                     "the reason) — re-read get_world; sessions in it "
+                     "land work as PRs against upstream")
         return self._gate("external_project", {"machine": machine, "repo_url": repo_url,
                                                "confirm": confirm}, do)
 
@@ -1377,16 +1381,14 @@ class Verbs:
         project**: sessions run in it like any project, but the harness never
         runs gh/git-remote operations against it and never stores a repo URL.
         Use when the operator names a folder that isn't a clawdbotatg repo.
-        The path only ever leaves the machine inside encrypted fleet frames."""
+        The path only ever leaves the machine inside encrypted fleet frames.
+        A rejected path (missing folder, not allowed) is `ok: false` + why."""
         def do():
             c = self.clients.get(machine)
             if not c:
                 return {"ok": False, "error": f"no such machine: {machine}"}
-            return {"ok": c.add_local_project(path), "machine": machine,
-                    "path": path,
-                    "note": "the harness replies with an `error` frame (not to "
-                            "us) if the path is rejected — re-read get_world to "
-                            "confirm it appeared"}
+            return _refused(c.add_local_project(path), machine=machine,
+                            path=path)
         return self._gate("add_local_project", {"machine": machine, "path": path,
                                                 "confirm": confirm}, do)
 
@@ -1412,6 +1414,14 @@ class Verbs:
                     "name": proj.get("name"), "folder_kept": True}
         return self._gate("remove_project", {"machine": machine, "pid": pid,
                                              "confirm": confirm}, do)
+
+
+def _refused(why, **fields):
+    """Reply for a write the harness can refuse: the client waited a moment
+    for an `error` frame and hands back its text (None = no refusal came)."""
+    if why:
+        return {"ok": False, "error": why, **fields}
+    return {"ok": True, **fields}
 
 
 def _clean(args):

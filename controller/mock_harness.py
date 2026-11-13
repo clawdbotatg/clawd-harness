@@ -36,6 +36,9 @@ class _State:
         # frame types the mock should IGNORE (simulates an old harness that
         # predates them — the client must time out gracefully)
         self.ignore_frames = set()
+        # frame type -> reason: answer that frame with the real harness's
+        # refusal `error` frame instead of doing it (tests set this)
+        self.refuse = {}
         # 🔥 direct-mode irons (members are pids) + 🗃️ closed-session history
         self.irons = []
         self.closed = []
@@ -188,6 +191,22 @@ def _make_handler(state):
         def _dispatch(self, f, j):
             t = f.get("type")
             if t in state.ignore_frames:
+                return
+            why = state.refuse.get(t)
+            if t in ("wrap", "check") and not why and f.get("cid") not in state.sessions:
+                why = "no such session"
+            if why:
+                # the shapes server.py sends (docs/WS-PROTOCOL.md `error`)
+                cid = f.get("cid")
+                if t == "wrap":
+                    j({"type": "error", "cid": cid, "error": "wrap: " + why})
+                elif t == "check":
+                    j({"type": "error", "cid": cid, "check": cid,
+                       "error": "can't double-check: " + why})
+                elif t == "addLocalProject" and why == "missing":
+                    j({"type": "localProjectMissing", "path": f.get("path")})
+                else:
+                    j({"type": "error", "error": f"{t}: {why}"})
                 return
             if t == "search":
                 ql = (f.get("q") or "").lower()

@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 
+from . import refusals
 from .wsclient import client_connect, ws_read_message, ws_send
 
 # Relay PING_EVERY is 20s; consider the link wedged after ~3 missed pings.
@@ -24,6 +25,10 @@ READ_TIMEOUT = 75.0
 # even if the relay's ping cadence hiccups — READ_TIMEOUT is then a true backstop
 # for genuinely dead links, not a trigger on quiet-but-alive ones.
 KEEPALIVE_EVERY = 20.0
+
+
+# How long a write verb waits for the harness to say no (it never says yes).
+REFUSAL_WAIT = 2.5
 
 
 class RelayMachine:
@@ -45,10 +50,12 @@ class RelayMachine:
         self._reopen_for = None       # cid a reopen is waiting on (error routing)
         self._reopen_err = None
         self._pending = {}            # request id -> {"ev": Event, "resp": frame}
+        self._refusals = refusals.Refusals()   # write verbs listening for an `error`
 
     # -- inbound (called from the fleet reader thread) ------------------------
     def _handle(self, msg):
         t = msg.get("type")
+        self._refusals.feed(msg)
         with self._lock:
             if t == "projects":
                 self.projects = {p["pid"]: p for p in msg.get("projects", [])}
@@ -154,13 +161,19 @@ class RelayMachine:
 
     def wrap_session(self, cid, text=""):
         """📑 arm the session to close itself + deliver the wrap prompt (the
-        harness's default text when `text` is empty)."""
-        return self._send({"type": "wrap", "cid": cid, "text": text or ""})
+        harness's default text when `text` is empty). Returns the refusal
+        text, or None when the harness took it."""
+        return self._refusals.ask(
+            lambda: self._send({"type": "wrap", "cid": cid, "text": text or ""}),
+            refusals.for_cid(cid), REFUSAL_WAIT)
 
     def check_session(self, cid):
         """🔍 arm the session for a double-check: it writes its brief, then
-        the harness spawns the other engine's reviewer in the same project."""
-        return self._send({"type": "check", "cid": cid, "via": "pm"})
+        the harness spawns the other engine's reviewer in the same project.
+        Returns the refusal text, or None when the harness took it."""
+        return self._refusals.ask(
+            lambda: self._send({"type": "check", "cid": cid, "via": "pm"}),
+            refusals.for_cid(cid), REFUSAL_WAIT)
 
     def pin_session(self, cid, on=True):
         return self._send({"type": "pin", "cid": cid, "on": bool(on)})
@@ -172,10 +185,15 @@ class RelayMachine:
         return self._send({"type": "addProject", "repoUrl": repo_url})
 
     def add_local_project(self, path):
-        return self._send({"type": "addLocalProject", "path": path})
+        return self._refusals.ask(
+            lambda: self._send({"type": "addLocalProject", "path": path}),
+            refusals.with_prefix("addLocalProject:", "localProjectMissing"),
+            REFUSAL_WAIT)
 
     def add_external_project(self, repo_url):
-        return self._send({"type": "addExternalProject", "repoUrl": repo_url})
+        return self._refusals.ask(
+            lambda: self._send({"type": "addExternalProject", "repoUrl": repo_url}),
+            refusals.with_prefix("addExternalProject:"), REFUSAL_WAIT)
 
     def remove_project(self, pid):
         return self._send({"type": "removeProject", "pid": pid})
