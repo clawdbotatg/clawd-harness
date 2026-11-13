@@ -37,6 +37,12 @@ paths dead-end here and burn the whole turn.
 - **Two clocks, don't mix them up.** `prompted` is how long ago the operator
   last prompted the session. `active` is how long ago the session last did
   anything. "When did we last touch X" is `prompted`.
+- **"How much is left in X / which sessions are about done" → `left`.** Each
+  session keeps its own task list; rows carry `left` ("3 high, 1 low" =
+  high- and low-leverage items still open, "all done" = it listed work and
+  finished it). No `left` means the session never wrote a list — say you
+  can't tell, don't call it finished. For the items themselves, read the
+  session's `tasks` with a scoped `get_world(machine=…, pid=…)`.
 - **A time word in the question is a hard filter.** "Today" →
   `get_warm(since="today")`; "this past hour" → `get_warm(since="1")`.
   Report only what comes back. A session he last prompted yesterday is not

@@ -12,7 +12,7 @@ to clear it. See docs/CONTROLLER.md (the reading phase).
 """
 import time
 
-from .verbs import engine_tag
+from .verbs import engine_tag, tasks_tag
 
 _SEV_ORDER = {"high": 0, "medium": 1, "low": 2}
 
@@ -86,7 +86,7 @@ class World:
                "status": self._status(s),
                # engine only when it ISN'T claude (verbs.engine_tag) — this dict
                # rides in every snapshot, so the default costs nothing
-               **engine_tag(s)}
+               **engine_tag(s), **tasks_tag(s)}   # ☰ `left` = the session's own open tasks
         if s.get("bg"):
             out["bg"] = s["bg"]           # which kind of background work
         if s.get("pinned"):

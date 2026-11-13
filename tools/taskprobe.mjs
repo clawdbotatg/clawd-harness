@@ -96,7 +96,10 @@ async function run(label, ctxOpts, touch) {
     pass(`${label}: chip "${c.text}" under the corner buttons`);
   else fail(`${label}: chip ` + JSON.stringify(c));
 
-  await hit('#taskChip');
+  const startOpen = await page.evaluate(() => !document.getElementById('taskPanel').hidden);
+  if (startOpen === !touch) pass(`${label}: the panel starts ${touch ? 'closed' : 'open'}`);
+  else fail(`${label}: panel starts ${startOpen ? 'open' : 'closed'}`);
+  if (touch) await hit('#taskChip');
   const rows = () => page.evaluate(() => [...document.querySelectorAll('#taskPanel .tki')].map(n =>
     ({ id: n.dataset.id, done: n.classList.contains('done'), lev: n.querySelector('.tklev').textContent })));
   let r = await rows();
@@ -125,6 +128,18 @@ async function run(label, ctxOpts, touch) {
   if (JSON.stringify(kept) === JSON.stringify([['b1', true], ['a1', true], ['d1', true]])) pass(`${label}: a repaint keeps the row nodes, reordered`);
   else fail(`${label}: repaint ` + JSON.stringify(kept));
 
+  const tabTk = await page.evaluate(() => {
+    window.__fake.tasks = { hi: 3, lo: 1, done: 0, at: 1, items: [] };
+    return [taskLeftText(window.__fake), taskLeftText({ tasks: { hi: 0, lo: 0, done: 2 } }), taskLeftText({})];
+  });
+  if (JSON.stringify(tabTk) === JSON.stringify([' · 3 high · 1 low left', ' · ✓ tasks done', ''])) pass(`${label}: the session card says what's left`);
+  else fail(`${label}: card text ` + JSON.stringify(tabTk));
+  if (!touch) {            // closing is remembered on this device
+    await hit('#taskChip');
+    const closed = await page.evaluate(() => [document.getElementById('taskPanel').hidden, localStorage.getItem('cc_tasks_open')]);
+    if (closed[0] && closed[1] === '0') pass(`${label}: a tap closes it and that is remembered`); else fail(`${label}: close ` + JSON.stringify(closed));
+    await page.evaluate(() => localStorage.removeItem('cc_tasks_open'));
+  }
   await setTasks([{ ...list[0], done: true }, list[3]]);
   c = await chip();
   if (c.shown && c.text.includes('all done')) pass(`${label}: nothing open → "${c.text}"`);

@@ -114,5 +114,7 @@ Read the section for the feature you're touching. Not loaded every session.
   in for a list never written, then every `TASKS_EMPTY_TURNS` 8); the 📑 wrap
   prompt reconciles it. Never nudge at Stop — a blocked Stop forces an extra
   turn and its message replaces the real answer in the TLDR. Claude-only
-  (codex discards hook output, has no appended system prompt). The PM does
-  not see it yet. `test_tasks.py`, `tools/taskprobe.mjs`.
+  (codex discards hook output, has no appended system prompt). The same
+  counts sit on each tab (`.tk`, "3·1") and session card; the panel starts
+  open on desktop (`cc_tasks_open` remembers a close), closed on touch. The
+  PM reads it as `left` on its session rows (`controller/verbs.tasks_tag`). `test_tasks.py`, `tools/taskprobe.mjs`.

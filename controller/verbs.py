@@ -529,7 +529,7 @@ class Verbs:
                        "title": (s.get("title") or s["cid"])[:60],
                        "status": self.world._status(s),
                        **_clocks(s, now), "_w": _warmth(s),
-                       **engine_tag(s),
+                       **engine_tag(s), **tasks_tag(s),
                        "url": self._harness_link(pid, s["cid"], machine=mid)["url"]}
                 if s.get("pinned"):
                     row["pinned"] = True
@@ -630,7 +630,7 @@ class Verbs:
                        "title": (s.get("title") or s["cid"])[:60],
                        "status": self.world._status(s),
                        **_clocks(s, now), "_w": w,
-                       **engine_tag(s),
+                       **engine_tag(s), **tasks_tag(s),
                        **_iron_tag(by_proj, mid, s.get("pid")),
                        "url": self._harness_link(s.get("pid"), s["cid"],
                                                  machine=mid)["url"]}
@@ -1428,6 +1428,20 @@ def engine_tag(s):
     descriptions so the reading model can't misread silence as "unknown"."""
     eng = (s or {}).get("engine") or "claude"
     return {} if eng == "claude" else {"engine": eng}
+
+
+def tasks_tag(s):
+    """☰ `{"left": "3 high, 1 low"}` from the session's own task list (the
+    chip beside its terminal) — `"left": "all done"` when it wrote a list and
+    nothing is open, and no field at all when it never wrote one (which is NOT
+    "nothing left": unknown)."""
+    t = (s or {}).get("tasks") or {}
+    hi, lo, done = t.get("hi") or 0, t.get("lo") or 0, t.get("done") or 0
+    if not (hi or lo or done):
+        return {}
+    if not (hi or lo):
+        return {"left": "all done"}
+    return {"left": ", ".join(x for x in (f"{hi} high" if hi else "", f"{lo} low" if lo else "") if x)}
 
 
 def _iron_tag(by_proj, machine, pid):
