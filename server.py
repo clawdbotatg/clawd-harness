@@ -5446,8 +5446,17 @@ class ClaudeSession:
         # usage endpoint does NOT show the included-Fable allowance as spent
         # (2026-11-12: modal painted while the endpoint read 51% overall,
         # fable 6%), so rescue_limit_wall must not gate it on a percentage.
-        self._limit_modal = bool(modal) or bool(_LIMIT_MODEL_RE.search(
-            spaced[banner.start():banner.start() + 300] if banner else ""))
+        # Only the DIALOG is trusted without the gate. A plain banner line in
+        # the PTY may be text the user pasted or the model quoted (2026-11-13:
+        # a pasted old spend-limit banner was echoed in the prompt box,
+        # skipped the gate, quarantined two pools at 21%/23% and forced
+        # /model opus). The real spend-cap wall also arrives as a <synthetic>
+        # transcript line (_on_limit_transcript), which can't be user text.
+        if modal and re.sub(r"\s+", "", modal.group(0)).lower()[:60] in \
+                re.sub(r"\s+", "", getattr(self, "last_prompt", "") or "").lower():
+            self._limit_raw = b""
+            return                               # the user's own pasted dialog
+        self._limit_modal = bool(modal)
         if self._limit_modal:
             self._limit_kind = "weekly"
         self._limit_raw = b""                    # don't re-match this paint

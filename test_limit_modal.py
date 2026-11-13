@@ -146,6 +146,18 @@ def main():
     time.sleep(0.2)
     check("a sign-in ceremony session is never rescued", not s4.rescued)
 
+    s5 = fake_session()
+    feed(s5, b"you've hit your org's monthly spend limit \xc2\xb7 your fable limit resets 3am")
+    check("a plain spend-limit banner fires the rescue", wait_rescued(s5))
+    check("...but is NOT trusted past the usage gate (could be pasted/quoted text)",
+          not s5._limit_modal)
+
+    s6 = fake_session()
+    s6.last_prompt = server._PTY_ANSI_RE.sub(b"", MODAL).decode("utf-8", "ignore")
+    feed(s6, MODAL)
+    time.sleep(0.2)
+    check("a dialog the user PASTED into their own prompt fires nothing", not s6.rescued)
+
     print("guard rails (source checks):")
     pump = inspect.getsource(server.ClaudeSession._pump_pty)
     check("the scan stays fenced behind routes_accounts",
