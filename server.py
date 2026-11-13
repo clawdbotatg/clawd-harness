@@ -8309,6 +8309,25 @@ class SessionManager:
               f"{', '.join(map(fmt, fresh)) or '-'}; stale-cool: "
               f"{', '.join(map(fmt, stale)) or '-'})", flush=True)
 
+    def _fable_to_opus(self, s):
+        """No pool has Fable left: dismiss the CLI's credits dialog (Esc — its
+        Enter-default is Sonnet, which is never acceptable) and type
+        `/model opus`, then re-send the prompt the dialog ate. One shot per
+        _limit_seen_at, so a repaint can't loop it."""
+        if not s.alive:
+            return
+        print(f"[session {s.cid[:8]}] every pool is out of Fable — "
+              f"Esc + /model opus on {s.account}", flush=True)
+        try:
+            s.write(b"\x1b")
+            time.sleep(1.5)
+            s.send_message("/model opus ", control=True)   # trailing space: picker eats the CR
+            time.sleep(2)
+            if s.last_prompt.strip() and s.hook_count == s.hooks_at_prompt:
+                s.send_message(s.last_prompt)
+        except Exception as e:
+            print(f"[session {s.cid[:8]}] fable→opus failed: {e}", flush=True)
+
     def rescue_limit_wall(self, s, prompt=None):
         """The CLI just painted its limit banner in this session's terminal
         (_scan_for_limit). That's the zero-lag wall signal — hooks are silent
@@ -8359,6 +8378,11 @@ class SessionManager:
             if not alt:
                 self._stay_put_log(s, best, "limit banner confirmed")
                 self.broadcast_accounts()
+                if getattr(s, "_limit_modal", False):
+                    # Every pool is out of Fable too: stay on this login but
+                    # leave Fable for Opus (Austin, 11-12) instead of sitting
+                    # on a menu whose default is Sonnet.
+                    self._fable_to_opus(s)
                 return                           # nowhere better to go — stay put
             self._blind_log(s, alt, "limit banner confirmed")
             best = alt
