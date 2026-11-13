@@ -93,3 +93,23 @@ Read the section for the feature you're touching. Not loaded every session.
   which clawd-todo on the same box reads; still separate lists, items never
   move between them. `test_todo.py`,
   `fleet/test_todo_store.py`, `fleet/test_relay_todos.py`, `tools/todoprobe.mjs`.
+  **☰ session task list** (Austin, 11-12: "is this a session with a bunch of
+  things we still have to do, or one we've mostly finished?") = one short
+  list PER SESSION — what is left in THIS session, each item high or low
+  leverage, nothing finer. Not the iron's list, not the life list. The
+  session writes it with **`bin/harness-tasks`** (`HARNESS_TASKS_URL` →
+  `/self/tasks`); it lives on the session (`tasks` + `tasks_turn`, ctor +
+  registry, so respawns keep it) and rides the `sessions` row as `tasks`.
+  The page shows a chip under the tty's corner buttons (`#taskChip`: "N high
+  · N low · age" — the age is there so a stale list looks stale); a tap
+  opens `#taskPanel`, where a row can be ticked, re-levelled or dropped
+  (`stask` frame). What keeps it true is the harness, not claude's memory:
+  `TASKS_RULE` rides `--append-system-prompt` at every spawn; `/hook` answers
+  two events with a line claude gets as context (`tasks_note` — their hook
+  command prints the reply): the open items after a compact/resume
+  SessionStart, and ONE "still true?" reminder on a UserPromptSubmit once
+  open items sat untouched for `TASKS_STALE_TURNS` (4) prompts; the 📑 wrap
+  prompt reconciles it. Never nudge at Stop — a blocked Stop forces an extra
+  turn and its message replaces the real answer in the TLDR. Claude-only
+  (codex discards hook output, has no appended system prompt). The PM does
+  not see it yet. `test_tasks.py`, `tools/taskprobe.mjs`.

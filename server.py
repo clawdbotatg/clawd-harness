@@ -215,6 +215,8 @@ WRAP_PROMPT = (      # `{file}` → handoff_file_name() at the arm (manager.wrap
     "PATH) prints it: check off what you finished (`harness-todo done <id>`) "
     "and add what is still open (`harness-todo add <one short item>`), one "
     "item per task; if it says the project isn't in any iron, skip this. "
+    "Also run `harness-tasks` and make this session's own task list true: "
+    "check off what is done, remove what is moot. "
     "Your actual work is separate from the handoff: if code changes are still "
     "uncommitted, commit and push them as usual. Then run `harness-close` (on "
     "your PATH) — it closes this session once the turn ends. If something is "
@@ -2644,6 +2646,115 @@ def serve_skills_lib(client, frame):
                           "error": f"relay unreachable: {e}"})
 
 
+# ☰ Session task list (Austin, 11-12: "is this a session with a bunch of things
+# we still have to do, or one we've mostly finished?"). One short list PER
+# SESSION, written by the session itself with `bin/harness-tasks`, shown as a
+# chip beside the top-right pill. Each item is high or low leverage, nothing
+# finer. Not the iron's shared list (harness-todo) and not the life list
+# (todo): those outlive a session, this one is the session's own "what's left".
+# What keeps it true is the harness, not claude's memory: TASKS_RULE at spawn,
+# the open items handed back after a compaction/resume, one reminder when it
+# has sat untouched for TASKS_STALE_TURNS prompts (ClaudeSession.tasks_note),
+# and the 📑 wrap. test_tasks.py.
+TASKS_MAX = 60           # per session, open + done
+TASKS_WIRE = 40          # items on a `sessions` frame
+TASKS_STALE_TURNS = 4    # prompts with open items and no change → one reminder
+TASKS_OPS = ("add", "done", "undone", "rm", "lev", "clear")
+TASKS_RULE = (
+    "This session has its own task list, which the user sees beside the "
+    "terminal to judge how much is left here. `harness-tasks` (on your PATH) "
+    "prints it. When more than one thing is left to do in this session — you "
+    "and the user list several things, or you find follow-ups you are not "
+    "doing right now — put each on it: `harness-tasks add <one short item>` "
+    "for high-leverage work, `harness-tasks add --low <item>` for a "
+    "nice-to-have. When one is finished: `harness-tasks done <id or a few "
+    "words>`; when one is dropped: `harness-tasks rm <id or words>`. Keep it "
+    "true as you go. Skip it for a single one-step request, and do not talk "
+    "about the list in your replies unless asked.")
+
+
+def clean_tasks(raw):
+    """Registry / wire → sanitized items (bounded, deduped by id)."""
+    out, seen = [], set()
+    for e in (raw if isinstance(raw, list) else [])[:TASKS_MAX]:
+        it = _ts().clean_item(e)
+        if it is None or it["id"] in seen:
+            continue
+        seen.add(it["id"])
+        out.append({"id": it["id"], "text": it["text"], "done": it["done"],
+                    "lev": "lo" if e.get("lev") == "lo" else "hi",
+                    "created": it["created"], "doneAt": it["doneAt"], "via": it["via"]})
+    return out
+
+
+def tasks_sorted(items):
+    """Open high, open low, then done — insertion order inside each."""
+    rank = lambda i: 2 if i["done"] else (0 if i["lev"] == "hi" else 1)
+    return sorted(items, key=rank)
+
+
+def tasks_render(items, all_=False):
+    rows = [i for i in tasks_sorted(items) if all_ or not i["done"]]
+    if not rows:
+        return "no open tasks" if not all_ else "list is empty"
+    return "\n".join(f"[{'x' if i['done'] else ' '}] {i['id']}  "
+                     f"{'high' if i['lev'] == 'hi' else 'low '}  {i['text']}" for i in rows)
+
+
+def tasks_op(items, op, text="", ref="", lev="", via=""):
+    """Apply one op to a session's item list in place → (changed, message)."""
+    ts = _ts()
+    lev = "lo" if lev in ("lo", "low") else ("hi" if lev in ("hi", "high") else "")
+    if op == "add":
+        t = text.strip()[:ts.TEXT_MAX] if isinstance(text, str) else ""
+        if not t:
+            return False, "nothing to add (empty text)"
+        if any(not i["done"] and i["text"].lower() == t.lower() for i in items):
+            return False, f"already on the list: {t}"
+        if len(items) >= TASKS_MAX:
+            return False, f"the list is full ({TASKS_MAX} items) — `harness-tasks clear` drops the done ones"
+        it = {"id": ts.new_id(), "text": t, "done": False, "lev": lev or "hi",
+              "created": time.time(), "doneAt": 0.0, "via": str(via or "")[:24]}
+        items.append(it)
+        return True, f"added [{it['id']}] ({'high' if it['lev'] == 'hi' else 'low'}) {t}"
+    if op == "clear":
+        n = sum(1 for i in items if i["done"])
+        items[:] = [i for i in items if not i["done"]]
+        return n > 0, f"cleared {n} done item(s)"
+    if op not in TASKS_OPS:
+        return False, f"unknown op {op!r} (list, add, done, undone, rm, lev, clear)"
+    pool = items if op in ("rm", "lev") else [i for i in items if i["done"] == (op == "undone")]
+    it, err = ts.find(pool, ref)
+    if it is None:
+        return False, err
+    if op == "rm":
+        items.remove(it)
+        return True, f"removed [{it['id']}] {it['text']}"
+    if op == "lev":
+        if not lev:
+            return False, "lev wants high or low"
+        if it["lev"] == lev:
+            return False, f"[{it['id']}] is already {'high' if lev == 'hi' else 'low'}"
+        it["lev"] = lev
+        return True, f"[{it['id']}] is now {'high' if lev == 'hi' else 'low'} leverage: {it['text']}"
+    it["done"] = op == "done"
+    it["doneAt"] = time.time() if it["done"] else 0.0
+    return True, f"{'done' if it['done'] else 'reopened'} [{it['id']}] {it['text']}"
+
+
+def self_tasks(cid, op, text="", ref="", lev="", want_all=False):
+    """(http code, plain text) for /self/tasks — see _handle_self_tasks."""
+    s = MGR.get(cid)
+    if not s:
+        return 404, "no such session."
+    if op == "list":
+        with s.tasks_lock:
+            return 200, tasks_render(s.tasks, all_=want_all)
+    changed, msg = s.tasks_apply(op, text=text, ref=ref, lev=lev, via="agent")
+    left = s.tasks_meta()
+    return (200 if changed else 409), f"{msg}\n({left['hi']} high, {left['lo']} low open)"
+
+
 def self_todo(cid, op, text="", ref="", want_all=False):
     """(http code, plain text) for /self/todo — see _handle_self_todo."""
     s = MGR.get(cid)
@@ -3213,13 +3324,17 @@ class ClaudeEngine(Engine):
             # _follow_session records; the flag clears there, so a restart
             # before that first hook re-forks and after it resumes plainly).
             argv += ["--fork-session"]
-        rule = s.standing_rule()
-        if rule:
-            # External project: the branch-and-PR rule rides as an appended
-            # SYSTEM prompt — above CLAUDE.md, survives compaction, touches no
-            # file in the (someone else's) repo. Recomputed on every start, so
-            # a handoff/restart respawn carries it too.
-            argv += ["--append-system-prompt", rule]
+        # External project: the branch-and-PR rule rides as an appended
+        # SYSTEM prompt — above CLAUDE.md, survives compaction, touches no
+        # file in the (someone else's) repo. Recomputed on every start, so
+        # a handoff/restart respawn carries it too. ☰ Every working session
+        # also gets the task-list rule the same way (not sign-in ceremonies,
+        # not 🔍 reviewers — one-job sessions with nothing to list).
+        rules = [r for r in (s.standing_rule(),
+                             "" if (getattr(s, "ceremony", False) or getattr(s, "check_of", ""))
+                             else TASKS_RULE) if r]
+        if rules:
+            argv += ["--append-system-prompt", "\n\n".join(rules)]
         return argv
 
     def env(self, s, env):
@@ -3749,8 +3864,15 @@ class ClaudeSession:
                  pilot_status="", pilot_rounds=0,
                  tldr_text="", tldr_on=False, voice_on=False, fork=False,
                  head_at_spawn="", check_of="", check_file="", check_pending=False,
-                 check_log=None):
+                 check_log=None, tasks=None, tasks_turn=0):
         self.manager = manager
+        # ☰ this session's own task list (bin/harness-tasks; the chip beside
+        # the top-right pill) + the prompt_count it was last touched at (the
+        # stale reminder counts turns from there). Durable: ctor + registry.
+        self.tasks = clean_tasks(tasks)
+        self.tasks_turn = tasks_turn if isinstance(tasks_turn, int) else 0
+        self.tasks_at = max([max(i["created"], i["doneAt"]) for i in self.tasks] or [0.0])
+        self.tasks_lock = threading.Lock()
         # 🔍 double-check: the git HEAD when this session was created (""
         # for a non-repo or a pre-feature row) — the reviewer's diff base;
         # and, on a reviewer session, the cid of the session it is checking,
@@ -3961,7 +4083,8 @@ class ClaudeSession:
                 "fork": self.fork,
                 "head_at_spawn": self.head_at_spawn, "check_of": self.check_of,
                 "check_file": self.check_file, "check_pending": self.check_pending,
-                "check_log": self.check_log}
+                "check_log": self.check_log,
+                "tasks": [dict(i) for i in self.tasks], "tasks_turn": self.tasks_turn}
 
     def clone_for_respawn(self, **overrides):
         """A fresh session object for an in-place respawn under the SAME cid
@@ -4082,7 +4205,67 @@ class ClaudeSession:
                 "checkOf": self.check_of or "",     # 🔍 on a reviewer: the cid it double-checks
                 "checkLog": [{"n": r.get("n", 0), "worst": r.get("worst", ""), "counts": r.get("counts", {})}
                              for r in self.check_log[-8:]],   # 🔍 the severity gauge, oldest first
-                "loginCta": self._login_cta()}      # 🔑 "sign in to X" — a signed-out login beats this pool
+                "loginCta": self._login_cta(),      # 🔑 "sign in to X" — a signed-out login beats this pool
+                "tasks": self.tasks_meta()}         # ☰ the session's own task list (chip + panel)
+
+    # -- ☰ session task list ---------------------------------------------------
+    def tasks_meta(self):
+        """What rides every `sessions` frame: the counts the chip shows, when
+        the list last changed, and the items (open first, high before low;
+        bounded — a list is lines, and this frame is hot)."""
+        with self.tasks_lock:
+            items = tasks_sorted(self.tasks)
+            hi = sum(1 for i in items if not i["done"] and i["lev"] == "hi")
+            lo = sum(1 for i in items if not i["done"] and i["lev"] == "lo")
+            return {"hi": hi, "lo": lo, "done": len(items) - hi - lo, "at": self.tasks_at,
+                    "items": [{"id": i["id"], "text": i["text"][:200], "lev": i["lev"],
+                               "done": i["done"]} for i in items[:TASKS_WIRE]]}
+
+    def tasks_apply(self, op, text="", ref="", lev="", via=""):
+        """One op on this session's list → (changed, message). Any change
+        counts as a touch (resets the stale reminder), saves and broadcasts."""
+        with self.tasks_lock:
+            changed, msg = tasks_op(self.tasks, op, text=text, ref=ref, lev=lev, via=via)
+            if changed:
+                self.tasks_at = time.time()
+                self.tasks_turn = self.prompt_count
+        if changed:
+            self.manager.save_registry()
+            self.manager.broadcast_sessions()
+        return changed, msg
+
+    def tasks_note(self, ev, obj):
+        """The line a hook hands back to claude as context ("" = nothing, the
+        usual case). Two moments only:
+          · SessionStart after a compaction or a resume — the open items, so
+            the list outlives the context that wrote it;
+          · UserPromptSubmit when open items have sat untouched for
+            TASKS_STALE_TURNS prompts — one "is this still true?" line, then
+            quiet for another TASKS_STALE_TURNS (the reminder counts as a touch).
+        Never at Stop: a blocked Stop forces an extra turn and its message
+        would replace the real answer in the TLDR."""
+        if self.ceremony or self.check_of or not self.eng.routes_accounts:
+            return ""
+        with self.tasks_lock:
+            open_ = [i for i in tasks_sorted(self.tasks) if not i["done"]]
+            if not open_:
+                return ""
+            if ev == "SessionStart":
+                if obj.get("source") not in ("compact", "resume"):
+                    return ""
+                self.tasks_turn = self.prompt_count
+                return ("Harness note: this session's task list (`harness-tasks`) has "
+                        f"{len(open_)} open item(s):\n" + tasks_render(open_))
+            if ev == "UserPromptSubmit":
+                if self.prompt_count - self.tasks_turn < TASKS_STALE_TURNS:
+                    return ""
+                self.tasks_turn = self.prompt_count
+                return ("Harness note (not from the user): this session's task list has "
+                        f"{len(open_)} open item(s) and hasn't changed in {TASKS_STALE_TURNS} "
+                        "prompts. If any are finished or moot, fix it in this turn "
+                        "(`harness-tasks done <id>` / `harness-tasks rm <id>`); if it is "
+                        "still true, do nothing and don't mention it.\n" + tasks_render(open_))
+        return ""
 
     # -- 📑 wrap: arm, cancel, the self-close request, the turn-end close ------
     def wrap_armed(self):
@@ -4348,6 +4531,8 @@ class ClaudeSession:
         env["HARNESS_CLOSE_URL"] = f"http://127.0.0.1:{PORT}/self/close?t={TOKEN}&cid={self.cid}"
         # ☑ `harness-todo`: this session's iron to-do list (bin/harness-todo)
         env["HARNESS_TODO_URL"] = f"http://127.0.0.1:{PORT}/self/todo?t={TOKEN}&cid={self.cid}"
+        # ☰ `harness-tasks`: this session's OWN task list (bin/harness-tasks)
+        env["HARNESS_TASKS_URL"] = f"http://127.0.0.1:{PORT}/self/tasks?t={TOKEN}&cid={self.cid}"
         env["PATH"] = f"{HERE / 'bin'}:{env.get('PATH', '')}"
         for k in SCRUB_ENV:                      # pristine top-level + subscription auth
             env.pop(k, None)
@@ -4439,9 +4624,17 @@ class ClaudeSession:
                 f"--data-binary @- >/dev/null 2>&1 || true")
         one = [{"hooks": [{"type": "command", "command": post}]}]
         star = [{"matcher": "*", "hooks": [{"type": "command", "command": post}]}]
+        # ☰ On these two events claude adds the hook's stdout to its context
+        # (verified on 2.1.323, 2026-11-12), so their command prints /hook's
+        # reply instead of discarding it — tasks_note() is the only thing
+        # that ever puts a body there. -f: an error page is never context.
+        say = [{"hooks": [{"type": "command", "command":
+                f"curl -sSf -m 2 -X POST "
+                f"'http://127.0.0.1:{PORT}/hook?t={TOKEN}&cid={self.cid}' "
+                f"--data-binary @- 2>/dev/null || true"}]}]
         settings = {"hooks": {
-            "SessionStart": one, "SessionEnd": one,
-            "UserPromptSubmit": one, "Stop": one, "Notification": one,
+            "SessionStart": say, "SessionEnd": one,
+            "UserPromptSubmit": say, "Stop": one, "Notification": one,
             "PreToolUse": star, "PostToolUse": star,
         }}
         path = str(HERE / f".clawd-harness.hooks.{self.cid}.json")
@@ -6339,7 +6532,8 @@ class SessionManager:
                     voice_on=bool(e.get("voice_on")), fork=bool(e.get("fork")),
                     head_at_spawn=e.get("head_at_spawn", ""), check_of=e.get("check_of", ""),
                     check_file=e.get("check_file", ""), check_pending=bool(e.get("check_pending")),
-                    check_log=e.get("check_log"))
+                    check_log=e.get("check_log"),
+                    tasks=e.get("tasks"), tasks_turn=e.get("tasks_turn", 0))
                 self.sessions[s.cid] = s
                 self._park_for_boot(s)
                 continue
@@ -6421,7 +6615,8 @@ class SessionManager:
                 voice_on=bool(e.get("voice_on")), fork=bool(e.get("fork")),
                 head_at_spawn=e.get("head_at_spawn", ""), check_of=e.get("check_of", ""),
                 check_file=e.get("check_file", ""), check_pending=bool(e.get("check_pending")),
-                    check_log=e.get("check_log"))
+                    check_log=e.get("check_log"),
+                tasks=e.get("tasks"), tasks_turn=e.get("tasks_turn", 0))
             self.sessions[s.cid] = s
             self._park_for_boot(s)
         # Projects saved before `touched` existed: seed it from their sessions.
@@ -10429,6 +10624,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._proxy_pm("GET")
         if path == "/self/todo":
             return self._handle_self_todo()
+        if path == "/self/tasks":
+            return self._handle_self_tasks()
         if path == "/config":
             # Token-gated: it leaks workdir / lanIp / sessionId, which a malicious
             # site could grab via DNS-rebinding if this were open. The page sends
@@ -10460,6 +10657,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_self_close()
         if path == "/self/todo":
             return self._handle_self_todo()
+        if path == "/self/tasks":
+            return self._handle_self_tasks()
         if path == "/upload":
             return self._handle_upload()
         if path == "/tts":
@@ -10563,13 +10762,53 @@ class Handler(BaseHTTPRequestHandler):
             obj = json.loads(body.decode("utf-8")) if body else {}
         except Exception:
             obj = {}
+        note = ""
         if obj:
             s = MGR.get(cid)
             if s:
                 s.on_hook(obj)
-        self.send_response(204)
-        self.send_header("Content-Length", "0")
+                try:                             # ☰ the one thing a hook ever says back
+                    note = s.tasks_note(obj.get("hook_event_name", ""), obj)
+                except Exception as e:
+                    print(f"[session {cid[:8]}] tasks_note failed: {e!r}", flush=True)
+        if not note:
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        out = note.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(out)))
         self.end_headers()
+        self.wfile.write(out)
+
+    def _handle_self_tasks(self):
+        """☰ `harness-tasks` from inside a session (bin/harness-tasks, URL
+        from HARNESS_TASKS_URL): one op on THAT session's own task list (form
+        fields op/text/ref/lev/all). Plain-text reply. The list lives on the
+        session, on this box — no iron, no relay."""
+        if not self._token_ok():
+            return self.send_error(403, "bad token")
+        cid = self._query().get("cid", [""])[0]
+        form = {}
+        if self.command == "POST":
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+            except Exception:
+                body = ""
+            form = {k: v[0] for k, v in urllib.parse.parse_qs(body).items()}
+        code, msg = self_tasks(cid, (form.get("op") or "list").strip(),
+                               text=form.get("text") or "", ref=(form.get("ref") or "")[:80],
+                               lev=form.get("lev") or "",
+                               want_all=form.get("all") in ("1", "true", "yes"))
+        out = msg.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
 
     def _handle_self_todo(self):
         """☑ `harness-todo` from inside a session (bin/harness-todo, URL from
@@ -10940,6 +11179,16 @@ class Handler(BaseHTTPRequestHandler):
                 key=str(frame.get("key") or ""), via="page")
             if not changed and frame.get("op") not in ("clear", "order"):
                 client.send_json({"type": "error", "error": f"todo: {msg}"})
+        elif t == "stask":
+            # ☰ one op on one session's own task list, from the chip's panel;
+            # the `sessions` broadcast is the ack.
+            s = MGR.get(str(frame.get("cid") or ""))
+            if s and frame.get("op") in ("add", "done", "undone", "rm", "lev", "clear"):
+                changed, msg = s.tasks_apply(
+                    frame.get("op"), text=frame.get("text") or "",
+                    ref=str(frame.get("id") or ""), lev=str(frame.get("lev") or ""), via="page")
+                if not changed and frame.get("op") != "clear":
+                    client.send_json({"type": "error", "error": f"tasks: {msg}"})
         elif t == "restart":
             # force=True is the banner's "restart now" — a deliberate human act
             # that accepts cutting whatever the banner just told them is running.

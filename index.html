@@ -219,6 +219,44 @@
               opacity:.55; transition:opacity .12s, color .12s, border-color .12s; }
   #closeBtn:hover { opacity:1; color:var(--err); border-color:var(--err); }
   #closeBtn.show { display:block; }
+  /* ☰ session task list (Austin, 11-12: "is this one that has a lot to do, or
+     one that's about done?"). A chip under the corner buttons: open HIGH and
+     LOW leverage counts + how long since the list changed (a stale list must
+     look stale). The session writes it (bin/harness-tasks); a tap opens the
+     items, where a row can be ticked, re-levelled or dropped. Hidden while
+     the session has no list. Solid chrome — it floats over terminal text. */
+  #taskChip { position:absolute; top:42px; right:8px; z-index:20; display:none;
+              align-items:center; gap:7px; height:26px; padding:0 9px; cursor:pointer;
+              font:11px var(--mono); color:var(--dim); white-space:nowrap; user-select:none;
+              background:var(--bg); border:1px solid var(--edge); border-radius:6px; opacity:.92; }
+  #taskChip.show { display:flex; }
+  #taskChip.open { border-color:var(--accent-dim); }
+  #taskChip .hi { color:var(--accent); font-weight:700; }
+  #taskChip .lo { color:var(--ink); }
+  #taskChip .ok { color:var(--ok); font-weight:700; }
+  #taskPanel { position:absolute; top:72px; right:8px; z-index:21; width:340px; max-width:calc(100% - 16px);
+               max-height:60%; overflow-y:auto; background:var(--panel); border:1px solid var(--edge);
+               border-radius:8px; padding:4px 8px; box-shadow:0 6px 24px rgba(0,0,0,.45); }
+  #taskPanel[hidden] { display:none; }
+  #taskPanel .tki { display:flex; align-items:flex-start; gap:6px; padding:5px 0; border-bottom:1px solid var(--edge); }
+  #taskPanel .tki:last-of-type { border-bottom:0; }
+  #taskPanel .tki button { flex:0 0 auto; background:transparent; border:0; cursor:pointer; padding:0 3px; line-height:1.2; }
+  #taskPanel .tkchk { color:var(--accent); font-size:16px; }
+  #taskPanel .tklev { font:700 10px var(--mono); color:var(--accent); min-width:34px; padding-top:3px !important; }
+  #taskPanel .tki.lo .tklev { color:var(--dim); font-weight:400; }
+  #taskPanel .tktext { flex:1 1 auto; min-width:0; font-size:13px; line-height:1.35; color:var(--ink); overflow-wrap:anywhere; }
+  #taskPanel .tkrm { color:var(--dim); font-size:12px; opacity:.7; }
+  #taskPanel .tkrm:hover { color:var(--err); opacity:1; }
+  #taskPanel .tki.done .tkchk, #taskPanel .tki.done .tklev { color:var(--dim); }
+  #taskPanel .tki.done .tktext { color:var(--dim); text-decoration:line-through; }
+  #taskPanel .tkfoot { padding:6px 0 2px; text-align:right; }
+  #taskPanel .tkfoot button { font:11px var(--mono); color:var(--dim); background:transparent; border:0; cursor:pointer; }
+  @media (pointer:coarse) {
+    #taskChip { height:32px; font-size:13px; }
+    #taskPanel { top:80px; }
+    #taskPanel .tki { padding:8px 0; } #taskPanel .tkchk { font-size:20px; } #taskPanel .tktext { font-size:15px; }
+    #taskPanel .tkrm { font-size:15px; padding:0 6px !important; } #taskPanel .tklev { font-size:12px; min-width:40px; }
+  }
   /* 📌 pin — parks the open session on the pin board (out of the tab strip,
      claude stays alive) so a "go test this later" to-do stops looking like
      active work. Sits beside the close-✕; same quiet chrome. */
@@ -733,7 +771,8 @@
   /* the tty's corner pills (✕ 📌 ⏏ + the machine tag) float over the same
      corner — slide them left of the column so it never covers them */
   @media (pointer: fine) {
-    main.todoOpen #closeBtn, main.todoOpen #pinBtn, main.todoOpen #ejectBtn, main.todoOpen #machineTag { transform:translateX(calc(-1 * var(--todo-w))); }
+    main.todoOpen #closeBtn, main.todoOpen #pinBtn, main.todoOpen #ejectBtn, main.todoOpen #machineTag,
+    main.todoOpen #taskChip, main.todoOpen #taskPanel { transform:translateX(calc(-1 * var(--todo-w))); }
   }
   main { --todo-w:300px; }
   @media (pointer: coarse) {
@@ -1605,6 +1644,8 @@
     <button id="pinBtn" title="Pin this session — park it on the 📌 board and jump to the next session">📌</button>
     <button id="ejectBtn" title="Break out — open this session alone in its own window (no top bar, no tabs: just the terminal and the composer)">⏏</button>
     <button id="closeBtn" title="Close this session (done with this job)">✕</button>
+    <div id="taskChip" role="button" title="This session's own task list — what is still left to do here"></div>
+    <div id="taskPanel" hidden></div>   <!-- ☰ the chip's items; built by renderTasks() -->
     <section class="col hidden" id="projects">
       <div id="projectlist"></div>
     </section>
@@ -9042,7 +9083,7 @@ const QUICK_PROMPTS = [
   // stays literal: the server swaps in this wrap's HANDOFF-<stamp>.md at the arm.
   { e: '📑', label: 'doc', wrap: true,
     tip: 'wrap up: write the handoff to a LOCAL HANDOFF-<stamp>.md (git-excluded, never committed; one file per wrap, old ones stay), commit any real work, then close this tab (armed for 2 turns; cancel above the composer; ↩ from 🗃️)',
-    text: "We're wrapping this session up. Write the handoff for another agent or a future you: what changed, what's shipped vs. still local, open threads, gotchas, and the exact next steps. Write it to {file} at the repo root — a NEW file for this wrap; any older HANDOFF-*.md there are earlier sessions' handoffs, so skim the latest first and carry forward whatever is still true. Those files are LOCAL notes, not repo history: HANDOFF-*.md is already in this checkout's .git/info/exclude, so do NOT commit them, do NOT push them, and do NOT add them to .gitignore or any tracked file. Only if this project's own instructions say handoffs belong in a tracked log (a HISTORY / docs file) write there instead and commit as they say. If this project is in an iron with a to-do list, `harness-todo` (on your PATH) prints it: check off what you finished (`harness-todo done <id>`) and add what is still open (`harness-todo add <one short item>`), one item per task; if it says the project isn't in any iron, skip this. Your actual work is separate from the handoff: if code changes are still uncommitted, commit and push them as usual. Then run `harness-close` (on your PATH) — it closes this session once the turn ends. If something is unresolved or you need a decision from me, do NOT close: say what's open and stop. End your last message with a 3-line TLDR." },
+    text: "We're wrapping this session up. Write the handoff for another agent or a future you: what changed, what's shipped vs. still local, open threads, gotchas, and the exact next steps. Write it to {file} at the repo root — a NEW file for this wrap; any older HANDOFF-*.md there are earlier sessions' handoffs, so skim the latest first and carry forward whatever is still true. Those files are LOCAL notes, not repo history: HANDOFF-*.md is already in this checkout's .git/info/exclude, so do NOT commit them, do NOT push them, and do NOT add them to .gitignore or any tracked file. Only if this project's own instructions say handoffs belong in a tracked log (a HISTORY / docs file) write there instead and commit as they say. If this project is in an iron with a to-do list, `harness-todo` (on your PATH) prints it: check off what you finished (`harness-todo done <id>`) and add what is still open (`harness-todo add <one short item>`), one item per task; if it says the project isn't in any iron, skip this. Also run `harness-tasks` and make this session's own task list true: check off what is done, remove what is moot. Your actual work is separate from the handoff: if code changes are still uncommitted, commit and push them as usual. Then run `harness-close` (on your PATH) — it closes this session once the turn ends. If something is unresolved or you need a decision from me, do NOT close: say what's open and stop. End your last message with a 3-line TLDR." },
   // 🔫 kill — the 📑 wrap for a session that did a bad job: same arm + self-close,
   // but the prompt asks for an honest report for the next agent and commits
   // nothing. `text` MUST equal server.py's KILL_PROMPT (test_wrap.py diffs them).
@@ -11213,10 +11254,86 @@ function ctaStillTrue(s) {
 // Pill beside the close-✕ (top-right): model · ctx% · 🔑 account · machine.
 // Re-run on view changes AND on `sessions` frames: model, context and the
 // account all ride session metadata, which can land after the view is open.
+// ☰ session task list: the chip under the corner buttons + its panel. Fed by
+// `sessions` frames (s.tasks = {hi, lo, done, at, items}); ops go back as
+// `stask` frames and the next `sessions` frame is the ack. Reconciled by id,
+// never wiped — this repaints on every frame (landmine 4).
+let taskPanelOpen = false;
+const taskChip = document.getElementById('taskChip'), taskPanel = document.getElementById('taskPanel');
+taskChip.onclick = () => { taskPanelOpen = !taskPanelOpen; renderTasks(); };
+taskPanel.addEventListener('click', (e) => {
+  if (!currentCid) return;
+  if (e.target.closest('.tkclear')) { hsend({ type: 'stask', cid: currentCid, op: 'clear' }); return; }
+  const row = e.target.closest('.tki'); if (!row) return;
+  const id = row.dataset.id, done = row.classList.contains('done');
+  if (e.target.closest('.tkchk')) hsend({ type: 'stask', cid: currentCid, op: done ? 'undone' : 'done', id });
+  else if (e.target.closest('.tkrm')) hsend({ type: 'stask', cid: currentCid, op: 'rm', id });
+  else if (e.target.closest('.tklev')) hsend({ type: 'stask', cid: currentCid, op: 'lev', id, lev: row.classList.contains('lo') ? 'hi' : 'lo' });
+});
+function renderTasks(s) {
+  if (s === undefined) {
+    const v = currentView();
+    s = ((v === 'tty' || v === 'transcript') && currentCid) ? sessionList.find(x => x.cid === currentCid) : null;
+  }
+  const t = s && s.tasks, items = (t && t.items) || [];
+  const any = !!t && (t.hi + t.lo + t.done > 0);
+  taskChip.classList.toggle('show', any);
+  if (!any) { taskPanel.hidden = true; taskChip.dataset.fp = ''; return; }
+  const age = fmtAge(t.at);
+  const fp = JSON.stringify([t.hi, t.lo, t.done, age, taskPanelOpen]);
+  if (taskChip.dataset.fp !== fp) {
+    taskChip.dataset.fp = fp;
+    taskChip.textContent = '';
+    const add = (cls, text) => { const el = document.createElement('span'); if (cls) el.className = cls; el.textContent = text; taskChip.appendChild(el); };
+    if (t.hi + t.lo === 0) add('ok', '✓ all done');
+    if (t.hi) add('hi', t.hi + ' high');
+    if (t.lo) add('lo', t.lo + ' low');
+    if (age) add('', age);
+    taskChip.classList.toggle('open', taskPanelOpen);
+    taskChip.title = t.hi + ' high-leverage and ' + t.lo + ' low-leverage tasks left in this session, ' + t.done + ' done'
+                   + (age ? ' · list last changed ' + age + ' ago' : '') + ' — tap for the list';
+  }
+  taskPanel.hidden = !taskPanelOpen;
+  if (!taskPanelOpen) return;
+  const want = new Set(items.map(i => i.id));
+  for (const n of [...taskPanel.querySelectorAll(':scope > .tki')]) if (!want.has(n.dataset.id)) n.remove();
+  let foot = taskPanel.querySelector(':scope > .tkfoot');
+  if (!foot) {
+    foot = document.createElement('div'); foot.className = 'tkfoot';
+    const b = document.createElement('button'); b.className = 'tkclear'; b.textContent = 'clear done'; foot.appendChild(b);
+    taskPanel.appendChild(foot);
+  }
+  foot.hidden = !t.done;
+  let prev = null;
+  for (const it of items) {
+    let n = taskPanel.querySelector(':scope > .tki[data-id="' + CSS.escape(it.id) + '"]');
+    if (!n) {
+      n = document.createElement('div'); n.className = 'tki'; n.dataset.id = it.id;
+      for (const [cls, tag] of [['tkchk', 'button'], ['tklev', 'button'], ['tktext', 'span'], ['tkrm', 'button']]) {
+        const el = document.createElement(tag); el.className = cls; n.appendChild(el);
+      }
+      n.querySelector('.tkrm').textContent = '✕'; n.querySelector('.tkrm').title = 'drop this task';
+    }
+    const ifp = JSON.stringify([it.text, it.done, it.lev]);
+    if (n._fp !== ifp) {
+      n._fp = ifp;
+      n.classList.toggle('done', !!it.done); n.classList.toggle('lo', it.lev === 'lo');
+      n.querySelector('.tkchk').textContent = it.done ? '☑' : '☐';
+      n.querySelector('.tkchk').title = it.done ? 'reopen' : 'done';
+      n.querySelector('.tklev').textContent = it.lev === 'lo' ? 'low' : 'HIGH';
+      n.querySelector('.tklev').title = 'leverage — tap to switch';
+      n.querySelector('.tktext').textContent = it.text;
+    }
+    const at = prev ? prev.nextSibling : taskPanel.firstChild;
+    if (at !== n) taskPanel.insertBefore(n, at);
+    prev = n;
+  }
+}
 function refreshSessionTag() {
   const v = currentView();
   const inSession = (v === 'tty' || v === 'transcript') && !!currentCid;
   const s = inSession ? sessionList.find(x => x.cid === currentCid) : null;
+  renderTasks(s || null);
   // Resolve the local folder label (sub1/sub2/…) to the plan's real identity
   // via the machine's accounts frame — the labels are auto-picked and mean
   // nothing since nicknames went away. Fall back to the label only while the

@@ -141,12 +141,13 @@ def run(tmp):
     check("--append-system-prompt present", "--append-system-prompt" in argv)
     check("…carrying the rule",
           "--append-system-prompt" in argv
-          and argv[argv.index("--append-system-prompt") + 1] == rule)
+          and argv[argv.index("--append-system-prompt") + 1] == rule + "\n\n" + server.TASKS_RULE)
     s2 = server.ClaudeSession(mgr, cid="c2", pid="g", session_id="sid2",
                               resuming=False, created=time.time())
     s2.settings_path = "/dev/null"
-    check("gh project argv untouched",
-          "--append-system-prompt" not in server.ENGINES["claude"].argv(s2))
+    _a2 = server.ENGINES["claude"].argv(s2)
+    check("gh project argv carries only the ☰ task-list rule",
+          _a2[_a2.index("--append-system-prompt") + 1] == server.TASKS_RULE)
     s3 = server.ClaudeSession(mgr, cid="c3", pid=fork.pid, session_id="sid3",
                               resuming=True, created=time.time(), ceremony=True)
     s3.settings_path = "/dev/null"

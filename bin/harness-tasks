@@ -1,0 +1,46 @@
+#!/bin/sh
+# harness-tasks — THIS session's own task list: what is still left to do in
+# this session. The operator sees it as a chip beside the terminal (high and
+# low counts) and reads it to tell a session with a lot left from one that is
+# about done — so keep it true. Each item is high leverage (default) or low.
+# Not the iron's shared list (`harness-todo`) and not the operator's personal
+# list (`todo`).
+#
+#   harness-tasks                    list open items  ([ ] <id>  high|low  <text>)
+#   harness-tasks list --all         include done items
+#   harness-tasks add <text>         add a high-leverage item (no quotes needed)
+#   harness-tasks add --low <text>   add a low-leverage item (a nice-to-have)
+#   harness-tasks done <id|words>    check off (a unique few words of the item work)
+#   harness-tasks undone <id|words>  reopen
+#   harness-tasks rm <id|words>      drop it (moot, or decided against)
+#   harness-tasks high|low <id|words>  change an item's leverage
+#   harness-tasks clear              purge done items
+if [ -z "$HARNESS_TASKS_URL" ]; then
+  echo "harness-tasks: not running under the harness (HARNESS_TASKS_URL unset)" >&2
+  exit 2
+fi
+post() { curl -sS -m 15 -X POST "$HARNESS_TASKS_URL" -w '\n%{http_code}' "$@"; }
+cmd=${1:-list}; [ $# -gt 0 ] && shift
+case "$cmd" in
+  list|ls)
+    all=0; [ "${1:-}" = "--all" ] || [ "${1:-}" = "-a" ] && all=1
+    out=$(post --data-urlencode "op=list" --data-urlencode "all=$all") ;;
+  add)
+    lev=hi
+    case "${1:-}" in --low|-l) lev=lo; shift ;; --high|-h) shift ;; esac
+    [ $# -gt 0 ] || { echo "harness-tasks add [--low] <text>" >&2; exit 2; }
+    out=$(post --data-urlencode "op=add" --data-urlencode "lev=$lev" --data-urlencode "text=$*") ;;
+  done|undone|rm)
+    [ $# -gt 0 ] || { echo "harness-tasks $cmd <id|words>" >&2; exit 2; }
+    out=$(post --data-urlencode "op=$cmd" --data-urlencode "ref=$*") ;;
+  high|low)
+    [ $# -gt 0 ] || { echo "harness-tasks $cmd <id|words>" >&2; exit 2; }
+    out=$(post --data-urlencode "op=lev" --data-urlencode "lev=$cmd" --data-urlencode "ref=$*") ;;
+  clear)
+    out=$(post --data-urlencode "op=clear") ;;
+  *)
+    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac || { echo "harness-tasks: could not reach the harness" >&2; exit 3; }
+code=$(printf '%s\n' "$out" | tail -n 1)
+printf '%s\n' "$out" | sed '$d'
+[ "$code" = "200" ] || exit 1
