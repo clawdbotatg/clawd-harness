@@ -108,6 +108,35 @@ if (geom.ok && geom.tabs > 0) {
   await page.keyboard.type('zzqqxx-no-such-session', { delay: 5 });
   const none = await page.evaluate(() => spotListEl.querySelectorAll('.spotrow').length);
   if (none) fail(`nonsense query left ${none} rows`); else pass('a non-matching word empties the list');
+  // ---- 3b: a word only SAID in a session finds it (2026-11-13) --------------
+  // The box asks the harness's `search` read query once typing pauses; the hit
+  // lands as a row with the matching line under it. hsend is stubbed: no real
+  // transcript is scanned, the reply is fed by hand.
+  {
+    await page.evaluate(() => { window.__hs = window.hsend; window.__sent = [];
+                                window.hsend = f => { window.__sent.push(f); return true; }; });
+    await page.fill('#spotinput', '');
+    await page.keyboard.type('zzqqxx', { delay: 5 });
+    const waiting = await page.evaluate(() => (spotListEl.querySelector('.spotempty') || {}).textContent || '');
+    await page.waitForTimeout(500);
+    const r = await page.evaluate(() => {
+      const f = window.__sent.find(x => x.type === 'search');
+      window.hsend = window.__hs;
+      if (!f) return { asked: false };
+      const s = sortedSessions()[0];
+      handleJson({ type: 'searchResult', id: f.id, q: f.q,
+                   matches: [{ cid: s.cid, where: 'transcript', snippet: 'we ran the ZZQQXX audit here' }] });
+      const row = spotListEl.querySelector('.spotrow');
+      return { asked: true, q: f.q, scope: f.scope, rows: spotListEl.querySelectorAll('.spotrow').length,
+               mark: row && (row.querySelector('.ssnip mark') || {}).textContent, top: spotMatches()[0]?.cid === s.cid };
+    });
+    console.log('DEEP', JSON.stringify({ waiting, ...r }));
+    if (!/searching/.test(waiting)) fail(`while the search is out the list says "${waiting}"`);
+    if (!r.asked || r.q !== 'zzqqxx') fail('typing did not send a `search` frame for the word');
+    else if (r.rows !== 1 || !r.top || r.mark !== 'ZZQQXX') fail('a transcript hit did not become a row with its line');
+    else pass('a word only said in the conversation finds the session, with the matching line');
+    await page.screenshot({ path: join(HERE, 'tabfilterprobe-deep.png') });
+  }
   await page.fill('#spotinput', '');
   const word = await page.evaluate(() => ((document.querySelector('#sessionbar .stab .lbl') || {}).textContent || '')
     .split(/\s+/).filter(w => w.length > 3)[0] || '');
