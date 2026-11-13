@@ -203,7 +203,7 @@
   #status.idle    { border-color:var(--ok); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   #status.working { animation:pulse 1.1s ease-in-out infinite; }
-  /* live "claude is thinking" row, pinned to the bottom of the transcript while a turn is in flight */
+  /* live "claude is thinking" row, pinned to the bottom of the PM chat while a turn is in flight */
   .thinking { display:flex; align-items:center; gap:9px; padding:2px 4px;
               color:var(--dim); font-size:12px; font-family:var(--mono); }
   .thinking .spin { flex:none; color:var(--accent); font-family:var(--mono);
@@ -215,7 +215,7 @@
          touch-action:pan-y; }   /* we own horizontal swipes (page nav); leave vertical scroll to the browser */
   /* "I'm done with this job" — a deliberately big close target in the top-right of
      the session pane. Closes the focused session; the rail then lands you on a
-     neighbour (closeCurrentSession). Only shown in a session view (tty/transcript). */
+     neighbour (closeCurrentSession). Only shown in a session view (tty). */
   #closeBtn { position:absolute; top:6px; right:8px; z-index:20; display:none;
               width:30px; height:30px; line-height:28px; text-align:center; padding:0;
               font-size:18px; font-weight:700; cursor:pointer; border-radius:6px;
@@ -357,7 +357,6 @@
   }
   .col { display:flex; flex-direction:column; min-width:0; min-height:0; }
   #left  { flex:1; position:relative; }   /* anchors the #splash overlay */
-  #right { flex:1; background:var(--bg); }
   .col.hidden { display:none; }
   /* tty activity box: an always-on glanceable answer to "is this session doing
      anything right now?" — amber pulse = turn in flight, violet pulse = a
@@ -460,7 +459,7 @@
      grid blank — that's the black gap. We can't reflow content that lives inside the grid, so
      bottomJustifyTTY() translates the rendered .xterm-screen down by the unused height; the
      now-empty bottom rows slide past #term's edge and are clipped (overflow:hidden). Content
-     anchors to the bottom, TUI-style, matching #feed. Self-disabling once content fills/scrolls. */
+     anchors to the bottom, TUI-style. Self-disabling once content fills/scrolls. */
   /* xterm's viewport is its own overflow:scroll box and defaults to touch-action:auto,
      which re-grabs horizontal gestures the browser would otherwise leave to our swipe
      handler — that's the "swipe-back is janky on the TUI" bug. Pin it to pan-y like main. */
@@ -473,15 +472,14 @@
      works because xterm forwards wheel deltas in JS; touch has no such forwarding.)
      Make the text layer click-through on touch so the pan reaches the real scroll box
      and iOS scrolls it on the compositor thread — smooth, not the old choppy path.
-     Touch is read-only here (disableStdin) so we lose nothing but in-TTY link taps;
-     the transcript view keeps real markdown links. */
+     Touch is read-only here (disableStdin) so we lose nothing but in-TTY link taps. */
   @media (pointer: coarse) { .xterm-screen { pointer-events:none !important; } }
-  #feed, #pmfeed { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
+  #pmfeed { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
           padding:12px; display:flex; flex-direction:column; gap:9px;
           width:100%; max-width:880px; align-self:center; }
   /* anchor content to the bottom (TUI-style): short transcripts sit at the bottom and
      grow upward; once content overflows, the auto-margin collapses and scrolling is normal. */
-  #feed > :first-child, #pmfeed > :first-child { margin-top:auto; }
+  #pmfeed > :first-child { margin-top:auto; }
   /* messages read like a terminal log: flat ground, hairline box, a 2px left rule
      no colored rules — every turn is the same neutral box; you read the
      speaker from its uppercase tag, like log lines, not chat bubbles. */
@@ -862,8 +860,7 @@
   .bico { font-size:14px; line-height:1; }
   #pinsBtn .pincount { font-size:10px; font-family:var(--mono); }
   /* Fleet PM — folded into the harness as a first-class view: PM threads ride the
-     same #sessionbar tab strip, and the chat reuses the transcript #feed look.
-     #pmfeed inherits the #feed rules (see the #feed selectors above). */
+     same #sessionbar tab strip; #pmfeed's own rules are above. */
   .msg .pmopen { display:inline-block; margin-top:7px; padding:4px 10px; border:1px solid var(--accent);
                  color:var(--accent); border-radius:6px; font-size:11px; text-decoration:none; }
   .msg .pmopen:hover { background:var(--accent-bg); }
@@ -1675,9 +1672,6 @@
       <div id="splash" hidden></div>
       <div id="deadveil" hidden></div>
     </section>
-    <section class="col hidden" id="right">
-      <div id="feed"></div>
-    </section>
     <section class="col hidden" id="pm">
       <div id="pmfeed"></div>
     </section>
@@ -1846,7 +1840,7 @@ function ejectChanged(cid, hidden) {
     renderSessionBar();
     if (currentView() === 'sessions') renderSessions();
     const v = currentView();
-    if (hidden && cid === currentCid && (v === 'tty' || v === 'transcript')) hopAfterPin(cid);   // it left for its window — land on a neighbour
+    if (hidden && cid === currentCid && v === 'tty') hopAfterPin(cid);   // it left for its window — land on a neighbour
   } catch (e) { console.warn('eject repaint', e); }
 }
 let beatCid = null;                           // popup side: the cid we're currently announcing
@@ -1894,7 +1888,7 @@ function burnerSet(cid, on) {
   // parking the open session steps along the rail like 📌 does (before the
   // cid leaves the rail, so the hop lands on its neighbour)
   const v = currentView();
-  if (on && cid === currentCid && (v === 'tty' || v === 'transcript')) hopAfterPin(cid);
+  if (on && cid === currentCid && v === 'tty') hopAfterPin(cid);
   const f = { type: 'burner', cid, on };
   const mid = FLEET ? machineForCid(cid) : null;
   if (mid) hsendTo(mid, f); else hsend(f);
@@ -1944,7 +1938,7 @@ function wrapSession(cid, text = wrapPrompt(), kill = false) {
   if (!(mid ? hsendTo(mid, f) : hsend(f))) return false;
   const v = currentView();
   // the open session steps along the rail (before the cid leaves it), like 📌
-  if (!BREAKOUT && cid === currentCid && (v === 'tty' || v === 'transcript')) hopAfterPin(cid);
+  if (!BREAKOUT && cid === currentCid && v === 'tty') hopAfterPin(cid);
   burnerSet(cid, false);                     // one island at a time
   wrapLocal.set(cid, { on: true, until: Date.now() + WRAP_LOCAL_MS });
   renderSessionBar();
@@ -2045,11 +2039,8 @@ if (TAB_DND) {
   });
 }
 
-// Preferred deep view when you dive into a session: desktop drives the live
-// terminal (full keyboard, drives the TUI directly); touch reads the transcript
-// The session view is the live terminal (tty) on every device — the transcript
-// view was pulled. On touch the tty is read-only (you type in the composer).
-const DEEP_VIEW = 'tty';
+// The session view is the live terminal (tty) on every device. On touch the
+// tty is read-only (you type in the composer).
 const term = new Terminal({
   fontFamily: 'ui-monospace, Menlo, Monaco, "Courier New", monospace',
   fontSize: 13, cursorBlink: !isTouch,
@@ -2475,7 +2466,6 @@ function setStatus(emoji, text, cls) {
   const open = statusEl.classList.contains('pmopen');
   statusEl.className = 'hbtn ' + (cls || '') + (open ? ' pmopen' : '');
 }
-const feed = document.getElementById('feed');
 const box = document.getElementById('box');
 const sendBtn = document.getElementById('send');
 const sessionsEl = document.getElementById('sessions');
@@ -2546,7 +2536,7 @@ function applyMachineActivation(id, on) {
     // we've stopped talking to (a frozen terminal that never reconnects).
     if (currentMachine === id) {
       currentMachine = null; currentCid = null; currentProjectKey = null; currentPid = null;
-      term.reset(); feed.innerHTML = '';
+      term.reset();
       setView('projects');
     }
   }
@@ -2667,9 +2657,9 @@ function renderNeedsBar() {
   if (!FLEET) return;
   const bar = document.getElementById('needsbar');
   if (!bar) return;
-  // Hide only the session you're actively READING (transcript/tty); on a list/roster
+  // Hide only the session you're actively READING (tty); on a list/roster
   // view, surface every blocked session including this one.
-  const inSession = currentView() === 'transcript' || currentView() === 'tty';
+  const inSession = currentView() === 'tty';
   const items = needsYouSessions().filter(x => !(inSession && x.cid === currentCid));
   if (!items.length) { bar.hidden = true; bar.textContent = ''; return; }
   // Reconcile by machine+cid — never wipe (landmine 4): this runs on every
@@ -2735,7 +2725,7 @@ let serverBoot = null;   // server process id; a change across reconnect = daemo
 let authFails = 0;       // consecutive socket closes that never opened → likely a bad/expired token
 // -- Fleet PM ('pm' view): its own conversation threads, the chat analog of a
 // project's sessions. State mirrors the session model so the PM rides the same
-// #sessionbar tab strip + transcript #feed look. Talks to the controller over the
+// #sessionbar tab strip. Talks to the controller over the
 // same-origin /pm/* proxy (HTTP), independent of the harness WS.
 let pmThreads = [];      // [{id,title,archived,count,current}]
 let pmCurrent = null;    // selected thread id
@@ -2828,7 +2818,7 @@ function fleetResync() {
   fleetBootstrap();
   syncPushSubscription();          // re-register notifications with the (possibly restarted) relay
   const v = currentView();
-  if (currentMachine && currentCid && (v === 'tty' || v === 'transcript')) { subscribe(currentCid); sendResize(ttyOwned); armReplayWatchdog(); }
+  if (currentMachine && currentCid && v === 'tty') { subscribe(currentCid); sendResize(ttyOwned); armReplayWatchdog(); }
   flushOutbound();
 }
 function scheduleReconnect(delay) {
@@ -3175,7 +3165,7 @@ function handleRelay(m) {
     if (alreadySynced && !wasOnline && currentMachine && currentCid && isMachineOnline(currentMachine)) {
       const v = currentView();
       // soft: repaint in place once the replay lands — no blank-terminal flash
-      if (v === 'tty' || v === 'transcript') { subscribe(currentCid, { soft: true }); sendResize(ttyOwned); armReplayWatchdog(); flushOutbound(); }
+      if (v === 'tty') { subscribe(currentCid, { soft: true }); sendResize(ttyOwned); armReplayWatchdog(); flushOutbound(); }
     }
     return;
   }
@@ -4153,7 +4143,7 @@ function handleJson(m) {
       const wantTty = pendingNewFocus === 'tty';
       pendingNewFocus = false;
       clearNewFocusWatch(); hideDeadVeil();   // the spawn came back — drop the "starting…" island
-      openSession(m.cid);                 // subscribe + drop to the transcript
+      openSession(m.cid);                 // subscribe + drop to the terminal
       if (wantTty) setView('tty');        // sign-in ceremony: the login TUI needs the terminal
       // openSession→subscribe clears the feed, so show the queued box now (after).
       if (pendingSendText) addPending(pendingSendText, pendingSendText);
@@ -4252,7 +4242,7 @@ function handleJson(m) {
       else landedConfirmsOutbox(m.cid, m.event.text);
     }
     if (m.cid && m.cid !== currentCid) return;        // belongs to a backgrounded session
-    renderEvent(m.event, !m.history);   // live events type out; history replay renders instantly
+    onSessionEvent(m.event, !m.history);   // history replay only confirms the outbox (above)
   } else if (m.type === 'hook') {
     // claude received the prompt → the outbox copy did its job; drop it (any session,
     // even one you've navigated away from, so it can't resurface as stale text later).
@@ -4261,7 +4251,6 @@ function handleJson(m) {
     // (menu badges update via the sessions broadcast that follows each hook)
   } else if (m.type === 'exit') {
     if (m.cid !== currentCid) return;
-    hideThinking();
     meta.textContent = 'session ended';
     setStatus('🔴', 'ended', 'ended');
     showDeadVeil(m.cid, false);      // don't leave a black void with six-point type
@@ -4731,10 +4720,10 @@ function refreshBreadcrumb(view) {
   }
   meta.textContent = crumb;
   // Show the AI session name above the message box, but only when a specific
-  // session is open (transcript/tty rungs) — not on the projects/sessions lists.
+  // session is open (the tty rung) — not on the projects/sessions lists.
   const descEl = document.getElementById('sessiondesc');
   const live = sessionList.find(s => s.cid === currentCid);   // live title/desc (AI naming may have re-titled it)
-  const inSession = (view === 'tty' || view === 'transcript');
+  const inSession = view === 'tty';
   // Quick-prompt chips ride this row — visible whenever a session is open,
   // even before AI naming has produced a title (sessiondesc may be empty).
   document.getElementById('descrow').classList.toggle('insession', inSession);
@@ -4930,7 +4919,7 @@ function renderIronRow(view) {
   // a #/i/ deep link). Normal session navigation — tabs, rungs, needsbar —
   // NEVER pulls you into an iron just because the project happens to be in
   // one: working the global strip must stay the global strip.
-  const iron = (ironScope && (view === 'tty' || view === 'transcript')) ? ironById(ironScope) : null;
+  const iron = (ironScope && view === 'tty') ? ironById(ironScope) : null;
   if (!iron) {
     if (!wasHidden) { el.hidden = true; el.innerHTML = ''; delete el.dataset.fp; refitTTY(); }
     renderTodoPanel();                           // ☑ no scope → no overlay
@@ -5361,8 +5350,7 @@ function attachMachine(machineId) {
     // (streamCid deliberately KEPT: this machine's link may still be bound to a
     // session we viewed here earlier — a stale non-null value keeps its stream
     // gated until the next hello re-binds; null would let it paint.)
-    term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
-    if (activeType) { activeType.finish(); activeType = null; }
+    term.reset(); clearPending();
   }
   e2eEnsure(machineId, { reason: 'attach' }).then(() => e2eSendFrame(machineId, { type: 'list' })).catch(() => {});
   const pm = perMachine[machineId] || (perMachine[machineId] = {});
@@ -5557,8 +5545,7 @@ function addAccount(mid, name) {
   accountsModal.hidden = true;
   pendingNewFocus = 'tty';
   currentCid = null;
-  term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
-  if (activeType) { activeType.finish(); activeType = null; }
+  term.reset(); clearPending();
   accountSend(mid, { type: 'accountAdd', name });
   armNewFocusWatch(mid);           // same void risk as newSession()
 }
@@ -6685,9 +6672,7 @@ function subscribe(cid, opts) {
   const soft = !!(opts && opts.soft) && cid === currentCid && currentView() === 'tty';
   const switching = cid !== currentCid;   // 🟦 a reconnect to the SAME session keeps its summary on screen
   currentCid = cid;
-  // Wipe both views; the server re-streams this session's screen + history right
-  // after. Always clearing (even re-subscribing the same cid on reconnect) keeps
-  // the replayed history from duplicating into an existing feed.
+  // Wipe the terminal; the server re-streams this session's screen right after.
   if (soft) {
     const b = term.buffer && term.buffer.active;
     softSwap = { cid, chunks: [], timer: null, deadline: Date.now() + 3000,
@@ -6696,12 +6681,9 @@ function subscribe(cid, opts) {
     softSwap = null;
     term.reset();
   }
-  feed.innerHTML = '';
   if (switching) clearTldr();  // 🟦 the summary belongs to the session we're leaving (the new one re-sends its own)
   clearPending();              // queued boxes belong to the session we're leaving
   restorePending(cid);         // …but this session's own in-flight sends come back (✓ receipts)
-  hideThinking();
-  if (activeType) { activeType.finish(); activeType = null; }
   highlightCard(cid);
   updateTtyStat();             // activity box tracks the session we just switched to
   deadVeilDismissed = null;    // fresh entry: a dead session veils again until tapped
@@ -6792,7 +6774,7 @@ function updateTtyStat() {
   const v = currentView();
   const s = currentCid && allSessions().find(x => x.cid === currentCid);
   renderPilotUI();                 // 🤖 checkbox + row track the same signal
-  if (!s || (v !== 'tty' && v !== 'transcript')) { ttystatEl.hidden = true; return; }
+  if (!s || v !== 'tty') { ttystatEl.hidden = true; return; }
   const st = sessionState(s);
   ttystatEl.className = st.key;
   ttystatEl.title = st.word + '\n' + TTYSTAT_LEGEND;
@@ -6812,7 +6794,7 @@ let pilotPendingAt = 0, pilotCidShown = null;
 function renderPilotUI() {
   const v = currentView();
   const s = currentCid && allSessions().find(x => x.cid === currentCid);
-  const show = !!s && (v === 'tty' || v === 'transcript');
+  const show = !!s && v === 'tty';
   pilotChk.hidden = !show;
   tldrBtn.hidden = !show;                  // 🟦 lives beside it, same rule
   applyTldrHold();                         // 🟦 hold + overlay: on with the mode; waiting-on-you lifts both; leaving the view drops them
@@ -7164,7 +7146,7 @@ function focusSession(s) {
   }
   if (s.pid) currentPid = s.pid;   // keep the breadcrumb/`new` in this session's project
   subscribe(s.cid);
-  setView(currentView() === 'transcript' ? 'transcript' : DEEP_VIEW);
+  setView('tty');
   maybeSplash(s.cid);              // "you are here" card while the replay paints
   if (!isTouch) box.focus();
 }
@@ -7204,7 +7186,7 @@ function openSession(cid) {
   const s = sessionList.find(s => s.cid === cid);
   if (s && s.pid) currentPid = s.pid;       // keep the breadcrumb/`new` in this project
   subscribe(cid);
-  setView(DEEP_VIEW);                        // desktop → terminal, touch → transcript
+  setView('tty');
   maybeSplash(cid);                          // "you are here" card while the replay paints
   if (!isTouch) box.focus();                // desktop: ready to type immediately (skip on touch — don't pop the keyboard)
 }
@@ -7238,8 +7220,7 @@ function newSession(targetMachine, engine) {
   // last-painted screen (and any live bytes it keeps streaming) shows through the gap
   // while the fresh claude spawns, i.e. "new session in project A shows project B's TTY".
   currentCid = null;               // anything still streaming for the old cid is now stale
-  term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
-  if (activeType) { activeType.finish(); activeType = null; }
+  term.reset(); clearPending();
   // ＋ tapped on the sessions rung with a half-typed prompt in the box: bring the
   // text INTO the fresh session rather than leaving it behind outside. (Austin,
   // 2026-09-11: you land on a project's session list, start typing, and — since
@@ -7256,7 +7237,7 @@ function newSession(targetMachine, engine) {
     box.value = ''; autosizeBox(); clearDraft();   // activeDraftId is still new:<pid> here
   }
   armNewFocusWatch();              // "starting…" now; stand down loudly if no focus ever lands
-  setView(DEEP_VIEW);              // server replies with a focus → subscribe once it's spawned
+  setView('tty');              // server replies with a focus → subscribe once it's spawned
 }
 
 // Which CLI is behind a session, as a small chip. Returns null for claude —
@@ -7750,7 +7731,7 @@ function renderPinsUI() {
 // session it restores it to the tabs instead.
 function updatePinBtn() {
   const v = currentView();
-  const inSession = (v === 'tty' || v === 'transcript') && !!currentCid;
+  const inSession = v === 'tty' && !!currentCid;
   pinBtn.classList.toggle('show', inSession);
   if (!inSession) return;
   const s = allSessions().find(x => x.cid === currentCid);
@@ -7762,53 +7743,12 @@ function updatePinBtn() {
 }
 
 function setBusy(busy, label) {
-  if (busy) {
-    setStatus('🟡', label ? `working · ${label}` : 'working…', 'working');
-    showThinking(label);
-  } else {
-    setStatus('🟢', 'idle · ready', 'idle');
-    hideThinking();
-  }
+  if (busy) setStatus('🟡', label ? `working · ${label}` : 'working…', 'working');
+  else setStatus('🟢', 'idle · ready', 'idle');
 }
 
-// Live thinking indicator in the transcript: spinner + current activity + elapsed seconds,
-// pinned to the bottom of the feed while a turn is in flight (mirrors the TUI's spinner).
-let thinkEl = null, thinkTimer = null, thinkStart = 0, thinkLabel = '';
-// braille spinner frames — terminal-native, spins like a CLI does (no square-corner jank)
+// braille spinner frames — terminal-native, spins like a CLI does (the PM chat's thinking row)
 const SPIN_FRAMES = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
-let spinTimer = null, spinFrame = 0;
-function showThinking(label) {
-  thinkLabel = label || '';
-  if (!thinkEl) {
-    thinkEl = document.createElement('div');
-    thinkEl.className = 'thinking';
-    thinkEl.innerHTML = '<span class="spin"></span><span class="lbl"></span>';
-    thinkStart = Date.now();
-    thinkTimer = setInterval(paintThinking, 1000);
-    spinTimer = setInterval(spinTick, 80);   // fast frame cadence for a lively spin
-  }
-  feed.appendChild(thinkEl);            // keep it the last child as new events arrive
-  paintThinking();
-  spinTick();
-  feed.scrollTop = feed.scrollHeight;
-}
-function spinTick() {
-  if (!thinkEl) return;
-  spinFrame = (spinFrame + 1) % SPIN_FRAMES.length;
-  thinkEl.querySelector('.spin').textContent = SPIN_FRAMES[spinFrame];
-}
-function paintThinking() {
-  if (!thinkEl) return;
-  const secs = Math.round((Date.now() - thinkStart) / 1000);
-  const what = thinkLabel ? `running ${thinkLabel}` : 'thinking';
-  thinkEl.querySelector('.lbl').textContent = `claude is ${what}… ${secs}s`;
-}
-function hideThinking() {
-  if (thinkTimer) { clearInterval(thinkTimer); thinkTimer = null; }
-  if (spinTimer) { clearInterval(spinTimer); spinTimer = null; }
-  if (thinkEl) { thinkEl.remove(); thinkEl = null; }
-}
-function bumpThinking() { if (thinkEl) feed.appendChild(thinkEl); }  // re-pin below newest content
 
 function handleHook(m) {
   const ev = m.event, d = m.data || {};
@@ -7832,18 +7772,17 @@ function handleHook(m) {
   }
   else if (ev === 'Stop')        { setBusy(false, null); restoreViewAfterQuestion(); }
   else if (ev === 'SessionStart') { setBusy(false, null); if (pendingSendText) setTimeout(flushPendingSend, 500); }
-  else if (ev === 'SessionEnd')  { hideThinking(); setStatus('🔴', 'session ended', 'ended'); }
+  else if (ev === 'SessionEnd')  { setStatus('🔴', 'session ended', 'ended'); }
   else if (ev === 'Notification') {
     setBusy(m.busy, d.message ? d.message.slice(0,40) : null);
     openTtyForQuestion();                      // permission / "needs your input" — surface the TUI
   }
 }
 
-// `feedEl` defaults to the session transcript feed; the PM view passes #pmfeed so
-// it renders with the exact same bubble vocabulary. Bump the spinner that belongs
-// to the target feed (session vs PM each own one).
+// Chat bubbles for the PM chat (#pmfeed is the only feed left — sessions are
+// terminal-only). Each append re-pins the PM's thinking row below it.
 function bubble(cls, who, text, asMarkdown, feedEl) {
-  const F = feedEl || feed;
+  const F = feedEl || pmfeed;
   const d = document.createElement('div');
   d.className = 'msg ' + cls;
   const w = document.createElement('div'); w.className = 'who'; w.textContent = who;
@@ -7853,7 +7792,7 @@ function bubble(cls, who, text, asMarkdown, feedEl) {
   else body.textContent = text;
   d.appendChild(body);
   F.appendChild(d);
-  (F === pmfeed ? pmBumpThinking : bumpThinking)();
+  pmBumpThinking();
   F.scrollTop = F.scrollHeight;
   return d;
 }
@@ -7864,8 +7803,8 @@ function bubble(cls, who, text, asMarkdown, feedEl) {
 // Only one types at a time; a new one instantly finalizes the previous.
 let activeType = null;
 function typeBubble(cls, who, text, feedEl) {
-  const F = feedEl || feed;
-  const bump = F === pmfeed ? pmBumpThinking : bumpThinking;
+  const F = feedEl || pmfeed;
+  const bump = pmBumpThinking;
   if (activeType) activeType.finish();
   const d = bubble(cls, who, '', true, F);
   const body = d.lastChild;
@@ -7953,7 +7892,7 @@ function mdToHtml(src) {
 
 // Tool results can be huge — collapse them into a dropdown, opened on demand.
 function resultBubble(text, feedEl) {
-  const F = feedEl || feed;
+  const F = feedEl || pmfeed;
   text = String(text);
   const d = document.createElement('div');
   d.className = 'msg tool_result';
@@ -7969,46 +7908,17 @@ function resultBubble(text, feedEl) {
   det.appendChild(body);
   d.appendChild(det);
   F.appendChild(d);
-  (F === pmfeed ? pmBumpThinking : bumpThinking)();
+  pmBumpThinking();
   F.scrollTop = F.scrollHeight;
 }
 
-function renderEvent(ev, live) {
-  if (ev.role === 'user') {
-    if (live) landPending(ev.text);   // it arrived — drop its queued yellow box
-    bubble('user', 'you', ev.text, true);
-  } else if (ev.role === 'command') {
-    if (live) landPending(ev.text);   // box-sent slash commands land here, not as `user`
-    if (/^\/?clear\b/.test(ev.text.trim())) {       // /clear wipes the TUI — wipe the transcript to match
-      if (activeType) activeType.finish();
-      feed.innerHTML = '';
-      return;
-    }
-    bubble('cmd', 'command', '⌘ ' + ev.text);
-  } else if (ev.role === 'system') {
-    bubble('sys', 'system', ev.text);
-  } else if (ev.role === 'assistant') {
-    if (ev.text) {
-      if (live) { typeBubble('assistant', 'claude', ev.text); if (!tldrOn) speak(speakable(ev.text)); }   // 🟦 on: the summary is what gets read
-      else bubble('assistant', 'claude', ev.text, true);
-    }
-    (ev.tools || []).forEach(t => {
-      const d = bubble('tool', 'tool', '');
-      const body = d.lastChild;
-      const nm = document.createElement('span'); nm.className = 'toolname'; nm.textContent = t.name;
-      body.appendChild(nm);
-      body.appendChild(document.createTextNode(' ' + summarizeInput(t.input)));
-    });
-    // (tool calls are shown but not spoken — only prose is read aloud)
-  } else if (ev.role === 'tool_result') {
-    (ev.results || []).forEach(r => resultBubble(r));
-  } else if (ev.role === 'result') {
-    const u = ev.usage || {};
-    const tok = (u.input_tokens != null)
-      ? ` · in ${u.input_tokens} / out ${u.output_tokens}` : '';
-    bubble('result', 'turn complete',
-      `${ev.subtype || ''}${ev.duration_ms ? ' · ' + Math.round(ev.duration_ms/1000) + 's' : ''}${tok}`);
-  }
+// A live transcript line for the viewed session. Sessions show only the
+// terminal, so nothing is drawn — two side jobs remain: a landed prompt drops
+// its queued yellow box, and assistant prose is read aloud.
+function onSessionEvent(ev, live) {
+  if (!live || !ev) return;
+  if (ev.role === 'user' || ev.role === 'command') landPending(ev.text);   // box-sent slash commands land as `command`
+  else if (ev.role === 'assistant' && ev.text && !tldrOn) speak(speakable(ev.text));   // 🟦 on: the summary is what gets read
 }
 
 function summarizeInput(input) {
@@ -8321,7 +8231,7 @@ function currentDraftId() {
   const v = currentView();
   if (v === 'pm') return 'pm:' + (pmCurrent || '_');           // a draft per PM thread
   if (v === 'sessions') return 'new:' + (currentPid || '_');   // the "new session" composer, per project
-  if (v === 'transcript' || v === 'tty') return currentCid;    // talking to one specific session
+  if (v === 'tty') return currentCid;    // talking to one specific session
   return null;                                                 // projects rung — composer is hidden
 }
 // The outbox closes the gap between "you hit Enter" and "claude actually has it".
@@ -8596,11 +8506,10 @@ function reopenClosed(r) {
   currentPid = r.pid;
   pendingNewFocus = true;
   currentCid = null;
-  term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
-  if (activeType) { activeType.finish(); activeType = null; }
+  term.reset(); clearPending();
   closedlogEl.hidden = true;
   armNewFocusWatch();
-  setView(DEEP_VIEW);
+  setView('tty');
 }
 function showClosedLog() { renderClosedLog(); closedlogEl.hidden = false; }
 document.getElementById('closedBtn').onclick = showClosedLog;
@@ -8622,8 +8531,7 @@ function forkSession() {
   forkSrcCid = src;
   pendingNewFocus = true;
   currentCid = null;
-  term.reset(); feed.innerHTML = ''; clearPending(); hideThinking();
-  if (activeType) { activeType.finish(); activeType = null; }
+  term.reset(); clearPending();
   armNewFocusWatch(mid);
   meta.textContent = 'forking…';
 }
@@ -8814,7 +8722,7 @@ const skillbookEl = document.getElementById('skillbook');
 function skillSendable() {           // somewhere a chip can attach: a session, or a project's sessions rung
   const v = currentView();
   if (FLEET && !currentMachine) return false;
-  return (v === 'tty' || v === 'transcript') ? !!currentCid : (v === 'sessions' && !!currentPid);
+  return v === 'tty' ? !!currentCid : (v === 'sessions' && !!currentPid);
 }
 function skillInvocation(name, path) {
   return `Use the "${name}" skill: read ${path} and follow it. If it needs details I haven't given, ask me.`;
@@ -9156,7 +9064,7 @@ function hideChipTip() { chipTip.style.display = 'none'; }
 function sendQuick(text, q) {
   const v = currentView();
   if (v === 'pm') { pmSend(text); return; }   // chips drive the PM chat too (pmSend guards busy)
-  if (!currentCid || (v !== 'tty' && v !== 'transcript')) return;
+  if (!currentCid || v !== 'tty') return;
   if (q && q.wrap) {
     // 📑 the arm rides WITH the prompt: one frame, the owning machine arms the
     // session and types the text (the server logs it via:"quick" like any chip).
@@ -10619,7 +10527,7 @@ function renderIronLive() {
   else if (v === 'iron') renderIronDetail();     // the sessionless iron's page tracks frames too
   // scoped session: the one-row iron chrome above the strip tracks frames
   // (title/desc, member chips + counts) — the row IS the iron's live surface
-  else if (ironScope && (v === 'tty' || v === 'transcript')) renderIronRow(v);
+  else if (ironScope && v === 'tty') renderIronRow(v);
 }
 function renderIronsUI() {
   renderProjectRung(); renderIronLive();
@@ -11231,14 +11139,11 @@ function onIronDesc(m) {
   else ironUpdate(m.id, { desc: m.desc });             // broadcast repaints
 }
 
-// -- view switcher: one of four depth levels at a time ------------------------
-// projects → sessions → transcript → tty. Mobile defaults to the transcript
-// (native scroll, markdown, no xterm pain) for a session; the app opens on the
-// projects rung. Drop to the tty only to get surgical.
+// -- view switcher: one of three depth levels at a time -----------------------
+// projects → sessions → tty. The app opens on the projects rung.
 const projectsPanel = document.getElementById('projects');
 const menuPanel = document.getElementById('menu');
 const leftPanel = document.getElementById('left');
-const rightPanel = document.getElementById('right');
 const pmPanel = document.getElementById('pm');
 const pinsPanel = document.getElementById('pinsview');
 const ironsPanel = document.getElementById('ironsview');
@@ -11312,7 +11217,7 @@ taskPanel.addEventListener('click', (e) => {
 function renderTasks(s) {
   if (s === undefined) {
     const v = currentView();
-    s = ((v === 'tty' || v === 'transcript') && currentCid) ? sessionList.find(x => x.cid === currentCid) : null;
+    s = (v === 'tty' && currentCid) ? sessionList.find(x => x.cid === currentCid) : null;
   }
   const t = s && s.tasks, items = (t && t.items) || [];
   const any = !!t && (t.hi + t.lo + t.done > 0);
@@ -11370,7 +11275,7 @@ function renderTasks(s) {
 }
 function refreshSessionTag() {
   const v = currentView();
-  const inSession = (v === 'tty' || v === 'transcript') && !!currentCid;
+  const inSession = v === 'tty' && !!currentCid;
   const s = inSession ? sessionList.find(x => x.cid === currentCid) : null;
   renderTasks(s || null);
   // Resolve the local folder label (sub1/sub2/…) to the plan's real identity
@@ -11437,7 +11342,7 @@ function setView(view) {
         irons = view === 'irons', iron = view === 'iron';   // iron = ONE iron's page (sessionless irons only — see openIron)
   // Iron scope lives only on the session plane — navigating to any rung
   // (projects/sessions/pins/pm/irons) exits it.
-  if (!tty && view !== 'transcript') ironScope = null;
+  if (!tty) ironScope = null;
   // Leaving the terminal view: stop claiming the PTY size (read BEFORE the
   // panel toggles below change what currentView() reports).
   if (!tty && currentCid && currentView() === 'tty') { releaseResize(); markSeen(currentCid); }
@@ -11446,7 +11351,6 @@ function setView(view) {
   projectsPanel.classList.toggle('hidden', !projects);
   menuPanel.classList.toggle('hidden', !sessions);
   leftPanel.classList.toggle('hidden', !tty);
-  rightPanel.classList.toggle('hidden', !(view === 'transcript'));
   pmPanel.classList.toggle('hidden', !pm);
   pinsPanel.classList.toggle('hidden', !pins);
   ironsPanel.classList.toggle('hidden', !irons);
@@ -11454,10 +11358,10 @@ function setView(view) {
   // 🔥 scoped session: keep currentIronId pointed at the scope so the one-row
   // iron chrome (renderIronRow, via renderSessionBar below) and its ✎ always
   // target the right iron.
-  if ((tty || view === 'transcript') && ironScope) currentIronId = ironScope;
+  if (tty && ironScope) currentIronId = ironScope;
   ironEditEl.hidden = true;                      // any nav closes the ✎ edit overlay
   document.getElementById('keys').style.display = (tty && isTouch) ? '' : 'none';  // key bar only for touch (the desktop terminal takes these keys natively)
-  const inSession = (tty || view === 'transcript') && !!currentCid;
+  const inSession = tty && !!currentCid;
   closeBtn.classList.toggle('show', inSession);  // big close-✕ only when a session is open
   updatePinBtn();       // 📌 toggle rides beside it, state mirrors the open session
   ejectBtn.classList.toggle('show', inSession && !isTouch && !BREAKOUT);   // ⏏ desktop only; pointless once broken out
@@ -11480,7 +11384,7 @@ function setView(view) {
   menuBtn.classList.toggle('on', sessions);
   projectsBtn.classList.toggle('on', projects);
   pinsBtn.classList.toggle('on', pins);
-  ironsHdrBtn.classList.toggle('on', irons || iron || ((tty || view === 'transcript') && !!ironScope));
+  ironsHdrBtn.classList.toggle('on', irons || iron || (tty && !!ironScope));
   statusEl.classList.toggle('pmopen', pm);
   refreshBreadcrumb(view);         // breadcrumb tracks the depth we just moved to
   syncUrl();                       // keep the URL in step with the depth we're at
@@ -11491,7 +11395,6 @@ function setView(view) {
   // you were doing on the rung.
   else if (projects) focusProjectFilterOnArrival();
   else if (sessions && !isTouch) box.focus();   // landing on sessions: composer ready so you can type a new prompt straight away
-  else if (view === 'transcript') feed.scrollTop = feed.scrollHeight;
   else if (pm) { renderPmFeed(); pmfeed.scrollTop = pmfeed.scrollHeight; }
   else if (pins) renderPinBoard();
   // landing on irons: paint, then the filter box takes focus — ARRIVAL only,
@@ -11591,8 +11494,8 @@ setView(pendingNav.view);        // …optimistically; resolvePendingNav refines
 setTimeout(() => { if (bootLanding && pendingNav && isHomeRoute(pendingNav)) landHome(); }, 4500);
 
 // Auto-surface the TUI when claude asks something interactive (AskUserQuestion,
-// plan approval, permission prompt) — those render only in the terminal, so the
-// transcript view would otherwise leave you not knowing. Restore the prior view
+// plan approval, permission prompt) — those render only in the terminal, so a
+// list view would otherwise leave you not knowing. Restore the prior view
 // once the prompt is answered. Skips work if you're already on the tty.
 let viewBeforeQuestion = null;
 function currentView() {
@@ -11603,14 +11506,14 @@ function currentView() {
   if (!projectsPanel.classList.contains('hidden')) return 'projects';
   if (!menuPanel.classList.contains('hidden')) return 'sessions';
   if (!leftPanel.classList.contains('hidden')) return 'tty';
-  return 'tty';   // transcript view was pulled; the session view is always the terminal
+  return 'tty';
 }
 
 // -- URL routing: project / session / depth live in the hash (the `?t=` token stays
 // in the query) so a reload — or a shared link — lands back where you were. The
 // machine is NOT in the URL: it's a per-project preference, resolved from the default.
-// Shapes (both modes): `#/` projects · `#/p/<key>` sessions · `…/s/<cid>` transcript ·
-// `…/s/<cid>/tty` tty. `<key>` is the project identity in fleet, the pid in direct mode.
+// Shapes (both modes): `#/` projects · `#/p/<key>` sessions ·
+// `…/s/<cid>/tty` tty (a bare `…/s/<cid>` opens the tty too). `<key>` is the project identity in fleet, the pid in direct mode.
 // Top-level views: `#/pm` · `#/pins` · `#/irons` (the 🔥 list). One iron:
 // `#/i/<id>` (its page, or a dive into its warmest session) ·
 // `#/i/<id>/s/<cid>[/tty]` (a session opened inside that iron's scope).
@@ -11677,7 +11580,7 @@ function syncUrl() {
     if (h !== location.hash) { lastWrittenHash = h; location.hash = h; } return; }
   // a session opened from an iron page carries the iron in its URL, so a reload
   // lands back inside the iron scope (strip + climb-out target intact)
-  if (ironScope && (v === 'tty' || v === 'transcript') && currentCid) {
+  if (ironScope && v === 'tty' && currentCid) {
     const h = '#/i/' + encodeURIComponent(ironScope) + '/s/' + encodeURIComponent(currentCid) + (v === 'tty' ? '/tty' : '');
     if (h !== location.hash) { lastWrittenHash = h; location.hash = h; }
     return;
@@ -11689,7 +11592,7 @@ function syncUrl() {
     // lives on multiple hosts (reload/share/deep-link land on this exact machine).
     if (FLEET && currentMachine) h += 'm/' + encodeURIComponent(currentMachine) + '/';
     h += 'p/' + encodeURIComponent(pkey);
-    if ((v === 'transcript' || v === 'tty') && currentCid) {
+    if (v === 'tty' && currentCid) {
       h += '/s/' + encodeURIComponent(currentCid);
       if (v === 'tty') h += '/tty';
     }
@@ -11842,12 +11745,10 @@ function restoreViewAfterQuestion() {
 
 // -- depth navigation: views are an ordered stack, shallow → deep. Swipe right
 // climbs out (toward projects); swipe left dives in (toward the tty), matching
-// the iOS back-gesture feel. projects → sessions → transcript → tty.
-// The two deep rungs are ordered by device preference: desktop dives into the
-// terminal first (transcript one rung deeper), touch into the transcript first.
+// the iOS back-gesture feel. projects → sessions → tty.
 // Fleet and direct share the same stack now — projects is the top rung in both
 // (the machines rung is gone; the roster lives in the 🖥️ overlay).
-const LEVELS = ['projects', 'sessions', 'tty'];   // transcript view pulled
+const LEVELS = ['projects', 'sessions', 'tty'];
 function stepLevel(dir) {
   // Climbing out of an iron-scoped session lands on the irons LIST — a live
   // iron has no page (its row + tabs + tty were the thing you're leaving), and
@@ -11874,7 +11775,7 @@ function stepLevel(dir) {
   // diving from the sessions list into a session returns to the last session we
   // viewed (currentCid persists). If that's gone/foreign to this project, pick
   // the first session in the project; if it has none, stay on the list.
-  if ((next === 'transcript' || next === 'tty') && currentView() === 'sessions') {
+  if (next === 'tty' && currentView() === 'sessions') {
     const here = sessionList.filter(s => s.pid === currentPid);
     if (!here.some(s => s.cid === currentCid)) {
       if (!here.length) return;            // nothing to dive into — stay on the list
@@ -11887,14 +11788,14 @@ function stepLevel(dir) {
 const goDeeper    = () => stepLevel(+1);   // dive in
 const goShallower = () => stepLevel(-1);   // climb out
 
-// The session plane = the terminal or the transcript. There, horizontal motion
+// The session plane = the terminal. There, horizontal motion
 // flips through the unified session roster (the rail); on the PM view it flips
 // through the PM threads (its rail — 'pm' isn't in LEVELS, so stepLevel would
 // just no-op there); everywhere else (the projects/sessions lists) it still
 // walks abstraction levels so back-nav works. navFwd/navBack are the single
 // source of truth shared by swipe + both keyboard handlers, so all three stay
 // in lock-step.
-function inSessionView() { const v = currentView(); return v === 'tty' || v === 'transcript'; }
+function inSessionView() { return currentView() === 'tty'; }
 // PM analog of cycleSession: wrap-around hop along the thread tabs, over exactly
 // the threads the bar shows (archived ones only while pmArchOpen reveals them).
 function cyclePmThread(dir) {
@@ -12167,7 +12068,7 @@ window.addEventListener('keydown', (e) => {
 // Horizontal swipe flips through the session rail (in a session) or changes depth
 // (on a list) — see navFwd/navBack. Listen in the capture phase so xterm (which
 // handles its own touches on the tty view) can't swallow it. Vertical motion is
-// left untouched so the transcript scrolls natively.
+// left untouched so lists scroll natively.
 //
 // Bound to #app (header + main + FOOTER), not just <main>: on a phone the mobile
 // key bar lives in the footer right below a short terminal, so a back-swipe near
@@ -12435,7 +12336,7 @@ function showLogin(msg) {
 
 // ── Fleet PM — folded into the harness as a first-class 'pm' view (not a drawer).
 //    Its conversation threads ride the same #sessionbar tab strip a project's
-//    sessions do, and the chat reuses the transcript #feed look; the footer
+//    sessions do; the footer
 //    composer talks to the current thread. Same-origin via the /pm/* proxy in
 //    BOTH modes: direct → harness reverse-proxies to the local controller; fleet
 //    → relay proxies to the box-resident controller (gated by your passkey).
@@ -12456,7 +12357,7 @@ function pmNavHref(r) {
 }
 // PM's own thinking spinner — independent of the session's singleton (a background
 // session may be mid-turn while you're in the PM view), but reusing the same
-// braille frames + .thinking markup so it reads identically to the transcript.
+// braille frames + .thinking markup so it reads like the TUI's.
 // (State declared up top so the hoisted render fns can touch it at boot.)
 function pmShowThinking() {
   if (!pmThinkEl) {

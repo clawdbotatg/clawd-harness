@@ -176,7 +176,7 @@ assumes an inline renderer. On a codex session, the phone pan finds an empty
 buffer, and there's no env var that fixes it.
 
 **Consequence:** for codex sessions the scroll surface has to be the
-**transcript view**, not the terminal. That view was pulled (`DEEP_VIEW`), but
+**transcript view**, not the terminal. That view was removed (2026-11, in git history), but
 the rollout JSONL is fully structured, so reviving it for codex is
 straightforward — and it's arguably where `docs/archive/UNIFIED-SESSIONS.md` was headed
 anyway. This is the one decision that shapes the whole port; make it first.
