@@ -108,7 +108,10 @@ Read the section for the feature you're touching. Not loaded every session.
   two events with a line claude gets as context (`tasks_note` — their hook
   command prints the reply): the open items after a compact/resume
   SessionStart, and ONE "still true?" reminder on a UserPromptSubmit once
-  open items sat untouched for `TASKS_STALE_TURNS` (4) prompts; the 📑 wrap
+  open items sat untouched for `TASKS_STALE_TURNS` (4) prompts, and — because
+  the rule alone left every live session's list empty (11-12) — an "add
+  what's left" question when nothing is open (`TASKS_FIRST_TURN` 3 prompts
+  in for a list never written, then every `TASKS_EMPTY_TURNS` 8); the 📑 wrap
   prompt reconciles it. Never nudge at Stop — a blocked Stop forces an extra
   turn and its message replaces the real answer in the TLDR. Claude-only
   (codex discards hook output, has no appended system prompt). The PM does

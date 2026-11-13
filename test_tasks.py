@@ -121,8 +121,15 @@ check("junk in the registry is dropped", server.clean_tasks([{"id": "a", "text":
 print("5. tasks_note")
 m = Mgr()
 s = sess(m, "c5")
-check("empty list says nothing", s.tasks_note("SessionStart", {"source": "compact"}) == ""
-      and s.tasks_note("UserPromptSubmit", {}) == "")
+check("empty list says nothing at SessionStart or in the first prompts",
+      s.tasks_note("SessionStart", {"source": "compact"}) == "" and s.tasks_note("UserPromptSubmit", {}) == "")
+s.prompt_count = server.TASKS_FIRST_TURN
+n = s.tasks_note("UserPromptSubmit", {})
+check("a list never written: asked once the session is a few prompts in", "task list is empty" in n and "harness-tasks add" in n, n)
+s.prompt_count += server.TASKS_EMPTY_TURNS - 1
+check("…then quiet", s.tasks_note("UserPromptSubmit", {}) == "")
+s.prompt_count += 1
+check("…and asked again only after TASKS_EMPTY_TURNS", "task list is empty" in s.tasks_note("UserPromptSubmit", {}))
 s.tasks_apply("add", text="wire the nudge")
 s.tasks_apply("add", text="polish", lev="lo")
 check("fresh startup says nothing", s.tasks_note("SessionStart", {"source": "startup"}) == "")
@@ -146,8 +153,9 @@ s.tasks_apply("done", ref="polish")
 check("a touch resets the count", s.tasks_note("UserPromptSubmit", {}) == "")
 s.tasks_apply("done", ref="wire")
 s.prompt_count += 50
-check("all done says nothing", s.tasks_note("UserPromptSubmit", {}) == ""
-      and s.tasks_note("SessionStart", {"source": "resume"}) == "")
+check("all done: nothing at SessionStart, the empty-list question at a prompt",
+      s.tasks_note("SessionStart", {"source": "resume"}) == ""
+      and "task list is empty" in s.tasks_note("UserPromptSubmit", {}))
 r = sess(m, "c6", check_of="c5")
 r.tasks = server.clean_tasks([{"id": "a", "text": "x"}])
 r.prompt_count = 99

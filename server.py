@@ -2659,6 +2659,8 @@ def serve_skills_lib(client, frame):
 TASKS_MAX = 60           # per session, open + done
 TASKS_WIRE = 40          # items on a `sessions` frame
 TASKS_STALE_TURNS = 4    # prompts with open items and no change → one reminder
+TASKS_FIRST_TURN = 3     # a list never written: ask once the session is this many prompts in…
+TASKS_EMPTY_TURNS = 8    # …and again every this many prompts while nothing is open
 TASKS_OPS = ("add", "done", "undone", "rm", "lev", "clear")
 TASKS_RULE = (
     "This session has its own task list, which the user sees beside the "
@@ -4250,7 +4252,22 @@ class ClaudeSession:
         with self.tasks_lock:
             open_ = [i for i in tasks_sorted(self.tasks) if not i["done"]]
             if not open_:
-                return ""
+                # Nothing open is ambiguous: finished, or never written? The
+                # spawn rule alone did not get sessions to write one (11-12:
+                # every live session had the rule and an empty list), so ask —
+                # early for a list never written, then rarely.
+                if ev != "UserPromptSubmit":
+                    return ""
+                gap = TASKS_EMPTY_TURNS if (self.tasks_at or self.tasks_turn) else TASKS_FIRST_TURN
+                if self.prompt_count - self.tasks_turn < gap:
+                    return ""
+                self.tasks_turn = self.prompt_count
+                return ("Harness note (not from the user): this session's task list is empty, "
+                        "and the user reads it to tell how much is left here. In this turn, if "
+                        "more than one thing is still left to do in this session, add each "
+                        "(`harness-tasks add <one short item>`, `harness-tasks add --low <item>` "
+                        "for a nice-to-have). If nothing is left beyond the current request, do "
+                        "nothing and don't mention it.")
             if ev == "SessionStart":
                 if obj.get("source") not in ("compact", "resume"):
                     return ""
