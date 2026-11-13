@@ -64,3 +64,4 @@ fleet/.clawd-fleet.roster.json*
 fleet/.clawd-fleet.todos.json*
 # the fleet doc store (shared shelf on the relay box) + its token
 fleet/.clawd-fleet.docs*
+.clawd-harness.unwall

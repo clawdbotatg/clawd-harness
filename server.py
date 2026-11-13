@@ -1070,6 +1070,10 @@ def heic_to_jpeg(src):
         print(f"[upload] heic convert failed: {e}", flush=True)
     return src
 REGISTRY_FILE = HERE / ".clawd-harness.sessions.json"   # persists projects+sessions across restarts
+# One-shot: account names (one per line) whose pool quarantine is dropped at
+# the next boot, then the file is deleted. For walls that were never real
+# (the 2026-11-13 hop cascade quarantined three healthy orgs for days).
+UNWALL_FILE = HERE / ".clawd-harness.unwall"
 # Serializes the tmp-write+replace in save_registry: two threads saving at once
 # (watch loop vs. a WS op) through one fixed tmp path can publish interleaved
 # bytes — an "atomic" write is only atomic if the tmp file has one writer.
@@ -4052,6 +4056,9 @@ class ClaudeSession:
         # evidence"), which quarantines a healthy pool. A real wall answers
         # a prompt, and every prompt arrives through write().
         self._limit_armed = False
+        self._armed_at = 0.0                      # when the first Enter went into THIS process (limit trips start here)
+        self._limit_synth_seen_at = 0.0           # cooldown anchor for the transcript limit trip (own clock: a
+                                                  # PTY-scan no-op must not swallow the real <synthetic> line)
         self._launched_at = time.time()           # transcript lines older than this are history, not live
         self._login_gone_seen = 0.0               # cooldown anchor for the login-expired rescue
         self._onboard_tail = ""                   # rolling de-ANSI'd PTY text, for the onboarding-screen scan
@@ -5098,6 +5105,7 @@ class ClaudeSession:
         self._gate_resolved_evt.set()
         if not self._limit_armed and b"\r" in data:
             self._limit_armed = True             # a prompt is going in — walls from here are live
+            self._armed_at = time.time()
             self._limit_raw = b""                # drop the resume repaint already buffered
         # Under _fd_lock: the pump closes the master when the child exits, and
         # a closed fd NUMBER is reused by the next spawn — never write to it.
@@ -5655,7 +5663,7 @@ class ClaudeSession:
                         if self._live_line(ev, raw):     # an old line re-read after a restart is history
                             self._on_login_expired()
                     elif '"<synthetic>"' in raw and _LIMIT_SYNTH_RE.search(raw) \
-                            and self._live_line(ev, raw):
+                            and self._answers_this_process(raw):
                         self._on_limit_transcript(raw)
 
     def _live_line(self, ev, raw):
@@ -5668,6 +5676,21 @@ class ClaudeSession:
             ts = None
         return ts is None or ts >= self._launched_at - 5
 
+    def _answers_this_process(self, raw):
+        """True only for a line written AFTER the first Enter into this
+        process. A handoff --resumes the SAME transcript, so the limit reply
+        that caused the hop is copied into the new pool's file; _live_line's
+        5 s slack let that old line re-trip on the new pool, and one real wall
+        on austingriffith hopped through ef → slop → clawd-buidlguidl in
+        seconds and quarantined all four orgs for days (2026-11-13 10:28)."""
+        if not self._armed_at:
+            return False
+        try:
+            ts = _parse_reset(json.loads(raw).get("timestamp"))
+        except (ValueError, AttributeError):
+            ts = None
+        return ts is not None and ts >= self._armed_at - 1
+
     def _on_limit_transcript(self, raw):
         """The transcript just showed the CLI's limit reply (_LIMIT_SYNTH_RE).
         Same rescue as the PTY banner — confirm against the endpoint, then
@@ -5676,9 +5699,9 @@ class ClaudeSession:
         if self.ceremony or not self.eng.routes_accounts:
             return
         now = time.time()
-        if now - self._limit_seen_at < BOUNCE_COOLDOWN:
+        if now - self._limit_synth_seen_at < BOUNCE_COOLDOWN:
             return
-        self._limit_seen_at = now
+        self._limit_synth_seen_at = now
         self._limit_modal = bool(_LIMIT_MODEL_RE.search(raw))
         self._limit_kind = ("weekly" if self._limit_modal
                             or re.search(r"weekly", raw, re.I) else "session")
@@ -6533,9 +6556,17 @@ class SessionManager:
                        if k in self.irons}          # ☑ a list outlives no iron
                       if reg.get("todos") else {})
 
+        try:
+            unwall = {n.strip() for n in UNWALL_FILE.read_text().split() if n.strip()}
+            UNWALL_FILE.unlink()
+        except OSError:
+            unwall = set()
         for e in reg.get("accounts", []):
             if not e.get("name"):
                 continue
+            if e["name"] in unwall:
+                print(f"[accounts] {e['name']} quarantine dropped ({UNWALL_FILE.name})", flush=True)
+                e = {**e, "walled_until": 0.0, "wall_kind": ""}
             a = Account(name=e["name"], config_dir=e.get("config_dir", ""),
                         email=e.get("email", ""), org=e.get("org", ""),
                         org_name=e.get("org_name", ""), tier=e.get("tier", ""),
@@ -8419,6 +8450,7 @@ class SessionManager:
             return
         # Claim the cooldown BEFORE the slow confirm — it's the mutual-exclusion
         # anchor against rescue_bounced_prompt racing this on the same session.
+        prev_rescue = s.last_bounce_rescue
         s.last_bounce_rescue = now
         acct = self.accounts.get(s.account)
         cfg = acct.config_dir if acct else (s.config_dir or "")
@@ -8438,6 +8470,10 @@ class SessionManager:
                     acct.record_usage(pct, windows, now2)
                     acct.broken = False
         if not walled:
+            # A no-op must not burn the cooldown: on 2026-11-13 the PTY
+            # banner (gated, 52% → no-op) ate it, and the <synthetic> spend-
+            # limit line a second later — the trusted signal — was dropped.
+            s.last_bounce_rescue = prev_rescue
             return                               # echoed/stale banner on a cool pool
         # Persist the CLI's stronger verdict before selection so this rescue
         # AND brand-new sessions cannot route straight back to the same pool.

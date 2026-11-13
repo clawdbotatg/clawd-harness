@@ -154,12 +154,27 @@ new_line = synth(TEXT, iso(1))
 check("a transcript line from before this launch is history",
       not sess._live_line(None, old_line))
 check("a line from this launch is live", sess._live_line(None, new_line))
+# 2026-11-13: a handoff --resumes the same transcript, so the limit line that
+# caused the hop sits in the new pool's file 1-3 s before the new process got
+# any input. It must not re-trip (it cascaded one wall into all four orgs).
+sess._armed_at = 0.0
+check("before any Enter into this process, no limit line counts",
+      not sess._answers_this_process(synth(TEXT, iso(1))))
+sess._armed_at = NOW + 10
+check("a copied line from just before this process's first Enter is history",
+      not sess._answers_this_process(synth(TEXT, iso(8))))
+check("a line after the first Enter is a real answer",
+      sess._answers_this_process(synth(TEXT, iso(12))))
 fired.clear()
-sess._limit_seen_at = 0.0
+# The PTY scan just fired (gated no-op); the transcript trip must still run.
+sess._limit_seen_at = time.time()
+sess._limit_synth_seen_at = 0.0
 sess._on_limit_transcript(new_line)
 time.sleep(0.05)
-check("the transcript trip hands the prompt to the rescue",
+check("the transcript trip hands the prompt to the rescue, even right after a PTY scan",
       fired and fired[0][1] == PROMPT, f"fired={fired}")
+check("rescue_limit_wall gives the cooldown back when it was a no-op",
+      "s.last_bounce_rescue = prev_rescue" in open(server.__file__).read())
 src = open(server.__file__).read()
 check("write() arms the scan on Enter",
       'if not self._limit_armed and b"\\r" in data:' in src)
