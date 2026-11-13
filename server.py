@@ -1565,7 +1565,7 @@ def _worktree_dirty(path):
     normally hidden by the exclude entry `_exclude_handoff` writes, tolerated
     here in case it isn't). The 🔍 double-check's REVIEW-*.md files are the
     same kind, same treatment."""
-    if not path or not os.path.isdir(os.path.join(path, ".git")):
+    if not path or not os.path.exists(os.path.join(path, ".git")):   # a file in a worktree/submodule
         return ""
     try:
         r = subprocess.run(["git", "status", "--porcelain"], cwd=path,
@@ -1589,7 +1589,7 @@ def _exclude_handoff(path, name=HANDOFF_GLOB):
     accident. Idempotent. True when the entry is present (already or now);
     False for a non-repo or a git failure (the gate's carve-out still covers
     the file). Never touches .gitignore — that would be a repo change."""
-    if not path or not os.path.isdir(os.path.join(path, ".git")):
+    if not path or not os.path.exists(os.path.join(path, ".git")):   # a file in a worktree/submodule
         return False
     try:
         r = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=path,
@@ -1618,7 +1618,7 @@ def _git_head(path):
     unborn branch, or any git failure. Recorded on every session at spawn
     (`head_at_spawn`, ctor param + registry) so a 🔍 double-check can name
     the exact range the reviewer should read."""
-    if not path or not os.path.isdir(os.path.join(path, ".git")):
+    if not path or not os.path.exists(os.path.join(path, ".git")):   # a file in a worktree/submodule
         return ""
     try:
         r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=path,
@@ -5652,7 +5652,8 @@ class ClaudeSession:
                     # lines only (not subscribe replays); the rescue
                     # confirms against the store, so a quote is a no-op.
                     if '"<synthetic>"' in raw and _LOGIN_EXPIRED_RE.search(raw):
-                        self._on_login_expired()
+                        if self._live_line(ev, raw):     # an old line re-read after a restart is history
+                            self._on_login_expired()
                     elif '"<synthetic>"' in raw and _LIMIT_SYNTH_RE.search(raw) \
                             and self._live_line(ev, raw):
                         self._on_limit_transcript(raw)
@@ -8669,6 +8670,13 @@ class SessionManager:
             last_active=time.time(),
             account=target.name, config_dir=target.config_dir)
         with self.lock:
+            if self.sessions.get(s.cid) is not s:
+                # Another handoff/rescue already replaced this session while
+                # we were linking. Starting ours too would leave two claudes
+                # on one cid, one of them tracked by nobody.
+                print(f"[handoff {s.cid[:8]}] already replaced by another "
+                      "move — dropping this one", flush=True)
+                return
             self.sessions[s.cid] = fresh
         s.kill()                                 # SIGTERM the drained claude (exit broadcast suppressed)
         fresh.start()
