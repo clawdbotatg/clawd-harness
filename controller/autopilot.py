@@ -46,6 +46,9 @@ import time
 from .verbs import out_hash as _hash
 
 
+# With no push channel, keep at most this many undelivered escalations.
+UNDELIVERED_MAX = 50
+
 class Autopilot:
     def __init__(self, run_pm, verbs, ledger, guard, notify=None,
                  enabled=True, toggle_path=None,
@@ -58,6 +61,9 @@ class Autopilot:
         self.ledger = ledger
         self.guard = guard
         self.notify = notify or (lambda text: None)
+        # No push channel (Telegram unset): escalations can't be delivered,
+        # so they are kept for /api/autopilot instead of being thrown away.
+        self.has_channel = notify is not None
         self.toggle_path = toggle_path
         self.enabled = self._load_toggle(enabled)
         self.cooldown_s = cooldown_s
@@ -383,6 +389,14 @@ class Autopilot:
         """Sink for the `escalate` verb. urgency 'now' pushes immediately;
         everything else waits for the windowed digest."""
         item = dict(item, t=time.time())
+        if not self.has_channel:
+            with self._esc_lock:
+                self.escalations.append(item)
+                del self.escalations[:-UNDELIVERED_MAX]
+            self._note("escalate", item.get("cid") or "-", "no channel — kept")
+            return {"ok": False, "error": "no push channel is configured, so "
+                    "this was NOT sent — put the question in your reply instead "
+                    "(it is kept on /api/autopilot)"}
         if item.get("urgency") == "now":
             self.notify("🚨 " + self._fmt(item))
             self._note("escalate", item.get("cid") or "-", "pushed now")
@@ -400,6 +414,8 @@ class Autopilot:
             self.flush_digest()
 
     def flush_digest(self):
+        if not self.has_channel:
+            return 0                      # nowhere to send — keep them
         with self._esc_lock:
             items, self.escalations = self.escalations, []
         if not items:
@@ -434,6 +450,11 @@ class Autopilot:
             pending = len(self._q)
         with self._esc_lock:
             esc = len(self.escalations)
+            undelivered = ([] if self.has_channel else
+                           [{"t": it.get("t"), "machine": it.get("machine"),
+                             "cid": it.get("cid"), "urgency": it.get("urgency"),
+                             "question": it.get("question"), "url": it.get("url")}
+                            for it in self.escalations])
         pipes = [{"task": t["id"], "step": t.get("step"),
                   "steps": len(t.get("steps") or []),
                   "goal": (t.get("goal") or "")[:80]}
@@ -446,6 +467,8 @@ class Autopilot:
                 "pipelines": pipes,
                 "pipeline_idle_s": self.pipeline_idle_s,
                 "queue": pending, "digest_pending": esc,
+                # escalations nobody was told about (no push channel)
+                "push_channel": self.has_channel, "undelivered": undelivered,
                 "digest_window_s": self.digest_window_s,
                 "recent": [{"t": t, "kind": k, "target": tg, "note": n}
                            for t, k, tg, n in list(self.recent)]}

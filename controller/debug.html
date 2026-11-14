@@ -101,6 +101,9 @@
 </main>
 <script>
 const $ = s => document.querySelector(s);
+// Text from sessions (titles, summaries, cids) is not ours — never let it be markup.
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const jget = async u => (await fetch(u)).json();
 const jpost = async (u,b) => (await fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})})).json();
 
@@ -168,10 +171,10 @@ async function loadTools(){
     const fields = Object.entries(props).map(([k,sc]) => {
       const r = req.has(k) ? ' *' : '';
       if (sc.type === 'boolean')
-        return `<div class="fld"><label>${k}${r}</label><input type="checkbox" data-k="${k}" data-bool="1"></div>`;
-      return `<div class="fld"><label>${k}${r}</label><input type="text" data-k="${k}" placeholder="${sc.type||'string'}"></div>`;
+        return `<div class="fld"><label>${esc(k)}${r}</label><input type="checkbox" data-k="${esc(k)}" data-bool="1"></div>`;
+      return `<div class="fld"><label>${esc(k)}${r}</label><input type="text" data-k="${esc(k)}" placeholder="${esc(sc.type||'string')}"></div>`;
     }).join('') || '<div class="muted">no arguments</div>';
-    el.innerHTML = `<div class="hd"><span class="nm">${t.name}</span><span class="ds">${t.description}</span></div>
+    el.innerHTML = `<div class="hd"><span class="nm">${esc(t.name)}</span><span class="ds">${esc(t.description)}</span></div>
       <div class="body">${fields}<div class="row"><button class="act run">Run ▶</button></div><pre class="out muted">—</pre></div>`;
     el.querySelector('.hd').onclick = () => el.classList.toggle('open');
     el.querySelector('.run').onclick = async (e) => {

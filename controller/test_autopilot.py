@@ -123,6 +123,24 @@ def main():
         assert ap.flush_digest() == 0                       # empty → no push
     check("escalations batch into ONE digest push", t_digest)
 
+    def t_no_channel():
+        # Telegram unset: nothing can be pushed. The verb must say so (it used
+        # to answer ok, then the digest flush threw the items away).
+        mute = Autopilot(run_pm, verbs=None, ledger=ledger, guard=guard,
+                         notify=None, enabled=False,
+                         toggle_path=tempfile.mktemp(suffix=".txt"))
+        for urgency in ("digest", "now"):
+            r = mute.escalate({"question": f"ship it? ({urgency})",
+                               "machine": "m1", "cid": "c1", "urgency": urgency})
+            assert r["ok"] is False and "NOT sent" in r["error"], r
+        assert mute.flush_digest() == 0
+        st = mute.status()
+        assert st["push_channel"] is False, st
+        qs = [u["question"] for u in st["undelivered"]]
+        assert qs == ["ship it? (digest)", "ship it? (now)"], st   # kept, not discarded
+        assert ap.status()["push_channel"] is True and ap.status()["undelivered"] == []
+    check("no push channel: escalate says NOT sent and the item is kept", t_no_channel)
+
     def t_now():
         before = len(pings)
         ap.escalate({"question": "disk full on m2!", "machine": "m2",

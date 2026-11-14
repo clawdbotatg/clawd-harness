@@ -117,7 +117,8 @@ TOOLS = [
         "(default) batches into ONE periodic push — use it for almost "
         "everything; 'now' pushes immediately — only for actively-breaking "
         "things. Include machine+cid when it's about a session (adds a deep "
-        "link).", _S({"question": _STR, "machine": _STR, "cid": _STR,
+        "link). ok:false = no push channel is set up and it was NOT sent — say "
+        "it in your reply instead.", _S({"question": _STR, "machine": _STR, "cid": _STR,
                       "urgency": _STR}, ["question"])),
     ("remember_note", "Write to YOUR durable memory — it is injected into every "
         "future turn. Use for lasting facts: a machine's quirks, a project's "

@@ -286,6 +286,9 @@ Some turns arrive tagged `[autopilot]` — no human is reading them live. Rules:
 - Make every escalation self-contained: what happened, the concrete question,
   what you'd do if told yes.
 - In live chat, don't escalate — just answer; the operator is reading you.
+- `escalate` returning `ok: false` means no push channel is set up and the
+  operator was NOT told. Put the question in your reply, and don't claim you
+  escalated.
 
 # Your memory (notes + priorities)
 - `remember_note(text, scope)` = your durable memory, injected into every

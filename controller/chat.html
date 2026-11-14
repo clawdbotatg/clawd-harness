@@ -101,6 +101,9 @@
 </main>
 <script>
 const $ = s => document.querySelector(s);
+// Text from sessions (titles, summaries, cids) is not ours — never let it be markup.
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const log = $("#log"), box = $("#box");
 
 function add(cls, text){
@@ -134,7 +137,7 @@ function botEl(text, trace){
   if (trace && trace.length){
     const tr = document.createElement("div");
     tr.className = "trace";
-    tr.innerHTML = "did: " + trace.map(t => "<code>"+t.tool+"</code>").join(" → ");
+    tr.innerHTML = "did: " + trace.map(t => "<code>"+esc(t.tool)+"</code>").join(" → ");
     d.appendChild(tr);
   }
   return d;
@@ -254,19 +257,19 @@ async function refresh(){
     $("#attBadge").style.color = n ? "var(--high)" : "var(--ok)";
     $("#attCount").textContent = n ? "("+n+")" : "";
     $("#fleet").innerHTML = st.machines.map(m =>
-      `<div class="badge"><b>${m.id}</b> · ${m.connected?"online":"offline"} · ${m.sessions} sess</div>`).join("") || '<span class="empty">no machines</span>';
+      `<div class="badge"><b>${esc(m.id)}</b> · ${m.connected?"online":"offline"} · ${esc(m.sessions)} sess</div>`).join("") || '<span class="empty">no machines</span>';
     const att = (await jget("/api/attention")).items || [];
     $("#att").innerHTML = att.length ? att.map(a => {
       const href = sessionHref(a.machine, a.pid, a.cid);
-      const open = href ? ` · <a href="${href}" class="open">open ↗</a>` : "";
-      return `<div class="att ${a.sev}"><div class="t"><span class="dot"></span>${a.title} <span class="badge">${a.cid}</span></div>
-       <div class="s">${a.summary}</div><div class="a">→ ${a.suggested_action}${open}</div></div>`;
+      const open = href ? ` · <a href="${esc(href)}" class="open">open ↗</a>` : "";
+      return `<div class="att ${esc(a.sev)}"><div class="t"><span class="dot"></span>${esc(a.title)} <span class="badge">${esc(a.cid)}</span></div>
+       <div class="s">${esc(a.summary)}</div><div class="a">→ ${esc(a.suggested_action)}${open}</div></div>`;
     }).join("")
       : '<div class="empty">nothing needs you 🎉</div>';
     const evs = ((await jget("/api/notifications")).events || []).slice(-8).reverse();
     const icon = k => k==="blocked"?"⏳":k==="turn_done"?"✓":k==="ended"?"■":"·";
     $("#events").innerHTML = evs.length ? evs.map(e =>
-      `<div class="badge">${icon(e.kind)} <b>${e.cid?e.cid.slice(0,8):""}</b> ${e.summary||e.kind}</div>`).join("")
+      `<div class="badge">${icon(e.kind)} <b>${esc(e.cid?e.cid.slice(0,8):"")}</b> ${esc(e.summary||e.kind)}</div>`).join("")
       : '<span class="empty">no events yet</span>';
     loadThreads();   // keep the thread bar (titles + msg counts) fresh
   }catch(e){ /* server may be mid-restart */ }

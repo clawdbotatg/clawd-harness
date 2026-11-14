@@ -664,7 +664,8 @@ class Verbs:
     def escalate(self, question, machine=None, cid=None, urgency="digest"):
         """Queue something for the operator. 'digest' rides the next batched
         push (one message per window, not a ping per item); 'now' pushes
-        immediately — reserve it for actively-breaking things."""
+        immediately — reserve it for actively-breaking things. With no push
+        channel configured the answer is `ok: false` (not sent)."""
         if not (question or "").strip():
             return {"ok": False, "error": "empty question"}
         if self.escalate_sink is None:
