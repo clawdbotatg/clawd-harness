@@ -609,14 +609,19 @@ AUTO_TLDR_DELAY = float(os.environ.get("AUTO_TLDR_DELAY", "3")) # grace before s
 AUTO_TLDR_JUDGE = os.environ.get("AUTO_TLDR_JUDGE", "1") != "0"
 AUTO_TLDR_JUDGE_MAX = int(os.environ.get("AUTO_TLDR_JUDGE_MAX", "800"))
 AUTO_TLDR_JUDGE_SYS = (
-    "A coding assistant just finished a reply to a busy person reading on a "
-    "phone. By default they want a shorter TLDR of it, so answer YES. "
-    "Answer NO only when the reply is already as short as a TLDR would be: "
-    "a few terse bullets or numbered options, a one- or two-sentence status, "
-    "or a direct question, with nothing left to cut. Any explanatory prose, "
-    "background, reasoning, or more than a handful of short lines means YES. "
+    "A coding assistant just finished a short reply to a busy person reading "
+    "on a phone. Decide whether a shorter TLDR of it would help them. "
+    "Answer NO when the reply is already short and direct: it answers up "
+    "front and each sentence or bullet carries something the reader needs — "
+    "a few terse bullets or options, a brief status, a question, or a few "
+    "short plain paragraphs that get straight to the point. "
+    "Answer YES when it has padding, preamble, repetition, hedging, "
+    "background nobody asked for, or it narrates what was checked or done "
+    "before getting to the answer, so the point is not in the first lines. "
     "When unsure, YES. "
     'Reply with JSON only: {"tldr": true} or {"tldr": false}.')
+# Loosened once (Austin, 11-13): two direct ~650-char prose answers got
+# TLDR'd under the "any explanatory prose means YES" wording and didn't need it.
 
 
 def is_tldr_prompt(text):
