@@ -542,7 +542,8 @@ whole stack is proud of being pure stdlib, disk-as-source-of-truth. So:
   - **Escalation discipline**: the `escalate` verb is the PM's only unattended
     channel to the operator — `digest` items batch into ONE windowed Telegram
     push (`CONTROLLER_DIGEST_WINDOW`), `now` bypasses for genuine emergencies;
-    the raw per-block reactor ping is suppressed while the autopilot owns it.
+    the raw per-block ping is replaced only by a triage turn that actually runs
+    (off, paused, cooling down or out of budget → the plain ping still goes out).
   - **Durable memory** (`controller/notes.py`): operator-set standing
     priorities + scoped fleet notes (`machine:` / `project:` / `task:` /
     `general`), written through `remember_note`/`set_priorities` verbs and

@@ -158,7 +158,6 @@ resolve; degrades, doesn't break.
 { "type":"sessions", "sessions":[<sessionMeta>...], "current":"<cid|null>" }
 { "type":"accounts", "accounts":[<accountMeta>...], "active":"<name>", "auto":bool,
   "best":"<name|null>",          // what a new session would be routed to right now
-  "lastSwitch":<ts>,             // when the active account last changed
   "codex":<usage|null> }         // the codex plan's usage, read-out only; null when codex isn't signed in
 { "type":"irons", "irons":[{ "id","title","desc","tags":[..], "pids":[..], "created", "rank" }...] }  // rank-sorted: list order = priority (see ironOrder)
 { "type":"closed", "closed":[{cid,engine,pid,project,session_id,title,desc,account,prompt_count,first_prompt,created,last_active,closed_at,reason,last_answer,resumable}] }   // 🗃️ closed-session history, newest first (every `close`, capped at CLOSED_MAX, persisted); on `list` and on every change. `reason`: "closed" | "project gone" | "wrapped" (📑 closed itself; `last_answer` = its TLDR, ≤280 chars). `resumable`=false = no conversation to resume (reopen starts fresh).
@@ -213,7 +212,7 @@ no-op that would leave the previous session's stream flowing (that's how
 { "type":"peekPty", "cid", "d":"<base64 PTY bytes>" }   // 🔍 to a `peek`ing client only: the peeked session's terminal stream (see `peek`)
 { "type":"projects", "projects":[...] }                // re-broadcast on any project change (no `boot`)
 { "type":"sessions", "sessions":[...], "current" }     // re-broadcast on any session change
-{ "type":"accounts", "accounts":[...], "active", "auto", "best", "lastSwitch", "codex" }  // subscription logins/usage/active changed
+{ "type":"accounts", "accounts":[...], "active", "auto", "best", "codex" }  // subscription logins/usage/active changed
 { "type":"reload" }                                    // index.html changed on disk → browser should reload
 { "type":"restart", "pending":bool, "reason", "busy":int,        // restart state (banner)
   "waitedFor":float, "maxWait":float,                            // seconds pending / ceiling
