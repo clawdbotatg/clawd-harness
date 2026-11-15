@@ -5187,7 +5187,7 @@ function mergeProjects() {
       if (p.emoji) g.emojiVotes.push([mid, p.emoji]);   // each box badges the repo on its own; elected below
       if (p.pinned) g.pinned = true;
       if ((p.lastTouched || 0) > g.lastTouched) g.lastTouched = p.lastTouched || 0;  // warmth = warmest machine
-      g.machines.push({ machineId: mid, pid: p.pid, online,
+      g.machines.push({ machineId: mid, pid: p.pid, name: p.name || '', online,
         sessionCount: p.sessionCount || 0, busyCount: p.busyCount || 0,
         waitingCount: p.waitingCount || 0, status: p.status });
     }
@@ -5304,10 +5304,31 @@ function defaultCreateMachine() {
   const on = liveMachines()[0];
   return on ? on.id : null;
 }
+// One row per machine for "where does a new session go". A machine can hold the
+// same repo in several folders (git worktrees parked in projects/ each register
+// as a project and fold into the repo's card), which listed that machine once
+// per folder in the picker. Pick the main checkout — the folder named like the
+// repo, else the busiest — and sum the session counts.
+function spawnRows(g) {
+  if (!g) return [];
+  const base = normRepo(g.repoUrl).split('/').pop() || (g.name || '').toLowerCase();
+  const by = new Map();
+  for (const m of g.machines) {
+    const r = by.get(m.machineId);
+    if (!r) { by.set(m.machineId, Object.assign({}, m)); continue; }
+    const total = (r.sessionCount || 0) + (m.sessionCount || 0);
+    const isMain = x => (x.name || '').toLowerCase() === base;
+    if (!isMain(r) && (isMain(m) || (m.sessionCount || 0) > (r.sessionCount || 0)))
+      Object.assign(r, m);
+    r.sessionCount = total;
+  }
+  return [...by.values()];
+}
 function pickMachineEntry(g) {
   if (!g || !g.machines.length) return null;
-  const online = g.machines.filter(m => m.online);
-  const pool = online.length ? online : g.machines;
+  const rows = spawnRows(g);
+  const online = rows.filter(m => m.online);
+  const pool = online.length ? online : rows;
   const pref = defaultMachineFor(g.key);
   return pool.find(m => m.machineId === pref)
       || pool.find(m => (m.sessionCount || 0) > 0)
@@ -7260,7 +7281,7 @@ function newSession(targetMachine, engine) {
     if (!g || !g.machines.length) { setView('projects'); return; }
     const mid = targetMachine || newSessionMachine || defaultMachineFor(currentProjectKey)
               || currentMachine || (pickMachineEntry(g) || {}).machineId;
-    const me = g.machines.find(m => m.machineId === mid) || pickMachineEntry(g);
+    const me = spawnRows(g).find(m => m.machineId === mid) || pickMachineEntry(g);
     if (!me) { setView('projects'); return; }
     attachMachine(me.machineId);
     currentPid = me.pid;
@@ -7415,13 +7436,14 @@ function renderSessions() {
                          : everything.filter(s => !s.pinned && !isEjected(s.cid));   // 📌 parked ones live on the pin board, ⏏ ejected ones in their window
   const pinnedHere = everything.length - list.length;
   const g = FLEET ? unifiedProjects.get(currentProjectKey) : null;
-  const multi = !!(g && g.machines.length > 1);
+  const rows = spawnRows(g);                 // one per machine, even when it holds several worktrees
+  const multi = rows.length > 1;
 
   // ---- the head (title, ＋ new session row, 📌 note): rebuilt only when what
   // it shows changes, never on an ordinary frame. This used to be wiped along
   // with every card on EVERY sessions/accounts frame — a card, its ✕ or the
   // ＋ button under a finger mid-tap was destroyed (landmine 4).
-  if (!noProject && multi && (!newSessionMachine || !g.machines.some(m => m.machineId === newSessionMachine && m.online)))
+  if (!noProject && multi && (!newSessionMachine || !rows.some(m => m.machineId === newSessionMachine && m.online)))
     newSessionMachine = defaultMachineFor(currentProjectKey) || currentMachine
                      || (pickMachineEntry(g) || {}).machineId;
   const pn = noProject ? '' : projectName(currentPid);
@@ -7430,7 +7452,7 @@ function renderSessions() {
     ? `all sessions · ${list.length}`
     : (pn ? (pe ? pe + ' ' : '') + pn + ' · ' : '') + `sessions · ${list.length}`;
   const headFp = JSON.stringify([noProject, multi, FLEET ? currentProjectKey : currentPid, !!pinnedHere,
-    multi ? g.machines.map(m => [m.machineId, !!m.online, m.sessionCount || 0]) : 0]);
+    multi ? rows.map(m => [m.machineId, !!m.online, m.sessionCount || 0]) : 0]);
   let head = sessionsEl.querySelector(':scope > .shead');
   // The machine <select> mid-pick: a rebuild closes the native dropdown and
   // steals focus. While focus is inside the picker row, defer the HEAD rebuild
@@ -7470,7 +7492,7 @@ function renderSessions() {
       add.id = 'newSession'; add.textContent = '＋  new session on';
       add.onclick = () => newSession(sel.value);
       const sel = document.createElement('select');
-      g.machines.forEach(me => {
+      rows.forEach(me => {
         const opt = document.createElement('option');
         opt.value = me.machineId;
         opt.textContent = shortMachine(me.machineId) + (me.online ? '' : ' · offline') + ` · ${me.sessionCount || 0} sess`;
