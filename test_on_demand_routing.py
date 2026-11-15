@@ -344,7 +344,8 @@ server.SUB_ROUTE_ON_PROMPT = True
 print("\nwait_ready (started AND gate-resolved)")
 import types
 s = types.SimpleNamespace(
-    _started_evt=threading.Event(), _gate_resolved_evt=threading.Event())
+    _started_evt=threading.Event(), _gate_resolved_evt=threading.Event(),
+    _gate_deadline=time.time() + 120)    # armed, window still open
 wait_ready = server.ClaudeSession.wait_ready
 check("neither event → not ready", wait_ready(s, timeout=0.05) is False)
 s._started_evt.set()
@@ -352,6 +353,17 @@ check("started alone is NOT ready (the addenda race)",
       wait_ready(s, timeout=0.05) is False)
 s._gate_resolved_evt.set()
 check("started + gate resolved → ready", wait_ready(s, timeout=0.05) is True)
+# A quiet terminal never runs the scan, so the event stays unset after the
+# window ends — the clock alone must resolve it (audit S8).
+s._gate_resolved_evt.clear()
+s._gate_deadline = time.time() + 0.3
+t0 = time.time()
+check("gate window ends mid-wait → ready, without waiting out the timeout",
+      wait_ready(s, timeout=5) is True and time.time() - t0 < 2, f"{time.time() - t0:.2f}s")
+s._gate_deadline = time.time() - 1
+check("gate window already over → ready at once", wait_ready(s, timeout=0.05) is True)
+s._started_evt.clear()
+check("…but never without SessionStart", wait_ready(s, timeout=0.05) is False)
 
 if FAILED:
     print(f"\n{len(FAILED)} FAILED: {FAILED}")

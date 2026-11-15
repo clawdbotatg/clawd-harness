@@ -38,15 +38,6 @@ check("a tee url is ours", server.tee_is_ours("http://127.0.0.1:8791/s/abc-123")
 check("a gateway is not", not server.tee_is_ours("https://llm.example.com/v1"))
 check("empty is not", not server.tee_is_ours(""))
 
-print("tee_is_subagent:")
-main = json.dumps({"model": "m", "system": [{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.257.4c4; cc_entrypoint=cli;"}, {"type": "text", "text": "You are Claude Code"}], "messages": []}).encode()
-sub = json.dumps({"model": "m", "system": [{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.257.2b6; cc_entrypoint=cli; cc_is_subagent=true;"}], "messages": []}).encode()
-quoted = json.dumps({"model": "m", "system": [{"type": "text", "text": "x-anthropic-billing-header: cc_version=1; cc_entrypoint=cli;"}], "messages": [{"role": "user", "content": "the log said cc_is_subagent=true"}]}).encode()
-check("main conversation is not a subagent", not server.tee_is_subagent(main))
-check("Agent-tool call is a subagent", server.tee_is_subagent(sub))
-check("marker quoted in a message doesn't count", not server.tee_is_subagent(quoted))
-check("unparseable body: raw search", server.tee_is_subagent(b"garbage cc_is_subagent=true"))
-
 print("tee_call_kind:")
 big_pad = "x" * server.API_TEE_MAIN_MIN
 conv = json.dumps({"system": [{"type": "text", "text": "x-anthropic-billing-header: cc_entrypoint=cli;"}], "tools": [{"name": "Bash"}], "messages": [{"role": "user", "content": big_pad}]}).encode()

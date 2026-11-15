@@ -280,8 +280,8 @@ def review_file_name(now=None):
 
 CHECK_BRIEF_PROMPT = (
     "A second agent ({reviewer}) is about to double-check your work in this "
-    "repo. Write it a short brief in {file} at the repo root (replace an old "
-    "one if it exists): what you were asked to do, what you changed and where "
+    "repo. Write it a short brief in {file} at the repo root: what you were "
+    "asked to do, what you changed and where "
     "(files, functions), what you verified and how, what is still unverified "
     "or you are unsure of, and what is uncommitted. Plain facts, under 60 "
     "lines. That file is LOCAL notes: REVIEW-*.md is already in this "
@@ -459,6 +459,11 @@ BANKR_API      = os.environ.get("BANKR_API", "openai").lower()   # openai | anth
 # piping the MP3 straight back. Voice ID defaults to "Brian" if unset.
 ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "") or "ogwqBH5bbF03DSbNiRNN"   # Austin's pick (2026-09-05)
+# One voice for both render paths (/tts stream, WS eleven_tts). Speed stays
+# 1.0 here: tempo is the browser's 1.25×.
+ELEVENLABS_MODEL_ID = "eleven_flash_v2_5"
+ELEVENLABS_VOICE_SETTINGS = {"stability": 0.65, "similarity_boost": 0.5,
+                             "use_speaker_boost": True, "speed": 1.0}
 # 🎤 Deepgram streaming speech-to-text. Optional — without a key the browser
 # dictates with its own Web Speech recognizer (live, but no custom vocabulary:
 # the 2026-09-13 "kodaks / codecs for Codex" complaint). The page streams mic
@@ -775,20 +780,6 @@ def tee_call_kind(body):
     if "cc_is_subagent=true" in head[:600]:
         return "subagent"
     return "main" if d.get("tools") else "side"
-
-
-def tee_is_subagent(body):
-    """The subagent marker, size-independent (tee_call_kind's size pre-check
-    would call a small subagent body a side call, which is fine for the tee
-    but not for this question)."""
-    try:
-        d = json.loads(body)
-        sysm = d.get("system")
-        head = (sysm[0].get("text", "") if isinstance(sysm, list) and sysm and isinstance(sysm[0], dict)
-                else (sysm if isinstance(sysm, str) else ""))
-        return "cc_is_subagent=true" in head[:600]
-    except Exception:
-        return b"cc_is_subagent=true" in body
 
 
 def tee_is_main_call(body):
@@ -2202,7 +2193,8 @@ def _fetch_usage(config_dir, tok_cache=None, want_ident=False,
 
     code = usage = retry_after = None
     good = None                                  # the token the 200 came from
-    tries = [t for t in (cached, access) if t]
+    # de-duplicated: a cache equal to the store is ONE token, not two refusals
+    tries = list(dict.fromkeys(t for t in (cached, access) if t))
     for tok in tries:
         code, usage, retry_after = call(tok)
         if code == 200:
@@ -3306,7 +3298,7 @@ class Engine:
     def env(self, s, env):      pass          # mutated in place
     def hook_setup(self, s):    return None   # → settings path, or None
     def transcript_globs(self, s):  return []
-    def slim_event(self, s, line):  return None
+    def slim_event(self, s, line, track=False):  return None
     def is_conversation(self, s, line):
         """Is this raw transcript line a real conversation turn? The default
         asks the engine's own parser, so a new engine is right for free."""
@@ -3430,8 +3422,8 @@ class ClaudeEngine(Engine):
         base = s.config_dir or os.path.expanduser("~/.claude")
         return [f"{base}/projects/*/{s.session_id}.jsonl"]
 
-    def slim_event(self, s, line):
-        return s._slim_event_claude(line)
+    def slim_event(self, s, line, track=False):
+        return s._slim_event_claude(line, track)
 
     def is_conversation(self, s, line):
         return '"type":"user"' in line or '"type":"assistant"' in line
@@ -3537,8 +3529,8 @@ class CodexEngine(Engine):
         return [f"{CODEX_STORE}/sessions/*/*/*/rollout-*{s.session_id}.jsonl",
                 f"{CODEX_STORE}/sessions/*/*/*/*{s.session_id}*.jsonl"]
 
-    def slim_event(self, s, line):
-        return s._slim_event_codex(line)
+    def slim_event(self, s, line, track=False):
+        return s._slim_event_codex(line, track)
 
 
 ENGINES = {"claude": ClaudeEngine(), "codex": CodexEngine()}
@@ -5143,7 +5135,13 @@ class ClaudeSession:
         the race it guards, and the wait itself never writes to the PTY)."""
         deadline = time.time() + timeout
         started = self._started_evt.wait(timeout)
-        resolved = self._gate_resolved_evt.wait(max(0.0, deadline - time.time()))
+        # The scan only notices its window ending when a PTY chunk arrives; a
+        # quiet terminal would leave the event unset forever. The clock is the
+        # truth: past the gate deadline is "expired" = resolved.
+        gate_end = self._gate_deadline
+        until = min(deadline, gate_end) if gate_end else deadline
+        resolved = self._gate_resolved_evt.wait(max(0.0, until - time.time())) \
+            or bool(gate_end and time.time() >= gate_end)
         return started and resolved
 
     def send_message(self, text: str, control: bool = False):
@@ -5271,7 +5269,7 @@ class ClaudeSession:
         not wait for a Stop that already happened."""
         self._pilot_refresh_goal()
         if self.autopilot and self.alive and not self.busy and not self.waiting:
-            self._pilot_step(engaging=True)
+            self._pilot_step()
 
     def _pilot_refresh_goal(self):
         text = self._transcript_text_for_naming(cap=PILOT_CTX)
@@ -5289,7 +5287,7 @@ class ClaudeSession:
         if self.pilot_goal:
             print(f"[pilot {self.cid[:8]}] goal: {self.pilot_goal!r}", flush=True)
 
-    def _pilot_step(self, engaging=False):
+    def _pilot_step(self):
         """One supervisor round: read the goal + transcript tail, then either
         type the next nudge or park with a reason in the 🤖 row. Runs on every
         Stop while engaged (and once at engage-time if idle). Same shape as
@@ -5657,7 +5655,7 @@ class ClaudeSession:
                     if not buf.endswith("\n"):
                         continue                     # partial line; wait for the rest
                     raw, buf = buf, ""
-                    ev = self._slim_event(raw.strip())
+                    ev = self._slim_event(raw.strip(), track=True)
                     if ev and stale:
                         stale = not self._live_line(ev, raw)
                     if ev and not stale:
@@ -5737,7 +5735,7 @@ class ClaudeSession:
         threading.Thread(target=self.manager.rescue_login_expired,
                          args=(self, self.last_prompt), daemon=True).start()
 
-    def _slim_event(self, line: str):
+    def _slim_event(self, line: str, track=False):
         """Reduce a raw transcript line to the bits a controller cares about.
         The OUTPUT shape is the harness's own (role/text/tools/…) and is
         engine-independent — every consumer above this line (transcript view,
@@ -5748,15 +5746,19 @@ class ClaudeSession:
         subscriber's replay or the tailer (2026-08-27: a queued_command
         whose prompt was a content-block LIST — an image queued mid-turn —
         raised in _strip_noise, and every subscribe to that session killed
-        its whole WS: the harness read as bricked)."""
+        its whole WS: the harness read as bricked).
+
+        track=True (the tailer only) also harvests model / ctx_tokens for
+        the splash card. Every other caller is a READ of old lines — some
+        walk the file backwards — and must not move the gauge."""
         try:
-            return self.eng.slim_event(self, line)
+            return self.eng.slim_event(self, line, track)
         except Exception as e:
             print(f"[transcript {self.cid[:8]}] slim_event failed on a line: "
                   f"{e!r}", flush=True)
             return None
 
-    def _slim_event_claude(self, line: str):
+    def _slim_event_claude(self, line: str, track=False):
         """claude's transcript JSONL → slim events. Shapes mirror
         clawd-tg-claude/bot.py's stream-json handling."""
         if not line:
@@ -5797,13 +5799,14 @@ class ClaudeSession:
             # carry the answering model and a usage block whose input-side sum
             # is the turn's whole context — the "how full is the window" number.
             # ("<synthetic>" tags CLI-generated error text, not a real model.)
-            if msg.get("model") and "<" not in msg["model"]:
+            # Tailer only (track) — see _slim_event.
+            if track and msg.get("model") and "<" not in msg["model"]:
                 self.model = msg["model"]
             u = msg.get("usage") or {}
             tok = sum(u.get(k) or 0 for k in
                       ("input_tokens", "cache_read_input_tokens",
                        "cache_creation_input_tokens"))
-            if tok:
+            if track and tok:
                 self.ctx_tokens = tok
             content = msg.get("content") or []
             text = _collect_text(content)
@@ -5839,7 +5842,7 @@ class ClaudeSession:
                     "usage": obj.get("usage")}
         return None
 
-    def _slim_event_codex(self, line: str):
+    def _slim_event_codex(self, line: str, track=False):
         """codex's rollout JSONL → the same slim events.
 
         Format (0.147.0): one JSON object per line, `{"timestamp":…,
@@ -5870,7 +5873,7 @@ class ClaudeSession:
         if ptype in ("session_meta", "turn_context"):
             # Header lines: harvest the model for the splash card, emit nothing.
             m = p.get("model") or (p.get("turn_context") or {}).get("model")
-            if isinstance(m, str) and m:
+            if track and isinstance(m, str) and m:
                 self.model = m
             return None
 
@@ -5886,10 +5889,10 @@ class ClaudeSession:
             info = p.get("info") or {}
             usage = info.get("last_token_usage") or info
             tok = usage.get("input_tokens") or 0
-            if tok:
+            if track and tok:
                 self.ctx_tokens = tok
             win = info.get("model_context_window") or 0
-            if win:
+            if track and win:
                 self.ctx_window = win
             return None
 
@@ -7108,7 +7111,6 @@ class SessionManager:
             return {"type": "accounts", "active": active,
                     "auto": SUB_AUTOSWITCH,
                     "best": self._best_account(),   # what a new session would pick now
-                    "lastSwitch": self.last_switch_at,
                     "accounts": [a.meta(active=(a.name == active))
                                  for a in self._ordered_accounts()],
                     # The second engine's plan, informational only: codex is
@@ -10404,10 +10406,23 @@ def ws_send(wfile, lock, data, opcode=0x1):
         wfile.flush()
 
 
-def ws_read_message(rfile, max_len=None):
+def _ws_unmask(chunk, mask):
+    """XOR a client frame with its 4-byte mask as ONE big-int operation —
+    the per-byte generator this replaces took seconds on an 8 MiB upload."""
+    n = len(chunk)
+    key = (mask * (n // 4 + 1))[:n]
+    return (int.from_bytes(chunk, "big") ^ int.from_bytes(key, "big")).to_bytes(n, "big")
+
+
+def ws_read_message(rfile, max_len=None, on_ping=None):
     """One reassembled WS message from a browser. A frame (or the fragments
     so far) past `max_len` (MAX_WS_MESSAGE) returns None — the client is
-    dropped rather than read into memory on its own say-so."""
+    dropped rather than read into memory on its own say-so.
+
+    A ping/pong may legally arrive BETWEEN the fragments of one message.
+    Returning it there would abandon the fragments read so far, so it is
+    handled in place: a ping goes to `on_ping(payload)` (the caller's pong),
+    a pong is dropped, and the reassembly carries on."""
     if max_len is None:
         max_len = MAX_WS_MESSAGE
     payload = b""
@@ -10434,11 +10449,17 @@ def ws_read_message(rfile, max_len=None):
         if length > max_len or len(payload) + length > max_len:
             return None
         mask = rfile.read(4) if masked else b""
+        if masked and len(mask) < 4:
+            return None
         chunk = rfile.read(length) if length else b""
         if masked and chunk:
-            chunk = bytes(chunk[i] ^ mask[i % 4] for i in range(len(chunk)))
+            chunk = _ws_unmask(chunk, mask)
         if opcode == 0x8:
             return ("close", chunk)
+        if opcode in (0x9, 0xA) and msg_opcode is not None:
+            if opcode == 0x9 and on_ping:        # mid-message: answer, keep the fragments
+                on_ping(chunk)
+            continue
         if opcode == 0x9:
             return ("ping", chunk)
         if opcode == 0xA:
@@ -10513,9 +10534,8 @@ def eleven_tts(text):
     Raises on any failure. Same voice/model/settings as the /tts HTTP proxy."""
     url = (f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
            "?output_format=mp3_44100_64")
-    body = json.dumps({"text": text[:4000], "model_id": "eleven_flash_v2_5",
-                       "voice_settings": {"stability": 0.65, "similarity_boost": 0.5,
-                                          "use_speaker_boost": True, "speed": 1.0}}).encode()
+    body = json.dumps({"text": text[:4000], "model_id": ELEVENLABS_MODEL_ID,
+                       "voice_settings": ELEVENLABS_VOICE_SETTINGS}).encode()
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json",
         "Accept": "audio/mpeg"})
@@ -10787,18 +10807,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/self/tasks":
             return self._handle_self_tasks()
         if path == "/config":
-            # Token-gated: it leaks workdir / lanIp / sessionId, which a malicious
-            # site could grab via DNS-rebinding if this were open. The page sends
-            # the token it already holds (?t=). No token is returned in the body.
+            # Token-gated like every other GET that describes this box. The
+            # page sends the token it already holds (?t=); none is returned.
+            # Only what the page reads: workdir / lanIp / sessionId used to
+            # ride along with no consumer.
             if not self._token_ok():
                 return self.send_error(403, "bad token")
-            cur = MGR.get(MGR.default_cid())
             return self._serve_json({
-                "sessionId": cur.session_id if cur else None,
-                "workdir": WORKDIR,
-                "sessions": len(MGR.sessions),
-                "lanIp": lan_ip(),
-                "port": PORT,
                 "tts": bool(ELEVENLABS_API_KEY),   # browser uses ElevenLabs when true
                 "stt": bool(DEEPGRAM_API_KEY),     # 🎤 Deepgram dictation available (creds via WS `stt`)
             })
@@ -10879,9 +10894,8 @@ class Handler(BaseHTTPRequestHandler):
                "?optimize_streaming_latency=3&output_format=mp3_44100_64")
         req_body = json.dumps({
             "text": text,
-            "model_id": "eleven_flash_v2_5",
-            "voice_settings": {"stability": 0.65, "similarity_boost": 0.5,
-                               "use_speaker_boost": True, "speed": 1.0},   # tempo is the browser's 1.25×
+            "model_id": ELEVENLABS_MODEL_ID,
+            "voice_settings": ELEVENLABS_VOICE_SETTINGS,
         }).encode()
         req = urllib.request.Request(url, data=req_body, method="POST", headers={
             "xi-api-key": ELEVENLABS_API_KEY,
@@ -11031,7 +11045,10 @@ class Handler(BaseHTTPRequestHandler):
         already forwards verbatim, so it needs no fleet protocol change."""
         if not self._token_ok():
             return self.send_error(403, "bad token")
-        n = int(self.headers.get("Content-Length", "0"))
+        try:
+            n = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            return self.send_error(400, "bad Content-Length")
         if n <= 0 or n > MAX_UPLOAD:
             return self.send_error(413, "bad size")
         parts = [p.strip() for p in self.headers.get("Content-Type", "image/png").split(";")]
@@ -11127,7 +11144,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             while True:
                 try:
-                    msg = ws_read_message(self.rfile)
+                    msg = ws_read_message(
+                        self.rfile, on_ping=lambda d: ws_send(
+                            self.wfile, client.lock, d, opcode=0xA))
                 except Exception:
                     break
                 if msg is None:

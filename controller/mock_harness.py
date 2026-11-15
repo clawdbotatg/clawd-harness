@@ -106,7 +106,7 @@ class _State:
     def accounts_frame(self):
         """A plausible `accounts` frame — one hot pool, one cool, plus codex."""
         return {"type": "accounts", "active": "alpha", "auto": True,
-                "best": "beta", "lastSwitch": 0,
+                "best": "beta",
                 "accounts": [
                     {"name": "alpha", "email": "a@x", "status": "ready",
                      "active": True, "usagePct": 91.0, "headroom": 9.0,
