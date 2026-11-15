@@ -3802,6 +3802,9 @@ function scheduleRelist(machine, delay) {
     }
     // keep retrying (backoff, cap 30s) until a fresh `sessions` frame lands —
     // relistSatisfied() below clears the chain the moment one does
+    // …except behind the "Updating…" overlay: there a human is staring at a
+    // spinner, so ask every 2s, without spending attempts, until the box answers.
+    if (_updating) { st.attempt = 0; scheduleRelist(machine, 2000); return; }
     scheduleRelist(machine, Math.min(30000, 1500 * Math.pow(2, st.attempt)));
   }, delay == null ? 1500 : delay);
 }
@@ -3823,8 +3826,19 @@ function sweepStaleLists() {
 // `projects`/`sessions` from ANY machine update that machine's cache (and the merge);
 // every other frame (focus/hello/transcript/hook/exit/…) only matters for the machine
 // whose session we're viewing, so it's handed to the unchanged single-session handleJson.
+const machineBoot = {};   // machineId -> that harness's boot id, as last seen on a `projects` frame
 function handleMachineJson(machine, m) {
   if (m.type === 'projects') {
+    // The harness on this box restarted (new boot id on the first frame of a
+    // fresh harness link). Direct mode catches this in handleJson; in fleet the
+    // frame never gets there, so the "Updating…" overlay sat until its 25s
+    // safety net — long after the box was back ("it never reconnects", Austin
+    // 11-14). The box just spoke, so it is provably up: reload now.
+    if (m.boot) {
+      const was = machineBoot[machine];
+      machineBoot[machine] = m.boot;
+      if (was && was !== m.boot && machine === currentMachine) { beginUpdate('Updating…', 1200); return; }
+    }
     const pm = perMachine[machine] || (perMachine[machine] = {});
     pm.projectList = m.projects || [];
     pm.gotProjects = true;
