@@ -104,18 +104,33 @@ class _State:
                     "projects": [dict(p) for p in self.projects.values()]}
 
     def accounts_frame(self):
-        """A plausible `accounts` frame — one hot pool, one cool, plus codex."""
+        """A plausible `accounts` frame — one hot pool, one cool, plus codex.
+        Rows carry every key server.py's Account.meta() sends. `alpha-old` is a
+        dead second login into alpha's org: labels are folders, not plans, and
+        get_accounts has to collapse them by orgUuid."""
+        def acct(name, org, org_name, pct, resets, **kw):
+            row = {"name": name, "email": f"{name[0]}@x", "fable": True,
+                   "routable": True, "orgUuid": org, "orgName": org_name,
+                   "tier": "default_claude_max_20x", "status": "ready",
+                   "active": False, "usagePct": pct,
+                   "headroom": None if pct is None else round(100 - pct, 1),
+                   "windows": ([] if pct is None else
+                               [{"key": "w", "label": "weekly", "used": pct,
+                                 "resets": resets}]),
+                   "checkedAt": 0, "walledUntil": 0, "wallKind": "",
+                   "error": "", "loginExpiresAt": None, "token": False,
+                   "configDir": f"/mock/accounts/{name}"}
+            row.update(kw)
+            return row
         return {"type": "accounts", "active": "alpha", "auto": True,
                 "best": "beta",
                 "accounts": [
-                    {"name": "alpha", "email": "a@x", "status": "ready",
-                     "active": True, "usagePct": 91.0, "headroom": 9.0,
-                     "windows": [{"key": "w", "label": "weekly", "used": 91.0,
-                                  "resets": "2026-08-12T00:00:00Z"}]},
-                    {"name": "beta", "email": "b@x", "status": "ready",
-                     "active": False, "usagePct": 12.0, "headroom": 88.0,
-                     "windows": [{"key": "w", "label": "weekly", "used": 12.0,
-                                  "resets": "2026-08-10T00:00:00Z"}]}],
+                    acct("alpha", "org-a", "Alpha Co", 91.0,
+                         "2026-08-12T00:00:00Z", active=True),
+                    acct("beta", "org-b", "Beta Co", 12.0,
+                         "2026-08-10T00:00:00Z"),
+                    acct("alpha-old", "org-a", "Alpha Co", None, "",
+                         status="needs-login")],
                 "codex": {"engine": "codex", "status": "ready", "plan": "pro",
                           "pct": 40.0, "limitReached": ""}}
 
@@ -242,7 +257,21 @@ def _make_handler(state):
                     j({"type": "transcriptTailResult", "id": f.get("id"),
                        "cid": cid, "error": f"no such session: {cid}"})
                     return
-                evs = state.transcripts.get(cid, [])[-int(f.get("n") or 30):]
+                # same clamps + per-field cut as server.py tail_events
+                n = max(1, min(int(f.get("n") or 30), 50))
+                chars = max(40, min(int(f.get("chars") or 400), 2000))
+                evs = []
+                for ev in state.transcripts.get(cid, [])[-n:]:
+                    ev = dict(ev)
+                    if isinstance(ev.get("text"), str):
+                        ev["text"] = ev["text"][:chars]
+                    if ev.get("tools"):
+                        ev["tools"] = [{"name": tu.get("name"),
+                                        "input": str(tu.get("input"))[:chars]}
+                                       for tu in ev["tools"][:8]]
+                    if ev.get("results"):
+                        ev["results"] = [str(r)[:chars] for r in ev["results"][:8]]
+                    evs.append(ev)
                 j({"type": "transcriptTailResult", "id": f.get("id"),
                    "cid": cid, "events": evs})
                 return
@@ -305,6 +334,24 @@ def _make_handler(state):
                 cid, on = f.get("cid"), f.get("on", True)
                 state.set_session(cid, pinned=(1.0 if on else 0.0),
                                   testHint=("go verify it by hand" if on else ""))
+            elif t in ("createProject", "addProject"):
+                # create = a new repo under the owner; add = clone one. Both
+                # re-adopt a project of the same name instead of duplicating it.
+                if t == "createProject":
+                    nm = (f.get("name") or "").strip().replace(" ", "-") or "project"
+                    url = f"https://github.com/clawdbotatg/{nm}"
+                else:
+                    url = (f.get("repoUrl") or "").rstrip("/")
+                    nm = url.split("/")[-1].removesuffix(".git") or "project"
+                with state.lock:
+                    if not any(p["name"] == nm for p in state.projects.values()):
+                        pid = f"G{len(state.projects) + 1}"
+                        state.projects[pid] = {
+                            "pid": pid, "name": nm, "path": f"/mock/projects/{nm}",
+                            "repoUrl": url, "kind": "gh", "status": "ready",
+                            "sessionCount": 0, "busyCount": 0, "waitingCount": 0,
+                            "pinned": False}
+                state.broadcast(state.projects_frame())
             elif t == "addExternalProject":
                 url = (f.get("repoUrl") or "").rstrip("/")
                 with state.lock:

@@ -18,6 +18,8 @@ import threading
 import time
 import urllib.parse
 
+from .ledger import STATUSES
+
 WRITE_VERBS = {"assign", "ask", "answer_prompt", "interrupt",
                "create_project", "clone_project", "spawn", "close", "wrap", "check",
                "start_pipeline", "pin", "add_local_project", "remove_project",
@@ -137,10 +139,10 @@ class Verbs:
                      "snippet": (t.get("goal") or "")[:160],
                      "sessions": t.get("sessions", [])[-3:]})
         # 2) cached session/project meta — includes offline machines
-        clients = {mid: c for mid, c in self.clients.items()
+        clients = {mid: c for mid, c in list(self.clients.items())
                    if not machine or mid == machine}
         _, by_proj, _ = self._iron_index()
-        for mid, c in clients.items():
+        for mid, c in list(clients.items()):
             st = c.state()
             for p in st["projects"]:
                 name = p.get("name") or ""
@@ -185,7 +187,7 @@ class Verbs:
         # 3) transcript fan-out — server-side search on each connected machine
         unreachable = []
         if scope in ("transcript", "all"):
-            live = [(mid, c) for mid, c in clients.items()
+            live = [(mid, c) for mid, c in list(clients.items())
                     if getattr(c, "connected", False)]
             per = max(3, limit // len(live)) if live else 0
             results = {}
@@ -281,7 +283,7 @@ class Verbs:
                     it["tail"] = r.get("events", [])
         idle_no_task, stale_tasks, working = [], [], []
         live_cids = set()
-        for mid, c in self.clients.items():
+        for mid, c in list(self.clients.items()):
             for s in c.state()["sessions"]:
                 live_cids.add(s["cid"])
                 st = self.world._status(s)
@@ -340,7 +342,7 @@ class Verbs:
         router can spend right now. Only say a plan needs a re-sign-in when its
         pool has `live: false` — every label into it is dead."""
         out = []
-        for mid, c in self.clients.items():
+        for mid, c in list(self.clients.items()):
             if machine and mid != machine:
                 continue
             a = c.state().get("accounts") or {}
@@ -426,7 +428,7 @@ class Verbs:
         answer to "what's outstanding?" that neither the attention queue (they
         aren't blocked) nor idle_no_task (they're deliberately parked) gives."""
         pins = []
-        for mid, c in self.clients.items():
+        for mid, c in list(self.clients.items()):
             if machine and mid != machine:
                 continue
             for s in c.state()["sessions"]:
@@ -459,7 +461,7 @@ class Verbs:
         irons, by_proj = [], {}
         src = self.irons_source() if self.irons_source else None
         if src is not None:
-            projs = [(mid, p) for mid, c in self.clients.items()
+            projs = [(mid, p) for mid, c in list(self.clients.items())
                      for p in c.state()["projects"]]
             base = {}
             for _mid, p in projs:
@@ -491,7 +493,7 @@ class Verbs:
             return irons, by_proj, bool(src.get("seen"))
         multi = len(self.clients) > 1
         n = 0
-        for mid, c in self.clients.items():
+        for mid, c in list(self.clients.items()):
             st = c.state()
             pids = {p.get("pid") for p in st["projects"]}
             for i in st.get("irons") or []:
@@ -578,7 +580,7 @@ class Verbs:
         _, by_proj, _ = self._iron_index()
         now = time.time()
         rows = []
-        for mid, c in self.clients.items():
+        for mid, c in list(self.clients.items()):
             if machine and mid != machine:
                 continue
             for r in c.state().get("closed") or []:
@@ -618,7 +620,7 @@ class Verbs:
         now = time.time()
         cutoff, window = _since_cutoff(since, now)
         rows, left_out = [], 0
-        for mid, c in self.clients.items():
+        for mid, c in list(self.clients.items()):
             for s in c.state()["sessions"]:
                 if s.get("pinned") or s.get("alive") is False:
                     continue
@@ -739,6 +741,14 @@ class Verbs:
         return {"ok": True, "task": t}
 
     def set_task_status(self, task_id, status):
+        """Move a task to one of ledger.STATUSES. Anything else is refused: the
+        attention queue, the verify turn and list_tasks(status=) all match
+        these exact strings, so a typo ("in-progress", "complete") used to
+        park the task where none of them would ever see it again."""
+        status = str(status or "").strip().lower()
+        if status not in STATUSES:
+            return {"ok": False, "error": f"unknown status {status!r} — use one "
+                    "of: " + ", ".join(STATUSES)}
         t = self.ledger.set_status(task_id, status)
         return {"ok": bool(t), "task": t} if t else {"ok": False, "error": "no such task"}
 
@@ -1156,7 +1166,9 @@ class Verbs:
         spawned session — "claude" (default) or "codex"; it is ignored when you
         reuse `existing` (that session's engine is already what it is). The
         engine is recorded on the task, so the ledger says which CLI did the
-        work."""
+        work. A kickoff the session would not take comes back ok:false with
+        `linked: true` — the session exists and is on the task, but nothing was
+        said to it."""
         engine = _norm_engine(engine)
 
         def do():
@@ -1183,7 +1195,19 @@ class Verbs:
             kickoff = t["goal"]
             if t.get("acceptance"):
                 kickoff += f"\n\nDone when: {t['acceptance']}"
-            c.send_message(cid, kickoff)
+            if not c.send_message(cid, kickoff):
+                # The link is already recorded (the session is real and is this
+                # task's), so say exactly what is missing rather than report a
+                # start that never happened.
+                self.ledger.note(task_id, f"assign: session {cid} would not take "
+                                 "the kickoff (link down?)")
+                return {"ok": False, "task": task_id, "machine": machine,
+                        "cid": cid, "spawned": spawned, "engine": ran_on,
+                        "linked": True,
+                        "error": f"session {cid} is linked to {task_id} but would "
+                                 "not take the kickoff (link down?) — it has NOT "
+                                 "started; re-send the goal with ask() once the "
+                                 "machine is back"}
             return {"ok": True, "task": task_id, "machine": machine,
                     "cid": cid, "spawned": spawned, "engine": ran_on,
                     "kickoff": kickoff}

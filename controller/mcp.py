@@ -13,6 +13,8 @@ import json
 import sys
 import urllib.request
 
+from .ledger import STATUSES
+
 PROTOCOL_VERSION = "2025-06-18"
 
 # (name, description, inputSchema). Kept flat + explicit — a model reads these
@@ -25,7 +27,9 @@ _INT = {"type": "integer"}
 TOOLS = [
     ("get_world", "Compact fleet map: machines→projects→sessions, one line per "
         "session (cid/title/status/task/idle_m/digest), per-machine counts, "
-        "empty projects as a name list. Bounded — never overflows. Drill down "
+        "empty projects as a name list. Bounded — never overflows. Unscoped, "
+        "each machine lists its 40 most recent sessions (`more_sessions` = how "
+        "many were left out); machine= returns ALL of that machine's. Drill down "
         "with machine=/pid= (verbose=true only when scoped). For 'where is X' "
         "questions use `find`, NOT this. Two flags appear only when true: "
         "`engine` (absent ⇒ claude, so `engine:\"codex\"` marks the codex ones) "
@@ -145,20 +149,23 @@ TOOLS = [
         "harness UI. Use to send the user to a project. Read-only.",
         _S({"machine": _STR, "pid": _STR}, ["machine", "pid"])),
     ("list_tasks", "The task ledger (PM intent). Optional status filter "
-        "(open|in_progress|blocked|review|done).", _S({"status": _STR})),
+        "(" + "|".join(STATUSES) + ").", _S({"status": _STR})),
     ("get_task", "One task by id.", _S({"task_id": _STR}, ["task_id"])),
     ("create_task", "Record an intended unit of work. Bookkeeping only — does not "
         "touch the fleet. acceptance = how you'll know it's done.",
         _S({"goal": _STR, "project": _STR, "acceptance": _STR, "machine": _STR}, ["goal"])),
-    ("set_task_status", "Update a task's status.",
+    ("set_task_status", "Update a task's status. `status` must be one of "
+        + " | ".join(STATUSES) + " — anything else is refused.",
         _S({"task_id": _STR, "status": _STR}, ["task_id", "status"])),
     ("note_task", "Append a note to a task's history.",
         _S({"task_id": _STR, "text": _STR}, ["task_id", "text"])),
     ("assign", "Put a task to work: spawn a new session in project `spawn_in` (a "
         "pid) OR reuse `existing` (a cid), link it to the task, and send the goal "
         "as the first message. `engine` picks the CLI for a newly spawned session "
-        "— \"claude\" (default) or \"codex\" — and is recorded on the task. WRITE "
-        "— needs confirm=true under autonomy=confirm.",
+        "— \"claude\" (default) or \"codex\" — and is recorded on the task. "
+        "ok:false with `linked:true` = the session is on the task but would NOT "
+        "take the goal (link down): it has not started — re-send with `ask`, do "
+        "not assign again. WRITE — needs confirm=true under autonomy=confirm.",
         _S({"task_id": _STR, "machine": _STR, "spawn_in": _STR, "existing": _STR,
             "engine": _STR, "confirm": _BOOL}, ["task_id", "machine"])),
     ("create_pipeline", "Plan a MULTI-STEP task: one goal, an ordered list of "

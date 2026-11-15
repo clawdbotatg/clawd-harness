@@ -102,11 +102,45 @@ def main():
         ap._handle({"kind": "blocked", "machine": "m2", "cid": "c4",
                     "summary": "over budget"})
         assert len(turns) == 3, turns                       # hard stop
-        assert len(pings) == before + 1 and "budget exhausted" in pings[-1], pings
+        notices = lambda: [p for p in pings[before:] if "budget exhausted" in p]  # noqa: E731
+        assert len(notices()) == 1, pings
         ap._handle({"kind": "blocked", "machine": "m2", "cid": "c5",
                     "summary": "still over"})
-        assert len(pings) == before + 1, pings              # notified ONCE
+        assert len(notices()) == 1, pings                   # notified ONCE
     check("hourly budget hard-stops turns; operator notified once", t_budget)
+
+    def t_raw_ping_when_not_acting():
+        # The autopilot swallows the plain "needs you" ping only when a triage
+        # turn really runs. Enabled-but-not-acting used to notify nobody.
+        raw = lambda: [p for p in pings if p.startswith("⏳ needs you")]  # noqa: E731
+        # (the cooldown / own-echo / over-budget blocks above each pinged)
+        got = "\n".join(raw())
+        for cid, why in (("c1", "again"), ("c-own", "our own send parked it"),
+                         ("c4", "over budget"), ("c5", "still over")):
+            assert f"/{cid}: {why}" in got, (cid, raw())
+        # …and the blocks that DID get a triage turn did not
+        assert "permission prompt" not in got and "third turn" not in got, raw()
+        n, t = len(raw()), len(turns)
+        for pause, unpause in ((lambda: ap.set_enabled(False), lambda: ap.set_enabled(True)),
+                               (lambda: setattr(guard, "autonomy", "readonly"),
+                                lambda: setattr(guard, "autonomy", "auto"))):
+            pause()
+            ap.feed({"kind": "blocked", "machine": "m3", "cid": "c-paused",
+                     "summary": "parked while paused"})
+            unpause()
+            n += 1
+            assert len(raw()) == n and "m3/c-paused: parked while paused" in raw()[-1], raw()
+            assert not ap._q, ap._q                  # pinged, not queued for later
+        # a triage turn that dies is not "acting" either
+        boom = Autopilot(lambda kind, prompt: 1 / 0, None, ledger, guard,
+                         notify=pings.append, enabled=True,
+                         toggle_path=tempfile.mktemp(suffix=".txt"))
+        boom._handle({"kind": "blocked", "machine": "m3", "cid": "c-boom",
+                      "summary": "turn will crash"})
+        assert "m3/c-boom: turn will crash" in raw()[-1], raw()
+        assert len(turns) == t, turns
+    check("blocked with no triage turn (paused/cooldown/budget/echo) still pings",
+          t_raw_ping_when_not_acting)
 
     def t_digest():
         r1 = ap.escalate({"question": "merge to main?", "machine": "m1",

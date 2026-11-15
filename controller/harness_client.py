@@ -161,9 +161,6 @@ class HarnessClient:
         except Exception:
             return False
 
-    def refresh(self):
-        return self.send({"type": "list"})
-
     def new_session(self, pid, timeout=12, engine="claude"):
         """Create a session in `pid` and block for the server's focus reply with
         the new cid (None on timeout). Serialized so concurrent spawns don't

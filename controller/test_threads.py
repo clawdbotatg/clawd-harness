@@ -36,14 +36,10 @@ def main():
         th = Threads(path)
         a = th.current
         th.record("me", "work on alpha")
-        th.save_state("bankr", {"history": [{"role": "user", "content": "alpha"}]})
         b = th.new()                          # new thread, auto-selected
         assert th.current == b and b != a
         th.record("me", "work on beta")
-        th.save_state("bankr", {"history": [{"role": "user", "content": "beta"}]})
-        # each thread sees only its own state + transcript
-        assert th.state_for("bankr", a)["history"][0]["content"] == "alpha"
-        assert th.state_for("bankr", b)["history"][0]["content"] == "beta"
+        # each thread sees only its own transcript
         assert th.messages(a)[0]["text"] == "work on alpha"
         assert th.messages(b)[0]["text"] == "work on beta"
         # title locked from the first user message
@@ -64,7 +60,7 @@ def main():
         cur = th.current
         assert th.messages(cur)                # has content
         th.clear()
-        assert th.messages(cur) == [] and th.state_for("bankr", cur) == {}
+        assert th.messages(cur) == []
         assert th.get(cur)["title"] == "New thread"
     check("clear wipes a thread's context but keeps the slot", t_clear)
 
@@ -86,7 +82,6 @@ def main():
         th.clear()
         tid = th.new(title="persisted")
         th.record("me", "remember me")
-        th.save_state("claude-code", {"history": [], "session_id": "sess-123"})
         th.persist()                           # caller persists after a turn (Router.chat)
         cur = th.current
         # reopen from disk → same threads, current, history
@@ -94,7 +89,6 @@ def main():
         assert th2.current == cur
         assert th2.get(tid)["title"] == "persisted"
         assert th2.messages(tid)[0]["text"] == "remember me"
-        assert th2.state_for("claude-code", tid)["session_id"] == "sess-123"
         # ids keep climbing — no collision after restart
         new_id = th2.new()
         assert new_id not in {tid}

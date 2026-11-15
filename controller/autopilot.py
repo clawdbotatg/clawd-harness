@@ -36,6 +36,8 @@ hazard: per-session and per-task cooldowns; **own-action suppression** (an
 event on a cid the PM itself just wrote to is its own echo — skipped);
 hourly + daily turn budgets with a hard stop; paused entirely under
 autonomy=readonly; a persisted runtime kill switch (POST /api/autopilot).
+A `blocked` that gets no triage turn for any of those reasons still sends the
+plain "⏳ needs you" ping — the autopilot only replaces it by actually acting.
 Every decision is visible: turns are recorded into a dedicated "🤖 autopilot"
 chat thread and [auto] journal lines.
 """
@@ -128,6 +130,13 @@ class Autopilot:
         kind = event.get("kind")
         if kind not in ("blocked", "turn_done"):
             return
+        if kind == "blocked":
+            reason = self._paused_reason()
+            if reason:
+                # paused → no triage turn will ever run for this block, so the
+                # plain ping must still go out (said now, not from the queue)
+                self._raw_ping(event, reason)
+                return
         key = (kind, event.get("cid"))
         with self.lock:
             if key in self._q_keys:
@@ -135,6 +144,16 @@ class Autopilot:
             self._q_keys.add(key)
             self._q.append(event)
         self._wake.set()
+
+    def _raw_ping(self, ev, why):
+        """The plain per-block push. The autopilot replaces it ONLY with a
+        triage turn that actually runs: paused, cooling down, out of budget,
+        echo-suppressed or a failed turn all mean nobody is looking at this
+        block, and an enabled-but-idle autopilot used to swallow it whole."""
+        self.notify(f"⏳ needs you — {ev.get('machine')}/{str(ev.get('cid'))[:8]}: "
+                    f"{ev.get('summary') or 'needs input'}")
+        self._note("blocked", f"{ev.get('machine')}/{str(ev.get('cid'))[:8]}",
+                   f"raw ping (no triage: {why})")
 
     # -- guards ---------------------------------------------------------------------
     def _paused_reason(self):
@@ -194,10 +213,12 @@ class Autopilot:
                     self._log(f"handler error: {type(e).__name__}: {e}")
 
     def _handle(self, ev):
+        kind, cid, machine = ev.get("kind"), ev.get("cid"), ev.get("machine")
         reason = self._paused_reason()
         if reason:
+            if kind == "blocked":         # paused between feed() and here
+                self._raw_ping(ev, reason)
             return
-        kind, cid, machine = ev.get("kind"), ev.get("cid"), ev.get("machine")
         now = time.time()
         # A pipeline step finishing is checked BEFORE own-echo suppression: we
         # prompted that session ourselves, so its Stop *is* our own echo — and
@@ -210,16 +231,19 @@ class Autopilot:
                 return
         if self._own_echo(cid):
             self._note(kind, f"{machine}/{str(cid)[:8]}", "skipped: own echo")
+            if kind == "blocked":
+                self._raw_ping(ev, "own echo")
             return
         if kind == "blocked":
             if now - self._last_turn_for.get(cid, 0) < self.cooldown_s:
-                return
+                return self._raw_ping(ev, "cooldown")
             if not self._budget_left():
-                return
+                return self._raw_ping(ev, "budget exhausted")
             self._last_turn_for[cid] = now
             self._turns.append(now)
-            self._turn("triage", self._triage_prompt(ev),
-                       f"{machine}/{str(cid)[:8]}")
+            if not self._turn("triage", self._triage_prompt(ev),
+                              f"{machine}/{str(cid)[:8]}"):
+                self._raw_ping(ev, "triage turn failed")
         elif kind == "turn_done":
             tid = self.ledger.task_for_cid(cid)
             task = self.ledger.get(tid) if tid else None
@@ -311,7 +335,7 @@ class Autopilot:
         # list it: an offline or not-yet-synced machine used to get every
         # running step there force-failed, and the chain moved on empty.
         live, seen = {}, set()
-        for mid, c in (self.verbs.clients or {}).items():
+        for mid, c in list((self.verbs.clients or {}).items()):
             try:
                 st = c.state()
             except Exception:
@@ -353,8 +377,9 @@ class Autopilot:
             reply = self.run_pm(kind, prompt)
         except Exception as e:
             self._note(kind, target, f"turn failed: {e}")
-            return
+            return False
         self._note(kind, target, (reply or "").strip()[:200])
+        return True
 
     # -- prompts ---------------------------------------------------------------------
     @staticmethod

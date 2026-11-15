@@ -315,11 +315,10 @@ def main(argv):
             if e["kind"] == "blocked":
                 line = f"⏳ needs you — {e['machine']}/{e['cid'][:8]}: {e['summary']}"
                 print("[reactor] " + line, flush=True)
-                # With the autopilot ON, the raw per-event ping is ITS job to
-                # replace (triage it, or batch it into the digest) — pinging
-                # here too would double-notify every block.
-                if tg and not autopilot.enabled:
-                    tg.notify(line)
+                # The Telegram ping is the autopilot's to send or replace
+                # (Autopilot._raw_ping): it goes out whenever no triage turn
+                # runs for this block — off, paused, cooling down, out of
+                # budget — and pinging here too would double-notify.
         reactor.on_event(on_event)
 
         chat_server.serve_with_router(router, verbs, guard,

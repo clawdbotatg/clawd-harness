@@ -149,7 +149,6 @@ class TelegramBridge:
             return
         # Stream the PM's work live (tool calls + narration) rather than one final
         # dump. emit() is throttled to stay under Telegram's per-chat rate limit.
-        import time
         last = [0.0]
 
         def emit(kind, body):

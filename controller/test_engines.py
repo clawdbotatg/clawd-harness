@@ -153,6 +153,13 @@ def main():
         assert hot["usage_pct"] == 91.0 and hot["active"] and hot["windows"], hot
         assert m["would_spawn_on"] == "beta", m           # the router's own pick
         assert m["codex"]["plan"] == "pro" and m["codex"]["routed"] is False, m
+        # the mock's frame carries the org fields the real one does, so the
+        # label→plan collapse is exercised: 3 labels, 2 subscriptions, and the
+        # dead `alpha-old` login costs nothing because alpha is live
+        assert hot["org"] == "org-a" and hot["plan"] == "Alpha Co", hot
+        assert m["plans_total"] == 2 and m["plans_usable"] == 2, m
+        pool = next(p for p in m["pools"] if p["org"] == "org-a")
+        assert pool["labels"] == ["alpha", "alpha-old"] and pool["live"], pool
         # there is deliberately no verb to move accounts around
         assert not any(n.startswith("account") for n in dir(verbs))
     check("get_accounts reports plan headroom + the codex card (read-only)",

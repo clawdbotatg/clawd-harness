@@ -19,7 +19,10 @@ _SEV_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 class World:
     def __init__(self, clients, ledger):
-        self.clients = clients      # {machine_id: HarnessClient}
+        # {machine_id: HarnessClient}. In fleet mode this is RelayFleet's LIVE
+        # dict — its reader thread adds machines while HTTP/autopilot threads
+        # read here, so every loop iterates a list(...) copy.
+        self.clients = clients
         self.ledger = ledger
 
     # -- the full snapshot -----------------------------------------------------
@@ -27,7 +30,7 @@ class World:
         now = time.time()
         verbose = bool(verbose) and bool(machine or pid)   # verbose only when scoped
         machines = []
-        for mid, client in self.clients.items():
+        for mid, client in list(self.clients.items()):
             if machine and mid != machine:
                 continue
             st = client.state()
@@ -39,8 +42,12 @@ class World:
                 counts[self._status(s)] = counts.get(self._status(s), 0) + 1
             ordered = sorted(sessions, key=lambda s: s.get("lastActive") or 0,
                              reverse=True)
-            dropped = max(0, len(ordered) - max_sessions)
-            ordered = ordered[:max_sessions]
+            # The cap keeps the fleet-wide map small; a machine-scoped read IS
+            # the drill-down its hint points at, so it returns every session
+            # (verbs.get_world's char budget still bounds the reply).
+            cap = len(ordered) if machine else max_sessions
+            dropped = max(0, len(ordered) - cap)
+            ordered = ordered[:cap]
             sess_by_pid = {}
             for s in ordered:
                 row = (self._verbose_session(s, st, now) if verbose
@@ -122,7 +129,7 @@ class World:
     def attention(self, stall_after=900, limit=30):
         now = time.time()
         items = []
-        for mid, client in self.clients.items():
+        for mid, client in list(self.clients.items()):
             for s in client.state()["sessions"]:
                 status = s.get("status")
                 blocked_on = (s.get("blocked_on") or "").strip()

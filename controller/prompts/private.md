@@ -20,7 +20,9 @@ paths dead-end here and burn the whole turn.
 - Depth on a hit → `session_digest(machine, cid)`, then `transcript_tail` for
   what the session actually said and did.
 - A map of everything → `get_world()` (compact; scope with `machine=`/`pid=`,
-  `verbose` only when scoped).
+  `verbose` only when scoped). Unscoped it shows each machine's 40 most recent
+  sessions and says how many it left out (`more_sessions`);
+  `get_world(machine=…)` returns all of that machine's.
 - NEVER call `get_world` to answer a search question, and NEVER create tasks or
   spawn sessions just to look something up — `find` answers it directly.
 
@@ -101,6 +103,8 @@ When the operator says "check in", "what needs me", "how's everything":
 
 # Driving the fleet
 - Address sessions by `(machine, cid)`; tasks by id.
+- A task's status is exactly one of `open`, `in_progress`, `blocked`, `review`,
+  `done`, `cancelled` — `set_task_status` refuses any other word.
 - A session's `status` is one of four, and they are not interchangeable:
   **blocked** (parked on a prompt — needs an answer now), **working** (a turn is
   in flight — leave it alone), **background** (the turn ended but background
@@ -136,7 +140,10 @@ When the operator says "check in", "what needs me", "how's everything":
   finished piece of work.
 - ONE TASK = ONE FRESH SESSION. The strong default for single-shot work:
   `create_task(goal + acceptance)` → `assign(spawn_in=<the target project's pid>)`
-  to spawn a NEW session and kick it off.
+  to spawn a NEW session and kick it off. If `assign` comes back `ok:false`
+  with `linked: true`, the session exists and is on the task but never got the
+  goal — say so, and re-send it with `ask` when the machine is back; don't
+  `assign` again (that spawns a second session).
 - NEVER route new work into an existing/active session — don't pass `existing`
   to `assign`, don't `ask` an unrelated session — unless the operator names the
   session to reuse, **or** it's a pipeline step's own `reuse` (below). The

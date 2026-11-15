@@ -146,6 +146,77 @@ def main():
             what="assigned session linked in world")
     check("create_task + assign spawns a session and links it", t_create_and_assign)
 
+    def t_assign_reports_failed_kickoff():
+        # The spawn works but the goal never reaches the session (link dropped
+        # in between). assign used to ignore that and answer ok:true.
+        guard.autonomy = "auto"
+        task = verbs.create_task("write the docs", project="p1", machine="self")["task"]
+        real = client.send_message
+        client.send_message = lambda cid, text: False
+        try:
+            r = verbs.assign(task["id"], "self", spawn_in="p1")
+        finally:
+            client.send_message = real
+        assert r["ok"] is False and "kickoff" in r["error"], r
+        assert r["linked"] is True and r["spawned"] and r["cid"], r
+        assert ledger.task_for_cid(r["cid"]) == task["id"]      # link is real
+        assert any("would not take the kickoff" in str(h)
+                   for h in ledger.get(task["id"]).get("history", [])), ledger.get(task["id"])
+        assert ledger.recent_actions(1)[0]["ok"] is False        # audited as a failure
+    check("assign says so when the kickoff send fails", t_assign_reports_failed_kickoff)
+
+    def t_status_validated():
+        task = verbs.create_task("status check")["task"]
+        for bad in ("in-progress", "complete", "", None):
+            r = verbs.set_task_status(task["id"], bad)
+            assert r["ok"] is False and "review" in r["error"], (bad, r)
+        assert ledger.get(task["id"])["status"] == "open"        # untouched
+        r = verbs.set_task_status(task["id"], " Review ")        # tidy, then accept
+        assert r["ok"] and r["task"]["status"] == "review", r
+        assert verbs.set_task_status("T-nope", "done")["ok"] is False
+    check("set_task_status refuses a status outside ledger.STATUSES", t_status_validated)
+
+    def t_projects_on_mock():
+        guard.autonomy = "auto"
+        assert verbs.create_project("self", "fresh thing")["ok"]
+        assert verbs.clone_project("self", "https://github.com/someone/lib.git")["ok"]
+        _wait(lambda: {"fresh-thing", "lib"} <= {p["name"] for p in client.state()["projects"]},
+              what="created + cloned projects on the mock")
+        n = len(client.state()["projects"])
+        verbs.create_project("self", "fresh thing")              # same name → re-adopted
+        verbs.create_project("self", "one more")
+        _wait(lambda: any(p["name"] == "one-more" for p in client.state()["projects"]),
+              what="a later project frame")
+        assert len(client.state()["projects"]) == n + 1, client.state()["projects"]
+    check("mock harness speaks createProject / addProject", t_projects_on_mock)
+
+    def t_machines_can_arrive_mid_read():
+        # Fleet mode hands World/Verbs the relay's LIVE machine dict: its reader
+        # thread adds a machine while an HTTP or autopilot thread is iterating.
+        live = {"self": client}
+
+        class Arriving:
+            """A client whose state() read coincides with a roster change."""
+            def __getattr__(self, name):
+                return getattr(client, name)
+
+            def state(self):
+                live[f"late{len(live)}"] = client
+                return client.state()
+        live["first"] = Arriving()
+        w = World(live, ledger)
+        v = Verbs(w, ledger, live, Guard(autonomy="auto"))
+        for name, read in (("snapshot", w.snapshot), ("attention", w.attention),
+                           ("get_world", v.get_world), ("sweep", v.sweep),
+                           ("get_accounts", v.get_accounts), ("get_pins", v.get_pins),
+                           ("find", lambda: v.find("existing"))):
+            try:
+                read()
+            except RuntimeError as e:
+                raise AssertionError(f"{name}: {e}")
+    check("reads survive a machine joining the fleet mid-iteration",
+          t_machines_can_arrive_mid_read)
+
     def t_attention_and_answer():
         guard.autonomy = "auto"
         # drive c1 into a blocked state via the mock's ASK? convention

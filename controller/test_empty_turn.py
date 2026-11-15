@@ -94,10 +94,32 @@ def main():
         assert out["reply"] == EMPTY_TURN_FALLBACK, out
         assert len(agent_mod._run_turn.calls) == 2, agent_mod._run_turn.calls
 
+    def unexpected_error_still_ends_the_turn():
+        # Only two exception types were handled; anything else skipped _end()
+        # and left turn_status "active" (the UI's in-flight spinner) for good.
+        for dies_on in (1, 2):               # the turn itself / the empty-turn nudge
+            class Boom(FakeEngine):
+                def __call__(self, user_text, **kw):
+                    self.calls.append(user_text)
+                    if len(self.calls) == dies_on:
+                        raise ValueError("engine blew up")
+                    return {"text": "", "num_turns": 1}
+            agent_mod._run_turn = Boom([])
+            b = AgentBrain(StubGuard(), trust="private", claude_bin="claude")
+            try:
+                b.chat("go build it")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("the error should still propagate")
+            assert b.turn_status == {"active": False}, (dies_on, b.turn_status)
+
     check("normal turn: 1 engine call, reply verbatim", normal_turn_untouched)
     check("empty turn: one nudge, nudged reply shown", empty_turn_gets_one_nudge)
     check("empty twice: fallback line, no '(no result)'", double_empty_falls_back)
     check("nudge errors: fallback line, no crash", nudge_error_falls_back)
+    check("unexpected engine error: turn_status is not left active",
+          unexpected_error_still_ends_the_turn)
 
     if failures:
         raise SystemExit(f"FAILED: {failures}")

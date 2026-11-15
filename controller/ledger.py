@@ -16,8 +16,8 @@ import threading
 import time
 
 # Task lifecycle: open (created, unassigned) → in_progress (assigned to a
-# session) → blocked | review | done. Free-form beyond these is allowed; these
-# are what the brain/attention logic key off.
+# session) → blocked | review | done. These are what the brain/attention logic
+# key off; the set_task_status verb refuses anything else.
 STATUSES = ("open", "in_progress", "blocked", "review", "done", "cancelled")
 
 # A **pipeline** is a task whose work is an ordered list of steps, each run by
@@ -26,7 +26,7 @@ STATUSES = ("open", "in_progress", "blocked", "review", "done", "cancelled")
 # was no way to say "when session A finishes, feed its answer to session B".
 # The steps live here, in the same append-only log, so the state survives
 # restarts and any turn can reconstruct exactly where a pipeline got to.
-STEP_STATUSES = ("pending", "running", "done", "failed", "skipped")
+# Step statuses: pending | running | done | failed | skipped.
 
 
 class TaskLedger:

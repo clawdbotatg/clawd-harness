@@ -121,6 +121,20 @@ def main():
     check("get_world stays bounded on a 10x fleet (degrades, never blows)",
           t_world_bounded_at_scale)
 
+    def t_world_machine_scope_uncapped():
+        # the fleet-wide map caps each machine and points at the drill-down…
+        m = verbs.get_world()["machines"][0]
+        shown = sum(len(p["sessions"]) for p in m["projects"])
+        assert shown == 40 and m["more_sessions"] == m["sessions"] - 40, m
+        assert "get_world(machine='self')" in m["hint"], m
+        # …so the drill-down has to actually return "the rest"
+        m = verbs.get_world(machine="self")["machines"][0]
+        shown = sum(len(p["sessions"]) for p in m["projects"])
+        assert shown == m["sessions"] > 40, (shown, m["sessions"])
+        assert "more_sessions" not in m and "hint" not in m, m
+    check("get_world(machine=) returns every session, not the capped 40",
+          t_world_machine_scope_uncapped)
+
     def t_world_scoped():
         snap = verbs.get_world(machine="self", pid="p1", verbose=True)
         rows = snap["machines"][0]["projects"][0]["sessions"]
@@ -133,6 +147,16 @@ def main():
         assert r["events"][-1]["role"] == "assistant", r
         bad = verbs.transcript_tail("self", "nope")
         assert bad["ok"] is False, bad
+        # the mock cuts text fields to `chars` like the real tail_events
+        r = client.transcript_tail(c_other, n=1, chars=40)
+        assert r["events"][0]["text"] == "the bucket script is in tools/sort.py", r
+        mock.state.transcripts[c_other].append({"role": "assistant", "text": "y" * 300})
+        try:
+            for chars, want in ((40, 40), (120, 120), (1, 40)):
+                r = client.transcript_tail(c_other, n=1, chars=chars)
+                assert len(r["events"][0]["text"]) == want, (chars, r)
+        finally:
+            mock.state.transcripts[c_other].pop()
     check("transcript_tail returns slim events; clamps; clean error", t_tail)
 
     def t_screen():

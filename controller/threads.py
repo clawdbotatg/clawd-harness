@@ -64,9 +64,6 @@ class Threads:
     def get(self, tid):
         return self.threads.get(tid)
 
-    def current_thread(self):
-        return self.threads.get(self.current)
-
     def summary(self):
         """UI-facing list: live threads first (creation order), then archived."""
         def row(tid):
@@ -86,18 +83,6 @@ class Threads:
         with self._lock:
             t = self.threads.get(tid or self.current)
             return list(t["messages"]) if t else []
-
-    # -- brain state in/out ----------------------------------------------------
-    def state_for(self, backend, tid=None):
-        with self._lock:
-            t = self.threads.get(tid or self.current)
-            return (t["state"].get(backend) if t else None) or {}
-
-    def save_state(self, backend, state, tid=None):
-        with self._lock:
-            t = self.threads.get(tid or self.current)
-            if t is not None:
-                t["state"][backend] = state
 
     def record(self, who, text, trace=None, tid=None):
         """Append a display message; lock the title from the first user message."""

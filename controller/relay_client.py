@@ -88,9 +88,6 @@ class RelayMachine:
     def _send(self, msg):
         return self._fleet._to_machine(self.machine_id, msg)
 
-    def refresh(self):
-        return self._send({"type": "list"})
-
     def new_session(self, pid, timeout=15, engine="claude"):
         with self._new_lock:
             self._focus_event.clear()

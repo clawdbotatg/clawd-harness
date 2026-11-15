@@ -233,9 +233,6 @@ class AgentBrain:
         if f and key:
             f(key)
 
-    def reset(self):
-        self.forget_conversation(self.conversation_key)
-
     def set_model(self, model):
         """Set the `claude --model` the PM runs as, from the next turn on. Empty →
         back to the CONTROLLER_MODEL env pin (or Claude Code's default). Persists
@@ -389,6 +386,11 @@ class AgentBrain:
                            f"(after {stats['tools']} tool calls)",
             }.get(kind, f"⚠️ {e}")
             return self._finish(msg, [])
+        except BaseException as e:
+            # Anything else still has to close the turn: without _end() the
+            # status stays "active" forever and the watchdog never stops.
+            _end("error", err=e)
+            raise
         def _text_of(m):
             return ((m.get("text") if isinstance(m, dict) else m) or "").strip()
 
@@ -406,6 +408,9 @@ class AgentBrain:
                 )
             except (FileNotFoundError, RuntimeError):
                 meta2 = None                 # nudge died → fall to the fallback line
+            except BaseException as e:
+                _end("error", err=e)
+                raise
             if _text_of(meta2):
                 reply, meta = _text_of(meta2), meta2
             else:
