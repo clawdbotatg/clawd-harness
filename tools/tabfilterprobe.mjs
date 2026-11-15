@@ -217,7 +217,8 @@ checkGeom(await page.evaluate(GEOM_FN), ' phone');
   else {
     if (r.a.shown !== r.a.truth) fail(`counter says ${r.a.shown} hidden, ${r.a.truth} actually are`);
     else pass(`counter shows ${r.a.shown} hidden tab(s), matching the strip`);
-    if (r.overflow && !r.a.shown) fail('strip overflows but the counter is hidden');
+    // (a strip that overflows by one PARTLY clipped tab hides none — the counter counts whole tabs past the edge)
+    if (r.overflow && r.a.truth && !r.a.shown) fail('strip overflows but the counter is hidden');
     if (r.a.shown && !r.moved) fail('tapping the counter did not scroll the strip');
     if (r.b.shown !== r.b.truth) fail(`after a scroll the counter says ${r.b.shown}, truth ${r.b.truth}`);
     else if (r.a.shown) pass('counter follows a scroll; tap scrolls the strip');
