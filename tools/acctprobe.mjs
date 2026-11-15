@@ -43,7 +43,11 @@ const opened = await page.evaluate(() => {
   b.click(); return true;
 });
 console.log('clicked 🧠:', opened);
-await page.waitForTimeout(2000);
+// The accounts frame lands when the harness sends it — under a loaded gate that
+// was after the old fixed 2 s, and the probe went red on a healthy page
+// (2026-11-14). Wait for the card itself.
+await page.waitForSelector('.acct.codexacct', { timeout: 15000 }).catch(() => {});
+await page.waitForTimeout(300);
 
 const info = await page.evaluate(() => {
   const cx = document.querySelector('.acct.codexacct');

@@ -99,6 +99,10 @@
   #outbound.over { border-color:var(--accent) !important; background:var(--accent-bg); }
   body.tabdrag-outbound #sessionbar { outline:1px dashed var(--edge-hi); outline-offset:-1px; }
   body.tabdrag-outbound #sessionbar.over { outline-color:var(--accent); }
+  /* an empty strip opened only as a drop zone (its last tab is on an island) */
+  body.tabdrag-island #sessionbar:empty, body.tabdrag-outbound #sessionbar:empty { min-height:30px; }
+  body.tabdrag-island #sessionbar:empty::before, body.tabdrag-outbound #sessionbar:empty::before {
+    content:"drop here — back to a tab"; font-size:11px; color:var(--dim); font-family:var(--mono); }
   #dot { width:8px; height:8px; background:var(--err); flex:0 0 auto; }   /* square status LED */
   #dot.up { background:var(--ok); }
   /* 🔥 iron scope row: the iron compressed to one line while one of its
@@ -1962,7 +1966,15 @@ function tabDragStart(e, cid, from) {
   tabDrag = { cid, from };
   e.dataTransfer.setData('application/x-harness-cid', cid);
   e.dataTransfer.effectAllowed = 'move';
-  setTimeout(() => { if (tabDrag) document.body.classList.add('tabdrag-' + from); }, 0);
+  setTimeout(() => {
+    if (!tabDrag) return;
+    document.body.classList.add('tabdrag-' + from);
+    // The last tab went to an island → the strip is hidden, and a chip had
+    // nowhere to be dragged back to. Open it as an empty drop zone for the
+    // drag; tabDragEnd's repaint hides it again if it's still empty.
+    const bar = document.getElementById('sessionbar');
+    if (from !== 'strip' && bar.hidden && currentView() !== 'pm') bar.hidden = false;
+  }, 0);
 }
 function tabDragEnd() {
   if (!tabDrag) return;

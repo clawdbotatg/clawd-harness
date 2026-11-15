@@ -46,12 +46,18 @@ let token = '';
 try { token = readFileSync(join(ROOT, '.clawd-harness.token'), 'utf8').trim(); } catch {}
 const url = `http://127.0.0.1:${PORT}/?t=${token}#/p/self`;
 
-const browser = await chromium.launch({ executablePath: exec });
+// (a fulfilled document counts as a public page; without this flag its WS to 127.0.0.1 is blocked)
+const browser = await chromium.launch({ executablePath: exec, args: ['--disable-features=LocalNetworkAccessChecks'] });
 const page = await browser.newPage({ viewport: { width: 900, height: 800 } });
 let failed = false;
 const fail = m => { console.error('FAIL: ' + m); failed = true; };
 const pass = m => console.log('PASS: ' + m);
 
+// The page under test is THIS checkout's index.html (direct mode serves it
+// untouched), so the probe checks the working tree, not what the server has.
+await page.route(u => u.pathname === '/' , r => r.request().resourceType() === 'document'
+  ? r.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: readFileSync(join(ROOT, 'index.html'), 'utf8') })
+  : r.continue());
 try {
   await page.goto(url, { waitUntil: 'networkidle', timeout: 15000 });
 } catch (e) {
