@@ -45,7 +45,7 @@ OK, BAD, WARN = "\033[32m✓\033[0m", "\033[31m✗\033[0m", "\033[33m!\033[0m"
 RELAY_SSH = os.environ.get("FLEET_RELAY_SSH", "zkllmapi")
 ROSTER_PATH = "~/clawd-harness/fleet/.clawd-fleet.roster.json"
 PREFS_PATH = "~/clawd-harness/fleet/.clawd-fleet.prefs.json"   # {"inactive":[…]} — switched-off boxes
-ROSTER_MAX_AGE = 120   # the relay rewrites it on every stats tick (~10s per box)
+ROSTER_MAX_AGE = 120   # the relay rewrites it on every build change and every 20s heartbeat
 
 
 def _buildinfo():

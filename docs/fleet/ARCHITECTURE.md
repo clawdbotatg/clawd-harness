@@ -106,7 +106,7 @@ length-prefixed with a routing id (shipped in the proxy step).
   binary `[len][machineId][PTY…]`
 - relay→worker: `{type:"task", from:<mobileId>, msg:{…}}` ·
   `{type:"mobileGone", mobile:<id>}`
-- worker→relay: `{type:"reply", to:<mobileId>, msg:{…}}` · `{type:"status", msg:{…}}` ·
+- worker→relay: `{type:"reply", to:<mobileId>, msg:{…}}` ·
   binary `[len][mobileId][PTY…]`
 
 Addressing: each mobile gets a relay-assigned `mobile_id`; the worker echoes it

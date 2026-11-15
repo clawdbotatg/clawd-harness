@@ -15,7 +15,6 @@ Protocol (all JSON text frames):
   worker→relay:
     (handshake via query: ?role=worker&machine=<id>&host=<name>&t=<token>)
     {type:"reply",  to:<mobileId>, msg:{...}}   # route a result to one mobile
-    {type:"status", msg:{...}}                  # broadcast (e.g. busy/idle)
     {type:"stats", projects:N, sessions:N, active:N, sys:{cpu,ram,disk,gpu}?}
         # build:{code,ttl,idle,started,chan:{n,next,last}}? — what the worker
         # PROCESS runs (hash of its code files + its resolved E2E TTLs) and its live
@@ -187,7 +186,6 @@ CTL_IDENT = "__ctl__"
 CONTROLLER_TOKEN = os.environ.get("FLEET_CONTROLLER_TOKEN", "")
 # Configurable so tests/dev never clobber a real worker's provisioned file.
 PASSKEY_FILE = Path(os.environ.get("FLEET_PASSKEY_FILE") or (HERE / ".clawd-fleet.passkeys.json"))
-_passkey_lock = threading.Lock()
 
 
 def load_passkeys():
@@ -195,11 +193,6 @@ def load_passkeys():
         return json.loads(PASSKEY_FILE.read_text())
     except Exception:
         return []
-
-
-def save_passkeys(creds):
-    with _passkey_lock:
-        PASSKEY_FILE.write_text(json.dumps(creds))
 
 
 # ── Web Push (VAPID) brokering ──────────────────────────────────────────────
@@ -250,7 +243,8 @@ def save_push_subs(subs):
 # usable, and an empty/missing file means "everything on" — exactly the
 # behaviour that predates this feature.
 PREFS_FILE = Path(os.environ.get("FLEET_PREFS_FILE") or (HERE / ".clawd-fleet.prefs.json"))
-# The live roster, dumped on every change (0600, atomic) so an operator on the
+# The live roster, dumped on every change a browser or shipcheck would see, and
+# at least every PING_EVERY (0600, atomic), so an operator on the
 # relay box — tools/shipcheck.py over ssh — can see what each worker PROCESS is
 # running without a passkey. Aggregate counts + build info only, never content.
 ROSTER_FILE = Path(os.environ.get("FLEET_ROSTER_FILE") or (HERE / ".clawd-fleet.roster.json"))
@@ -592,12 +586,49 @@ def find_passkey(cred_id):
     return None
 
 
+def stats_shown(st):
+    """The part of a worker's stats the page paints (index.html paintMachines +
+    renderSysStats), at about the precision it prints: the three counts, each
+    load bar's whole percent, the GB figures to 0.1, the load average to 0.1.
+    Two reports that agree here would draw the same card, so the second needs
+    no fan-out. `build` and `harnessBuild` are not here: no browser reads them
+    (tools/shipcheck.py does, from ROSTER_FILE — see stats_unshown).
+    A report this can't read returns a fresh object, i.e. "changed"."""
+    if st is None:
+        return None
+    try:
+        out = [st.get("projects"), st.get("sessions"), st.get("active")]
+        sys = st.get("sys")
+        if sys is None:
+            return out + [None]
+        for name in ("cpu", "ram", "disk", "gpu"):
+            m = sys.get(name)
+            if not m or m.get("pct") is None:
+                out.append(None)      # the page draws no row for it
+                continue
+            row = [round(m["pct"])]
+            if name == "cpu":
+                row += [round(m.get("load1") or 0, 1), m.get("cores")]
+            else:
+                row += [round((m.get(k) or 0) / 1073741824, 1) for k in ("used", "total", "free")]
+            out.append(row)
+        return out
+    except Exception:
+        return object()
+
+
+def stats_unshown(st):
+    """Everything in a worker's stats except the load sample: the build, the
+    harness build and the channel deadlines — what shipcheck reads off disk."""
+    return None if st is None else {k: v for k, v in st.items() if k != "sys"}
+
+
 def new_challenge():
     return webauthn.b64u_encode(secrets.token_bytes(32))
 
 
 # iOS drops the WebSocket while the Face ID sheet is up, so the assertion often
-# comes back on a NEW connection — whose conn.challenge is a fresh one that the
+# comes back on a NEW connection — whose own challenge is a fresh one that the
 # user never signed. Accepting any challenge WE minted in the last couple of
 # minutes (single-use, popped on first try win-or-lose) lets that already-paid
 # Face ID land instead of re-prompting. Freshness + single-use + our-issuance
@@ -744,11 +775,10 @@ class Conn:
         # Passkey second factor (mobiles). Workers are gated by their token at the
         # handshake; mobiles must additionally prove a WebAuthn assertion before any
         # frame is routed. mfa_ok flips true after a valid `auth` frame; auth_until
-        # is when the passkey session lapses (epoch seconds); challenge is the
-        # single-use WebAuthn challenge we issued for this connection.
+        # is when the passkey session lapses (epoch seconds). The single-use
+        # challenge lives in RECENT_CHALLENGES, not on the connection.
         self.mfa_ok = True if role in ("worker", "controller") else not REQUIRE_PASSKEY
         self.auth_until = float("inf")
-        self.challenge = ""
         # Plaintext aggregate counts a proxy worker reports for its harness
         # ({projects,sessions,active}) — three integers, no titles/content; shown
         # on the roster for an at-a-glance per-machine load. None until reported.
@@ -1058,10 +1088,10 @@ class Relay:
     def _auth_challenge(self, conn, reason=None):
         """Mint a single-use passkey challenge for this connection and describe
         what the browser needs (rpId + enrolled credential ids)."""
-        conn.challenge = new_challenge()
-        remember_challenge(conn.challenge)   # survives a socket flap mid-Face-ID
+        challenge = new_challenge()
+        remember_challenge(challenge)   # survives a socket flap mid-Face-ID
         creds = load_passkeys()
-        msg = {"type": "authRequired", "method": "passkey", "challenge": conn.challenge,
+        msg = {"type": "authRequired", "method": "passkey", "challenge": challenge,
                "rpId": RP_ID, "credentialIds": [c["id"] for c in creds], "enrolled": bool(creds)}
         if reason:
             msg["reason"] = reason
@@ -1133,7 +1163,6 @@ class Relay:
             ok, reason = webauthn.verify_assertion(
                 pubkey, frame.get("clientDataJSON") or "", frame.get("authenticatorData") or "",
                 frame.get("signature") or "", claimed, RP_ID, ORIGIN)
-            mobile.challenge = ""  # single-use, win or lose
             if ok:
                 mobile.mfa_ok = True
                 mobile.auth_until = time.time() + SESSION_TTL
@@ -1301,15 +1330,6 @@ class Relay:
             if m and m.authed():
                 m.send_json(out)
             return
-        if t == "status":
-            out = {"type": "machineMsg", "machine": worker.ident,
-                   "msg": frame.get("msg") or {}}
-            with self.lock:
-                mobiles = list(self.mobiles.values())
-            for m in mobiles:
-                if m.authed():
-                    m.send_json(out)
-            return
         if t == "stats":             # plaintext aggregate counts + sys stats for the roster
             st = {"projects": int(frame.get("projects") or 0),
                   "sessions": int(frame.get("sessions") or 0),
@@ -1321,8 +1341,15 @@ class Relay:
             if isinstance(build, dict):
                 st["build"] = {k: build.get(k) for k in ("code", "ttl", "idle", "started", "chan")}
             st["harnessBuild"] = frame.get("harnessBuild")
-            worker.stats = st
-            self.broadcast_roster()
+            old, worker.stats = worker.stats, st
+            # Every worker reports every ~10 s. Fan the roster out only when a
+            # browser would paint something different; write the file only when
+            # something shipcheck reads moved. Whatever is skipped here rides
+            # the PING_EVERY heartbeat roster (ping_loop), which always does both.
+            if stats_shown(old) != stats_shown(st):
+                self.broadcast_roster()
+            elif stats_unshown(old) != stats_unshown(st):
+                self._dump_roster(self.roster())
             return
         if t == "uploadResult":      # answer to a pending HTTP /upload
             self.finish_upload(frame.get("id"), frame)

@@ -36,7 +36,7 @@ GET ws://<host>:8787/ws?t=<TOKEN>      (HTTP/1.1 WebSocket upgrade)
   unless the relay runs `FLEET_PASSKEY_ONLY=1`), `worker` (`?t=` worker
   token + `?machine=`), `controller` (`?t=` controller token). Any other value
   → 403 before the upgrade. Frames from a mobile are capped at
-  `FLEET_MOBILE_MAX_MESSAGE` (1 MiB); the roster / worker status fan-outs go
+  `FLEET_MOBILE_MAX_MESSAGE` (1 MiB); the roster fan-out goes
   to *authenticated* mobiles only; `POST /upload` needs `?s=<passkey session
   token>` (the one `authOk` returned) and is quota'd per session
   (`FLEET_UPLOAD_QUOTA` per `FLEET_UPLOAD_QUOTA_WINDOW`). `fleet/test_relay_gate.py`.

@@ -176,16 +176,15 @@ def main():
         # 2. controller without its token → 403
         check("controller without token refused", refused(f"{RELAY}/ws?role=controller"))
 
-        # 3. parked mobile sees no roster / status when a worker joins + reports
+        # 3. parked mobile sees no roster when a worker joins + reports
         mob = Peer(f"{RELAY}/ws?role=mobile")
         chal = mob.wait_for(lambda f: f.get("type") == "authRequired")
         check("mobile gets passkey challenge", chal is not None)
         mob.inbox.clear()
         wk = Peer(f"{RELAY}/ws?role=worker&machine=gatebox&host=gate.local&t={quote(WTOK)}")
-        wk.send({"type": "status", "msg": {"type": "hello", "secret": "titles"}})
         wk.send({"type": "stats", "projects": 1, "sessions": 2, "active": 1})
         leak = mob.wait_for(lambda f: f.get("type") in ("machines", "machineMsg", "prefs"), 1.5)
-        check("parked mobile gets no roster/status/prefs", leak is None)
+        check("parked mobile gets no roster/prefs", leak is None)
         check("parked mobile socket still open (ping-able, not dropped)", not mob.closed.is_set())
 
         # 4. upload needs a live passkey session
