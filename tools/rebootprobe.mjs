@@ -8,9 +8,10 @@ const cache = join(process.env.HOME, 'Library/Caches/ms-playwright');
 const d = readdirSync(cache).filter(x => x.startsWith('chromium_headless_shell-')).sort().reverse()[0];
 const exec = ['mac-arm64','mac-x64'].map(a => join(cache, d, `chrome-headless-shell-${a}`, 'chrome-headless-shell')).find(existsSync);
 const token = readFileSync(join(ROOT, '.clawd-harness.token'),'utf8').trim();
+const PORT = process.env.HARNESS_PORT || '8787';
 const b = await chromium.launch({ executablePath: exec });
 const p = await b.newPage({ viewport: { width: 1000, height: 700 } });
-await p.goto(`http://127.0.0.1:8787/?t=${token}`, { waitUntil: 'networkidle', timeout: 15000 });
+await p.goto(`http://127.0.0.1:${PORT}/?t=${token}`, { waitUntil: 'networkidle', timeout: 15000 });
 await p.waitForTimeout(2000);
 const out = await p.evaluate(() => {
   const sent = [];

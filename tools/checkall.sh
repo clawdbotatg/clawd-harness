@@ -10,7 +10,7 @@
 #                                      # the failed list is printed LAST
 #
 # Excluded by name (debug tools, not guards): uiprobe (screenshot driver),
-# probe-geom + tldrgeom (need a live pid/cid), brain_probe (screenshot driver).
+# tldrgeom (needs a live pid/cid).
 # Probes need server.py running on :8787 (it usually is — launchd KeepAlive).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -27,7 +27,7 @@ fi
 # Guards run side by side (10-03: one at a time took ~8 min). Each guard's
 # output is printed whole, so lines never interleave.
 res=$({ ls "$ROOT"/test_*.py "$ROOT"/fleet/test_*.py "$ROOT"/controller/test_*.py "$HERE"/test_*.py
-        ls "$HERE"/*.mjs | grep -vE '/(uiprobe|probe-geom|brain_probe|tldrgeom)[.]mjs$'
+        ls "$HERE"/*.mjs | grep -vE '/(uiprobe|tldrgeom)[.]mjs$'
       } | xargs -P "${JOBS:-6}" -n 1 sh "$0" --one)
 # A timing probe can flake under parallel load: rerun each failure once, alone.
 fails=""

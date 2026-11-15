@@ -120,7 +120,7 @@ Prototype `msg` kinds: `{kind:"ping"}`→`{kind:"pong",host,machine,ts}`;
 
 ✅ **Full vertical slice, in production.** Relay live on AWS behind TLS
 (`wss://h.atg.link`) as a systemd service. The **harness-proxy worker** and the
-**mobile UI** are shipped: from a browser at `https://h.atg.link/?t=<TOKEN>` you
+**mobile UI** are shipped: from a browser at `https://h.atg.link` you
 pick a machine, drill into its real projects/sessions, and drive a live Claude
 session — terminal (binary PTY), transcript, and working pill all tunneled. The
 laptop proxy worker is a launchd agent (`com.clawd.fleet-worker`). Both
@@ -130,12 +130,13 @@ laptop proxy worker is a launchd agent (`com.clawd.fleet-worker`). Both
 `/upload`). ✅ **Auth hardened** — split mobile/worker tokens, worker allowlist,
 `exec` off by default (see decision log).
 
-✅ **Token kept out of the URL** — `index.html` migrates `?t=` into localStorage
-and strips it from the bar (replaceState); tokenless → a paste-the-token screen.
+✅ **Passkey + end-to-end channel** — the user credential is a passkey, checked
+at the relay edge and again, authoritatively, by each machine's worker
+(`E2E-PROTOCOL.md`). A mobile URL token is optional: the relay skips it when
+`FLEET_PASSKEY_ONLY=1` (see `DEPLOY.md` → Auth).
 
 🚧 **Remaining:** server-side TTS isn't proxied (`/tts`/`/config` are
-harness-only); the box is still scp-deployed (a leftover — the repo is now
-**public**, so converting the box to a `git clone` is unblocked).
+harness-only).
 
 ## Decision log (and the traps we hit)
 
@@ -146,8 +147,10 @@ harness-only); the box is still scp-deployed (a leftover — the repo is now
   two secrets** (`FLEET_MOBILE_TOKEN` vs `FLEET_WORKER_TOKEN`) so a leaked mobile
   URL can't register a worker; plus a worker allowlist (`FLEET_WORKER_ALLOW`) and
   `exec` off by default (`FLEET_ALLOW_EXEC`). Both tokens fall back to
-  `FLEET_TOKEN` for single-token dev. The mobile token no longer lingers in the
-  URL — the page migrates `?t=` into localStorage and strips it on load.
+  `FLEET_TOKEN` for single-token dev. When a mobile token is used the page
+  migrates `?t=` into localStorage and strips it on load. With
+  `FLEET_PASSKEY_ONLY=1` the relay asks a mobile for no token at all — the
+  passkey is the only user credential (`DEPLOY.md` → Auth).
 - **Relay binds 127.0.0.1 + nginx TLS** — chosen over opening a raw port in the
   AWS security group, because (a) no SG change needed (80/443 already open for
   the box's other services) and (b) real `wss://` instead of plaintext `ws://`.

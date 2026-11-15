@@ -5,12 +5,13 @@
 //   cd tools && node tldrgeom.mjs <pid> <cid>
 import { chromium } from 'playwright-core';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 function findChromium(){const c=join(process.env.HOME,'Library/Caches/ms-playwright');
  for(const d of readdirSync(c).filter(d=>d.startsWith('chromium_headless_shell-')).sort().reverse())
   for(const a of ['mac-arm64','mac-x64']){const b=join(c,d,`chrome-headless-shell-${a}`,'chrome-headless-shell');if(existsSync(b))return b;}}
 const [pid, cid] = process.argv.slice(2);
-const token = readFileSync('/Users/austingriffith/clawd/clawd-harness/.clawd-harness.token','utf8').trim();
+const token = readFileSync(join(dirname(dirname(fileURLToPath(import.meta.url))), '.clawd-harness.token'),'utf8').trim();
 const browser = await chromium.launch({ executablePath: findChromium() });
 const page = await browser.newPage({ viewport:{width:1100,height:800}, deviceScaleFactor:2 }); await page.addInitScript(()=>{ try{localStorage.setItem('cc_tldr','1');}catch{} });
 await page.goto(`http://127.0.0.1:8787/?t=${token}#/p/${pid}/s/${cid}/tty`, {waitUntil:'domcontentloaded'});

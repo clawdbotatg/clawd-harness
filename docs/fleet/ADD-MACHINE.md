@@ -2,7 +2,7 @@
 
 **Goal:** get a new machine running its own [clawd-harness](../../README.md) **and**
 a fleet **worker**, so it shows up as a machine in the phone UI
-(`https://h.atg.link/?t=<TOKEN>`) next to the others and you can drive its Claude
+(`https://h.atg.link`) next to the others and you can drive its Claude
 sessions from there — and, optionally, so the fleet **PM brain** can see and drive
 it too (**step 8**).
 
@@ -39,7 +39,7 @@ under `fleet/`) or from the operator. You need **both**:
 
 | What | Env / file | Where to get it |
 |---|---|---|
-| **Worker token** | `FLEET_WORKER_TOKEN` | The box's `~/clawd-harness/fleet/fleet.env` (`grep WORKER_TOKEN`), or an existing machine's worker config (e.g. the laptop's launchd plist). Use the **worker** token, *not* the mobile/URL token. |
+| **Worker token** | `FLEET_WORKER_TOKEN` | The box's `~/clawd-harness/fleet/fleet.env` (`grep WORKER_TOKEN`), or an existing machine's `fleet/fleet.env`. |
 | **Passkey file** | `fleet/.clawd-fleet.passkeys.json` | The canonical copy lives on the box: `scp zkllmapi:~/clawd-harness/fleet/.clawd-fleet.passkeys.json` (or copy from any existing machine's `fleet/` dir). It holds only **public** keys, is the **same on every machine**, and is what lets this worker verify *you* over the end-to-end channel. See [`DEPLOY.md`](DEPLOY.md) → "Provisioning the passkey". |
 | **E2E session TTL** | `FLEET_E2E_MAX_TTL` | **Not per-box since 2026-09-09.** The worker pins it to `fleet/buildinfo.py`'s `CADENCE` and logs + ignores a `fleet.env`/env value (every box but one still had an old 86400 line, invisibly shortening the cadence). Delete the line. Leave unset — the default (604800 = 7 days, since 2026-09-05) is the per-machine passkey cadence, and silent resume covers everything inside it. Do **not** set it lower "to be safe": the old 3600 default is what made every app-open cost a passkey per machine, and 86400 still cost one per box per day. An explicit value in an old `fleet.env` overrides the default — the shortest of worker/relay/browser wins, so grep for `TTL` when a box re-prompts early. Until 2026-09-09 a worker's self-restart also kept its *first* boot's `fleet.env` values, so a box whose worker has never been restarted for real since before then needs one `launchctl kickstart -k gui/$(id -u)/com.clawd.fleet-worker` (or `systemctl restart clawd-fleet-worker`). |
 
@@ -88,11 +88,11 @@ working."** The harness reads per-deployment secrets from a **gitignored**
 falls back to dumb first-prompt titles. The boot log says so:
 `note: AI naming off (set BANKR_API_KEY + BANKR_BASE_URL …)`.
 
-Copy it from an existing machine (it's the same secrets everywhere):
+Copy it from an existing machine **that runs a harness** (the relay box does
+not — it has no such file). It's the same secrets everywhere:
 
 ```bash
-scp zkllmapi:~/clawd/clawd-harness/.clawd-harness.env ~/clawd/clawd-harness/
-# (or from the laptop / any working harness)
+scp <working-machine>:<its-checkout>/.clawd-harness.env ~/clawd/clawd-harness/
 chmod 600 ~/clawd/clawd-harness/.clawd-harness.env
 ```
 
@@ -169,8 +169,8 @@ fix that before continuing (the daemon must use the **same** `python3`).
 From the values you brought in "Before you start":
 
 ```bash
-# worker token: keep it out of shell history / the repo. You'll put it in the
-# launchd plist (step 6) or export it for the step-5 test.
+# worker token: keep it out of shell history / the repo. It goes in the
+# gitignored fleet/fleet.env (step 6); export it for the step-5 test.
 
 # passkey file: copy it into THIS repo's fleet/ dir, verbatim, then lock it down.
 # canonical source is the box (holds only public keys):
@@ -233,69 +233,49 @@ and daemonize (step 6).
 
 ### macOS (launchd)
 
-Save as `~/Library/LaunchAgents/com.clawd.fleet-worker.plist` (substitute your
-home dir, machine id, and the worker token):
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.clawd.fleet-worker</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/opt/homebrew/bin/python3</string>
-    <string>/Users/<you>/clawd/clawd-harness/fleet/worker.py</string>
-    <string>--machine</string><string>austin-desktop</string>
-    <string>--host</string><string>desktop</string>
-    <string>--harness</string><string>ws://127.0.0.1:8787</string>
-  </array>
-  <key>WorkingDirectory</key><string>/Users/<you>/clawd/clawd-harness/fleet</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>FLEET_RELAY</key><string>wss://h.atg.link</string>
-    <key>FLEET_WORKER_TOKEN</key><string><worker-token></string>
-    <key>HARNESS_WS</key><string>ws://127.0.0.1:8787</string>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/<you>/Library/Logs/clawd-fleet-worker.log</string>
-  <key>StandardErrorPath</key><string>/Users/<you>/Library/Logs/clawd-fleet-worker.log</string>
-</dict>
-</plist>
-```
-
-The `python3` you point at **must** be the one that has `cryptography` installed
-(step 2). Then:
+Write the config to the gitignored `fleet/fleet.env` (the worker loads it
+itself, so the token never lands in a plist), then let `daemon-worker.sh`
+write and load the LaunchAgent:
 
 ```bash
-chmod 600 ~/Library/LaunchAgents/com.clawd.fleet-worker.plist     # it holds the token
-launchctl load -w ~/Library/LaunchAgents/com.clawd.fleet-worker.plist
-tail -f ~/Library/Logs/clawd-fleet-worker.log
+cd ~/clawd/clawd-harness/fleet
+cat > fleet.env <<'ENV'
+FLEET_RELAY=wss://h.atg.link
+FLEET_WORKER_TOKEN=<worker-token>
+FLEET_MACHINE=austin-desktop
+HARNESS_WS=ws://127.0.0.1:8787
+ENV
+chmod 600 fleet.env
+./daemon-worker.sh install -- --host desktop
+./daemon-worker.sh logs
 ```
 
-Manage it later: `launchctl list | grep fleet-worker` (running?),
-`launchctl unload …plist` (stop), `launchctl load -w …plist` (start).
+The agent runs whichever `python3` is first on your PATH at install time — it
+**must** be the one that has `cryptography` (step 2). Manage it later with
+`./daemon-worker.sh status | restart | logs | uninstall`.
 
 ### Linux (systemd)
 
-Use [`../../fleet/deploy/clawd-fleet-worker.service`](../../fleet/deploy/clawd-fleet-worker.service)
-as a template. Set `WorkingDirectory` to this repo's `fleet/`, `ExecStart` to
-`python3 worker.py --machine <id> --host <host> --harness ws://127.0.0.1:8787`,
-and an `EnvironmentFile` holding `FLEET_RELAY` + `FLEET_WORKER_TOKEN`. Make sure
-the unit's `python3` has `cryptography`. Then:
+[`../../fleet/deploy/clawd-fleet-worker.service`](../../fleet/deploy/clawd-fleet-worker.service)
+is the **relay box's own** unit (a `--kind relay` marker with no harness), so
+don't install it as-is. Copy it, then in the copy: point `WorkingDirectory`,
+`EnvironmentFile` and `ExecStart` at this machine's checkout and user, and
+change `ExecStart` to
+`python3 worker.py --machine <id> --host <host> --harness ws://127.0.0.1:8787`
+(no `--kind relay`). The `EnvironmentFile` holds `FLEET_RELAY` +
+`FLEET_WORKER_TOKEN`. Make sure the unit's `python3` has `cryptography`. Then:
 
 ```bash
-sudo cp fleet/deploy/clawd-fleet-worker.service /etc/systemd/system/
+sudo cp <your-edited-copy> /etc/systemd/system/clawd-fleet-worker.service
 sudo systemctl daemon-reload && sudo systemctl enable --now clawd-fleet-worker
 journalctl -u clawd-fleet-worker -f
 ```
 
 ## Step 7 — verify from the phone
 
-Open `https://h.atg.link/?t=<MOBILE_TOKEN>` (the mobile token, factor 1) and pass
-the passkey prompt (factor 2). The **machines** rung should now list your new id
+Open `https://h.atg.link` and pass the passkey prompt. (A relay running without
+`FLEET_PASSKEY_ONLY` also wants `?t=<MOBILE_TOKEN>` — see
+[`DEPLOY.md`](DEPLOY.md) → Auth.) The **machines** rung should now list your new id
 (e.g. `austin-desktop`) as online. Tap it:
 
 - its local **projects/sessions load** → the worker↔harness bridge works;
@@ -329,10 +309,8 @@ controller runs in box mode). The **only per-machine step** is to opt this worke
 in by setting **`FLEET_CTL_ALLOW=1`** in its environment, then restart it. Put it
 wherever this machine's worker reads env so it persists:
 
-- **launchd (macOS):** add to the plist's `EnvironmentVariables` dict
-  `<key>FLEET_CTL_ALLOW</key><string>1</string>` (or to a `fleet/fleet.env` the
-  worker loads), then
-  `launchctl kickstart -k gui/$(id -u)/com.clawd.fleet-worker`.
+- **launchd (macOS):** add `FLEET_CTL_ALLOW=1` to `fleet/fleet.env`, then
+  `fleet/daemon-worker.sh restart`.
 - **systemd (Linux):** add `FLEET_CTL_ALLOW=1` to the worker's `EnvironmentFile`
   (e.g. `fleet.env`), then `sudo systemctl restart clawd-fleet-worker`.
 
@@ -356,8 +334,7 @@ controller restart is needed.
 > support): every machine — worker laptops **and the box** — is now a **git
 > checkout** that pulls from `origin/main`, so `git pull --ff-only` + restart the
 > worker (NOT scp, which dirties the checkout). The box checkout is at
-> `~/clawd-harness`. See the memory note "fleet-machine-update" for the per-machine
-> ssh aliases/paths.
+> `~/clawd-harness`.
 
 ---
 
@@ -404,13 +381,3 @@ that step. Same file holds the ElevenLabs key, so missing TTS has the same fix.
 **`pkill -f worker.py` over SSH kills your shell** (the pattern matches its own
 command line). Use the bracket trick `pkill -f "[w]orker.py"`, or just
 `systemctl restart` / `launchctl`.
-
----
-
-## What's new vs. the old recipe
-
-Earlier docs (the short "Add a new machine" snippet in
-[`RUNBOOK.md`](RUNBOOK.md)) predate the **end-to-end encryption** layer and
-omitted steps 2 and 3 — which is exactly why a from-scratch attempt would join the
-roster but fail to open a machine. This page is the current, complete path; the
-RUNBOOK now points here.

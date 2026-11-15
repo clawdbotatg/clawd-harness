@@ -19,6 +19,16 @@ reason (Cloudflare block, rate limit, outage) must never be shown as
 - **Violated when:** any card says `needs sign-in` without a
   `refresh REJECTED` line in that machine's log.
 
+> **Correction, 2026-11-14.** "Ever" turned out to be wrong: a sign-in dies
+> about 30 days after each ceremony, on Anthropic's side, and nothing the
+> harness does extends it (EXPECTATIONS.md, 2026-09-06). The harness retires
+> a login shortly before that and moves its sessions. The way to meet this
+> goal now is a **token account** — a one-year `CLAUDE_TOKEN_<NAME>` in
+> `.clawd-harness.env` (`tools/install_claude_tokens.py`), which needs no
+> sign-in. The `refresh REJECTED` log line no longer exists either; a login
+> that truly needs a new sign-in logs `the client wiped the blob` or
+> `login expired`.
+
 ## Goal 2 — never rate-limited while any sub has headroom
 
 **I should never get a message that we hit the subscription rate limit if I

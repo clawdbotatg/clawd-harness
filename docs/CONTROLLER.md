@@ -81,9 +81,9 @@ doing more**: not a new system, a bigger label.
 Two kinds of new meta, split by whether they need the LLM:
 
 **Free facts (no LLM — derive from state/transcript we already have):**
-- `status` — `blocked | working | idle` from the existing `busy`/`waiting`
-  flags. (`error`/`done` are later refinements; `result.is_error` from the
-  transcript can feed `error`.)
+- `status` — `blocked | working | background | idle` from the existing
+  `waiting`/`busy`/`bg` flags (`background` = the turn ended but claude still
+  has background shells/agents running).
 
 **LLM digest (the deepening of naming):**
 - `digest` — one line: *what is this session doing right now*. Volatile.
@@ -92,7 +92,7 @@ Two kinds of new meta, split by whether they need the LLM:
 ### Cadence — why two clocks
 
 - **Title/desc** stay on the milestone cadence (`name_at_prompt`: prompt 1, then
-  every 5). They're a *stable label*; re-naming every turn makes titles flicker.
+  every 3). They're a *stable label*; re-naming every turn makes titles flicker.
 - **Digest/blocked_on** regenerate on **every `Stop`** — that's exactly when
   `data.last` is fresh and the state changed, and the digest is *meant* to be
   volatile. Each call is cheap (qwen3-coder); the user explicitly wants "more AI
@@ -132,7 +132,7 @@ create_task(goal, project, acceptance) -> task_id   # ledger-only (controller st
 assign(task_id, {spawn_in: pid} | {existing: cid}, engine)  # → new + send
 ask(cid, text)                                       # → send
 answer_prompt(cid, choice)                           # → input (raw keys) — the hard one
-interrupt(cid) / pause(cid)
+interrupt(cid)
 wrap(cid, text?)                                     # 📑 → wrap frame: local HANDOFF-<stamp>.md, commit real work, then it closes ITSELF
 check(cid)                                           # 🔍 → check frame: the OTHER engine reviews its work in a new session
 session_digest(cid)                                  # deep-read one session on demand
@@ -324,7 +324,8 @@ A headless process that is **a relay client + a semantic projection + the task
 ledger**, exposed as **MCP**:
 
 - **MCP resources = the read shape**: `world` (the whole fleet as one compact
-  object), `attention` (the derived "needs you" queue), `session_digest(cid)`.
+  object), `attention` (the derived "needs you" queue), `tasks` (the ledger).
+  (`session_digest` is a tool, not a resource.)
 - **MCP tools = the write shape**: the intent verbs above.
 
 Packaging it as MCP means the PM brain can be *any* agent — including a stock
@@ -391,7 +392,7 @@ controller (box) ──role=controller──▶ relay ──task(__ctl__)──�
 (a compromised box could drive machines) — the deliberate "box = brain" choice.
 The phone⇄worker **E2E is untouched**: the relay still can't read or forge that
 traffic; only the opted-in trusted-control identity rides plaintext, and only on
-machines that set the flag. Wiring a machine in: **[`fleet/ADD-MACHINE.md`](fleet/ADD-MACHINE.md)
+machines that set the flag. Wiring a machine in: **[`docs/fleet/ADD-MACHINE.md`](fleet/ADD-MACHINE.md)
 step 8**.
 
 ---
@@ -449,9 +450,9 @@ whole stack is proud of being pure stdlib, disk-as-source-of-truth. So:
 
 - **An append-only JSONL event log** (`.clawd-controller.tasks.jsonl`,
   gitignored, same family as `.clawd-harness.sessions.json`).
-- The log **is** the history: `task_created`, `assigned`, `blocked`, `nudged`,
-  `done` — plus `pipeline_created` / `step_started` / `step_done` for multi-step
-  tasks. Fold/replay it on boot to rebuild the ledger in memory (event sourcing;
+- The log **is** the history: `task_created`, `assigned`, `status`, `note`,
+  `action` (the audit line for every write verb) — plus `pipeline_created` /
+  `pipeline_defaults` / `step_started` / `step_done` for multi-step tasks. Fold/replay it on boot to rebuild the ledger in memory (event sourcing;
   trivial at this scale). Event sourcing is what makes a pipeline restart-safe:
   where a chain got to is a replay of its own log, not in-process state.
 - One file gives you three things: current state (replay), the **audit trail**
@@ -487,11 +488,12 @@ whole stack is proud of being pure stdlib, disk-as-source-of-truth. So:
   autonomy/rate/audit) behind both an MCP server (`mcp.py`) and the PM brain
   (`agent.py` — a minimal claude-p-agent, `claude -p` + those tools).
   Confirm-gated by default.
-- **Phase 3 — bounded autonomy** ◑. Autonomy gate + task ledger + an
+- **Phase 3 — bounded autonomy** ✅. Autonomy gate + task ledger + an
   event-driven **Reactor** (`events.py`): fleet hooks (`Stop`/`Notification`)
   become higher-level events (`blocked`/`turn_done`/`ended`), pushed to handlers
-  and `/api/notifications`. Remaining: a standing "verify a finished task against
-  its acceptance" auto-loop.
+  and `/api/notifications`. The "verify a finished task against its
+  acceptance" loop is the autopilot's VERIFY turn (`autopilot.py`, on with
+  `CONTROLLER_AUTOPILOT=1`).
 - **Phase 4 — Telegram front-end** ✅. `telegram.py` — allowlisted, stdlib,
   routes messages to the same brain and lets the Reactor push `blocked` alerts to
   your phone. Enabled by setting `CONTROLLER_TELEGRAM_TOKEN` (a dedicated bot).

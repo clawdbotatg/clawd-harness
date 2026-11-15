@@ -1,10 +1,9 @@
 # runtime / local state — never commit (comments on their own lines!)
-
 # auth secret (wildcarded — a .bak of a secret is just as secret)
 .clawd-harness.token*
 # local secrets / config (BANKR_API_KEY etc.) — loaded by server.py at boot
 .clawd-harness.env*
-# local session id (legacy single-session) + multi-session registry
+# multi-session registry (and the legacy single-session id file)
 # (+ its .tmp<pid> atomic-write staging and .corrupt quarantine)
 .clawd-harness.session*
 # first-party prompt log (quick-chip ranking data) — local usage, may hold anything

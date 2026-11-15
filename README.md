@@ -11,14 +11,9 @@ which proved out the single-session mirror; the harness is where it grows up.
 Pure Python stdlib server + a single HTML page. No build, no dependencies
 (xterm.js loads from a CDN).
 
-**Where it's headed** (the reason for the fork):
-- **Multiple projects** — group sessions by workdir/repo, switch between them.
-- **Multiple sessions** per project — already here (a SessionManager owns N PTY
-  sessions, each with its own transcript + ring buffer; AI-named titles).
-- **Transcript or TUI mode** per session — already here (the view switcher).
-- **An AI layer on top** — a controller that can read the structured stream,
-  summarize, route, and drive sessions on your behalf (the AI session-naming is
-  the first toe in the water).
+It runs **many sessions across many projects** (git repos under `projects/`),
+on several subscription logins, and a fleet relay (`fleet/`) drives N machines
+from one phone. Orientation for working on the code: [`CLAUDE.md`](CLAUDE.md).
 
 ## Why interactive (no `-p`)
 
@@ -80,19 +75,19 @@ Shared across both:
 
 ```bash
 python3 server.py
-# open the tokenized URL it prints, e.g. http://127.0.0.1:8787/?t=<token>
+# open http://127.0.0.1:8787
 ```
 
 Requires the `claude` CLI authenticated with a Claude subscription (OAuth, not an
 API key). Python 3, stdlib only.
 
-A **token** gates the WebSocket and `/hook` — printed at startup, persisted in
-`.clawd-harness.token`, or set via `CONSOLE_TOKEN`. The server binds
-**`127.0.0.1` by default** (localhost-only — remote access goes through the
-fleet relay's passkey/E2E stack). Set `BIND=0.0.0.0` to expose it on your LAN
-directly; the token is then the only thing gating command execution and the
-session runs with bypass-permissions — **don't do that beyond a trusted
-network.**
+The server binds **`127.0.0.1` by default** and needs **no token** there: only
+local processes can reach it, and remote access goes through the fleet relay's
+passkey/E2E stack. Set `BIND=0.0.0.0` to expose it on your LAN and a **token**
+(persisted in `.clawd-harness.token`, or set via `CONSOLE_TOKEN`) gates the
+WebSocket and `/hook`; the startup log prints the tokenized URL. The token is
+then the only thing gating command execution and sessions run with
+bypass-permissions — **don't do that beyond a trusted network.**
 
 Env knobs: `PORT` (8787), `BIND` (127.0.0.1), `WORKDIR` (cwd — where claude runs),
 `CLAUDE_BIN`, `COLS`/`ROWS` (120×34), `SEND_SETTLE` (1.5), `CONSOLE_TOKEN`.
@@ -100,9 +95,8 @@ Env knobs: `PORT` (8787), `BIND` (127.0.0.1), `WORKDIR` (cwd — where claude ru
 ### Phone / LAN
 
 With `BIND=0.0.0.0`, open `http://<lan-ip>:<port>/?t=<token>` on a phone on the
-same network for the same live session (the default localhost bind doesn't
-reach the LAN — the fleet relay is the supported remote path). (Both clients drive the one PTY and share its terminal size —
-fine for a prototype.)
+same network (the default localhost bind doesn't reach the LAN — the fleet
+relay is the supported remote path).
 
 ### Run as a daemon (survives closing the terminal)
 
@@ -111,11 +105,11 @@ fine for a prototype.)
 ./daemon.sh status | logs | restart | uninstall
 ```
 
-The session id is pinned and saved to `.clawd-harness.session`; on every (re)start
-the server re-attaches with `--resume`, so the conversation survives crashes
-(KeepAlive resurrects it), closing the terminal (it's detached), and reboot
-(RunAtLoad). A turn that was mid-flight when killed is lost; context up to the last
-saved step is restored.
+Projects and sessions are saved in `.clawd-harness.sessions.json`; on every
+(re)start the server re-attaches each session with `--resume`, so conversations
+survive crashes (KeepAlive resurrects it), closing the terminal (it's detached),
+and reboot (RunAtLoad). A turn that was mid-flight when killed is lost; context
+up to the last saved step is restored.
 
 ## Architecture
 
@@ -136,15 +130,19 @@ One WebSocket carries everything: **binary** frames are raw PTY bytes (→ xterm
 
 ### Files
 
-- **`server.py`** — spawns one interactive `claude` in a PTY (`pty.openpty` +
-  `subprocess.Popen` with `setsid`+`TIOCSCTTY`), bridges it to N browser clients
-  over a hand-rolled WebSocket, tails the transcript JSONL into slim structured
-  events, serves the page, handles `/hook` and `/upload`, and injects the hooks
-  config via `claude --settings`.
-- **`index.html`** — the whole UI: view switcher, xterm terminal, key bar,
-  transcript renderer (safe markdown + command/system parsing), message box,
-  image paste.
+- **`server.py`** — one `SessionManager`, N projects, N sessions. Each session
+  is an interactive `claude` in a PTY (`pty.openpty` + `subprocess.Popen`),
+  bridged to N browser clients over a hand-rolled WebSocket; the server tails
+  each transcript JSONL into slim structured events, serves the page, handles
+  `/hook` and `/upload`, and injects the hooks config via `claude --settings`.
+- **`index.html`** — the whole UI, one page with hash routing: projects,
+  sessions, xterm terminal, key bar, transcript renderer, composer.
 - **`daemon.sh`** — launchd install/uninstall/status/logs/restart.
+- **`fleet/`** — relay + per-machine worker: N harnesses from one phone
+  (`fleet/CLAUDE.md`, `docs/fleet/`).
+- **`controller/`** — the PM, an AI layer that drives sessions as a WebSocket
+  client (`docs/CONTROLLER.md`).
+- **`tools/`** — UI probes and `checkall.sh`.
 
 ### Hooks → turn-boundary signal
 
@@ -204,15 +202,5 @@ rather than sending, so no real message reaches a live session). Note: this is a
   Chrome may serve its cached page. Hard-refresh once (Cmd+Shift+R) or use the LAN
   URL. clawd-harness sends `Cache-Control: no-store` so it never goes stale itself.
 - **Runtime/secret files are gitignored** — `.clawd-harness.token`,
-  `.clawd-harness.session`, `.clawd-harness.hooks.json` (embeds the token), and
-  `.clawd-harness-uploads/` (pasted images).
-
-## Roadmap
-
-- **Multiple projects** — a project = a workdir/repo; group its sessions, switch
-  between projects in the UI. (Today the server runs one workdir.)
-- **AI layer** — a controller that reads the structured stream to summarize, route,
-  notify, and drive sessions semi-autonomously.
-- Telegram / external front-ends on the same controller core.
-- Per-client terminal sizing instead of one shared PTY size.
-- Vendoring the CDN assets for offline use; periodic cleanup of `.clawd-harness-uploads/`.
+  `.clawd-harness.sessions.json`, `.clawd-harness.hooks.*.json` (embed the
+  token), `.clawd-harness.env`, and `.clawd-harness-uploads/` (pasted images).

@@ -17,7 +17,10 @@ on run
 		end try
 		if w is missing value then set w to (create window with default profile)
 		tell current session of w
-			write text "exec /usr/bin/python3 /Users/austingriffith/clawd/clawd-harness/tools/subpick.py"
+			-- the checkout lives at ~/clawd-harness on some boxes and
+			-- ~/clawd/clawd-harness on others: take whichever exists. Runs
+			-- through /bin/sh so it works whatever the login shell is.
+			write text "exec /bin/sh -c 'for d in \"$HOME/clawd-harness\" \"$HOME/clawd/clawd-harness\"; do [ -f \"$d/tools/subpick.py\" ] && exec /usr/bin/python3 \"$d/tools/subpick.py\"; done; echo \"subpick.py not found under $HOME\"'"
 		end tell
 		select w
 		activate

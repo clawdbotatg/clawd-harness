@@ -5,7 +5,7 @@ No Vercel, no build step. The whole system is pure-Python stdlib + one static
 
 ```
  phone/browser ──wss──▶  h.atg.link  (AWS box: relay.py)  ◀──wss──  laptop: worker.py → harness :8787
- (fleet UI)              token + passkey gate, routes              (the real Claude sessions)
+ (fleet UI)              passkey gate, routes                      (the real Claude sessions)
 ```
 
 ## The one UI, two modes
@@ -71,12 +71,13 @@ Watch it: `journalctl -u clawd-fleet-pull -f`. Disable:
   `~/clawd-harness`. Gitignored runtime/secret files sit next to the code that reads them:
   `fleet.env` + `.clawd-fleet.{token,passkeys.json,machine}` in `fleet/`; `.env.controller`
   + `.clawd-controller.tasks.jsonl` at the repo root.
-- `fleet.env` on the box (gitignored) holds: `FLEET_MOBILE_TOKEN`, `FLEET_WORKER_TOKEN`,
+- `fleet.env` on the box (gitignored) holds: `FLEET_WORKER_TOKEN`,
+  `FLEET_PASSKEY_ONLY=1` (or, without it, `FLEET_MOBILE_TOKEN` — see Auth below),
   `FLEET_WORKER_ALLOW`, `FLEET_RP_ID=h.atg.link`, `FLEET_ORIGIN=https://h.atg.link`,
   `FLEET_AASA_APPS=<TEAMID>.<bundle id>[,…]` (serves
   `/.well-known/apple-app-site-association` so the native iOS wrapper's web view
   may use the passkey — `clawd-dictate/ios/Harness`, `test_aasa.py`; unset → 404),
-  `FLEET_REQUIRE_PASSKEY=1`, `FLEET_ALLOW_ENROLL=0`.
+  `FLEET_REQUIRE_PASSKEY=1` (the default).
 
 ## The worker (each machine)
 The laptop runs `worker.py` as a launchd agent `com.clawd.fleet-worker`
@@ -121,6 +122,18 @@ onto self-restarting code: `launchctl kickstart -k gui/$UID/com.clawd.fleet-work
 **There is no user token.** Your passkey is the sole user credential
 (`FLEET_PASSKEY_ONLY=1`). The worker token still gates *machine registration*
 (`FLEET_WORKER_TOKEN`) — that's a machine-fleet secret, not your login.
+
+`relay.py` implements two modes, chosen by the box's `fleet.env`:
+
+| `FLEET_PASSKEY_ONLY` | mobile connects with | page URL |
+|---|---|---|
+| `1` (what this doc describes) | nothing; passkey after connect | `https://h.atg.link` |
+| unset (the code default) | `FLEET_MOBILE_TOKEN` in `?t=`, then the passkey | `https://h.atg.link/?t=<MOBILE_TOKEN>` |
+
+Either way the passkey gate is on unless `FLEET_REQUIRE_PASSKEY=0` (routing
+smokes only), and the worker token is always required. Check which mode a
+relay runs in its startup log: `auth: passkey-only (no mobile token)` or
+`auth: mobile+worker tokens`.
 
 1. **Relay edge gate (passkey doorman).** A mobile connects with no token; the
    relay requires a passkey assertion before it reveals the roster. Anti-abuse +

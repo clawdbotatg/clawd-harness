@@ -28,10 +28,12 @@ python3 -m controller mcp
 
 ## Debug / inspector page — `http://127.0.0.1:8799/debug`
 
-(Also the 🛠 button in the PM drawer / chat header.) Three tabs:
+(Also the 🛠 button in the PM drawer / chat header.) Four tabs:
 - **Prompt** — the PM brain's persona (`prompts/private.md`, appended to
   `claude -p` each turn). Edit + Save to override it live (persisted to
   `.clawd-controller.prompt.txt`, survives restarts); Reset returns to the file.
+- **Config** — pick the PM's model live (persisted to
+  `.clawd-controller.model.txt`).
 - **Tools** — every tool the PM can call, with its schema, and a form to **run any
   of them yourself** and see the raw result. Writes still pass the autonomy gate
   (tick `confirm`).
@@ -43,8 +45,9 @@ python3 -m controller mcp
 Each turn shells out via **`run_turn()`** imported from claude-p-agent
 (`CLAUDE_P_AGENT_HOME`). This adapter attaches the fleet **MCP server** and loads
 persona from **`controller/prompts/`** (private for chat/Telegram, public for
-untrusted adapters). Multi-turn continuity rides on `--resume`. See
-[`agent.py`](agent.py).
+untrusted adapters). Multi-turn continuity is claude-p-agent's: each turn passes
+a conversation key (one per thread) and the engine keeps and resumes the session
+behind it — the controller stores no session id. See [`agent.py`](agent.py).
 
 The persona lives in **[`prompts/`](prompts/)**, picked by trust level:
 - **`private.md`** — the trusted operator persona (chat UI + Telegram are *you*).
@@ -59,7 +62,7 @@ Claude Code's own default.
 
 The chat header has a **thread bar** — the PM equivalent of the harness's N
 sessions per project. Run several PM conversations at once and switch between
-them; each thread keeps its **own history** (and its own `--resume` id, so
+them; each thread keeps its **own history** (its own conversation key, so
 continuity is preserved) plus its display transcript.
 
 - **＋ new** — spawn a fresh thread (new context).
@@ -68,8 +71,8 @@ continuity is preserved) plus its display transcript.
   archived threads, then click one to restore it).
 - **🧹 clear** (header) — wipe the current thread's context but keep the slot.
 
-Threads persist to `.clawd-controller.threads.json` (gitignored), so they — and
-the brain history + `--resume` id inside them — survive a daemon restart. API:
+Threads persist to `.clawd-controller.threads.json` (gitignored), so they
+survive a daemon restart. API:
 `GET /api/threads`,
 `GET /api/thread/messages?id=`, `POST /api/thread/{new,select,clear,archive}`.
 Telegram shares the **current** thread.
@@ -88,8 +91,8 @@ it returns **409** mid-turn rather than blocking. Pinned by
 
 ## Autonomy (the write guard)
 
-Write verbs (assign / ask / answer_prompt / interrupt / spawn / close / pin /
-create|clone|add|remove project / start_pipeline) pass through a gate; reads are
+Write verbs (assign / ask / answer_prompt / interrupt / spawn / close / reopen /
+wrap / check / pin / create|clone|external|add|remove project / start_pipeline) pass through a gate; reads are
 always free.
 
 - `readonly` — refuse writes, return a proposal instead.
@@ -153,12 +156,14 @@ endpoint (e.g. behind the relay).
 
 Read: `get_world`, `find`, `transcript_tail`, `peek_screen`, `sweep`,
 `get_attention`, `get_pins`, `get_accounts`, `get_irons`, `get_warm`,
-`get_closed`, `session_digest`, `open_session`,
-`open_project`, `list_tasks`, `get_task`, `get_step_output`.
+`get_closed`, `session_digest`, `open_session`, `open_project`, `list_tasks`,
+`get_task`, `get_step_output`, `get_notes`.
 Write: `create_task`, `set_task_status`, `note_task`, `assign`, `ask`,
-`answer_prompt`, `interrupt`, `spawn`, `close`, `reopen`, `pin`, `create_project`,
-`clone_project`, `add_local_project`, `remove_project`, `create_pipeline`,
-`start_pipeline`, `advance_pipeline`.
+`answer_prompt`, `interrupt`, `spawn`, `close`, `reopen`, `wrap`, `check`, `pin`,
+`create_project`, `clone_project`, `external_project`, `add_local_project`,
+`remove_project`, `create_pipeline`, `start_pipeline`, `advance_pipeline`.
+PM-side (no harness write): `escalate`, `remember_note`, `forget_note`,
+`set_priorities`.
 
 Sessions are addressed by `(machine, cid)`, tasks by id. `find` is the retrieval
 entry point ("which session is about X" in one call); `sweep` is the check-in
@@ -220,6 +225,15 @@ force-closed. Completion sets the task to `review` and pushes the report.
 | `CONTROLLER_TELEGRAM_ALLOW` | `672968601` | csv of allowed Telegram user ids |
 | `CONTROLLER_PIPELINE_IDLE` | `120` | a pipeline step's answer must be unchanged this long before the settle sweep advances it without a turn-end hook |
 | `CONTROLLER_PIPELINE_SWEEP` | `20` | how often that sweep looks |
+| `CONTROLLER_RELAY` / `CONTROLLER_RELAY_TOKEN` | — | box mode: drive the whole fleet through the relay's trusted-control path; wins over `CONTROLLER_HARNESS_WS` |
+| `CONTROLLER_RATE_PER_MIN` | `8` | per-target write rate limit |
+| `CONTROLLER_TURN_TIMEOUT` / `CONTROLLER_TURN_STALL` | `1800` / `300` | hard ceiling on a turn / kill after this long with no stream events |
+| `CONTROLLER_AUTOPILOT` | `0` | `1` = Reactor events trigger budgeted PM turns (`autopilot.py`); tune with `CONTROLLER_AUTOPILOT_*` |
+| `CONTROLLER_SWEEP_EVERY` | `0` | seconds between scheduled sweeps (0 = off) |
+| `CONTROLLER_DIGEST_WINDOW` | `900` | one batched "needs you" push per window |
+| `CONTROLLER_AGENT_HOME` / `CONTROLLER_MEMORY_DIR` | `~/.clawd-controller/…` | the PM's own cwd and memory dir, outside the repo |
+
+The full list, with the reasons, is `config.py`.
 
 ## Tests
 
@@ -238,17 +252,28 @@ python3 -m controller.test_pm_naming    # AI thread titles + running tldr
 python3 -m controller.test_empty_turn   # a silent turn gets one nudge, never '(no result)'
 python3 -m controller.test_relay_fleet  # the trusted-control path through the relay
 python3 -m controller.test_telegram     # Telegram bridge (mock Bot API)
+python3 -m controller.test_pm_visibility # irons, closed history, what's warm
+python3 -m controller.test_refusals     # a harness "no" is not reported as done
+python3 -m controller.test_voice        # the voice PM's server half
 ```
+
+`tools/checkall.sh` runs every `controller/test_*.py`.
 
 No test needs a real `claude`, `codex`, relay or network — `mock_harness.py`
 speaks the WS protocol and every engine is a fiction.
 
 ## Files
 
-`harness_client.py` (WS client + state) · `world.py` (snapshot + attention) ·
-`ledger.py` (event-sourced task log) · `verbs.py` (intent verbs + guard) ·
-`mcp.py` (MCP stdio server) · `agent.py` (the PM brain: a minimal claude-p-agent,
-`claude -p` + fleet tools) · `prompts/` (the persona, by trust level) ·
-`events.py` (Reactor: hooks → higher-level events) · `telegram.py` (Telegram
-bridge) · `chat_server.py` + `chat.html` (chat UI) · `threads.py` (PM conversation
-threads) · `mock_harness.py` (test double) · `__main__.py` (entry).
+`harness_client.py` (WS client + state) · `relay_client.py` (the same, for the
+whole fleet through the relay) · `wsclient.py` (re-exports the fleet's WebSocket
+helpers) · `world.py` (snapshot + attention) · `ledger.py` (event-sourced task
+log) · `verbs.py` (intent verbs + guard) · `refusals.py` (hearing a harness
+"no") · `mcp.py` (MCP stdio server) · `agent.py` (the PM brain: an adapter over
+claude-p-agent) · `prompts/` (the persona, by trust level, plus the PM home's
+`CLAUDE.pm.md`) · `events.py` (Reactor: hooks → higher-level events) ·
+`autopilot.py` (Reactor events → budgeted PM turns) · `notes.py` (priorities +
+scoped notes) · `naming.py` (AI thread titles) · `telegram.py` (Telegram
+bridge) · `voice.py` (realtime voice front-end) · `chat_server.py` +
+`chat.html` + `debug.html` (chat UI + inspector) · `threads.py` (PM
+conversation threads) · `config.py` (every knob) · `mock_harness.py` (test
+double) · `__main__.py` (entry).

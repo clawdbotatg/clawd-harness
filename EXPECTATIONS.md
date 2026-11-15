@@ -355,6 +355,14 @@ covered by the `Bash(ssh:*)` allow rule) → **hard-reload the h.atg.link tab**
 > real binary, pinned fallback). Verified on the same grant, same minute:
 > curl's default UA → 429, claude-cli UA → 200.
 >
+> *(Correction, 2026-11-14: `_refresh_grant` and `_claude_ua()` no longer
+> exist. Since 2026-08-07 the harness sends no refresh grant of its own — a
+> stale login is rotated by a real `claude` ping (`_ping_rotate` in
+> `server.py`). The log lines this file quotes from the curl era
+> (`refresh blocked in transit …`, `refresh REJECTED by the OAuth service`,
+> `refreshed access token persisted`, `WRITE FAILED`) are no longer emitted;
+> today's lines are in "When it breaks" 3b.)*
+>
 > **Debugging rule this buys:** when routing picks a weird pool, check
 > `checkedAt` ages in `.clawd-harness.sessions.json` FIRST. Stale usage
 > doesn't crash routing — it silently collapses the candidate set before
@@ -639,8 +647,11 @@ is.
    are only routed to when every fresh pool is hot (the log says so:
    `every fresh pool is hot — routing to … on a N-min-old reading`); a
    stale-cool pool more than `USAGE_STALE_TRUST` (12 h) old is dropped
-   entirely (root cause v3). A wall of `refresh blocked in transit (HTTP 429)`
-   lines = the refresh client is being identity-blocked again.
+   entirely (root cause v3). The refresh lines to grep for (`[creds <dir> …]`):
+   `rotated via client ping` = a rotation worked; `refresh ping failed but the
+   credential is intact — transient` = it didn't, retry in 10 min (a wall of
+   these on every account = rotation is broken again); `refresh ping failed and
+   the client wiped the blob` = that login really needs a re-sign-in.
 3c. **A rate limit was SEEN (banner flashed / message bounced):** grep the
    log for which layer caught it, in order — `limit banner/modal in the PTY`
    (tripwire), `send got NO hook in` (send watchdog; its `pty tail:` dump

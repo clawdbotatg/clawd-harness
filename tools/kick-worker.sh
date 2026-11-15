@@ -37,7 +37,8 @@ machine, cid = sys.argv[1], sys.argv[2]
 text = (
   "You are on " + machine + ". Restart this box's fleet worker — it is "
   "running stale code. Do exactly this and report each result:\n"
-  "1. cd ~/clawd-harness && git pull\n"
+  "1. cd \"$(git rev-parse --show-toplevel)\" && git pull  (this session "
+  "starts inside the harness checkout; its path differs per box)\n"
   "2. PY=$(plutil -extract ProgramArguments.0 raw "
   "~/Library/LaunchAgents/com.clawd.fleet-worker.plist); \"$PY\" -c "
   "'import cryptography' — if the import fails, run \"$PY\" -m pip install "

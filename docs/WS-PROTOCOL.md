@@ -19,7 +19,7 @@ harness without modifying it.** (Source of truth: `server.py` `Handler.handle_ws
 GET ws://<host>:8787/ws?t=<TOKEN>      (HTTP/1.1 WebSocket upgrade)
 ```
 - **Port 8787** by default (`PORT`).
-- **Token required** — `?t=` must equal the server token (`.clawd-harness.token`
+- **Token required on a non-loopback bind** — `?t=` must equal the server token (`.clawd-harness.token`
   file, or `CONSOLE_TOKEN` env). A bad/missing token → HTTP 403, no upgrade.
 - The page at `/` loads without a token; it just can't open `/ws` without one.
 - **Loopback bind = no token, but same-origin only.** On the default
@@ -32,7 +32,8 @@ GET ws://<host>:8787/ws?t=<TOKEN>      (HTTP/1.1 WebSocket upgrade)
   `Origin` and are unaffected. `server.py` `origin_allowed()`,
   `test_origin_gate.py`.
 - **Fleet relay (`fleet/relay.py`) roles:** `?role=` is a closed set —
-  `mobile` (default; passkey-gated after connect), `worker` (`?t=` worker
+  `mobile` (default; passkey-gated after connect, plus the `?t=` mobile token
+  unless the relay runs `FLEET_PASSKEY_ONLY=1`), `worker` (`?t=` worker
   token + `?machine=`), `controller` (`?t=` controller token). Any other value
   → 403 before the upgrade. Frames from a mobile are capped at
   `FLEET_MOBILE_MAX_MESSAGE` (1 MiB); the roster / worker status fan-outs go
@@ -153,9 +154,12 @@ resolve; degrades, doesn't break.
 
 ### On connect (every client, immediately)
 ```jsonc
-{ "type":"projects", "projects":[<projectMeta>...], "boot":"<BOOT_ID>" }
+{ "type":"projects", "projects":[<projectMeta>...], "boot":"<BOOT_ID>", "build":"<12-hex hash of server.py>" }
 { "type":"sessions", "sessions":[<sessionMeta>...], "current":"<cid|null>" }
-{ "type":"accounts", "accounts":[<accountMeta>...], "active":"<name>", "auto":bool }
+{ "type":"accounts", "accounts":[<accountMeta>...], "active":"<name>", "auto":bool,
+  "best":"<name|null>",          // what a new session would be routed to right now
+  "lastSwitch":<ts>,             // when the active account last changed
+  "codex":<usage|null> }         // the codex plan's usage, read-out only; null when codex isn't signed in
 { "type":"irons", "irons":[{ "id","title","desc","tags":[..], "pids":[..], "created", "rank" }...] }  // rank-sorted: list order = priority (see ironOrder)
 { "type":"closed", "closed":[{cid,engine,pid,project,session_id,title,desc,account,prompt_count,first_prompt,created,last_active,closed_at,reason,last_answer,resumable}] }   // 🗃️ closed-session history, newest first (every `close`, capped at CLOSED_MAX, persisted); on `list` and on every change. `reason`: "closed" | "project gone" | "wrapped" (📑 closed itself; `last_answer` = its TLDR, ≤280 chars). `resumable`=false = no conversation to resume (reopen starts fresh).
 { "type":"todos", ... }   // 🔥 iron to-do lists
@@ -163,7 +167,9 @@ resolve; degrades, doesn't break.
 // + a restart-state frame if a restart is already pending
 ```
 `boot` is a per-process id; the browser auto-reloads when it changes after a
-reconnect (i.e. the server restarted).
+reconnect (i.e. the server restarted). `boot` and `build` ride **only** this
+on-connect `projects` frame — the reply to `list` and every re-broadcast carry
+just `projects`.
 
 ### On `subscribe` (that client only)
 ```jsonc
@@ -205,9 +211,9 @@ no-op that would leave the previous session's stream flowing (that's how
 { "type":"exit", "cid" }                               // the claude process for cid exited
 { "type":"ttySize", "cid", "cols":int, "rows":int }    // to that session's subscribers: the PTY was re-sized to a viewer's claim (see `resize`)
 { "type":"peekPty", "cid", "d":"<base64 PTY bytes>" }   // 🔍 to a `peek`ing client only: the peeked session's terminal stream (see `peek`)
-{ "type":"projects", "projects":[...], "boot" }        // re-broadcast on any project change
+{ "type":"projects", "projects":[...] }                // re-broadcast on any project change (no `boot`)
 { "type":"sessions", "sessions":[...], "current" }     // re-broadcast on any session change
-{ "type":"accounts", "accounts":[...], "active", "auto" }  // subscription logins/usage/active changed
+{ "type":"accounts", "accounts":[...], "active", "auto", "best", "lastSwitch", "codex" }  // subscription logins/usage/active changed
 { "type":"reload" }                                    // index.html changed on disk → browser should reload
 { "type":"restart", "pending":bool, "reason", "busy":int,        // restart state (banner)
   "waitedFor":float, "maxWait":float,                            // seconds pending / ceiling

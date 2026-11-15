@@ -202,8 +202,9 @@ Corollary directions baked into the design:
 - `python3 test_relay_prefs.py` — the shared active-machines set: `prefs` before
   the first roster, echoed to every device, persisted, sanitized. Run after
   touching prefs or the mobile auth path. Client half: `cd ../tools && node fleetprobe.mjs`.
-- Env: `FLEET_MOBILE_TOKEN` + `FLEET_WORKER_TOKEN` (auth; both fall back to
-  `FLEET_TOKEN`, then `.clawd-fleet.token`), `FLEET_WORKER_ALLOW` (csv machine
+- Env: `FLEET_WORKER_TOKEN` + `FLEET_MOBILE_TOKEN` (auth; both fall back to
+  `FLEET_TOKEN`, then `.clawd-fleet.token`; the mobile one is unused with
+  `FLEET_PASSKEY_ONLY=1`), `FLEET_WORKER_ALLOW` (csv machine
   allowlist), `FLEET_ALLOW_EXEC=1` (enable the `exec` diagnostic, off by default),
   `FLEET_RELAY` (worker→relay url), `FLEET_PORT`, `FLEET_BIND`, `FLEET_MACHINE`,
   plus `HARNESS_WS` / `HARNESS_TOKEN` (worker → local harness).
@@ -264,10 +265,8 @@ doc: `../docs/fleet/SKILLS.md`**; test: `test_skills_lib.py`.
 The relay box also holds the **shared doc shelf** (`.clawd-fleet.docs/`,
 gitignored): flat named files any agent on any machine puts/gets over HTTP
 (`/docs/list|get|put|rm`) so a plan written on one box is one curl away on
-another, from anywhere on the web. Gated by its **own** token
-(`FLEET_DOCS_TOKEN`, else auto-generated `.clawd-fleet.docs.token`) — never
-the worker token, because the token rides inside the `fleet-docs` library
-skill. Overwrite and rm both keep the old bytes in `.trash/`. **Deep doc:
+another, from anywhere on the web. Gated by **per-agent bearer credentials**
+provisioned with `docs_admin.py` — never the worker token. Overwrite and rm both keep the old bytes in `.trash/`. **Deep doc:
 `../docs/fleet/DOCS-STORE.md`**; test: `test_docs_store.py`.
 
 ## Deep docs
