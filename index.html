@@ -150,7 +150,7 @@
   #needsbar .nb-who { font-size:10px; opacity:.65; white-space:nowrap; }
   #needsbar .nb-ask { font-size:12px; font-weight:600; white-space:nowrap;
                       overflow:hidden; text-overflow:ellipsis; max-width:100%; }
-  /* .stab is shared by the top tab strip AND the 🔥 iron detail's session row */
+  /* .stab: one tab in the top strip — session tabs, and the PM's thread tabs */
   #sessionbar .stab { display:inline-flex; align-items:center; gap:6px; flex:0 0 auto;
                       padding:4px 9px; border:1px solid var(--edge); background:transparent;
                       color:var(--dim); font-size:12px; font-family:var(--mono); cursor:pointer;
@@ -629,7 +629,6 @@
   #wraprow button, #checkrow button { flex:0 0 auto; background:transparent; border:1px solid var(--edge); color:var(--dim);
                     border-radius:6px; padding:3px 9px; font-size:12px; cursor:pointer; }
   #wraprow button:hover, #checkrow button:hover { border-color:var(--accent); color:var(--accent); }
-  /* 🔍 double-check — the session is writing its brief; a reviewer tab opens when its turn ends */
   /* 📑 wrapped-up toast: the tab just vanished on purpose — say so, offer ↩ */
   #wraptoast { position:fixed; left:50%; top:var(--wt-top, 56px); transform:translateX(-50%); z-index:60;
                display:flex; gap:10px; align-items:center; background:var(--raised); color:var(--ink);
@@ -680,7 +679,7 @@
          background:var(--raised); color:var(--ink);
          border:1px solid var(--edge); padding:9px 11px; font:inherit; }
   /* 13px on mobile (small, per request). iOS Safari would normally auto-zoom on focus for a field
-     under ~16 visual px, but the viewport's maximum-scale=1 caps zoom so it can't — so small type
+     under ~16 visual px, but the viewport's maximum-scale (0.9, user-scalable=no) caps zoom so it can't — so small type
      here no longer triggers the zoom. Scoped to coarse pointers so the desktop input keeps its
      inherited size. */
   @media (pointer: coarse) { #box { font-size:13px; } }
@@ -1001,7 +1000,6 @@
   .ironform input:focus { outline:none; border-color:var(--accent-dim); }
   .ironform .frow { display:flex; gap:6px; }
   .ironform .frow button { flex:0 0 auto; }
-  /* the one filter+create row: input stretches, button hangs off its right */
   /* dive-wait status on the iron page: "finding its sessions…" while frames
      stream in, the honest "none yet" after the wait expires */
   #ironvstatus { margin:8px 14px 0; padding:10px 12px; border-radius:8px;
@@ -1370,12 +1368,12 @@
               cursor:pointer; font-family:var(--mono); font-size:12px; padding:0 12px;
               white-space:nowrap; }
   .codexnew:hover { color:var(--codex); border-color:var(--codex); }
-  /* engine badge on a session chip/card — only ever shown for non-claude, so
-     the default engine stays visually silent */
   /* the codex plan card: same shape as a claude one, green edge so you never
      mistake which engine's meter you're reading */
   .acct.codexacct { border-left:2px solid var(--codex); }
   .acct.codexacct .aname { color:var(--codex); }
+  /* engine badge on a session chip/card — only ever shown for non-claude, so
+     the default engine stays visually silent */
   .ebadge { color:var(--codex); border:1px solid var(--codex); border-radius:3px;
             font-size:9px; padding:0 3px; margin-left:5px; letter-spacing:.08em;
             text-transform:uppercase; vertical-align:middle; }
@@ -1480,8 +1478,8 @@
       <div id="outbound" class="isle empty" title="on the way out — 📑 wrapping up, each closes itself once its handoff is written; drag a tab here to 📑 it, drag a chip back to the tabs to cancel"><span class="bhint">drop here · 📑 wrap it up</span></div>
     </div>
     <div id="island" class="isle empty" title="back burner — drag a tab here to park it; drag it back to the tabs to resume"><span class="bhint">drop here · back burner</span></div>
-    <!-- one control strip, left→right: projects · sessions · machines · subscriptions
-         · PM · pins · settings · reload. All the same square emoji chip (.hbtn);
+    <!-- one control strip, left→right: irons · projects · sessions · machines ·
+         subscriptions · PM · pins · settings · reload. All the same square emoji chip (.hbtn);
          only 📌 carries a count. -->
     <button id="ironsBtn" class="hbtn" title="Irons — named groups of projects, each with every session inside it"><span class="bico">🔥</span></button>
     <button id="projectsBtn" class="hbtn" title="All projects"><span class="bico">🗂️</span></button>
@@ -2161,7 +2159,7 @@ function tldrHold() {
   // of the script — reachable from a render during boot (the TDZ crash of 2026-09-04)
   if (typeof uiBooted === 'undefined' || !uiBooted) return 0;
   if (typeof tldrOn === 'undefined' || !tldrOn || currentView() !== 'tty') return 0;
-  const s = currentCid && allSessions().find(x => x.cid === currentCid);
+  const s = currentCid && sessionByCid(currentCid);   // every xterm render: a lookup, not a roster copy
   if (!s || s.waiting) return 0;
   // A session that hasn't taken a prompt yet shows ALL of itself: claude's startup
   // dialogs (the bypass-permissions accept, "continue?" after an update…) render in
@@ -2209,10 +2207,21 @@ function tldrTrailing() {
   const b = term.buffer && term.buffer.active, lb = tldrLastBuf();
   return (!b || lb < 0 || b.baseY === 0) ? 0 : (b.length - 1 - lb);
 }
-// rows of the grid the summary box needs (1..TTY_COVER_ROWS); 0 with no summary
+// rows of the grid the summary box needs (1..TTY_COVER_ROWS); 0 with no summary.
+// Called from every xterm render while a summary shows, and the measurement is
+// two forced layouts — so the answer is kept while nothing that feeds it moved:
+// the text, the grid (cols/rows/font), the window, and the box's own size
+// (tldrBoxGen — a ResizeObserver, so a side panel squeezing it counts too).
+// Only a measurement taken with the box on screen is kept: hidden, the observer
+// can't see it change.
+let tldrRowsKey = null, tldrRowsVal = 0, tldrBoxGen = 0;
 function tldrRowsNeeded() {
   const el = document.getElementById('tldr'), inner = document.getElementById('tldrInner');
-  if (!inner || !document.getElementById('tldrText').textContent.trim()) return 0;
+  const text = document.getElementById('tldrText').textContent;
+  if (!inner || !text.trim()) return 0;
+  const key = [term.cols, term.rows, term.options.fontSize, window.devicePixelRatio,
+               window.innerWidth, window.innerHeight, tldrBoxGen, text].join('|');
+  if (key === tldrRowsKey && !el.hidden) return tldrRowsVal;
   const rowsEl = term.element && term.element.querySelector('.xterm-rows');
   const cell = rowsEl && rowsEl.children.length ? rowsEl.children[0].getBoundingClientRect().height : 0;
   if (!cell) return TTY_COVER_ROWS;
@@ -2220,8 +2229,12 @@ function tldrRowsNeeded() {
   if (wasHidden) el.hidden = false;                 // lay it out to measure (width is fixed by left/right)
   const need = Math.ceil((inner.offsetHeight + 5) / cell);    // + the box's vertical padding (2 + 3)
   if (wasHidden) el.hidden = true;
-  return Math.max(1, Math.min(TTY_COVER_ROWS, need));
+  const val = Math.max(1, Math.min(TTY_COVER_ROWS, need));
+  if (wasHidden) tldrRowsKey = null; else { tldrRowsKey = key; tldrRowsVal = val; }
+  return val;
 }
+// the box changed size → the kept answer is stale; re-seat the hold if it moved
+new ResizeObserver(() => { tldrBoxGen++; applyTldrHold(); }).observe(document.getElementById('tldrInner'));
 // "scroll to the bottom" as the reader sees it: the true bottom, minus the held rows.
 function ttyBottom() {
   term.scrollToBottom();
@@ -2283,7 +2296,7 @@ function positionTldr() {
   // Only while there IS a summary: an empty cover is just a black hole where the
   // input box was (a tool-only turn has no prose for minutes — 2026-09-05).
   if (!tldrOn || document.getElementById('tldrText').textContent === '') { el.hidden = true; tldrPosKey = ''; return; }
-  const s = currentCid && allSessions().find(x => x.cid === currentCid);
+  const s = currentCid && sessionByCid(currentCid);
   const on = currentView() === 'tty' && !!s && !s.waiting;
   if (!on) { el.hidden = true; tldrPosKey = ''; return; }
   const screen = term.element && term.element.querySelector('.xterm-screen');
@@ -2446,18 +2459,6 @@ function scheduleHardRepaint() {
   clearTimeout(hardRepaintTimer);
   hardRepaintTimer = setTimeout(hardRepaint, 80);
 }
-// Fleet deep-link fix: on a /tty deep-link the e2e handshake (and its passkey) can
-// take longer than armHardRepaint's 2500ms window, so the subscribe — queued until
-// the channel opens — only sends, and the screen only replays, AFTER the window has
-// lapsed. Then scheduleHardRepaint() early-returns and the buffer fills but never
-// re-measures → the blank-terminal-on-open bug. Re-arm the window the moment the
-// channel opens (the queued subscribe is going out right now, the replay is imminent)
-// so those late bursts still force the visible re-measure. Only matters for the session
-// we're actually viewing on the tty; otherwise it's a harmless no-op.
-function onE2EChannelOpen(machine) {
-  if (machine === currentMachine && currentCid && currentView() === 'tty') armHardRepaint();
-}
-
 // The composer (footer) grows whenever an image chip is attached, a pending
 // message is queued, the key bar appears, or the textarea wraps — each shrinks
 // <main> without a window resize, so xterm keeps its stale (taller) row count
@@ -2471,7 +2472,7 @@ const meta = document.getElementById('meta');
 const statusEl = document.getElementById('status');
 // Status chip: the content is always the PM face (👩‍💼, set in the HTML);
 // session status is conveyed by border color alone via the class.
-function setStatus(emoji, text, cls) {
+function setStatus(cls) {
   // #status doubles as the Fleet PM launcher; preserve the open marker across
   // session-status updates so the border state and the PM affordance coexist.
   // `hbtn` is the chip's shape, not a state — it has to survive every repaint.
@@ -2725,7 +2726,7 @@ function loadToken() {
   return t;
 }
 // Mode: the relay injects window.__FLEET__ when it serves this page (fleet mode —
-// machines rung, passkey, toMachine wrapping). The harness serves it untouched →
+// machine roster, passkey, toMachine wrapping). The harness serves it untouched →
 // FLEET is false → direct mode: talk to the local harness exactly as its own UI does.
 const FLEET = !!window.__FLEET__;
 // Fleet mode is passkey-only — NO token (the passkey is the sole credential).
@@ -3039,7 +3040,7 @@ function connect() {
       else meta.textContent = '';
       return;
     }
-    if (!currentMachine) { meta.textContent = ''; return; }   // on the machines rung — nothing to re-sync
+    if (!currentMachine) { meta.textContent = ''; return; }   // no machine attached yet — nothing to re-sync
     // Deliberately DON'T list/subscribe or kick the e2e handshake here. A fresh
     // relay socket is unauthed, and the relay SILENTLY DROPS every non-`auth`
     // frame until the passkey gate is passed (relay.py from_mobile). Firing the
@@ -3166,7 +3167,14 @@ function handleRelay(m) {
       (m.machines || []).forEach(x => {
         if (machineIsLive(x) && prevOnline[x.id] === false) scheduleRelist(x.id, 2000);
       });
-    saveFleetCacheSoon();
+    // This roster is also the relay's ~1/s pulse (only the stats move): write
+    // the cache when who-is-there changed, or hourly so its age stamp stays
+    // young. Session/project frames save on their own.
+    const rosterSig = JSON.stringify((m.machines || []).map(x => [x.id, !!x.online, x.kind || '', x.host || '']));
+    if (rosterSig !== fleetCacheRosterSig || Date.now() - fleetCacheSavedAt > 3600e3) {
+      fleetCacheRosterSig = rosterSig;
+      saveFleetCacheSoon();
+    }
     // A worker↔relay socket flap drops every viewer's harness link on that machine
     // (worker.py serve_once → _drop_all_links) while OUR socket stays healthy — so
     // fleetResync (once per socket) never re-runs, pings still pong (the chain is
@@ -3546,7 +3554,7 @@ async function e2eEnsure(machine, opts = {}) {
     // phase showed no prompt, so retrying it costs nothing — let the relist chain
     // re-resume right away instead of parking the machine for 30s.
     if (ch.phase !== 'resume') e2eFailUntil[machine] = Date.now() + E2E_FAIL_COOLDOWN_MS;   // no auto-retry storm; user gesture still retries
-    if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker, clear the pin in settings."); }
+    if ((e && e.message) === 'pin') { meta.textContent = '⚠ ' + machine + ' identity changed — refusing'; alert('SECURITY: ' + machine + "'s key changed since you first connected. Refusing to connect. If you reinstalled the worker yourself, this browser is still holding the old key: clear this site's data in the browser (the entry is cc_e2e_pin_" + machine + " in local storage), then reload."); }
     else { meta.textContent = 'secure channel failed: ' + ((e && e.message) || e); console.error('[e2e] handshake failed for', machine, e); }
     throw e;
   });
@@ -3727,7 +3735,7 @@ function e2eOnRecord(machine, rec) {
 // hydrate on boot: every machine's tabs render immediately (offline-marked,
 // with honest ages), then live frames + the re-list engine below replace them.
 const FLEET_CACHE_KEY = 'cc_fleet_cache_v2';
-let fleetCacheTimer = null;
+let fleetCacheTimer = null, fleetCacheRosterSig = null, fleetCacheSavedAt = 0;
 function saveFleetCacheSoon() {
   if (!FLEET || fleetCacheTimer) return;
   fleetCacheTimer = setTimeout(() => { fleetCacheTimer = null; saveFleetCache(); }, 1000);
@@ -3742,6 +3750,7 @@ function saveFleetCache() {
     }
     localStorage.setItem(FLEET_CACHE_KEY,
       JSON.stringify({ t: Date.now(), machineList, perMachine: pm }));
+    fleetCacheSavedAt = Date.now();
   } catch {}
 }
 function hydrateFleetCache() {
@@ -4073,7 +4082,7 @@ rebootNow.onclick = () => {
 function handleJson(m) {
   if (m.type === 'pong') { onPong(m.id); return; }   // liveness probe came back → chain is alive (see wake())
   if (m.type === 'searchResult') { onSpotSearchResult(null, m); return; }   // 🔎 direct mode
-  if (m.type === 'peekPty') { onPeekPty(m); return; }   // 🔍 the reviewer pane's own stream   // liveness probe came back → chain is alive (see wake())
+  if (m.type === 'peekPty') { onPeekPty(m); return; }   // 🔍 the reviewer pane's own stream
   if (m.type === 'reload') {        // server saw index.html change on disk → live-reload
     // Direct mode only: this page IS the harness's served HTML, so a disk edit
     // means reload. In fleet mode the page comes from the RELAY (its own copy) —
@@ -4264,7 +4273,7 @@ function handleJson(m) {
   } else if (m.type === 'exit') {
     if (m.cid !== currentCid) return;
     meta.textContent = 'session ended';
-    setStatus('🔴', 'ended', 'ended');
+    setStatus('ended');
     showDeadVeil(m.cid, false);      // don't leave a black void with six-point type
   } else if (m.type === 'localProjectMissing') {
     // 📁 local path pointed at a folder that doesn't exist → ask, then retry
@@ -4727,7 +4736,7 @@ function refreshBreadcrumb(view) {
       const pe = currentProjectEmoji();
       crumb = (pe ? pe + ' ' : '') + pn;
     }
-    // (iron scope: the #ironhdr line above the strip carries the 🔥 identity —
+    // (iron scope: the #ironrow line above the strip carries the 🔥 identity —
     // the crumb stays the project so the phone header doesn't say it twice)
   }
   meta.textContent = crumb;
@@ -5251,7 +5260,16 @@ function allMachinesSessions() {
 // prefer the saved default, else an online machine that already has sessions, else
 // the first online machine; fall back to any (offline) entry so the card still renders.
 const DEFAULT_MACHINE_KEY = 'cc_proj_default';
-function loadDefaults() { try { return JSON.parse(localStorage.getItem(DEFAULT_MACHINE_KEY) || '{}'); } catch { return {}; } }
+// Parsed once and kept: the rung asks once per project per repaint. The one
+// writer below edits the kept map; another window's write drops it (`storage`).
+let defaultsMap = null;
+function loadDefaults() {
+  if (defaultsMap) return defaultsMap;
+  let d = null;
+  try { d = JSON.parse(localStorage.getItem(DEFAULT_MACHINE_KEY) || '{}'); } catch {}
+  return defaultsMap = (d && typeof d === 'object') ? d : {};
+}
+window.addEventListener('storage', e => { if (e.key === DEFAULT_MACHINE_KEY || e.key === null) defaultsMap = null; });
 function defaultMachineFor(key) { return loadDefaults()[key] || null; }
 function setDefaultMachine(key, id) { const d = loadDefaults(); d[key] = id; try { localStorage.setItem(DEFAULT_MACHINE_KEY, JSON.stringify(d)); } catch {} }
 // Global default HOST for new repos created/cloned from the projects rung — a single
@@ -5401,7 +5419,7 @@ function selectProject(id) {
 // to the first online machine. (Direct mode talks straight to the local harness.)
 function ensureTargetMachine() {
   if (!FLEET) return true;
-  // An explicit clone default (set via the machine roster checkbox) wins outright —
+  // An explicit clone default (set in ⚙️ settings) wins outright —
   // that's the whole point of pinning one: deterministic host for new repos.
   const pref = cloneDefaultMachine();
   if (pref && isMachineOnline(pref) && isMachineActive(pref)) { currentMachine = pref; e2eEnsure(pref, { reason: 'target' }).catch(() => {}); return true; }
@@ -6725,16 +6743,17 @@ function shortMachine(id) { return (id || '').replace(/^clawd-/, ''); }
 // dive-in) while the replay paints underneath. ONE WORD at a time, huge (sized
 // to fill most of the window's width), always in the same spot, hard cuts —
 // project words in white, machine in violet, session-title words in amber,
-// desc words in grey — then everything hides (~200-250ms/word). A colored
-// state box (top) and a one-line meta strip (bottom) hold still for the whole
-// show. Paints instantly from metadata the client already holds. Tap dismisses
+// desc words in grey — then everything hides (~200-250ms/word). Each finished
+// line locks in above the flashing word, and a one-line meta strip holds still
+// at the foot of the box for the whole show. Paints instantly from metadata
+// the client already holds. Tap dismisses
 // early; the composer below is never covered, so typing works the whole time.
 // Reconnect re-subscribes and the auto-surfaced-question path never call this
 // — only real navigation does.
 const splashEl = document.getElementById('splash');
 let splashTimers = [], splashCid = null;
-// One shared read of "what is this session doing right now" — feeds both the
-// splash's NOW line and the persistent #ttystat activity box. `agent` = a turn
+// One shared read of "what is this session doing right now" — feeds the
+// persistent #ttystat activity box and the word on a session card. `agent` = a turn
 // is in flight AND its current tool is a subagent (Task/Agent) — i.e. work is
 // delegated to a background agent rather than the session's own hands.
 function sessionState(s) {
@@ -7083,6 +7102,20 @@ function allSessions() {
       out.push(Object.assign({ _machine: mid, _pkey: projectKeyForSession(mid, s.pid) }, s));
   }
   return out;
+}
+
+// allSessions().find(by cid) without building the roster: the same lists in the
+// same order, but it returns the LIVE row (no `_machine`/`_pkey` tags, no copy)
+// — read-only use. For the xterm render path, which runs many times a second
+// and only needs a flag or two off the open session.
+function sessionByCid(cid) {
+  if (!FLEET) return sessionList.find(s => s.cid === cid);
+  for (const mid of Object.keys(perMachine)) {
+    if (!isMachineActive(mid)) continue;
+    const s = ((perMachine[mid] || {}).sessionList || []).find(s => s.cid === cid);
+    if (s) return s;
+  }
+  return undefined;
 }
 
 // The unified roster in rail order — importance bucket (needs-you → working →
@@ -7493,8 +7526,7 @@ function renderSessions() {
     const full = em ? sessionEmojiFull(s) : '';
     const eng = (s.engine && s.engine !== 'claude') ? s.engine : '';
     const plan = (s.account && s.account !== 'default') ? acctDisplay(s._machine || 'local', s.account) : '';   // which subscription it burns
-    const state = !s.alive ? 'ended' : s.waiting ? 'needs you' :
-                  s.busy ? (s.tool ? `running ${s.tool}` : 'working…') : 'idle';
+    const state = sessionState(s).word;   // the same read as the dot — never a red/magenta dot beside "idle"
     syncSlots(card, [
       ['row', true, 'div', 'row', row => syncSlots(row, [
         ['dot', true, 'span', 'sdot', el => putProp(el, 'className', 'sdot' + dotState(s))],
@@ -7614,8 +7646,7 @@ function renderPinBoard() {
     }
     const sm = document.createElement('div');
     sm.className = 'smeta';
-    const state = !s.alive ? 'ended' : s.waiting ? 'needs you' :
-                  s.busy ? (s.tool ? `running ${s.tool}` : 'working…') : 'idle';
+    const state = sessionState(s).word;   // the same read as the dot — never a red/magenta dot beside "idle"
     const pinAge = fmtAge(s.pinned);
     sm.textContent = `${s.promptCount || 0} msg · ${state}` +
                      (pinAge ? ` · pinned ${pinAge} ago` : '');
@@ -7755,8 +7786,7 @@ function updatePinBtn() {
 }
 
 function setBusy(busy, label) {
-  if (busy) setStatus('🟡', label ? `working · ${label}` : 'working…', 'working');
-  else setStatus('🟢', 'idle · ready', 'idle');
+  setStatus(busy ? 'working' : 'idle');
 }
 
 // braille spinner frames — terminal-native, spins like a CLI does (the PM chat's thinking row)
@@ -7784,7 +7814,7 @@ function handleHook(m) {
   }
   else if (ev === 'Stop')        { setBusy(false, null); restoreViewAfterQuestion(); }
   else if (ev === 'SessionStart') { setBusy(false, null); if (pendingSendText) setTimeout(flushPendingSend, 500); }
-  else if (ev === 'SessionEnd')  { setStatus('🔴', 'session ended', 'ended'); }
+  else if (ev === 'SessionEnd')  { setStatus('ended'); }
   else if (ev === 'Notification') {
     setBusy(m.busy, d.message ? d.message.slice(0,40) : null);
     openTtyForQuestion();                      // permission / "needs your input" — surface the TUI
@@ -11497,7 +11527,7 @@ document.getElementById('brand').onclick = () => {
   navTo('sessions');
   renderSessions();   // setView doesn't repaint a rung you're already on; the scope just changed
 };
-if (!FLEET) machinesBtn.style.display = 'none';   // no machines rung when talking to a harness directly
+if (!FLEET) machinesBtn.style.display = 'none';   // no machine roster when talking to a harness directly
 pendingNav = parseHash();        // restore project / session / depth from the URL…
 if (pendingNav.iron) currentIronId = pendingNav.iron;   // a #/i/ link's page can name itself while loading
 setView(pendingNav.view);        // …optimistically; resolvePendingNav refines once data lands
@@ -11994,7 +12024,15 @@ function renderSpotlight() {
       r.classList.add('deep'); r.appendChild(sn);
     }
     r.onclick = () => spotLaunch(p);
-    r.onmousemove = () => { if (spotSel !== i) { spotSel = i; renderSpotlight(); } };
+    // Hover moves the highlight by toggling .sel — never by rebuilding: a tap
+    // fires a synthetic mousemove first, and a handler that replaces the row
+    // under the finger can cost the tap its click (the row then needs two taps).
+    r.onmousemove = () => {
+      if (spotSel === i) return;
+      spotSel = i;
+      for (const x of spotListEl.querySelectorAll('.spotrow.sel')) x.classList.remove('sel');
+      r.classList.add('sel');
+    };
     spotListEl.appendChild(r);
     if (i === spotSel) r.scrollIntoView({ block: 'nearest' });
   });

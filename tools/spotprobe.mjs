@@ -34,7 +34,13 @@ function findChromium() {
 const token = readFileSync(join(ROOT, '.clawd-harness.token'), 'utf8').trim();
 const url = `http://127.0.0.1:8787/?t=${token}#/`;
 const browser = await chromium.launch({ executablePath: findChromium() });
+// The page under test is THIS checkout's index.html (direct mode serves it
+// untouched), not whatever the running server has on disk.
+const serveLocal = (pg) => pg.route(u => u.pathname === '/', r => r.request().resourceType() === 'document'
+  ? r.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: readFileSync(join(ROOT, 'index.html'), 'utf8') })
+  : r.continue());
 const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+await serveLocal(page);
 await page.goto(url, { waitUntil: 'domcontentloaded' });
 await page.waitForFunction(() => typeof openSpotlight === 'function').catch(() => {});
 await page.waitForTimeout(600);
@@ -95,7 +101,49 @@ const r = await page.evaluate(async () => {
   }
   return out;
 });
-console.log('SPOT:', JSON.stringify(r));
+
+// Touch: ONE real tap on a row that is not the selected one must launch it.
+// (The row's mousemove handler used to rebuild the whole list, so the tap's
+// own synthetic mousemove replaced the row under the finger before the click.)
+// openIron is stubbed and the irons are fake — nothing real is opened.
+const phone = await browser.newPage({ viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true });
+await serveLocal(phone);
+await phone.goto(url, { waitUntil: 'domcontentloaded' });
+await phone.waitForFunction(() => typeof openSpotlight === 'function').catch(() => {});
+await phone.waitForTimeout(600);
+await phone.evaluate(() => {
+  window.__dove = null; window.__rebuilt = 0;
+  window.openIron = (id) => { window.__dove = id; };
+  ironList = [{ id: 'probeiron1', title: 'zzprobe iron', desc: '', tags: [], pids: [], keys: [] },
+              { id: 'probeiron2', title: 'other effort', desc: '', tags: [], pids: [], keys: [] }];
+  openSpotlight('iron');
+  new MutationObserver(ms => { for (const m of ms) window.__rebuilt += m.removedNodes.length; })
+    .observe(spotListEl, { childList: true });
+});
+const box = await phone.evaluate(() => {
+  const b = spotListEl.querySelectorAll('.spotrow')[1].getBoundingClientRect();
+  return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+});
+await phone.touchscreen.tap(box.x, box.y);
+await phone.waitForTimeout(300);
+const t = await phone.evaluate(() => ({ dove: window.__dove, rebuilt: window.__rebuilt, up: !spotEl.hidden }));
+r.touchOneTap = t.dove === 'probeiron2' && !t.up;
+r.touchNoRebuild = t.rebuilt === 0;       // the row under the finger is never replaced
+// Desktop hover still moves the highlight (by toggling .sel, not rebuilding).
+r.hoverSelects = await page.evaluate(async () => {
+  const saved = ironList, savedOpen = window.openIron;
+  window.openIron = () => {};
+  ironList = [{ id: 'probeiron1', title: 'zzprobe iron', desc: '', tags: [], pids: [], keys: [] },
+              { id: 'probeiron2', title: 'other effort', desc: '', tags: [], pids: [], keys: [] }];
+  try {
+    openSpotlight('iron');
+    const rows = [...spotListEl.querySelectorAll('.spotrow')];
+    rows[1].dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+    const now = [...spotListEl.querySelectorAll('.spotrow')];
+    return now[1] === rows[1] && now[1].classList.contains('sel') && !now[0].classList.contains('sel') && spotSel === 1;
+  } finally { ironList = saved; window.openIron = savedOpen; closeSpotlight(); }
+});
+console.log('SPOT:', JSON.stringify(r), JSON.stringify(t));
 
 const ok = Object.values(r).every(Boolean);
 console.log(ok ? 'PASS — Ctrl+Space irons dive, Ctrl+Shift+Space project spawn, chords switch modes'

@@ -59,6 +59,11 @@ const check = (name, ok, detail) => ok ? pass(name) : fail(name + (detail ? ' �
 async function open(ctxOpts) {
   const ctx = await browser.newContext(ctxOpts);
   const page = await ctx.newPage();
+  // The page under test is THIS checkout's index.html (direct mode serves it
+  // untouched), not whatever the running server has on disk.
+  await page.route(u => u.pathname === '/', r => r.request().resourceType() === 'document'
+    ? r.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: readFileSync(join(ROOT, 'index.html'), 'utf8') })
+    : r.continue());
   try {
     await page.goto(url, { waitUntil: 'networkidle', timeout: 15000 });
   } catch (e) {
@@ -189,15 +194,27 @@ else {
     const now = document.querySelector(`#sessions > .scard[data-cid="${cid}"]`);
     const out = { same: now === node, meta: now.querySelector('.smeta').textContent, blk: (now.querySelector('.sblock') || {}).textContent || '',
                   order: [...now.children].map(c => c.className.split(' ')[0]).join() };
+    // the word beside the dot is the dot's own state: a red dot (blocked without
+    // `waiting`) or a magenta one (background work) must never sit next to "idle"
+    const wasMore = { status: s.status, bg: s.bg };
+    const read = () => { renderSessions(); const c = document.querySelector(`#sessions > .scard[data-cid="${cid}"]`);
+                         return c.querySelector('.sdot').className + ' | ' + c.querySelector('.smeta').textContent; };
+    s.busy = false; s.tool = ''; s.waiting = false; s.status = 'blocked'; s.bg = null;
+    out.blockedWord = read();
+    s.status = wasMore.status === 'blocked' ? '' : wasMore.status; s.bg = 'shell';
+    out.bgWord = read();
+    Object.assign(s, wasMore);
     Object.assign(s, was); renderSessions();
     out.cleared = !document.querySelector(`#sessions > .scard[data-cid="${cid}"] .sblock`) || !!was.blocked_on;
     return out;
   }, cc);
   if (live.skip) console.log('SKIP: live-change check (session not on this machine\'s list)');
   else {
-    check('rung: a live change is written into the same card', live.same && /running TabTapTool/.test(live.meta) && /probe question/.test(live.blk), JSON.stringify(live));
+    check('rung: a live change is written into the same card', live.same && /TabTapTool/.test(live.meta) && /probe question/.test(live.blk), JSON.stringify(live));
     check('rung: the card keeps its line order (…, needs-you, meta, ✕)', /sblock,smeta,sclose$/.test(live.order), live.order);
     check('rung: a line that no longer applies is removed', live.cleared);
+    check('rung: a red dot reads "needs you", never "idle"', /blocked/.test(live.blockedWord) && /needs you/.test(live.blockedWord) && !/idle/.test(live.blockedWord), live.blockedWord);
+    check('rung: a magenta dot reads "background", never "idle"', /bgwork/.test(live.bgWord) && /background/.test(live.bgWord) && !/idle/.test(live.bgWord), live.bgWord);
   }
   // ✕ pressed, repaints land, released → exactly one close frame, captured not sent
   await page.evaluate(() => { window.__sent = []; });
