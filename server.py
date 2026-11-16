@@ -3343,6 +3343,16 @@ class Engine:
     compact_cmd = "/compact "
 
 
+def _pool_out_of_fable(s):
+    """True when this session's login sits in a pool quarantined by a
+    CLI-confirmed weekly/model wall (the Fable / spend-cap kind)."""
+    mgr = getattr(s, "manager", None)
+    acct = getattr(mgr, "accounts", {}).get(getattr(s, "account", "")) if mgr else None
+    return bool(acct and time.time() < getattr(acct, "walled_until", 0.0)
+                and getattr(acct, "wall_kind", "") == "weekly"
+                and not getattr(s, "ceremony", False))
+
+
 class ClaudeEngine(Engine):
     name, bin, routes_accounts = "claude", CLAUDE_BIN, True
     forks = True                             # verified: --resume <id> --fork-session (2026-09-06)
@@ -3379,6 +3389,14 @@ class ClaudeEngine(Engine):
                              else TASKS_RULE) if r]
         if rules:
             argv += ["--append-system-prompt", "\n\n".join(rules)]
+        if _pool_out_of_fable(s):
+            # Spawned onto a pool the CLI already walled (org spend cap / Fable
+            # limit) — the router only does that when every pool is walled.
+            # Start on Opus instead of walling the first prompt: a /model typed
+            # after a wall dies with the process, so every restart, handoff and
+            # new tab used to hit the wall again (Austin, 11-16: "in the worst
+            # case switch to opus and keep going").
+            argv += ["--model", "opus"]
         return argv
 
     def env(self, s, env):
@@ -8424,7 +8442,7 @@ class SessionManager:
               f"{', '.join(map(fmt, fresh)) or '-'}; stale-cool: "
               f"{', '.join(map(fmt, stale)) or '-'})", flush=True)
 
-    def _fable_to_opus(self, s):
+    def _fable_to_opus(self, s, prompt=None):
         """No pool has Fable left: dismiss the CLI's credits dialog (Esc — its
         Enter-default is Sonnet, which is never acceptable) and type
         `/model opus`, then re-send the prompt the dialog ate. One shot per
@@ -8438,8 +8456,14 @@ class SessionManager:
             time.sleep(1.5)
             s.send_message("/model opus ", control=True)   # trailing space: picker eats the CR
             time.sleep(2)
-            if s.last_prompt.strip() and s.hook_count == s.hooks_at_prompt:
-                s.send_message(s.last_prompt)
+            # The transcript trip passes the eaten prompt: that turn RAN
+            # (hooks fired, the CLI answered with its limit line), so the
+            # hook-count test says "delivered" and the message was lost.
+            again = prompt if prompt and prompt.strip() else (
+                s.last_prompt if s.last_prompt.strip()
+                and s.hook_count == s.hooks_at_prompt else "")
+            if again:
+                s.send_message(again)
         except Exception as e:
             print(f"[session {s.cid[:8]}] fable→opus failed: {e}", flush=True)
 
@@ -8502,7 +8526,7 @@ class SessionManager:
                     # Every pool is out of Fable too: stay on this login but
                     # leave Fable for Opus (Austin, 11-12) instead of sitting
                     # on a menu whose default is Sonnet.
-                    self._fable_to_opus(s)
+                    self._fable_to_opus(s, prompt)
                 return                           # nowhere better to go — stay put
             self._blind_log(s, alt, "limit banner confirmed")
             best = alt

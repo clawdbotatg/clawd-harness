@@ -62,6 +62,17 @@ a = eng.argv(fake_s(resuming=True, fork=True))
 check("resuming fork: --resume <id> --fork-session",
       "--fork-session" in a and a[1:3] == ["--resume", "sid-1"], str(a))
 check("fork flag without resuming is inert", "--fork-session" not in eng.argv(fake_s(fork=True)))
+
+# Out-of-Fable pool: a spawn onto a CLI-walled (weekly/spend-cap) pool starts on Opus
+import time as _t
+_acct = lambda until, kind: types.SimpleNamespace(walled_until=until, wall_kind=kind)
+_mgr = lambda a: types.SimpleNamespace(accounts={"x": a})
+check("walled pool spawns --model opus",
+      "--model" in eng.argv(fake_s(account="x", manager=_mgr(_acct(_t.time() + 99, "weekly")))))
+check("healthy pool: no --model",
+      "--model" not in eng.argv(fake_s(account="x", manager=_mgr(_acct(0.0, "")))))
+check("5h session wall: no --model",
+      "--model" not in eng.argv(fake_s(account="x", manager=_mgr(_acct(_t.time() + 99, "session")))))
 check("engine capability: claude forks, codex doesn't",
       srv.ENGINES["claude"].forks and not srv.ENGINES["codex"].forks)
 
