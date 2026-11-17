@@ -348,6 +348,7 @@ class AgentBrain:
         turn with no stream events (wedged CLI), TURN_TIMEOUT is the ceiling."""
         run_turn = _get_run_turn()
         if run_turn is None:
+            emit("final", _missing_engine_msg())
             return self._finish(_missing_engine_msg(), [])
         sys_prompt = (self.current_prompt() or "") + _autonomy_note(self.guard.autonomy)
         if self.notes:
@@ -492,7 +493,9 @@ class AgentBrain:
                     return _walled(w2)
         except FileNotFoundError as e:
             _end("error", err=e)
-            return self._finish(f"⚠️ `{self.bin}` not found — is the Claude CLI installed?", [])
+            msg = f"⚠️ `{self.bin}` not found — is the Claude CLI installed?"
+            emit("final", msg)       # streaming front-ends (Telegram) only see emits
+            return self._finish(msg, [])
         except RuntimeError as e:
             kind = verdict["kind"] if verdict["kind"] != "ok" else "error"
             _end(kind, err=e)
@@ -502,6 +505,7 @@ class AgentBrain:
                 "timeout": f"⚠️ turn killed at the {int(config.TURN_TIMEOUT)}s ceiling "
                            f"(after {stats['tools']} tool calls)",
             }.get(kind, f"⚠️ {e}")
+            emit("final", msg)
             return self._finish(msg, [])
         except BaseException as e:
             # Anything else still has to close the turn: without _end() the

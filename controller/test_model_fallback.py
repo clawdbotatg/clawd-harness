@@ -147,8 +147,10 @@ def main():
                 self.calls.append(("", user_text))
                 raise RuntimeError("claude exited 1: MCP server crashed")
         eng = Dead()
-        out = _brain(eng).chat("hi")
+        seen = []
+        out = _brain(eng).chat_stream("hi", lambda k, t: seen.append((k, t)))
         assert len(eng.calls) == 1 and "MCP server crashed" in out["reply"], out
+        assert seen == [("final", out["reply"])], seen   # Telegram hears the error too
 
     def credits_wall_and_no_reset_time():
         eng = Engine(walled={PRIMARY}, wall="Fable requires usage credits. Run /usage-credits.")

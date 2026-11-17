@@ -44,8 +44,8 @@ def make_handler(router, verbs, guard, backend_getter, reactor=None, mcp=None,
         return f"claude · {m}" if m else "claude (subscription)"
 
     # Choices offered on the debug page's Config tab (a custom id is also accepted).
-    KNOWN_MODELS = ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5",
-                    "claude-haiku-4-5-20251001"]
+    KNOWN_MODELS = ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5",
+                    "claude-haiku-5-5"]
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
