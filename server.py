@@ -4531,6 +4531,8 @@ class ClaudeSession:
                 if not ev:
                     continue
                 if ev.get("role") == "user" and ev.get("text"):
+                    if ev["text"].lstrip().startswith("<task-notification>"):
+                        continue             # a background job's output (~2 KB), not the human
                     chunks.append("User: " + ev["text"])
                 elif ev.get("role") == "assistant" and ev.get("text"):
                     chunks.append("Claude: " + ev["text"])
