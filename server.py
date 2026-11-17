@@ -5802,6 +5802,13 @@ class ClaudeSession:
                     out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", m.group(1))  # strip ANSI
                     out = re.sub(r"<[^>]+>", "", out).strip()
                     return {"role": "system", "text": out} if out else None
+                if obj.get("isMeta"):
+                    # CLI-injected, not typed by the human: above all a loaded
+                    # skill's whole body (5–30 KB). Read as "User: …" it
+                    # filled the namer's tail window, and the session got
+                    # named after the skill's text (Austin, 11-17: an OG-image
+                    # session titled "Read-only data probe").
+                    return None
                 clean = _strip_noise(text).strip()
                 if not clean:
                     return None
