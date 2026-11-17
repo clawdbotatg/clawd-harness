@@ -48,6 +48,14 @@ def cfg(key, default=""):
 # right call: the PM is real Claude on your subscription, not a model menu). Set
 # CONTROLLER_MODEL to pin a specific one (e.g. claude-sonnet-4.6).
 AGENT_MODEL = cfg("CONTROLLER_MODEL", "")
+# The model a PM turn is re-run on when the primary hits a usage-limit wall
+# (agent.py + limits.py). "none" turns the fallback off. The PM goes back to
+# the primary once the wall's reset time passes; a wall with no readable reset
+# time is retried after FALLBACK_RETRY_S.
+FALLBACK_MODEL = cfg("CONTROLLER_FALLBACK_MODEL", "claude-opus-5-5")
+if FALLBACK_MODEL.lower() == "none":
+    FALLBACK_MODEL = ""
+FALLBACK_RETRY_S = float(cfg("CONTROLLER_FALLBACK_RETRY_S", "1800") or 1800)
 # Autonomy gate for write verbs: readonly (refuse) | confirm (dry-run unless
 # confirm=true) | auto (execute). Default confirm — safe but useful out of the box.
 AUTONOMY = cfg("CONTROLLER_AUTONOMY", "confirm").lower()
@@ -125,6 +133,9 @@ PROMPT_PATH = cfg("CONTROLLER_PROMPT", os.path.join(ROOT, ".clawd-controller.pro
 # Persisted model override (picked on the debug page's Config tab). Absent →
 # CONTROLLER_MODEL, which absent → Claude Code's own default.
 MODEL_PATH = cfg("CONTROLLER_MODEL_PATH", os.path.join(ROOT, ".clawd-controller.model.txt"))
+# Live model-fallback state (which wall, until when) — survives a restart.
+FALLBACK_PATH = cfg("CONTROLLER_FALLBACK_PATH",
+                    os.path.join(ROOT, ".clawd-controller.fallback.json"))
 # Persisted PM chat threads (multiple concurrent conversations + their history),
 # so they survive a daemon restart. Mirrors .clawd-harness.sessions.json.
 THREADS_PATH = cfg("CONTROLLER_THREADS", os.path.join(ROOT, ".clawd-controller.threads.json"))

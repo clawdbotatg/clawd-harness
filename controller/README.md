@@ -218,6 +218,8 @@ force-closed. Completion sets the task to `review` and pushes the report.
 | `CONTROLLER_HARNESS_TOKEN` | `.clawd-harness.token` | WS token |
 | `CONTROLLER_HARNESS_HTTP` | (derived from WS url) | UI origin for deep links |
 | `CONTROLLER_MODEL` | (Claude Code default) | pin the PM's `claude --model` (the debug page's **Config** tab overrides this live; override persists in `.clawd-controller.model.txt`) |
+| `CONTROLLER_FALLBACK_MODEL` | `claude-opus-5-5` | when a PM turn hits a usage-limit wall on the model above, the same message is re-run on this one and the reply says so in one line; the PM returns to the main model after the wall's reset time (or on a fresh thread). `none` = off |
+| `CONTROLLER_FALLBACK_RETRY_S` | `1800` | how long to stay on the fallback when the wall gives no reset time |
 | `CONTROLLER_AUTONOMY` | `confirm` | write gate |
 | `CONTROLLER_CHAT_PORT` | `8799` | chat UI port |
 | `CONTROLLER_LEDGER` | `../.clawd-controller.tasks.jsonl` | task log |
@@ -250,6 +252,7 @@ python3 -m controller.test_threads      # PM conversation threads (store + persi
 python3 -m controller.test_pm_responsive # PM controls stay live while a turn runs
 python3 -m controller.test_pm_naming    # AI thread titles + running tldr
 python3 -m controller.test_empty_turn   # a silent turn gets one nudge, never '(no result)'
+python3 -m controller.test_model_fallback  # a limit-walled turn is re-run on the fallback model
 python3 -m controller.test_relay_fleet  # the trusted-control path through the relay
 python3 -m controller.test_telegram     # Telegram bridge (mock Bot API)
 python3 -m controller.test_pm_visibility # irons, closed history, what's warm

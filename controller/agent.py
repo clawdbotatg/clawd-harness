@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-from . import config
+from . import config, limits
 from .mcp import TOOLS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -124,6 +124,14 @@ EMPTY_TURN_NUDGE = (
 EMPTY_TURN_FALLBACK = "PM turn produced no output — see transcript."
 
 
+class _Wall(Exception):
+    """A turn that hit the CLI's usage-limit wall instead of running."""
+
+    def __init__(self, wall, raw):
+        super().__init__(raw)
+        self.wall = wall
+
+
 def write_mcp_config():
     """Write the MCP config that tells `claude -p` how to launch the controller's
     stdio MCP server, pointed at the same harness + ledger this process drives."""
@@ -189,6 +197,10 @@ class AgentBrain:
                 self.model = override
         except OSError:
             pass
+        # Model fallback: while set, turns run on config.FALLBACK_MODEL because
+        # self.model hit a limit wall. {"primary", "until", "label", "model"}.
+        self.fallback = self._load_fallback()
+        self._fallback_keys = set()     # threads that already ran on the fallback
         self.bin = claude_bin or "claude"
         if self.bin != "claude":
             os.environ.setdefault("CLAUDE_BIN", self.bin)
@@ -239,6 +251,7 @@ class AgentBrain:
         across restarts via MODEL_PATH."""
         model = (model or "").strip()
         self.model = model or (config.AGENT_MODEL or None)
+        self._set_fallback(None)        # a deliberate pick always gets tried
         try:
             if model:
                 with open(config.MODEL_PATH, "w", encoding="utf-8") as f:
@@ -247,6 +260,62 @@ class AgentBrain:
                 os.remove(config.MODEL_PATH)
         except OSError:
             pass
+
+    # -- model fallback ---------------------------------------------------------
+    def _load_fallback(self):
+        try:
+            with open(config.FALLBACK_PATH, encoding="utf-8") as f:
+                st = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(st, dict) or st.get("primary") != (self.model or ""):
+            return None
+        if time.time() >= float(st.get("until") or 0):
+            return None
+        return st
+
+    def _set_fallback(self, st):
+        self.fallback = st
+        self._fallback_keys = set()
+        try:
+            if st:
+                with open(config.FALLBACK_PATH, "w", encoding="utf-8") as f:
+                    json.dump(st, f)
+            elif os.path.exists(config.FALLBACK_PATH):
+                os.remove(config.FALLBACK_PATH)
+        except OSError:
+            pass
+
+    def _can_fall_back(self):
+        return bool(config.FALLBACK_MODEL) and config.FALLBACK_MODEL != self.model
+
+    def _use_fallback(self):
+        """True when this turn should start on the fallback model. The primary
+        is tried again once the reset time passes, and by the first turn of a
+        thread that hasn't run on the fallback yet (a walled try costs ~2s)."""
+        st = self.fallback
+        if not st:
+            return False
+        if not self._can_fall_back() or time.time() >= float(st.get("until") or 0):
+            self._set_fallback(None)
+            return False
+        return self.conversation_key in self._fallback_keys
+
+    def _enter_fallback(self, wall):
+        until = wall.get("until") or (time.time() + config.FALLBACK_RETRY_S)
+        self._set_fallback({"primary": self.model or "", "until": until,
+                            "label": wall.get("label") or "",
+                            "model": wall.get("model") or ""})
+
+    def fallback_note(self):
+        """The one line that tells the operator which model answered."""
+        st = self.fallback or {}
+        fb = limits.model_label(config.FALLBACK_MODEL)
+        primary = limits.model_label(self.model) or st.get("model") or "the main model"
+        if st.get("label"):
+            return f"_running on {fb} until {primary} resets at {st['label']}_"
+        mins = max(1, int(round((float(st.get("until") or 0) - time.time()) / 60)))
+        return f"_running on {fb} — {primary} is limited, trying it again in {mins} min_"
 
     def default_prompt(self):
         return _read_prompt(self.trust)
@@ -347,11 +416,41 @@ class AgentBrain:
 
         threading.Thread(target=_watchdog, daemon=True,
                          name="pm-turn-watchdog").start()
-        xargs = ["--mcp-config", MCP_CONFIG, "--allowedTools", ALLOWED_TOOLS]
-        if self.model:
-            xargs += ["--model", self.model]
+        on_fallback = self._use_fallback()
+        cur = {"model": config.FALLBACK_MODEL if on_fallback else self.model}
+
+        def _xargs():
+            x = ["--mcp-config", MCP_CONFIG, "--allowedTools", ALLOWED_TOOLS]
+            if cur["model"]:
+                x += ["--model", cur["model"]]
+            return x
+
+        def _attempt(text):
+            """One engine call on cur["model"]. A limit wall — as the CLI's
+            exit error or as the turn's whole text — raises _Wall."""
+            try:
+                m = run_turn(
+                    text, append_system_prompt=sys_prompt or None,
+                    remember=self.conversation_key, cwd=config.AGENT_HOME_DIR,
+                    extra_args=_xargs(), on_event=_ev, return_meta=True,
+                    proc_holder=ph, auto_memory=config.AUTO_MEMORY,
+                    engine="claude",
+                )
+            except RuntimeError as e:
+                wall = limits.parse_wall(str(e)) if verdict["kind"] == "ok" else None
+                if wall:
+                    raise _Wall(wall, str(e)) from None
+                raise
+            t = _text_of(m)
+            if stats["tools"] == 0 and limits.is_wall_reply(t):
+                raise _Wall(limits.parse_wall(t), t)
+            return m
+
+        def _text_of(m):
+            return ((m.get("text") if isinstance(m, dict) else m) or "").strip()
+
         _log_turn("start", thread=self.conversation_key or "",
-                  model=self.model or "", autonomy=self.guard.autonomy)
+                  model=cur["model"] or "", autonomy=self.guard.autonomy)
 
         def _end(outcome, err=None, meta=None):
             stop_evt.set()
@@ -365,14 +464,32 @@ class AgentBrain:
                 fields["err"] = str(err)[:200]
             _log_turn("end", **fields)
 
+        def _walled(w):
+            """Both models walled (or no fallback set): a clean line, never the raw wall."""
+            _end("limit", err=w)
+            who = limits.model_label(cur["model"]) or w.wall.get("model") or "The PM's model"
+            when = f" — resets at {w.wall['label']}" if w.wall.get("label") else ""
+            msg = (f"⚠️ {who} is at its usage limit{when}. "
+                   f"Your message was not answered; send it again later.")
+            emit("final", msg)
+            return self._finish(msg, [])
+
         try:
-            meta = run_turn(
-                user_text, append_system_prompt=sys_prompt or None,
-                remember=self.conversation_key, cwd=config.AGENT_HOME_DIR,
-                extra_args=xargs, on_event=_ev, return_meta=True,
-                proc_holder=ph, auto_memory=config.AUTO_MEMORY,
-                engine="claude",
-            )
+            try:
+                meta = _attempt(user_text)
+            except _Wall as w:
+                if on_fallback or not self._can_fall_back():
+                    return _walled(w)
+                # The primary is walled: same message, fallback model.
+                self._enter_fallback(w.wall)
+                on_fallback, cur["model"] = True, config.FALLBACK_MODEL
+                _log_turn("fallback", thread=self.conversation_key or "",
+                          model=cur["model"], primary=self.model or "",
+                          until=self.fallback["until"], err=str(w)[:200])
+                try:
+                    meta = _attempt(user_text)
+                except _Wall as w2:
+                    return _walled(w2)
         except FileNotFoundError as e:
             _end("error", err=e)
             return self._finish(f"⚠️ `{self.bin}` not found — is the Claude CLI installed?", [])
@@ -391,22 +508,13 @@ class AgentBrain:
             # status stays "active" forever and the watchdog never stops.
             _end("error", err=e)
             raise
-        def _text_of(m):
-            return ((m.get("text") if isinstance(m, dict) else m) or "").strip()
-
         reply = _text_of(meta)
         outcome = "ok"
         if not reply:
             _log_turn("empty_renudge", thread=self.conversation_key or "")
             try:
-                meta2 = run_turn(
-                    EMPTY_TURN_NUDGE, append_system_prompt=sys_prompt or None,
-                    remember=self.conversation_key, cwd=config.AGENT_HOME_DIR,
-                    extra_args=xargs, on_event=_ev, return_meta=True,
-                    proc_holder=ph, auto_memory=config.AUTO_MEMORY,
-                    engine="claude",
-                )
-            except (FileNotFoundError, RuntimeError):
+                meta2 = _attempt(EMPTY_TURN_NUDGE)
+            except (FileNotFoundError, RuntimeError, _Wall):
                 meta2 = None                 # nudge died → fall to the fallback line
             except BaseException as e:
                 _end("error", err=e)
@@ -418,6 +526,13 @@ class AgentBrain:
         _end(outcome, meta=meta if isinstance(meta, dict) else None)
         if reply != seen["text"]:          # answer wasn't already streamed as the last text block
             emit("final", reply)
+        if on_fallback:
+            # Streaming front-ends get the note as its own line; the stored
+            # reply carries it too, so every answer says which model wrote it.
+            self._fallback_keys.add(self.conversation_key)
+            note = self.fallback_note()
+            emit("text", note)
+            reply = f"{reply}\n\n{note}"
         trace = []
         if isinstance(meta, dict):
             tmeta = {k: meta.get(k) for k in ("num_turns", "duration_ms")
