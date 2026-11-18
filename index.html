@@ -9589,16 +9589,28 @@ const SR = IN_HARNESS_APP ? null : (window.SpeechRecognition || window.webkitSpe
 // --- 👓 Even G1 glasses (📱 clawd harness app only) ---------------------------
 // The app (clawd-dictate ios/Harness/Glasses) holds the Bluetooth link; this
 // page steers it. Inside the app the never-used esc key becomes 👓: tap → red
-// = on. The APP listens (AirPods / phone mic, natively, so it works with the
-// phone locked — the glasses' own mic is hiss, 11-01): tap a glasses arm to
-// talk, tap again and it posts {type:'send'} here. Double tap left/right posts
-// {type:'tab'} to hop sessions. The 🟦 live TLDR (switched on with it) is what
-// the glasses show while claude works.
+// = on. The APP listens (the glasses' LEFT mic — the right one is static,
+// 11-18 — or AirPods / phone mic if the glasses send nothing; natively, so it
+// works with the phone locked): tap a glasses arm to talk, tap again and it
+// posts {type:'send'} here. Double tap left/right posts {type:'tab'} to hop
+// sessions. The 🟦 live TLDR (switched on with it) is what the glasses show
+// while claude works. Every screen carries the session lines (glassesHead):
+// "3/8 working - title" and the description, so you know which one you're on.
 // A browser without the app's message handler keeps its plain esc key.
 const GLASSES = (IN_HARNESS_APP && window.webkit?.messageHandlers?.glasses) || null;
 const glassesBtn = GLASSES ? document.querySelector('#keys button[data-k="esc"]') : null;
 let glassesOn = false, glassesLastLog = '', glassesLive = '', glassesTimer = null, glassesAlive = null;
-function glassesShow(text) { if (glassesOn && text) GLASSES.postMessage({ op: 'show', text: speakable(text) }); }
+// the glasses font has no emoji: drop them
+function glassesClean(t) { return speakable(t || '').replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, '').replace(/\s+/g, ' ').trim(); }
+function glassesHead() {
+  const list = railSessions(), i = list.findIndex(x => x.cid === currentCid), s = list[i];
+  if (!s) return { head: '', desc: '' };
+  const st = s.waiting || s.status === 'blocked' ? 'needs you' : s.busy ? 'working' : 'idle';
+  return { head: (i + 1) + '/' + list.length + ' ' + st + ' - ' + (glassesClean(s.title || s.tab) || 'new session'),
+           desc: glassesClean(s.desc || s.digest) };
+}
+function glassesPost(text) { GLASSES.postMessage({ op: 'show', text: glassesClean(text), ...glassesHead() }); }
+function glassesShow(text) { if (glassesOn && text) glassesPost(text); }
 function glassesSent() { if (glassesOn) GLASSES.postMessage({ op: 'sent' }); }
 function setGlasses(on) {
   glassesOn = on;
@@ -9620,7 +9632,7 @@ function setGlasses(on) {
 if (glassesBtn) {
   delete glassesBtn.dataset.k;                       // no longer sends ESC
   glassesBtn.textContent = '👓';
-  glassesBtn.title = 'Glasses (Even G1): tap to turn on (red). Tap a glasses arm to talk (AirPods/phone mic), tap again to send. Double tap left/right: switch session. Replies show on the glasses.';
+  glassesBtn.title = 'Glasses (Even G1): tap to turn on (red). Tap a glasses arm to talk (glasses mic), tap again to send. Double tap left/right: switch session. Replies show on the glasses.';
   glassesBtn.onclick = () => setGlasses(!glassesOn);
   window.__glasses = (m) => {
     const j = JSON.stringify(m);
@@ -9629,7 +9641,7 @@ if (glassesBtn) {
       if (!m.on && glassesOn) setGlasses(false);
       glassesBtn.classList.toggle('glasses-wait', !!(m.on && !m.connected));
     } else if (m.type === 'send') {
-      // the app heard you (AirPods / phone mic, natively) — send it to the open session
+      // the app heard you (glasses mic, natively) — send it to the open session
       if (!glassesOn || !m.text) return;
       if (recOn) stopRec();
       const pre = box.value.trim();
@@ -9639,11 +9651,7 @@ if (glassesBtn) {
       if (!glassesOn) return;
       cycleSession(m.dir);
       const s = railSessions().find(x => x.cid === currentCid);
-      if (s) {
-        const st = s.waiting || s.status === 'blocked' ? 'needs you' : s.busy ? 'working' : 'idle';
-        const last = speakable(s.lastAnswer || s.digest || '').slice(0, 140);
-        GLASSES.postMessage({ op: 'show', text: (s.title || 'session') + ' - ' + st + (last ? '\n' + last : '') });
-      }
+      if (s) glassesPost(String(s.lastAnswer || s.digest || '').slice(0, 400));
     }
   };
 }
