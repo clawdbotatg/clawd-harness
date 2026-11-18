@@ -495,20 +495,31 @@ def name_at_prompt(count):
     return count <= 1 or count % 3 == 0
 # The naming instruction — a module constant so bench_naming.py tests the exact
 # same prompt the app uses (single source of truth; no drift).
-NAME_SYS_PROMPT = ("You name software-engineering sessions. Given a transcript, "
-                   "reply with ONLY compact JSON and nothing else: "
-                   '{"title": "<max 5 words>", "desc": "<max 12 words>", '
-                   '"tab": "<1-2 words>"}. '
-                   "Name the session by what it is working on NOW — the task "
-                   "in the most recent messages. Sessions drift (a bug fix turns "
-                   "into a new feature); when the work has moved on, follow it — "
-                   "the opening task is shown elsewhere. Only a single passing "
-                   "question (a quick how-to, then back to the same work) should "
-                   "not rename it. Ignore boilerplate prompts like \"TLDR\" or "
-                   "wrap-up instructions. "
-                   "The title is a terse label; the desc is a one-line summary; "
-                   "the tab is the tightest possible handle for a narrow browser "
-                   "tab — one or two words that still identify the task (e.g. "
+NAME_SYS_PROMPT = ("You name software-engineering sessions. You get an outline of "
+                   "everything the user asked for across the session, then its "
+                   "most recent exchange. Reply with ONLY compact JSON and "
+                   'nothing else: {"title": "<max 5 words>", "desc": "<max 12 '
+                   'words>", "tab": "<1-2 words>"}. '
+                   "Name the session AS A WHOLE: the one umbrella that covers "
+                   "what the user has been doing in it, taken mostly from the "
+                   "outline of their own requests. A session often touches many "
+                   "topics under one purpose (a meeting with several agenda "
+                   "items, a feature with several fixes) — name the purpose, "
+                   "never one of its topics, however long the latest message "
+                   "dwells on that topic. The recent exchange is there for "
+                   "detail and wording, not to pick the subject. "
+                   "The one exception is a real change of subject: when the "
+                   "later requests left the earlier work behind for something "
+                   "unrelated (an image-centering fix that became a price-feed "
+                   "integration), name what it is on now — the opening task is "
+                   "shown elsewhere. A single passing question does not rename "
+                   "it. Ignore boilerplate prompts like \"TLDR\" or wrap-up "
+                   "instructions. "
+                   "The title is a terse label; the desc is a one-line summary "
+                   "of the whole session — say what it is, do not list its "
+                   "topics, and stay within 12 words; the tab is "
+                   "the tightest possible handle for a narrow browser tab — one "
+                   "or two words that still identify it (e.g. "
                    '"local projects", "tab ages", "router port").')
 # 📍 The origin line: the first prompt as one readable sentence, pinned over
 # the terminal (Austin, 10-10: raw prompts full of HTML were hard to read).
@@ -4894,10 +4905,11 @@ class ClaudeSession:
                              kwargs={"seed_text": seed}, daemon=True).start()
 
     def _regenerate_name(self, seed_text=""):
-        # Tail only: the name follows the CURRENT work (Austin, 10-24 — a
-        # session that moved from image centering to price feeds stayed
-        # "Fix image centering"); the 📍 origin line keeps the opening task.
-        text = seed_text or self._transcript_text_for_naming(head_frac=0)
+        # The whole session, not its tail (Austin, 11-18: a meeting session
+        # covering many topics got named after the one topic its last message
+        # was about). The outline of the user's own asks carries the umbrella;
+        # the tail carries the latest wording, and lets a real pivot show.
+        text = seed_text or self._name_input()
         if not text:
             return
         title, desc, tab = generate_name(text)
@@ -5007,6 +5019,46 @@ class ClaudeSession:
             return
         print(f"[session {self.cid[:8]}] pinned → typing {cmd.strip()}", flush=True)
         self.send_message(cmd, control=True)      # ours, not the human's
+
+    # Sends that are ours, not the human's — they'd tell the namer nothing.
+    NAME_SKIP_VIA = ("auto", "check", "pilot")
+
+    def _asked_outline(self, cap=1500, clip=220):
+        """Every prompt the user sent this session, in order, one clipped line
+        each, read from PROMPTS_LOG by cid (stable across respawns). Over `cap`
+        the middle is thinned evenly — first and last always stay. "" when the
+        log has nothing for this session (prompts typed straight into the TTY)."""
+        asks = []
+        try:
+            with open(PROMPTS_LOG, encoding="utf-8", errors="ignore") as f:
+                for ln in f:
+                    if self.cid not in ln:
+                        continue
+                    try:
+                        rec = json.loads(ln)
+                    except ValueError:
+                        continue
+                    if rec.get("cid") != self.cid or rec.get("via") in self.NAME_SKIP_VIA:
+                        continue
+                    t = " ".join(str(rec.get("text") or "").split())
+                    if t:
+                        asks.append(t[:clip] + ("…" if len(t) > clip else ""))
+        except OSError:
+            return ""
+        while len(asks) > 2 and sum(len(a) + 4 for a in asks) > cap:
+            del asks[len(asks) // 2]                 # thin the middle, keep both ends
+        return "\n".join(f"{i}. {a}" for i, a in enumerate(asks, 1))
+
+    def _name_input(self):
+        """What the namer reads: the outline of the user's asks over the whole
+        session + the recent exchange. Without an outline, both ends of the
+        transcript stand in for it."""
+        outline = self._asked_outline()
+        if not outline:
+            return self._transcript_text_for_naming()
+        tail = self._transcript_text_for_naming(cap=2500, head_frac=0)
+        return ("EVERYTHING THE USER ASKED FOR, in order:\n" + outline
+                + "\n\nMOST RECENT EXCHANGE:\n" + tail)
 
     def _transcript_text_for_naming(self, cap=3500, head_frac=0.45):
         path = self.transcript_path or self._find_transcript()
