@@ -9938,12 +9938,45 @@ function dgFallback(d) {
   if (!SR) { stopRec(); return; }
   recEngine = 'sr'; rec = rec || buildRec(); try { rec.start(); } catch {}
 }
+// 🎤 On a Mac, never dictate through the iPhone (Continuity mic). Chrome picked
+// "Austin's iPhone Microphone" by itself: it takes seconds to wake and hands
+// over silence until it does — red button, no words, 3-4 taps (Austin, 11-24).
+// When one is in the list, we name the mic: the system default if that isn't
+// the phone, else the first mic that isn't. Phones and tablets are left alone.
+const MIC_PHONE_RX = /iPhone|iPad/i;
+const MIC_TOUCH = (navigator.maxTouchPoints || 0) > 1;
+const MIC_BASE = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+let micPick = null;
+async function micRefresh() {
+  if (MIC_TOUCH) return;
+  try {
+    const ins = (await navigator.mediaDevices.enumerateDevices()).filter(x => x.kind === 'audioinput' && x.deviceId);
+    const ok = ins.filter(x => !MIC_PHONE_RX.test(x.label));
+    micPick = (ins.length > ok.length && ok.length) ? (ok.find(x => x.deviceId === 'default') || ok[0]).deviceId : null;
+  } catch { micPick = null; }
+}
+async function micOpen() {
+  const md = navigator.mediaDevices;
+  if (micPick) {
+    try { return await md.getUserMedia({ audio: Object.assign({ deviceId: { exact: micPick } }, MIC_BASE) }); }
+    catch (e) { dgLog('picked mic failed (' + (e && e.name) + '), using the browser\'s'); micPick = null; }
+  }
+  const s = await md.getUserMedia({ audio: MIC_BASE });
+  const label = ((s.getTracks()[0] || {}).label) || '';
+  if (MIC_TOUCH || !MIC_PHONE_RX.test(label)) return s;
+  await micRefresh();                          // first press: labels only exist once the mic is allowed
+  if (!micPick) return s;
+  dgLog('browser chose "' + label + '" — switching to the computer\'s mic');
+  try { const s2 = await md.getUserMedia({ audio: Object.assign({ deviceId: { exact: micPick } }, MIC_BASE) }); s.getTracks().forEach(t => t.stop()); return s2; }
+  catch { return s; }
+}
+try { if (!MIC_TOUCH && navigator.mediaDevices) { micRefresh(); navigator.mediaDevices.addEventListener('devicechange', micRefresh); } } catch {}
 function dgStart(creds) {
   const d = { ws: null, src: null, proc: null, stream: null, q: [], open: false, done: false, got: false, tries: 0, creds, t0: Date.now() };
   dg = d;
   let streamP;
   try {
-    streamP = navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    streamP = micOpen();
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!dgCtx || dgCtx.state === 'closed') dgCtx = new AC();   // a NEW context in the gesture: the one path iOS always honors
     if (dgCtx.state !== 'running') { try { dgCtx.resume(); } catch {} }
