@@ -478,6 +478,24 @@
      and iOS scrolls it on the compositor thread — smooth, not the old choppy path.
      Touch is read-only here (disableStdin) so we lose nothing but in-TTY link taps. */
   @media (pointer: coarse) { .xterm-screen { pointer-events:none !important; } }
+  /* 📋 the touch text view (openTtyText): the terminal's text as REAL text, laid over
+     #term, because the rule above makes the xterm text layer untouchable — iOS
+     select/copy and link taps work here. A snapshot; ✕ returns to the terminal. */
+  #ttytext { position:absolute; left:0; right:0; z-index:15; background:#000;
+             display:flex; flex-direction:column; }
+  #ttytext[hidden] { display:none; }
+  #ttytextBar { display:flex; align-items:center; gap:8px; padding:4px 8px; color:var(--dim);
+                font:12px var(--mono); border-bottom:1px solid var(--edge);
+                user-select:none; -webkit-user-select:none; }
+  #ttytextBar span { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #ttytextBar button { background:none; border:1px solid var(--edge); border-radius:6px;
+                       color:var(--ink); font:13px var(--mono); padding:6px 12px; }
+  #ttytextBody { position:relative; flex:1; min-height:0; overflow-y:auto; touch-action:pan-y;
+                 -webkit-overflow-scrolling:touch; padding:6px 4px 6px 8px; color:#d9d7cf;
+                 font:13px/1.3 ui-monospace, Menlo, Monaco, "Courier New", monospace;
+                 white-space:pre-wrap; overflow-wrap:anywhere;
+                 user-select:text; -webkit-user-select:text; -webkit-touch-callout:default; }
+  #ttytextBody a { color:#4a9eff; }
   #pmfeed { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
           padding:12px; display:flex; flex-direction:column; gap:9px;
           width:100%; max-width:880px; align-self:center; }
@@ -1662,6 +1680,8 @@
       <div id="origin" hidden title="The prompt this session started with — tap to read it all"><span id="originText"></span></div>
       <div id="originFull" hidden></div>
       <div id="term"></div>
+      <!-- 📋 long-press the terminal on touch: its text, selectable (#ttytext CSS) -->
+      <div id="ttytext" hidden><div id="ttytextBar"><span>select text to copy</span><button id="ttytextAll">📋 copy all</button><button id="ttytextX">✕</button></div><div id="ttytextBody"></div></div>
       <!-- 🔍 the reviewer's live terminal, under the session it double-checks (#peek CSS) -->
       <div id="peek" hidden><div id="peekbar"><span class="sdot"></span><span id="peeklbl"></span><button id="peekX" title="Stop the double-check — closes the reviewer only, this session stays">✕</button></div><div id="peekterm"></div></div>
       <!-- 🟦 live TLDR: the rolling plain-English summary of the turn in flight. An
@@ -2379,6 +2399,143 @@ let ttyTouchHold = 0;   // Infinity while a finger is down; a timestamp grace af
   el.addEventListener('touchstart', () => { ttyTouchHold = Infinity; }, { passive: true });
   el.addEventListener('touchend', lift, { passive: true });
   el.addEventListener('touchcancel', lift, { passive: true });
+})();
+// ── touch: tap a link, long-press for a copyable text view ───────────────────
+// On touch the xterm text layer is click-through (the pointer-events rule in
+// the CSS — it is what makes finger-scroll work), so the web-links addon never
+// sees a tap and nothing can be selected. Both are rebuilt here from the
+// BUFFER, leaving that rule and the scroll path alone:
+//   tap        → the URL under the finger opens (ttyLinkAt)
+//   long-press → #ttytext, the terminal's text as real selectable text
+const TTY_URL = /https?:\/\/[^\s<>"'`─-╿]+/g;
+const TTY_URL_HEAD = /^[^\s<>"'`─-╿]+/;
+function ttyRowText(i) { const l = term.buffer.active.getLine(i); return l ? l.translateToString(true) : ''; }
+function ttyRowSoft(i) { const l = term.buffer.active.getLine(i); return !!(l && l.isWrapped); }
+// Links that START on buffer rows from..to → [{href, spans:[{row,s,e}]}]. A URL
+// cut at the right edge is followed onto the next rows: xterm's own wrap
+// always, and claude's hard wrap (newline + indent) when the row is full and
+// the next row's first word looks like more URL.
+function ttyLinks(from, to) {
+  const out = [], n = term.buffer.active.length, cols = term.cols;
+  for (let i = Math.max(0, from); i <= Math.min(to, n - 1); i++) {
+    const text = ttyRowText(i);
+    if (text.indexOf('http') < 0) continue;
+    TTY_URL.lastIndex = 0;
+    let m;
+    while ((m = TTY_URL.exec(text))) {
+      let raw = m[0], r = i, prevLen = text.length;
+      const spans = [{ row: i, s: m.index, e: m.index + raw.length }];
+      let endsRow = m.index + raw.length === text.length;
+      while (endsRow && r + 1 < n && r - i < 8) {
+        const next = ttyRowText(r + 1), soft = ttyRowSoft(r + 1);
+        if (!soft && prevLen < cols - 4) break;
+        const lead = soft ? 0 : next.length - next.trimStart().length;
+        const tok = (TTY_URL_HEAD.exec(next.slice(lead)) || [''])[0];
+        if (!tok || /^https?:\/\//.test(tok)) break;
+        if (!soft && !(/[\/\-_.=&%?#0-9]/.test(tok) || lead + tok.length === next.length)) break;
+        raw += tok; r++;
+        spans.push({ row: r, s: lead, e: lead + tok.length });
+        endsRow = lead + tok.length === next.length; prevLen = next.length;
+      }
+      let href = raw;                       // sentence punctuation after a URL isn't part of it
+      while (/[.,;:!?'"\])}>]$/.test(href) && !(href.endsWith(')') && href.includes('('))) href = href.slice(0, -1);
+      const last = spans[spans.length - 1];
+      last.e = Math.max(last.s, last.e - (raw.length - href.length));
+      out.push({ href, spans });
+    }
+  }
+  return out;
+}
+// The URL under a screen point, or null. A finger is fat: a cell and a half of
+// slack sideways, and a tap on a row's edge also tries the row next door.
+function ttyLinkAt(x, y) {
+  const scr = term.element && term.element.querySelector('.xterm-screen');
+  if (!scr) return null;
+  const r = scr.getBoundingClientRect();      // includes bottomJustifyTTY's translate
+  if (!r.width || !r.height) return null;
+  const col = (x - r.left) / (r.width / term.cols), fy = (y - r.top) / (r.height / term.rows);
+  const row = Math.floor(fy) + term.buffer.active.viewportY;
+  const off = fy - Math.floor(fy);             // a tap near a row's edge may have meant the row next door
+  const rows = off < 0.25 ? [row, row - 1] : off > 0.75 ? [row, row + 1] : [row];
+  const links = ttyLinks(row - 9, row + 1);
+  for (const want of rows)
+    for (const l of links) for (const sp of l.spans)
+      if (sp.row === want && col >= sp.s - 1.5 && col <= sp.e + 1.5) return l.href;
+  return null;
+}
+function openTtyLink(href) {
+  const h = inAppHash(href);
+  if (h) navInApp(h); else window.open(href, '_blank', 'noopener,noreferrer');
+}
+function closeTtyText() {
+  const box = document.getElementById('ttytext');
+  if (box.hidden) return;
+  box.hidden = true;
+  document.getElementById('ttytextBody').replaceChildren();
+}
+function openTtyText() {
+  const b = term.buffer.active, termEl = document.getElementById('term');
+  const box = document.getElementById('ttytext'), body = document.getElementById('ttytextBody');
+  let last = b.length - 1;
+  while (last > 0 && !ttyRowText(last)) last--;          // drop the blank tail of the grid
+  const byRow = new Map();
+  for (const l of ttyLinks(0, last)) for (const sp of l.spans) {
+    if (sp.e <= sp.s) continue;
+    if (!byRow.has(sp.row)) byRow.set(sp.row, []);
+    byRow.get(sp.row).push({ s: sp.s, e: sp.e, href: l.href });
+  }
+  const frag = document.createDocumentFragment();
+  let buf = '', mark = null;
+  const flush = () => { if (buf) { frag.append(buf); buf = ''; } };
+  for (let i = 0; i <= last; i++) {
+    if (i && !ttyRowSoft(i)) buf += '\n';                // a soft-wrapped row is the same line: no break in the copy
+    if (i === b.viewportY) { flush(); mark = document.createElement('span'); frag.append(mark); }
+    const line = b.getLine(i);
+    const text = line ? line.translateToString(!ttyRowSoft(i + 1)) : '';
+    let pos = 0;
+    for (const sp of (byRow.get(i) || []).sort((a, c) => a.s - c.s)) {
+      if (sp.s < pos) continue;
+      buf += text.slice(pos, sp.s); flush();
+      const a = document.createElement('a');
+      a.href = sp.href; a.textContent = text.slice(sp.s, sp.e);
+      if (!inAppHash(sp.href)) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
+      frag.append(a); pos = sp.e;
+    }
+    buf += text.slice(pos);
+  }
+  flush();
+  body.replaceChildren(frag);
+  box.style.top = termEl.offsetTop + 'px';
+  box.style.height = termEl.offsetHeight + 'px';
+  box.hidden = false;
+  body.scrollTop = mark ? mark.offsetTop : body.scrollHeight;   // open where the terminal was scrolled to
+}
+document.getElementById('ttytextX').onclick = closeTtyText;
+document.getElementById('ttytextAll').onclick = (e) => {
+  copyToClipboard(document.getElementById('ttytextBody').textContent);
+  const btn = e.currentTarget; btn.textContent = '✓ copied';
+  setTimeout(() => { btn.textContent = '📋 copy all'; }, 1500);
+};
+window.addEventListener('hashchange', closeTtyText);   // it is a snapshot of ONE session's screen
+if (isTouch) (() => {
+  const el = document.getElementById('term');
+  // a click here is a tap that did not scroll
+  el.addEventListener('click', (e) => { const href = ttyLinkAt(e.clientX, e.clientY); if (href) openTtyLink(href); });
+  let lp = 0, lx = 0, ly = 0;
+  const cancel = () => { clearTimeout(lp); lp = 0; };
+  el.addEventListener('touchstart', (e) => {
+    cancel();
+    if (e.touches.length !== 1) return;
+    lx = e.touches[0].clientX; ly = e.touches[0].clientY;
+    lp = setTimeout(() => { lp = 0; openTtyText(); }, 550);
+  }, { passive: true });
+  el.addEventListener('touchmove', (e) => {
+    const t = e.touches[0];
+    if (lp && t && Math.abs(t.clientX - lx) + Math.abs(t.clientY - ly) > 10) cancel();
+  }, { passive: true });
+  el.addEventListener('touchend', cancel, { passive: true });
+  el.addEventListener('touchcancel', cancel, { passive: true });
+  el.addEventListener('contextmenu', (e) => e.preventDefault());   // Android's long-press menu
 })();
 function ttyAtBottom() {
   if (Date.now() < ttyTouchHold) return false;
@@ -12221,7 +12378,7 @@ stage.addEventListener('touchstart', (e) => {
   swOn = e.touches.length === 1;
   swipeTap = false;
   // Don't hijack drags inside the message box (text selection / caret placement).
-  if (e.target.closest('#box')) { swOn = false; return; }
+  if (e.target.closest('#box, #ttytext')) { swOn = false; return; }
   if (!swOn) return;
   const t = e.touches[0]; swX = t.clientX; swY = t.clientY; swT = Date.now(); swAxis = null;
 }, { capture: true, passive: true });
